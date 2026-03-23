@@ -23,6 +23,7 @@ wasmsh-fs = { workspace = true }
 wasmsh-utils = { workspace = true }
 wasmsh-builtins = { workspace = true }
 smol_str = { workspace = true }
+indexmap = { workspace = true }
 
 [lints]
 workspace = true

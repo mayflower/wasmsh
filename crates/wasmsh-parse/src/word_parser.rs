@@ -179,8 +179,14 @@ fn parse_dollar(text: &str, pos: &mut usize) -> Option<WordPart> {
                         b'"' => {
                             *pos += 1;
                             while *pos < bytes.len() && bytes[*pos] != b'"' {
+                                if *pos >= bytes.len() {
+                                    break;
+                                }
                                 if bytes[*pos] == b'\\' {
                                     *pos += 1;
+                                    if *pos >= bytes.len() {
+                                        break;
+                                    }
                                 }
                                 *pos += 1;
                             }
@@ -199,6 +205,9 @@ fn parse_dollar(text: &str, pos: &mut usize) -> Option<WordPart> {
             let start = *pos;
             let mut depth: u32 = 1;
             while *pos < bytes.len() && depth > 0 {
+                if *pos >= bytes.len() {
+                    break;
+                }
                 match bytes[*pos] {
                     b'{' => {
                         depth += 1;
@@ -215,9 +224,10 @@ fn parse_dollar(text: &str, pos: &mut usize) -> Option<WordPart> {
                     }
                     b'\\' => {
                         *pos += 1;
-                        if *pos < bytes.len() {
-                            *pos += 1;
+                        if *pos >= bytes.len() {
+                            break;
                         }
+                        *pos += 1;
                     }
                     _ => *pos += 1,
                 }

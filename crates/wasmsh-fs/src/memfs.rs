@@ -16,8 +16,6 @@ enum FsNode {
 struct OpenFile {
     path: String,
     opts: OpenOptions,
-    /// Byte offset for future seek support.
-    _cursor: usize,
 }
 
 /// In-memory virtual filesystem. No persistence, no `std::fs`.
@@ -43,7 +41,10 @@ impl MemoryFs {
 
     fn alloc_handle(&mut self) -> u64 {
         let h = self.next_handle;
-        self.next_handle += 1;
+        self.next_handle = self
+            .next_handle
+            .checked_add(1)
+            .expect("file handle counter overflow");
         h
     }
 
@@ -89,14 +90,7 @@ impl Vfs for MemoryFs {
         }
 
         let h = self.alloc_handle();
-        self.handles.insert(
-            h,
-            OpenFile {
-                path: norm,
-                opts,
-                _cursor: 0,
-            },
-        );
+        self.handles.insert(h, OpenFile { path: norm, opts });
         Ok(FileHandle(h))
     }
 

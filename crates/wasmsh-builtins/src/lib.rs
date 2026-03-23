@@ -6,7 +6,7 @@
 
 use indexmap::IndexMap;
 use smol_str::SmolStr;
-use wasmsh_fs::{MemoryFs, Vfs};
+use wasmsh_fs::Vfs;
 use wasmsh_state::{ShellState, ShellVar};
 
 /// Abstraction for stdout/stderr output, suitable for browser streaming.
@@ -47,7 +47,7 @@ pub struct BuiltinContext<'a> {
     pub state: &'a mut ShellState,
     pub output: &'a mut dyn OutputSink,
     /// Optional VFS access (needed by `test -f`, etc.).
-    pub fs: Option<&'a MemoryFs>,
+    pub fs: Option<&'a dyn Vfs>,
     /// Stdin data from pipe or here-doc.
     pub stdin: Option<&'a [u8]>,
 }

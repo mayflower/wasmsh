@@ -4,7 +4,7 @@
 //! runtime to the host page via `wasmsh-protocol` messages. It wires
 //! the full pipeline: parse → HIR → expand → execute builtins.
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 use wasmsh_ast::RedirectionOp;
 use wasmsh_expand::expand_words;
@@ -20,6 +20,15 @@ use wasmsh_vm::Vm;
 /// Sentinel FD value for `&>` (redirect both stdout and stderr).
 const FD_BOTH: u32 = u32::MAX;
 
+// Runtime-level command names dispatched before builtins.
+const CMD_LOCAL: &str = "local";
+const CMD_BREAK: &str = "break";
+const CMD_CONTINUE: &str = "continue";
+const CMD_EXIT: &str = "exit";
+const CMD_EVAL: &str = "eval";
+const CMD_SOURCE: &str = "source";
+const CMD_DOT: &str = ".";
+
 /// Configuration for the browser runtime.
 #[derive(Debug, Clone)]
 pub struct BrowserConfig {
@@ -31,6 +40,34 @@ impl Default for BrowserConfig {
         Self {
             step_budget: 100_000,
         }
+    }
+}
+
+/// Transient execution state, reset between top-level commands.
+struct ExecState {
+    break_depth: u32,
+    loop_continue: bool,
+    exit_requested: Option<i32>,
+    errexit_suppressed: bool,
+    local_save_stack: Vec<(smol_str::SmolStr, Option<smol_str::SmolStr>)>,
+}
+
+impl ExecState {
+    fn new() -> Self {
+        Self {
+            break_depth: 0,
+            loop_continue: false,
+            exit_requested: None,
+            errexit_suppressed: false,
+            local_save_stack: Vec::new(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.break_depth = 0;
+        self.loop_continue = false;
+        self.exit_requested = None;
+        self.errexit_suppressed = false;
     }
 }
 
@@ -46,16 +83,9 @@ pub struct WorkerRuntime {
     /// Pending stdin data for the next command (from here-doc or pipe).
     pending_stdin: Option<Vec<u8>>,
     /// Registered shell functions (name → HIR body).
-    functions: HashMap<String, HirCommand>,
-    /// Stack of (name, `old_value`) for `local` variable restoration.
-    local_save_stack: Vec<(smol_str::SmolStr, Option<smol_str::SmolStr>)>,
-    /// Loop control: break/continue depth, set by builtins.
-    break_depth: u32,
-    loop_continue: bool,
-    /// Exit requested with this status.
-    exit_requested: Option<i32>,
-    /// When true, suppresses `set -e` checking (inside if/while/until conditions).
-    errexit_suppressed: bool,
+    functions: IndexMap<String, HirCommand>,
+    /// Transient execution state (loop control, exit, locals).
+    exec: ExecState,
 }
 
 impl WorkerRuntime {
@@ -69,12 +99,8 @@ impl WorkerRuntime {
             builtins: wasmsh_builtins::BuiltinRegistry::new(),
             initialized: false,
             pending_stdin: None,
-            functions: HashMap::new(),
-            local_save_stack: Vec::new(),
-            break_depth: 0,
-            loop_continue: false,
-            exit_requested: None,
-            errexit_suppressed: false,
+            functions: IndexMap::new(),
+            exec: ExecState::new(),
         }
     }
 
@@ -86,11 +112,8 @@ impl WorkerRuntime {
                 self.vm = Vm::new(ShellState::new(), step_budget);
                 self.fs = MemoryFs::new();
                 self.pending_stdin = None;
-                self.functions = HashMap::new();
-                self.break_depth = 0;
-                self.loop_continue = false;
-                self.exit_requested = None;
-                self.errexit_suppressed = false;
+                self.functions = IndexMap::new();
+                self.exec.reset();
                 self.initialized = true;
                 vec![WorkerEvent::Version(PROTOCOL_VERSION.to_string())]
             }
@@ -128,7 +151,11 @@ impl WorkerRuntime {
                 use wasmsh_fs::OpenOptions;
                 match self.fs.open(&path, OpenOptions::write()) {
                     Ok(h) => {
-                        let _ = self.fs.write_file(h, &data);
+                        if let Err(e) = self.fs.write_file(h, &data) {
+                            self.vm.stderr.extend_from_slice(
+                                format!("wasmsh: write error: {e}\n").as_bytes(),
+                            );
+                        }
                         self.fs.close(h);
                         vec![WorkerEvent::FsChanged(path)]
                     }
@@ -175,16 +202,16 @@ impl WorkerRuntime {
         };
         let hir = wasmsh_hir::lower(&ast);
         for cc in &hir.items {
-            if self.exit_requested.is_some() {
+            if self.exec.exit_requested.is_some() {
                 break;
             }
             for and_or in &cc.list {
                 self.execute_pipeline_chain(and_or);
-                if self.exit_requested.is_some() {
+                if self.exec.exit_requested.is_some() {
                     break;
                 }
                 if self.should_errexit(and_or) {
-                    self.exit_requested = Some(self.vm.state.last_status);
+                    self.exec.exit_requested = Some(self.vm.state.last_status);
                     break;
                 }
             }
@@ -204,7 +231,7 @@ impl WorkerRuntime {
         let mut events = self.execute_input_inner(input);
 
         // Fire EXIT trap if exit was requested
-        if let Some(exit_code) = self.exit_requested {
+        if let Some(exit_code) = self.exec.exit_requested {
             if let Some(handler) = self.vm.state.get_var("_TRAP_EXIT") {
                 if !handler.is_empty() {
                     let handler_str = handler.to_string();
@@ -214,11 +241,11 @@ impl WorkerRuntime {
                         smol_str::SmolStr::default(),
                     );
                     // Temporarily clear exit_requested so handler can execute
-                    self.exit_requested = None;
+                    self.exec.exit_requested = None;
                     let trap_events = self.execute_input_inner(&handler_str);
                     events.extend(trap_events);
                     // Restore exit_requested
-                    self.exit_requested = Some(exit_code);
+                    self.exec.exit_requested = Some(exit_code);
                 }
             }
         }
@@ -257,7 +284,10 @@ impl WorkerRuntime {
             ));
         }
 
-        let exit_status = self.exit_requested.unwrap_or(self.vm.state.last_status);
+        let exit_status = self
+            .exec
+            .exit_requested
+            .unwrap_or(self.vm.state.last_status);
         events.push(WorkerEvent::Exit(exit_status));
         events
     }
@@ -443,7 +473,7 @@ impl WorkerRuntime {
 
                 // Runtime-level commands that affect control flow
                 match cmd_name.as_str() {
-                    "local" => {
+                    CMD_LOCAL => {
                         // Save old values for restoration on function return
                         for arg in &argv[1..] {
                             let (name, value) = if let Some(eq) = arg.find('=') {
@@ -452,7 +482,8 @@ impl WorkerRuntime {
                                 (arg.as_str(), None)
                             };
                             let old = self.vm.state.get_var(name);
-                            self.local_save_stack
+                            self.exec
+                                .local_save_stack
                                 .push((smol_str::SmolStr::from(name), old));
                             if let Some(val) = value {
                                 self.vm.state.set_var(
@@ -469,26 +500,27 @@ impl WorkerRuntime {
                         self.vm.state.last_status = 0;
                         return;
                     }
-                    "break" => {
-                        self.break_depth = argv.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+                    CMD_BREAK => {
+                        self.exec.break_depth =
+                            argv.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
                         self.vm.state.last_status = 0;
                         return;
                     }
-                    "continue" => {
-                        self.loop_continue = true;
+                    CMD_CONTINUE => {
+                        self.exec.loop_continue = true;
                         self.vm.state.last_status = 0;
                         return;
                     }
-                    "exit" => {
+                    CMD_EXIT => {
                         let code = argv
                             .get(1)
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(self.vm.state.last_status);
-                        self.exit_requested = Some(code);
+                        self.exec.exit_requested = Some(code);
                         self.vm.state.last_status = code;
                         return;
                     }
-                    "eval" => {
+                    CMD_EVAL => {
                         let code = argv[1..].join(" ");
                         let sub_events = self.execute_input_inner(&code);
                         for e in sub_events {
@@ -500,7 +532,7 @@ impl WorkerRuntime {
                         }
                         return;
                     }
-                    "source" | "." => {
+                    CMD_SOURCE | CMD_DOT => {
                         if let Some(path) = argv.get(1) {
                             let full = self.resolve_cwd_path(path);
                             if let Ok(h) = self.fs.open(&full, OpenOptions::read()) {
@@ -580,10 +612,11 @@ impl WorkerRuntime {
                         .map(|s| smol_str::SmolStr::from(s.as_str()))
                         .collect();
                     // Bash functions share parent scope. `local` saves/restores.
-                    let locals_before = self.local_save_stack.len();
+                    let locals_before = self.exec.local_save_stack.len();
                     self.execute_command(&body);
                     // Restore variables declared `local` during this function call
-                    let new_locals: Vec<_> = self.local_save_stack.drain(locals_before..).collect();
+                    let new_locals: Vec<_> =
+                        self.exec.local_save_stack.drain(locals_before..).collect();
                     for (name, old_val) in new_locals.into_iter().rev() {
                         if let Some(val) = old_val {
                             self.vm.state.set_var(name, val);
@@ -617,19 +650,19 @@ impl WorkerRuntime {
                 self.vm.state.last_status = 0;
             }
             HirCommand::If(if_cmd) => {
-                let saved_suppress = self.errexit_suppressed;
-                self.errexit_suppressed = true;
+                let saved_suppress = self.exec.errexit_suppressed;
+                self.exec.errexit_suppressed = true;
                 self.execute_body(&if_cmd.condition);
-                self.errexit_suppressed = saved_suppress;
+                self.exec.errexit_suppressed = saved_suppress;
                 if self.vm.state.last_status == 0 {
                     self.execute_body(&if_cmd.then_body);
                 } else {
                     let mut handled = false;
                     for elif in &if_cmd.elifs {
-                        let saved = self.errexit_suppressed;
-                        self.errexit_suppressed = true;
+                        let saved = self.exec.errexit_suppressed;
+                        self.exec.errexit_suppressed = true;
                         self.execute_body(&elif.condition);
-                        self.errexit_suppressed = saved;
+                        self.exec.errexit_suppressed = saved;
                         if self.vm.state.last_status == 0 {
                             self.execute_body(&elif.then_body);
                             handled = true;
@@ -644,42 +677,42 @@ impl WorkerRuntime {
                 }
             }
             HirCommand::While(loop_cmd) => loop {
-                let saved = self.errexit_suppressed;
-                self.errexit_suppressed = true;
+                let saved = self.exec.errexit_suppressed;
+                self.exec.errexit_suppressed = true;
                 self.execute_body(&loop_cmd.condition);
-                self.errexit_suppressed = saved;
+                self.exec.errexit_suppressed = saved;
                 if self.vm.state.last_status != 0 {
                     break;
                 }
                 self.execute_body(&loop_cmd.body);
-                if self.break_depth > 0 {
-                    self.break_depth -= 1;
+                if self.exec.break_depth > 0 {
+                    self.exec.break_depth -= 1;
                     break;
                 }
-                if self.loop_continue {
-                    self.loop_continue = false;
+                if self.exec.loop_continue {
+                    self.exec.loop_continue = false;
                 }
-                if self.exit_requested.is_some() {
+                if self.exec.exit_requested.is_some() {
                     break;
                 }
             },
             HirCommand::Until(loop_cmd) => loop {
-                let saved = self.errexit_suppressed;
-                self.errexit_suppressed = true;
+                let saved = self.exec.errexit_suppressed;
+                self.exec.errexit_suppressed = true;
                 self.execute_body(&loop_cmd.condition);
-                self.errexit_suppressed = saved;
+                self.exec.errexit_suppressed = saved;
                 if self.vm.state.last_status == 0 {
                     break;
                 }
                 self.execute_body(&loop_cmd.body);
-                if self.break_depth > 0 {
-                    self.break_depth -= 1;
+                if self.exec.break_depth > 0 {
+                    self.exec.break_depth -= 1;
                     break;
                 }
-                if self.loop_continue {
-                    self.loop_continue = false;
+                if self.exec.loop_continue {
+                    self.exec.loop_continue = false;
                 }
-                if self.exit_requested.is_some() {
+                if self.exec.exit_requested.is_some() {
                     break;
                 }
             },
@@ -704,15 +737,15 @@ impl WorkerRuntime {
                 for word in words {
                     self.vm.state.set_var(for_cmd.var_name.clone(), word.into());
                     self.execute_body(&for_cmd.body);
-                    if self.break_depth > 0 {
-                        self.break_depth -= 1;
+                    if self.exec.break_depth > 0 {
+                        self.exec.break_depth -= 1;
                         break;
                     }
-                    if self.loop_continue {
-                        self.loop_continue = false;
+                    if self.exec.loop_continue {
+                        self.exec.loop_continue = false;
                         continue;
                     }
-                    if self.exit_requested.is_some() {
+                    if self.exec.exit_requested.is_some() {
                         break;
                     }
                 }
@@ -767,16 +800,16 @@ impl WorkerRuntime {
     }
 
     fn should_errexit(&self, and_or: &HirAndOr) -> bool {
-        !self.errexit_suppressed
+        !self.exec.errexit_suppressed
             && and_or.rest.is_empty()
             && !and_or.first.negated
             && self.vm.state.get_var("SHOPT_e").as_deref() == Some("1")
             && self.vm.state.last_status != 0
-            && self.exit_requested.is_none()
+            && self.exec.exit_requested.is_none()
     }
 
     fn should_stop_execution(&self) -> bool {
-        self.break_depth > 0 || self.loop_continue || self.exit_requested.is_some()
+        self.exec.break_depth > 0 || self.exec.loop_continue || self.exec.exit_requested.is_some()
     }
 
     fn execute_body(&mut self, body: &[HirCompleteCommand]) {
@@ -790,7 +823,7 @@ impl WorkerRuntime {
                 }
                 self.execute_pipeline_chain(and_or);
                 if self.should_errexit(and_or) {
-                    self.exit_requested = Some(self.vm.state.last_status);
+                    self.exec.exit_requested = Some(self.vm.state.last_status);
                 }
             }
         }
@@ -875,14 +908,22 @@ impl WorkerRuntime {
                         if let Ok(h) = self.fs.open(&path, OpenOptions::write()) {
                             let mut combined = stdout_data;
                             combined.extend_from_slice(&stderr_data);
-                            let _ = self.fs.write_file(h, &combined);
+                            if let Err(e) = self.fs.write_file(h, &combined) {
+                                self.vm.stderr.extend_from_slice(
+                                    format!("wasmsh: write error: {e}\n").as_bytes(),
+                                );
+                            }
                             self.fs.close(h);
                         }
                     } else if fd == 2 {
                         // 2> file: redirect stderr to file
                         let stderr_data = std::mem::take(&mut self.vm.stderr);
                         if let Ok(h) = self.fs.open(&path, OpenOptions::write()) {
-                            let _ = self.fs.write_file(h, &stderr_data);
+                            if let Err(e) = self.fs.write_file(h, &stderr_data) {
+                                self.vm.stderr.extend_from_slice(
+                                    format!("wasmsh: write error: {e}\n").as_bytes(),
+                                );
+                            }
                             self.fs.close(h);
                         }
                     } else {
@@ -890,7 +931,11 @@ impl WorkerRuntime {
                         let data = self.vm.stdout[stdout_before..].to_vec();
                         self.vm.stdout.truncate(stdout_before);
                         if let Ok(h) = self.fs.open(&path, OpenOptions::write()) {
-                            let _ = self.fs.write_file(h, &data);
+                            if let Err(e) = self.fs.write_file(h, &data) {
+                                self.vm.stderr.extend_from_slice(
+                                    format!("wasmsh: write error: {e}\n").as_bytes(),
+                                );
+                            }
                             self.fs.close(h);
                         }
                     }
@@ -900,7 +945,11 @@ impl WorkerRuntime {
                         // 2>> file: append stderr to file
                         let stderr_data = std::mem::take(&mut self.vm.stderr);
                         if let Ok(h) = self.fs.open(&path, OpenOptions::append()) {
-                            let _ = self.fs.write_file(h, &stderr_data);
+                            if let Err(e) = self.fs.write_file(h, &stderr_data) {
+                                self.vm.stderr.extend_from_slice(
+                                    format!("wasmsh: write error: {e}\n").as_bytes(),
+                                );
+                            }
                             self.fs.close(h);
                         }
                     } else {
@@ -908,7 +957,11 @@ impl WorkerRuntime {
                         let data = self.vm.stdout[stdout_before..].to_vec();
                         self.vm.stdout.truncate(stdout_before);
                         if let Ok(h) = self.fs.open(&path, OpenOptions::append()) {
-                            let _ = self.fs.write_file(h, &data);
+                            if let Err(e) = self.fs.write_file(h, &data) {
+                                self.vm.stderr.extend_from_slice(
+                                    format!("wasmsh: write error: {e}\n").as_bytes(),
+                                );
+                            }
                             self.fs.close(h);
                         }
                     }
