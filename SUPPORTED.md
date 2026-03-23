@@ -14,7 +14,7 @@
 - Single quoting: `'literal text'`
 - Double quoting: `"text with $expansion"`
 - Parameter expansion: `$var`, `${var}`, `${var:-default}`, `${var:+alt}`, `${#var}`
-- Command substitution: `$(...)` (placeholder — expands to empty)
+- Command substitution: `$(...)`
 - Arithmetic expansion: `$((expr))` with `+`, `-`, `*`, `/`, `%`
 - Backslash escaping: `\char`
 - Comments: `# comment`
@@ -22,19 +22,19 @@
 - Subshells: `( ... )`
 - Brace groups: `{ ...; }`
 - Function definitions: `name() { ... }`, `function name { ... }`
+- `case/esac`
+- Brace expansion: `{a,b,c}`, `{1..10}`
+- Tilde expansion: `~`
+- Here-strings: `<<<`
+- Glob/pathname expansion: `*`, `?`, `[...]`
 
 ### Not Yet Implemented
-- `case/esac`
 - `select`
 - `[[ ... ]]` (extended test)
-- Brace expansion: `{a,b,c}`
-- Tilde expansion: `~`
 - Process substitution: `<(cmd)`, `>(cmd)`
 - Coprocesses
 - Job control (`&`, `fg`, `bg`, `jobs`)
 - Signal handling (`trap`)
-- Here-strings: `<<<`
-- Glob/pathname expansion: `*`, `?`, `[...]`
 
 ## Builtins
 

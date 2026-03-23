@@ -181,7 +181,7 @@ pub enum WordPart {
     CommandSubstitution(SmolStr),
     /// `$((...))` arithmetic expansion. Stores the inner expression text.
     Arithmetic(SmolStr),
-    // Glob, TildePrefix added in later phases.
+    // Glob and tilde expansion handled at runtime/expansion layers.
 }
 
 /// A redirection (`>`, `<`, `>>`, `<<`, etc.).

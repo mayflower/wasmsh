@@ -363,13 +363,9 @@ pub(crate) fn util_cut(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
 pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let args = &argv[1..];
-    if args.len() < 2 {
-        if args.first() == Some(&"-d") && args.len() >= 2 {
-            // delete mode handled below
-        } else {
-            ctx.output.stderr(b"tr: missing operand\n");
-            return 1;
-        }
+    if args.is_empty() {
+        ctx.output.stderr(b"tr: missing operand\n");
+        return 1;
     }
     let text = if let Some(data) = ctx.stdin {
         String::from_utf8_lossy(data).to_string()
@@ -414,6 +410,7 @@ pub(crate) fn util_tee(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         Vec::new()
     };
     ctx.output.stdout(&data);
+    let mut status = 0;
     for path in args {
         let full = resolve_path(ctx.cwd, path);
         let opts = if append {
@@ -422,9 +419,12 @@ pub(crate) fn util_tee(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             OpenOptions::write()
         };
         if let Ok(h) = ctx.fs.open(&full, opts) {
-            let _ = ctx.fs.write_file(h, &data);
+            if let Err(e) = ctx.fs.write_file(h, &data) {
+                emit_error(ctx.output, "tee", path, &e);
+                status = 1;
+            }
             ctx.fs.close(h);
         }
     }
-    0
+    status
 }

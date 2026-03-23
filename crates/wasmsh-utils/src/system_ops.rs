@@ -65,7 +65,7 @@ pub(crate) fn util_hostname(ctx: &mut UtilContext<'_>, _argv: &[&str]) -> i32 {
 }
 
 pub(crate) fn util_sleep(_ctx: &mut UtilContext<'_>, _argv: &[&str]) -> i32 {
-    // In wasmsh, sleep is a cooperative yield. For now, just return.
+    // In wasmsh, sleep is a cooperative yield that returns immediately.
     0
 }
 

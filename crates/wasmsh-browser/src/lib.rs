@@ -141,11 +141,19 @@ impl WorkerRuntime {
             HostCommand::ReadFile { path } => {
                 use wasmsh_fs::OpenOptions;
                 match self.fs.open(&path, OpenOptions::read()) {
-                    Ok(h) => {
-                        let data = self.fs.read_file(h).unwrap_or_default();
-                        self.fs.close(h);
-                        vec![WorkerEvent::Stdout(data)]
-                    }
+                    Ok(h) => match self.fs.read_file(h) {
+                        Ok(data) => {
+                            self.fs.close(h);
+                            vec![WorkerEvent::Stdout(data)]
+                        }
+                        Err(e) => {
+                            self.fs.close(h);
+                            vec![WorkerEvent::Diagnostic(
+                                DiagnosticLevel::Error,
+                                format!("read error: {path}: {e}"),
+                            )]
+                        }
+                    },
                     Err(e) => vec![WorkerEvent::Diagnostic(
                         DiagnosticLevel::Error,
                         format!("read error: {e}"),
@@ -470,8 +478,17 @@ impl WorkerRuntime {
                                 wasmsh_expand::expand_word(&redir.target, &mut self.vm.state);
                             let path = self.resolve_cwd_path(&target);
                             if let Ok(h) = self.fs.open(&path, OpenOptions::read()) {
-                                if let Ok(data) = self.fs.read_file(h) {
-                                    self.pending_stdin = Some(data);
+                                match self.fs.read_file(h) {
+                                    Ok(data) => {
+                                        self.pending_stdin = Some(data);
+                                    }
+                                    Err(e) => {
+                                        let msg = format!("wasmsh: {target}: read error: {e}\n");
+                                        self.vm.stderr.extend_from_slice(msg.as_bytes());
+                                        self.vm.state.last_status = 1;
+                                        self.fs.close(h);
+                                        return;
+                                    }
                                 }
                                 self.fs.close(h);
                             } else {
@@ -546,6 +563,20 @@ impl WorkerRuntime {
                             match e {
                                 WorkerEvent::Stdout(d) => self.vm.stdout.extend_from_slice(&d),
                                 WorkerEvent::Stderr(d) => self.vm.stderr.extend_from_slice(&d),
+                                WorkerEvent::Diagnostic(level, msg) => {
+                                    self.vm.diagnostics.push(wasmsh_vm::DiagnosticEvent {
+                                        level: match level {
+                                            DiagnosticLevel::Trace => wasmsh_vm::DiagLevel::Trace,
+                                            DiagnosticLevel::Info => wasmsh_vm::DiagLevel::Info,
+                                            DiagnosticLevel::Warning => {
+                                                wasmsh_vm::DiagLevel::Warning
+                                            }
+                                            DiagnosticLevel::Error => wasmsh_vm::DiagLevel::Error,
+                                        },
+                                        category: wasmsh_vm::DiagCategory::Runtime,
+                                        message: msg,
+                                    });
+                                }
                                 _ => {}
                             }
                         }
@@ -555,23 +586,55 @@ impl WorkerRuntime {
                         if let Some(path) = argv.get(1) {
                             let full = self.resolve_cwd_path(path);
                             if let Ok(h) = self.fs.open(&full, OpenOptions::read()) {
-                                if let Ok(data) = self.fs.read_file(h) {
-                                    self.fs.close(h);
-                                    let code = String::from_utf8_lossy(&data).to_string();
-                                    let sub_events = self.execute_input_inner(&code);
-                                    for e in sub_events {
-                                        match e {
-                                            WorkerEvent::Stdout(d) => {
-                                                self.vm.stdout.extend_from_slice(&d);
+                                match self.fs.read_file(h) {
+                                    Ok(data) => {
+                                        self.fs.close(h);
+                                        let code = String::from_utf8_lossy(&data).to_string();
+                                        let sub_events = self.execute_input_inner(&code);
+                                        for e in sub_events {
+                                            match e {
+                                                WorkerEvent::Stdout(d) => {
+                                                    self.vm.stdout.extend_from_slice(&d);
+                                                }
+                                                WorkerEvent::Stderr(d) => {
+                                                    self.vm.stderr.extend_from_slice(&d);
+                                                }
+                                                WorkerEvent::Diagnostic(_, _) => {
+                                                    // Preserve diagnostic events from sub-execution
+                                                    if let WorkerEvent::Diagnostic(level, msg) = e {
+                                                        self.vm
+                                                            .diagnostics
+                                                            .push(wasmsh_vm::DiagnosticEvent {
+                                                            level: match level {
+                                                                DiagnosticLevel::Trace => {
+                                                                    wasmsh_vm::DiagLevel::Trace
+                                                                }
+                                                                DiagnosticLevel::Info => {
+                                                                    wasmsh_vm::DiagLevel::Info
+                                                                }
+                                                                DiagnosticLevel::Warning => {
+                                                                    wasmsh_vm::DiagLevel::Warning
+                                                                }
+                                                                DiagnosticLevel::Error => {
+                                                                    wasmsh_vm::DiagLevel::Error
+                                                                }
+                                                            },
+                                                            category:
+                                                                wasmsh_vm::DiagCategory::Runtime,
+                                                            message: msg,
+                                                        });
+                                                    }
+                                                }
+                                                _ => {}
                                             }
-                                            WorkerEvent::Stderr(d) => {
-                                                self.vm.stderr.extend_from_slice(&d);
-                                            }
-                                            _ => {}
                                         }
                                     }
-                                } else {
-                                    self.fs.close(h);
+                                    Err(e) => {
+                                        self.fs.close(h);
+                                        let msg = format!("source: {path}: read error: {e}\n");
+                                        self.vm.stderr.extend_from_slice(msg.as_bytes());
+                                        self.vm.state.last_status = 1;
+                                    }
                                 }
                             } else {
                                 let msg = format!("source: {path}: not found\n");
@@ -928,38 +991,59 @@ impl WorkerRuntime {
                         let stdout_data = self.vm.stdout[stdout_before..].to_vec();
                         self.vm.stdout.truncate(stdout_before);
                         let stderr_data = std::mem::take(&mut self.vm.stderr);
-                        if let Ok(h) = self.fs.open(&path, OpenOptions::write()) {
-                            let mut combined = stdout_data;
-                            combined.extend_from_slice(&stderr_data);
-                            if let Err(e) = self.fs.write_file(h, &combined) {
+                        match self.fs.open(&path, OpenOptions::write()) {
+                            Ok(h) => {
+                                let mut combined = stdout_data;
+                                combined.extend_from_slice(&stderr_data);
+                                if let Err(e) = self.fs.write_file(h, &combined) {
+                                    self.vm.stderr.extend_from_slice(
+                                        format!("wasmsh: write error: {e}\n").as_bytes(),
+                                    );
+                                }
+                                self.fs.close(h);
+                            }
+                            Err(e) => {
                                 self.vm.stderr.extend_from_slice(
-                                    format!("wasmsh: write error: {e}\n").as_bytes(),
+                                    format!("wasmsh: {target}: {e}\n").as_bytes(),
                                 );
                             }
-                            self.fs.close(h);
                         }
                     } else if fd == 2 {
                         // 2> file: redirect stderr to file
                         let stderr_data = std::mem::take(&mut self.vm.stderr);
-                        if let Ok(h) = self.fs.open(&path, OpenOptions::write()) {
-                            if let Err(e) = self.fs.write_file(h, &stderr_data) {
+                        match self.fs.open(&path, OpenOptions::write()) {
+                            Ok(h) => {
+                                if let Err(e) = self.fs.write_file(h, &stderr_data) {
+                                    self.vm.stderr.extend_from_slice(
+                                        format!("wasmsh: write error: {e}\n").as_bytes(),
+                                    );
+                                }
+                                self.fs.close(h);
+                            }
+                            Err(e) => {
                                 self.vm.stderr.extend_from_slice(
-                                    format!("wasmsh: write error: {e}\n").as_bytes(),
+                                    format!("wasmsh: {target}: {e}\n").as_bytes(),
                                 );
                             }
-                            self.fs.close(h);
                         }
                     } else {
                         // > file or 1> file: redirect stdout to file
                         let data = self.vm.stdout[stdout_before..].to_vec();
                         self.vm.stdout.truncate(stdout_before);
-                        if let Ok(h) = self.fs.open(&path, OpenOptions::write()) {
-                            if let Err(e) = self.fs.write_file(h, &data) {
+                        match self.fs.open(&path, OpenOptions::write()) {
+                            Ok(h) => {
+                                if let Err(e) = self.fs.write_file(h, &data) {
+                                    self.vm.stderr.extend_from_slice(
+                                        format!("wasmsh: write error: {e}\n").as_bytes(),
+                                    );
+                                }
+                                self.fs.close(h);
+                            }
+                            Err(e) => {
                                 self.vm.stderr.extend_from_slice(
-                                    format!("wasmsh: write error: {e}\n").as_bytes(),
+                                    format!("wasmsh: {target}: {e}\n").as_bytes(),
                                 );
                             }
-                            self.fs.close(h);
                         }
                     }
                 }
@@ -967,25 +1051,39 @@ impl WorkerRuntime {
                     if fd == 2 {
                         // 2>> file: append stderr to file
                         let stderr_data = std::mem::take(&mut self.vm.stderr);
-                        if let Ok(h) = self.fs.open(&path, OpenOptions::append()) {
-                            if let Err(e) = self.fs.write_file(h, &stderr_data) {
+                        match self.fs.open(&path, OpenOptions::append()) {
+                            Ok(h) => {
+                                if let Err(e) = self.fs.write_file(h, &stderr_data) {
+                                    self.vm.stderr.extend_from_slice(
+                                        format!("wasmsh: write error: {e}\n").as_bytes(),
+                                    );
+                                }
+                                self.fs.close(h);
+                            }
+                            Err(e) => {
                                 self.vm.stderr.extend_from_slice(
-                                    format!("wasmsh: write error: {e}\n").as_bytes(),
+                                    format!("wasmsh: {target}: {e}\n").as_bytes(),
                                 );
                             }
-                            self.fs.close(h);
                         }
                     } else {
                         // >> file: append stdout to file
                         let data = self.vm.stdout[stdout_before..].to_vec();
                         self.vm.stdout.truncate(stdout_before);
-                        if let Ok(h) = self.fs.open(&path, OpenOptions::append()) {
-                            if let Err(e) = self.fs.write_file(h, &data) {
+                        match self.fs.open(&path, OpenOptions::append()) {
+                            Ok(h) => {
+                                if let Err(e) = self.fs.write_file(h, &data) {
+                                    self.vm.stderr.extend_from_slice(
+                                        format!("wasmsh: write error: {e}\n").as_bytes(),
+                                    );
+                                }
+                                self.fs.close(h);
+                            }
+                            Err(e) => {
                                 self.vm.stderr.extend_from_slice(
-                                    format!("wasmsh: write error: {e}\n").as_bytes(),
+                                    format!("wasmsh: {target}: {e}\n").as_bytes(),
                                 );
                             }
-                            self.fs.close(h);
                         }
                     }
                 }

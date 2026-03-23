@@ -136,11 +136,15 @@ impl ShellState {
 
     /// Set a named variable (not a special parameter).
     /// Preserves `exported` and `readonly` flags if the variable already exists.
+    /// If the variable is readonly, the write is silently skipped (like bash).
     pub fn set_var(&mut self, name: SmolStr, value: SmolStr) {
         let (exported, readonly) = self
             .env
             .get(&name)
             .map_or((false, false), |v| (v.exported, v.readonly));
+        if readonly {
+            return; // readonly variables cannot be overwritten
+        }
         self.env.set(
             name,
             ShellVar {

@@ -370,6 +370,13 @@ fn builtin_export(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
         if let Some(eq_pos) = arg.find('=') {
             let name = &arg[..eq_pos];
             let value = &arg[eq_pos + 1..];
+            if let Some(existing) = ctx.state.env.get(name) {
+                if existing.readonly {
+                    let msg = format!("export: {name}: readonly variable\n");
+                    ctx.output.stderr(msg.as_bytes());
+                    continue;
+                }
+            }
             ctx.state.env.set(
                 SmolStr::from(name),
                 ShellVar {
@@ -529,8 +536,8 @@ fn builtin_exit(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 }
 
 /// `local` — declare local variables (in function scope).
-/// Since we use `push_scope`/`pop_scope` for functions, `local VAR=val`
-/// just sets the variable in the current scope.
+/// Runtime uses save/restore stack for function-local variables.
+/// `local VAR=val` sets the variable in the current scope.
 fn builtin_local(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     for arg in &argv[1..] {
         if let Some(eq_pos) = arg.find('=') {
@@ -582,11 +589,11 @@ fn builtin_command(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 }
 
 /// `eval` — evaluate arguments as shell code.
-/// This is a simplified version that concatenates args and returns.
-/// Full eval requires re-parsing, which happens at the runtime level.
+/// Intercepted at runtime level, not a placeholder. The runtime re-parses
+/// and executes the concatenated arguments directly.
 fn builtin_eval(_ctx: &mut BuiltinContext<'_>, _argv: &[&str]) -> i32 {
     // Actual eval is handled in WorkerRuntime by re-parsing the concatenated args.
-    // This builtin is a no-op placeholder; the runtime intercepts "eval".
+    // The runtime intercepts "eval" before reaching this builtin.
     0
 }
 
@@ -755,7 +762,10 @@ fn builtin_trap(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
                 ctx.state
                     .set_var(SmolStr::from("_TRAP_ERR"), SmolStr::from(handler));
             }
-            _ => {}
+            _ => {
+                let msg = format!("trap: {signal}: signal not supported\n");
+                ctx.output.stderr(msg.as_bytes());
+            }
         }
     }
     0

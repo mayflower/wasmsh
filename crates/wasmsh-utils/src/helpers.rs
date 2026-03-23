@@ -73,7 +73,13 @@ pub(crate) fn get_input_text(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> S
         String::new()
     } else {
         let full = resolve_path(ctx.cwd, file_args[0]);
-        read_text(ctx.fs, &full).unwrap_or_default()
+        match read_text(ctx.fs, &full) {
+            Ok(text) => text,
+            Err(e) => {
+                emit_error(ctx.output, "read", file_args[0], &e);
+                String::new()
+            }
+        }
     }
 }
 

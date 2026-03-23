@@ -235,8 +235,8 @@ impl Vm {
                 }
                 Ir::CallUtility { name: _ } => {
                     // Utility dispatch requires a VFS instance which is managed
-                    // at a higher level. Set status to 127 (command not found)
-                    // for now; the execution engine will handle utility dispatch.
+                    // by the runtime layer. Set status to 127 (command not found)
+                    // at this level; the runtime handles utility dispatch directly.
                     self.state.last_status = 127;
                     argv.clear();
                 }

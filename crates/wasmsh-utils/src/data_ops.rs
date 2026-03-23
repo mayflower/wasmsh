@@ -3,20 +3,67 @@
 use crate::helpers::require_args;
 use crate::UtilContext;
 
+fn seq_parse(s: &str) -> Option<i64> {
+    s.parse::<i64>().ok()
+}
+
 pub(crate) fn util_seq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let args = &argv[1..];
     let (start, end, step) = match args.len() {
-        1 => (1i64, args[0].parse().unwrap_or(1), 1i64),
-        2 => (
-            args[0].parse().unwrap_or(1),
-            args[1].parse().unwrap_or(1),
-            1,
-        ),
-        3 => (
-            args[0].parse().unwrap_or(1),
-            args[2].parse().unwrap_or(1),
-            args[1].parse().unwrap_or(1),
-        ),
+        1 => match seq_parse(args[0]) {
+            Some(e) => (1i64, e, 1i64),
+            None => {
+                let msg = format!("seq: invalid argument: '{}'\n", args[0]);
+                ctx.output.stderr(msg.as_bytes());
+                return 1;
+            }
+        },
+        2 => {
+            let s = match seq_parse(args[0]) {
+                Some(v) => v,
+                None => {
+                    let msg = format!("seq: invalid argument: '{}'\n", args[0]);
+                    ctx.output.stderr(msg.as_bytes());
+                    return 1;
+                }
+            };
+            let e = match seq_parse(args[1]) {
+                Some(v) => v,
+                None => {
+                    let msg = format!("seq: invalid argument: '{}'\n", args[1]);
+                    ctx.output.stderr(msg.as_bytes());
+                    return 1;
+                }
+            };
+            (s, e, 1)
+        }
+        3 => {
+            let s = match seq_parse(args[0]) {
+                Some(v) => v,
+                None => {
+                    let msg = format!("seq: invalid argument: '{}'\n", args[0]);
+                    ctx.output.stderr(msg.as_bytes());
+                    return 1;
+                }
+            };
+            let st = match seq_parse(args[1]) {
+                Some(v) => v,
+                None => {
+                    let msg = format!("seq: invalid argument: '{}'\n", args[1]);
+                    ctx.output.stderr(msg.as_bytes());
+                    return 1;
+                }
+            };
+            let e = match seq_parse(args[2]) {
+                Some(v) => v,
+                None => {
+                    let msg = format!("seq: invalid argument: '{}'\n", args[2]);
+                    ctx.output.stderr(msg.as_bytes());
+                    return 1;
+                }
+            };
+            (s, e, st)
+        }
         _ => {
             ctx.output.stderr(b"seq: missing operand\n");
             return 1;
@@ -70,8 +117,33 @@ pub(crate) fn util_dirname(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 pub(crate) fn util_expr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let args = &argv[1..];
     if args.len() == 3 {
-        let left: i64 = args[0].parse().unwrap_or(0);
-        let right: i64 = args[2].parse().unwrap_or(0);
+        // String comparison operators don't require numeric operands
+        if args[1] == "=" || args[1] == "!=" {
+            let result = match args[1] {
+                "=" => i64::from(args[0] == args[2]),
+                "!=" => i64::from(args[0] != args[2]),
+                _ => 0,
+            };
+            let s = format!("{result}\n");
+            ctx.output.stdout(s.as_bytes());
+            return i32::from(result == 0);
+        }
+        let left: i64 = match args[0].parse() {
+            Ok(v) => v,
+            Err(_) => {
+                let msg = format!("expr: non-numeric argument: '{}'\n", args[0]);
+                ctx.output.stderr(msg.as_bytes());
+                return 2;
+            }
+        };
+        let right: i64 = match args[2].parse() {
+            Ok(v) => v,
+            Err(_) => {
+                let msg = format!("expr: non-numeric argument: '{}'\n", args[2]);
+                ctx.output.stderr(msg.as_bytes());
+                return 2;
+            }
+        };
         let result = match args[1] {
             "+" => left + right,
             "-" => left - right,
@@ -90,8 +162,6 @@ pub(crate) fn util_expr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     0
                 }
             }
-            "=" => i64::from(args[0] == args[2]),
-            "!=" => i64::from(args[0] != args[2]),
             _ => 0,
         };
         let s = format!("{result}\n");

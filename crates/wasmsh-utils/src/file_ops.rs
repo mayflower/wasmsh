@@ -116,7 +116,10 @@ pub(crate) fn util_mv(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         emit_error(ctx.output, "mv", argv[1], &e);
         return 1;
     }
-    let _ = ctx.fs.remove_file(&src);
+    if let Err(e) = ctx.fs.remove_file(&src) {
+        emit_error(ctx.output, "mv", argv[1], &e);
+        return 1;
+    }
     0
 }
 

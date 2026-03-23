@@ -4,10 +4,10 @@
 //! correct POSIX order:
 //! 1. Tilde expansion
 //! 2. Parameter expansion
-//! 3. Command substitution (placeholder — requires VM callback)
-//! 4. Arithmetic expansion (placeholder — basic integer eval)
+//! 3. Command substitution (resolved at runtime layer)
+//! 4. Arithmetic expansion (basic integer expressions)
 //! 5. Field splitting
-//! 6. Pathname expansion / globbing (not yet)
+//! 6. Pathname expansion / globbing (resolved at runtime layer)
 //! 7. Quote removal
 
 use smol_str::SmolStr;
@@ -76,6 +76,13 @@ fn expand_part(part: &WordPart, state: &mut ShellState, out: &mut String) {
 
 fn expand_part_depth(part: &WordPart, state: &mut ShellState, out: &mut String, depth: usize) {
     if depth > MAX_EXPAND_DEPTH {
+        // Push the raw text instead of silently returning nothing
+        match part {
+            WordPart::Literal(s) | WordPart::SingleQuoted(s) | WordPart::Parameter(s) => {
+                out.push_str(s);
+            }
+            _ => {}
+        }
         return;
     }
     match part {
