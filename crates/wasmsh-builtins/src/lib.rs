@@ -59,7 +59,7 @@ impl std::fmt::Debug for BuiltinContext<'_> {
 }
 
 /// Signature for a builtin command function.
-/// Receives the context and argv (argv[0] is the command name).
+/// Receives the context and argv (argv\[0\] is the command name).
 /// Returns the exit status.
 pub type BuiltinFn = fn(&mut BuiltinContext<'_>, &[&str]) -> i32;
 
