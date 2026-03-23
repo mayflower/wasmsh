@@ -1384,8 +1384,8 @@ mod tests {
         let (events, status) = run_shell("echo hello world | wc");
         assert_eq!(status, 0);
         let stdout = get_stdout(&events);
-        assert!(stdout.contains("1")); // 1 line
-        assert!(stdout.contains("2")); // 2 words
+        assert!(stdout.contains('1')); // 1 line
+        assert!(stdout.contains('2')); // 2 words
     }
 
     #[test]

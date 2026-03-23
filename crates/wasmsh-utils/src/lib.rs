@@ -241,8 +241,8 @@ mod tests {
         let (status, out) = run_util("wc", &["wc", "/test.txt"], &mut fs);
         assert_eq!(status, 0);
         // 2 lines, 4 words, 20 bytes
-        assert!(out.stdout_str().contains("2"));
-        assert!(out.stdout_str().contains("4"));
+        assert!(out.stdout_str().contains('2'));
+        assert!(out.stdout_str().contains('4'));
     }
 
     #[test]
