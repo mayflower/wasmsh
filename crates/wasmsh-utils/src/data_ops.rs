@@ -3,64 +3,44 @@
 use crate::helpers::require_args;
 use crate::UtilContext;
 
-fn seq_parse(s: &str) -> Option<i64> {
-    s.parse::<i64>().ok()
+fn seq_parse(s: &str, output: &mut dyn crate::UtilOutput) -> Option<i64> {
+    match s.parse::<i64>() {
+        Ok(v) => Some(v),
+        Err(_) => {
+            let msg = format!("seq: invalid argument: '{s}'\n");
+            output.stderr(msg.as_bytes());
+            None
+        }
+    }
 }
 
 pub(crate) fn util_seq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let args = &argv[1..];
     let (start, end, step) = match args.len() {
-        1 => match seq_parse(args[0]) {
-            Some(e) => (1i64, e, 1i64),
-            None => {
-                let msg = format!("seq: invalid argument: '{}'\n", args[0]);
-                ctx.output.stderr(msg.as_bytes());
+        1 => {
+            let Some(e) = seq_parse(args[0], ctx.output) else {
                 return 1;
-            }
-        },
-        2 => {
-            let s = match seq_parse(args[0]) {
-                Some(v) => v,
-                None => {
-                    let msg = format!("seq: invalid argument: '{}'\n", args[0]);
-                    ctx.output.stderr(msg.as_bytes());
-                    return 1;
-                }
             };
-            let e = match seq_parse(args[1]) {
-                Some(v) => v,
-                None => {
-                    let msg = format!("seq: invalid argument: '{}'\n", args[1]);
-                    ctx.output.stderr(msg.as_bytes());
-                    return 1;
-                }
+            (1i64, e, 1i64)
+        }
+        2 => {
+            let Some(s) = seq_parse(args[0], ctx.output) else {
+                return 1;
+            };
+            let Some(e) = seq_parse(args[1], ctx.output) else {
+                return 1;
             };
             (s, e, 1)
         }
         3 => {
-            let s = match seq_parse(args[0]) {
-                Some(v) => v,
-                None => {
-                    let msg = format!("seq: invalid argument: '{}'\n", args[0]);
-                    ctx.output.stderr(msg.as_bytes());
-                    return 1;
-                }
+            let Some(s) = seq_parse(args[0], ctx.output) else {
+                return 1;
             };
-            let st = match seq_parse(args[1]) {
-                Some(v) => v,
-                None => {
-                    let msg = format!("seq: invalid argument: '{}'\n", args[1]);
-                    ctx.output.stderr(msg.as_bytes());
-                    return 1;
-                }
+            let Some(st) = seq_parse(args[1], ctx.output) else {
+                return 1;
             };
-            let e = match seq_parse(args[2]) {
-                Some(v) => v,
-                None => {
-                    let msg = format!("seq: invalid argument: '{}'\n", args[2]);
-                    ctx.output.stderr(msg.as_bytes());
-                    return 1;
-                }
+            let Some(e) = seq_parse(args[2], ctx.output) else {
+                return 1;
             };
             (s, e, st)
         }
@@ -128,21 +108,15 @@ pub(crate) fn util_expr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             ctx.output.stdout(s.as_bytes());
             return i32::from(result == 0);
         }
-        let left: i64 = match args[0].parse() {
-            Ok(v) => v,
-            Err(_) => {
-                let msg = format!("expr: non-numeric argument: '{}'\n", args[0]);
-                ctx.output.stderr(msg.as_bytes());
-                return 2;
-            }
+        let Ok(left) = args[0].parse::<i64>() else {
+            let msg = format!("expr: non-numeric argument: '{}'\n", args[0]);
+            ctx.output.stderr(msg.as_bytes());
+            return 2;
         };
-        let right: i64 = match args[2].parse() {
-            Ok(v) => v,
-            Err(_) => {
-                let msg = format!("expr: non-numeric argument: '{}'\n", args[2]);
-                ctx.output.stderr(msg.as_bytes());
-                return 2;
-            }
+        let Ok(right) = args[2].parse::<i64>() else {
+            let msg = format!("expr: non-numeric argument: '{}'\n", args[2]);
+            ctx.output.stderr(msg.as_bytes());
+            return 2;
         };
         let result = match args[1] {
             "+" => left + right,
