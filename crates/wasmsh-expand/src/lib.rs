@@ -71,11 +71,18 @@ pub fn expand_string(text: &str, state: &mut ShellState) -> String {
 }
 
 fn expand_part(part: &WordPart, state: &mut ShellState, out: &mut String) {
+    expand_part_depth(part, state, out, 0);
+}
+
+fn expand_part_depth(part: &WordPart, state: &mut ShellState, out: &mut String, depth: usize) {
+    if depth > MAX_EXPAND_DEPTH {
+        return;
+    }
     match part {
         WordPart::Literal(s) | WordPart::SingleQuoted(s) => out.push_str(s),
         WordPart::DoubleQuoted(parts) => {
             for p in parts {
-                expand_part(p, state, out);
+                expand_part_depth(p, state, out, depth);
             }
         }
         WordPart::Parameter(name) => {
@@ -144,7 +151,7 @@ fn expand_part(part: &WordPart, state: &mut ShellState, out: &mut String) {
                 let var_name = &name[..op_pos];
                 let operator = &name[op_pos..op_pos + param_op_len(name, op_pos)];
                 let operand = &name[op_pos + operator.len()..];
-                expand_param_op(var_name, operator, operand, state, out);
+                expand_param_op_depth(var_name, operator, operand, state, out, depth);
             } else if let Some(val) = state.get_var(name) {
                 out.push_str(&val);
             }
@@ -198,9 +205,17 @@ fn param_op_len(name: &str, pos: usize) -> usize {
     }
 }
 
+/// Maximum expansion depth for variable references to prevent infinite recursion.
+const MAX_EXPAND_DEPTH: usize = 50;
+
 /// Expand an operand string that may contain `$var` or `${...}` references.
 fn expand_operand(operand: &str, state: &mut ShellState) -> String {
-    if !operand.contains('$') {
+    expand_operand_inner(operand, state, 0)
+}
+
+/// Inner implementation with depth tracking.
+fn expand_operand_inner(operand: &str, state: &mut ShellState, depth: usize) -> String {
+    if depth > MAX_EXPAND_DEPTH || !operand.contains('$') {
         return operand.to_string();
     }
     let mut out = String::new();
@@ -212,15 +227,15 @@ fn expand_operand(operand: &str, state: &mut ShellState) -> String {
             if pos < bytes.len() && bytes[pos] == b'{' {
                 pos += 1; // skip {
                 let start = pos;
-                let mut depth: u32 = 1;
-                while pos < bytes.len() && depth > 0 {
+                let mut brace_depth: u32 = 1;
+                while pos < bytes.len() && brace_depth > 0 {
                     if bytes[pos] == b'{' {
-                        depth += 1;
+                        brace_depth += 1;
                     }
                     if bytes[pos] == b'}' {
-                        depth -= 1;
+                        brace_depth -= 1;
                     }
-                    if depth > 0 {
+                    if brace_depth > 0 {
                         pos += 1;
                     }
                 }
@@ -229,7 +244,12 @@ fn expand_operand(operand: &str, state: &mut ShellState) -> String {
                     pos += 1;
                 } // skip }
                   // Recursively expand as a Parameter
-                expand_part(&WordPart::Parameter(SmolStr::from(inner)), state, &mut out);
+                expand_part_depth(
+                    &WordPart::Parameter(SmolStr::from(inner)),
+                    state,
+                    &mut out,
+                    depth + 1,
+                );
             } else if pos < bytes.len() && (bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_')
             {
                 let start = pos;
@@ -253,27 +273,28 @@ fn expand_operand(operand: &str, state: &mut ShellState) -> String {
     out
 }
 
-fn expand_param_op(
+fn expand_param_op_depth(
     var_name: &str,
     operator: &str,
     operand: &str,
     state: &mut ShellState,
     out: &mut String,
+    depth: usize,
 ) {
     let val = state.get_var(var_name);
     match operator {
         ":-" => match val {
             Some(v) if !v.is_empty() => out.push_str(&v),
-            _ => out.push_str(&expand_operand(operand, state)),
+            _ => out.push_str(&expand_operand_inner(operand, state, depth + 1)),
         },
         "-" => match val {
             Some(v) => out.push_str(&v),
-            None => out.push_str(&expand_operand(operand, state)),
+            None => out.push_str(&expand_operand_inner(operand, state, depth + 1)),
         },
         ":=" => match val {
             Some(v) if !v.is_empty() => out.push_str(&v),
             _ => {
-                let expanded = expand_operand(operand, state);
+                let expanded = expand_operand_inner(operand, state, depth + 1);
                 state.set_var(SmolStr::from(var_name), SmolStr::from(expanded.as_str()));
                 out.push_str(&expanded);
             }
@@ -282,7 +303,7 @@ fn expand_param_op(
             if let Some(v) = val {
                 out.push_str(&v);
             } else {
-                let expanded = expand_operand(operand, state);
+                let expanded = expand_operand_inner(operand, state, depth + 1);
                 state.set_var(SmolStr::from(var_name), SmolStr::from(expanded.as_str()));
                 out.push_str(&expanded);
             }
@@ -319,7 +340,7 @@ fn expand_param_op(
         "#" => {
             // ${var#pattern} — remove shortest prefix match
             if let Some(val) = val {
-                let pat = expand_operand(operand, state);
+                let pat = expand_operand_inner(operand, state, depth + 1);
                 if let Some(rest) = strip_prefix_glob(&val, &pat, false) {
                     out.push_str(rest);
                 } else {
@@ -330,7 +351,7 @@ fn expand_param_op(
         "##" => {
             // ${var##pattern} — remove longest prefix match
             if let Some(val) = val {
-                let pat = expand_operand(operand, state);
+                let pat = expand_operand_inner(operand, state, depth + 1);
                 if let Some(rest) = strip_prefix_glob(&val, &pat, true) {
                     out.push_str(rest);
                 } else {
@@ -341,7 +362,7 @@ fn expand_param_op(
         "%" => {
             // ${var%pattern} — remove shortest suffix match
             if let Some(val) = val {
-                let pat = expand_operand(operand, state);
+                let pat = expand_operand_inner(operand, state, depth + 1);
                 if let Some(rest) = strip_suffix_glob(&val, &pat, false) {
                     out.push_str(rest);
                 } else {
@@ -352,7 +373,7 @@ fn expand_param_op(
         "%%" => {
             // ${var%%pattern} — remove longest suffix match
             if let Some(val) = val {
-                let pat = expand_operand(operand, state);
+                let pat = expand_operand_inner(operand, state, depth + 1);
                 if let Some(rest) = strip_suffix_glob(&val, &pat, true) {
                     out.push_str(rest);
                 } else {
@@ -504,10 +525,14 @@ pub fn expand_braces(word: &str) -> Vec<String> {
                             if let Some(expansions) = try_brace_range(inner) {
                                 let mut result = Vec::new();
                                 for item in &expansions {
+                                    if result.len() >= MAX_BRACE_ITEMS {
+                                        break;
+                                    }
                                     // Recursively expand suffix
                                     let combined = format!("{prefix}{item}{suffix}");
                                     result.extend(expand_braces(&combined));
                                 }
+                                result.truncate(MAX_BRACE_ITEMS);
                                 return result;
                             }
 
@@ -516,9 +541,13 @@ pub fn expand_braces(word: &str) -> Vec<String> {
                                 if items.len() > 1 {
                                     let mut result = Vec::new();
                                     for item in &items {
+                                        if result.len() >= MAX_BRACE_ITEMS {
+                                            break;
+                                        }
                                         let combined = format!("{prefix}{item}{suffix}");
                                         result.extend(expand_braces(&combined));
                                     }
+                                    result.truncate(MAX_BRACE_ITEMS);
                                     return result;
                                 }
                             }
@@ -534,6 +563,9 @@ pub fn expand_braces(word: &str) -> Vec<String> {
 
     vec![word.to_string()]
 }
+
+/// Maximum number of items a single brace expansion can produce.
+const MAX_BRACE_ITEMS: usize = 10_000;
 
 /// Try to parse `inner` as a range pattern `N..M` or `N..M..S`.
 fn try_brace_range(inner: &str) -> Option<Vec<String>> {
@@ -564,22 +596,28 @@ fn try_brace_range(inner: &str) -> Option<Vec<String>> {
     let mut result = Vec::new();
     let mut cur = start;
     if step > 0 {
-        while cur <= end {
+        while cur <= end && result.len() < MAX_BRACE_ITEMS {
             if needs_pad {
                 result.push(format!("{cur:0>width$}"));
             } else {
                 result.push(cur.to_string());
             }
-            cur += step;
+            cur = match cur.checked_add(step) {
+                Some(v) => v,
+                None => break,
+            };
         }
     } else {
-        while cur >= end {
+        while cur >= end && result.len() < MAX_BRACE_ITEMS {
             if needs_pad {
                 result.push(format!("{cur:0>width$}"));
             } else {
                 result.push(cur.to_string());
             }
-            cur += step;
+            cur = match cur.checked_add(step) {
+                Some(v) => v,
+                None => break,
+            };
         }
     }
 
@@ -620,13 +658,13 @@ fn split_brace_items(inner: &str) -> Option<Vec<String>> {
 }
 
 fn add(a: i64, b: i64) -> i64 {
-    a + b
+    a.wrapping_add(b)
 }
 fn sub(a: i64, b: i64) -> i64 {
-    a - b
+    a.wrapping_sub(b)
 }
 fn mul(a: i64, b: i64) -> i64 {
-    a * b
+    a.wrapping_mul(b)
 }
 fn div(a: i64, b: i64) -> i64 {
     if b == 0 {

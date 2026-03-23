@@ -74,10 +74,16 @@ impl PipeBuffer {
         }
     }
 
-    /// Write all data into the pipe, ignoring capacity limits.
+    /// Maximum total data that `write_all` will accept (64 MiB).
+    const MAX_PIPE_TOTAL: usize = 64 * 1024 * 1024;
+
+    /// Write all data into the pipe, ignoring per-write capacity limits
+    /// but enforcing a total size cap.
     /// Used for the "run to completion then feed" model.
     pub fn write_all(&mut self, buf: &[u8]) {
-        self.data.extend(buf);
+        let remaining = Self::MAX_PIPE_TOTAL.saturating_sub(self.data.len());
+        let to_write = buf.len().min(remaining);
+        self.data.extend(&buf[..to_write]);
     }
 
     /// Read available data from the pipe into a Vec.

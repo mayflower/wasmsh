@@ -4,6 +4,9 @@ use std::collections::HashMap;
 
 use crate::{DirEntry, FileHandle, FsError, Metadata, OpenOptions, Vfs};
 
+/// Maximum file size (64 MiB).
+const MAX_FILE_SIZE: usize = 64 * 1024 * 1024;
+
 /// An entry in the memory filesystem.
 #[derive(Debug, Clone)]
 enum FsNode {
@@ -121,6 +124,14 @@ impl Vfs for MemoryFs {
 
         match self.nodes.get_mut(&path) {
             Some(FsNode::File(contents)) => {
+                let new_size = if append {
+                    contents.len() + data.len()
+                } else {
+                    data.len()
+                };
+                if new_size > MAX_FILE_SIZE {
+                    return Err(FsError::Io("file size limit exceeded".into()));
+                }
                 if append {
                     contents.extend_from_slice(data);
                 } else {

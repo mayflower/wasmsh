@@ -43,6 +43,9 @@ impl Default for BrowserConfig {
     }
 }
 
+/// Maximum recursion depth for eval, source, and command substitution.
+const MAX_RECURSION_DEPTH: u32 = 100;
+
 /// Transient execution state, reset between top-level commands.
 struct ExecState {
     break_depth: u32,
@@ -50,6 +53,7 @@ struct ExecState {
     exit_requested: Option<i32>,
     errexit_suppressed: bool,
     local_save_stack: Vec<(smol_str::SmolStr, Option<smol_str::SmolStr>)>,
+    recursion_depth: u32,
 }
 
 impl ExecState {
@@ -60,6 +64,7 @@ impl ExecState {
             exit_requested: None,
             errexit_suppressed: false,
             local_save_stack: Vec::new(),
+            recursion_depth: 0,
         }
     }
 
@@ -191,6 +196,20 @@ impl WorkerRuntime {
 
     /// Execute input and return collected events (used by eval/source).
     fn execute_input_inner(&mut self, input: &str) -> Vec<WorkerEvent> {
+        self.exec.recursion_depth += 1;
+        if self.exec.recursion_depth > MAX_RECURSION_DEPTH {
+            self.exec.recursion_depth -= 1;
+            return vec![WorkerEvent::Stderr(
+                b"wasmsh: maximum recursion depth exceeded\n".to_vec(),
+            )];
+        }
+        let result = self.execute_input_inner_impl(input);
+        self.exec.recursion_depth -= 1;
+        result
+    }
+
+    /// Inner implementation of `execute_input_inner` (after recursion check).
+    fn execute_input_inner_impl(&mut self, input: &str) -> Vec<WorkerEvent> {
         let ast = match wasmsh_parse::parse(input) {
             Ok(ast) => ast,
             Err(e) => {
@@ -829,6 +848,9 @@ impl WorkerRuntime {
         }
     }
 
+    /// Maximum number of arguments after glob expansion.
+    const MAX_GLOB_RESULTS: usize = 10_000;
+
     /// Expand glob patterns in argv against the VFS.
     /// For each arg containing `*`, `?`, or `[`, list the appropriate directory
     /// and filter entries by the glob pattern. If no matches, keep the literal arg.
@@ -885,6 +907,7 @@ impl WorkerRuntime {
                 }
             }
         }
+        result.truncate(Self::MAX_GLOB_RESULTS);
         result
     }
 
