@@ -1,4 +1,5 @@
 //! Integration test: discovers and runs all TOML test cases from tests/suite/.
+#![allow(clippy::print_stderr)]
 
 use std::path::PathBuf;
 
@@ -59,7 +60,8 @@ fn run_all_suite_cases() {
     if !failures.is_empty() {
         let mut msg = String::from("Test suite failures:\n");
         for (name, reason) in &failures {
-            msg.push_str(&format!("\n--- FAIL: {name} ---\n{reason}\n"));
+            use std::fmt::Write;
+            let _ = write!(msg, "\n--- FAIL: {name} ---\n{reason}\n");
         }
         panic!("{msg}");
     }
