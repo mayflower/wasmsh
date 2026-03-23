@@ -1,0 +1,22 @@
+[test]
+name = "rw15-temp-cleanup"
+tags = ["real-world", "cleanup"]
+tier = "P2"
+requires = ["find", "for-in", "rm", "echo", "command-substitution", "arithmetic-expansion", "variable-assignment", "parameter-expansion"]
+
+[setup]
+files = { "/tmp/sess_a" = "x\n", "/tmp/sess_b" = "x\n", "/tmp/keep.txt" = "x\n", "/tmp/sess_c" = "x\n" }
+
+[input]
+script = """
+CLEANED=0
+for f in $(find /tmp -name "sess_*" -type f); do
+  rm $f
+  CLEANED=$((CLEANED + 1))
+done
+echo "cleaned: $CLEANED"
+"""
+
+[expect]
+status = 0
+stdout = "cleaned: 3\n"

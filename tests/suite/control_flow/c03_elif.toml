@@ -1,0 +1,12 @@
+[test]
+name = "elif: second condition matches"
+tags = ["if", "P0"]
+tier = "P0"
+requires = ["if", "true", "false", "echo"]
+
+[input]
+script = "if false; then echo a; elif true; then echo b; else echo c; fi"
+
+[expect]
+status = 0
+stdout = "b\n"

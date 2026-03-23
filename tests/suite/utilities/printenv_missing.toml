@@ -1,0 +1,12 @@
+[test]
+name = "printenv-missing-variable"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["printenv"]
+
+[input]
+script = "printenv NONEXISTENT"
+
+[expect]
+status = 1
+stdout = ""

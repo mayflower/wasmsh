@@ -1,0 +1,12 @@
+[test]
+name = "unknown command returns 127"
+tags = ["error", "P0"]
+tier = "P0"
+requires = ["simple-command"]
+
+[input]
+script = "nonexistent_cmd_xyz"
+
+[expect]
+status = 127
+stderr_contains = ["not found"]

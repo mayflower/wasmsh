@@ -1,0 +1,12 @@
+[test]
+name = "seq-range"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["seq"]
+
+[input]
+script = "seq 3 7"
+
+[expect]
+status = 0
+stdout = "3\n4\n5\n6\n7\n"

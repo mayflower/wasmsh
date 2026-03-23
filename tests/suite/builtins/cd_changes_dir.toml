@@ -1,0 +1,12 @@
+[test]
+name = "cd-changes-dir"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["cd", "pwd"]
+
+[input]
+script = "cd /tmp; pwd"
+
+[expect]
+status = 0
+stdout = "/tmp\n"

@@ -1,0 +1,15 @@
+[test]
+name = "glob-question-mark"
+tags = ["expansion", "glob", "P0"]
+tier = "P0"
+requires = ["glob-expansion", "echo", "touch"]
+
+[setup]
+files = { "/ab" = "", "/ac" = "", "/abc" = "" }
+
+[input]
+script = "echo /a?"
+
+[expect]
+status = 0
+stdout_contains = ["/ab", "/ac"]

@@ -1,0 +1,63 @@
+[test]
+name = "rw30-data-schema-validator"
+tags = ["real-world", "data"]
+tier = "P2"
+requires = ["function", "if", "test", "echo", "cut", "head", "tr", "grep", "for-in", "variable-assignment", "parameter-expansion", "command-substitution", "arithmetic-expansion", "pipeline", "redirection", "local"]
+
+[setup]
+files = { "/data/users.csv" = "id,name,email,age\n1,alice,alice@test.com,30\n2,bob,,25\n3,charlie,charlie@test.com,abc\n4,dave,dave@test.com,45\n" }
+
+[input]
+script = """
+ERRORS=0
+
+check_required() {
+  local value="$1"
+  local field="$2"
+  local row="$3"
+  if test -z "$value"; then
+    echo "  ERROR row $row: $field is required but empty"
+    ERRORS=$((ERRORS + 1))
+  fi
+}
+
+check_numeric() {
+  local value="$1"
+  local field="$2"
+  local row="$3"
+  if test -n "$value"; then
+    local cleaned=$(echo "$value" | tr -d '0123456789')
+    if test -n "$cleaned"; then
+      echo "  ERROR row $row: $field='$value' is not numeric"
+      ERRORS=$((ERRORS + 1))
+    fi
+  fi
+}
+
+echo "=== Schema Validation ==="
+echo "Validating: /data/users.csv"
+
+HEADER=$(head -n 1 /data/users.csv)
+NCOLS=$(echo "$HEADER" | tr ',' ' ' | grep -c "")
+echo "  Columns: 4 ($HEADER)"
+
+ROW=1
+for LINE in $(grep -v "id,name" /data/users.csv); do
+  ROW=$((ROW + 1))
+  ID=$(echo "$LINE" | cut -d , -f 1)
+  NAME=$(echo "$LINE" | cut -d , -f 2)
+  EMAIL=$(echo "$LINE" | cut -d , -f 3)
+  AGE=$(echo "$LINE" | cut -d , -f 4)
+  check_required "$ID" "id" "$ROW"
+  check_required "$NAME" "name" "$ROW"
+  check_required "$EMAIL" "email" "$ROW"
+  check_numeric "$AGE" "age" "$ROW"
+done
+
+echo "  Total errors: $ERRORS"
+echo "=== Done ==="
+"""
+
+[expect]
+status = 0
+stdout = "=== Schema Validation ===\nValidating: /data/users.csv\n  Columns: 4 (id,name,email,age)\n  ERROR row 3: email is required but empty\n  ERROR row 4: age='abc' is not numeric\n  Total errors: 2\n=== Done ===\n"

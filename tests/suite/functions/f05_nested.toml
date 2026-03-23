@@ -1,0 +1,12 @@
+[test]
+name = "nested-function-calls"
+tags = ["function", "P0"]
+tier = "P0"
+requires = ["function", "echo"]
+
+[input]
+script = "a() { echo a; }; b() { a; echo b; }; b"
+
+[expect]
+status = 0
+stdout = "a\nb\n"

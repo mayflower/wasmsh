@@ -1,0 +1,12 @@
+[test]
+name = "printf-escape-tab"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["printf"]
+
+[input]
+script = 'printf "a\tb\n"'
+
+[expect]
+status = 0
+stdout = "a\tb\n"

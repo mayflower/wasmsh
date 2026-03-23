@@ -1,0 +1,18 @@
+[test]
+name = "pipe-data-echo-tail"
+tags = ["pipeline", "data-flow", "P0"]
+tier = "P0"
+requires = ["pipeline", "echo", "tail"]
+
+[input]
+script = """
+echo "a
+b
+c
+d
+e" | tail -n 2
+"""
+
+[expect]
+status = 0
+stdout = "d\ne\n"

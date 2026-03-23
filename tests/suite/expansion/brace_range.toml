@@ -1,0 +1,12 @@
+[test]
+name = "brace-range-expansion"
+tags = ["expansion", "brace", "P0"]
+tier = "P0"
+requires = ["brace-expansion", "echo"]
+
+[input]
+script = "echo {1..5}"
+
+[expect]
+status = 0
+stdout = "1 2 3 4 5\n"

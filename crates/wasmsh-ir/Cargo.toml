@@ -1,0 +1,13 @@
+[package]
+name = "wasmsh-ir"
+description = "Linear instruction representation for the wasmsh VM"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+smol_str = { workspace = true }
+
+[lints]
+workspace = true

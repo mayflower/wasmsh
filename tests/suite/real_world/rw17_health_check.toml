@@ -1,0 +1,28 @@
+[test]
+name = "rw17-health-check"
+tags = ["real-world", "deploy"]
+tier = "P2"
+requires = ["for-in", "if", "test", "echo", "cat", "tr", "pipeline", "command-substitution", "variable-assignment", "parameter-expansion", "arithmetic-expansion", "exit"]
+
+[setup]
+files = { "/svc/web/status" = "ok\n", "/svc/api/status" = "ok\n", "/svc/worker/status" = "err\n" }
+
+[input]
+script = """
+FAILED=0
+for svc in web api worker; do
+  STATUS=$(cat /svc/$svc/status | tr -d '\n')
+  if test "$STATUS" = "ok"; then
+    echo "[PASS] $svc"
+  else
+    echo "[FAIL] $svc ($STATUS)"
+    FAILED=$((FAILED + 1))
+  fi
+done
+echo "failed: $FAILED"
+exit $FAILED
+"""
+
+[expect]
+status = 1
+stdout = "[PASS] web\n[PASS] api\n[FAIL] worker (err)\nfailed: 1\n"

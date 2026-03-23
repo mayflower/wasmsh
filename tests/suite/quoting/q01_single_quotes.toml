@@ -1,0 +1,12 @@
+[test]
+name = "single-quotes-prevent-expansion"
+tags = ["quoting", "P0"]
+tier = "P0"
+requires = ["single-quoting", "echo"]
+
+[input]
+script = "echo '$HOME'"
+
+[expect]
+status = 0
+stdout = "$HOME\n"

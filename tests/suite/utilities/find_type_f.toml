@@ -1,0 +1,15 @@
+[test]
+name = "find-type-file"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["find", "mkdir"]
+
+[setup]
+files = { "/d/a.txt" = "x" }
+
+[input]
+script = "mkdir -p /d/sub; find /d -type f"
+
+[expect]
+status = 0
+stdout = "/d/a.txt\n"

@@ -1,0 +1,15 @@
+[test]
+name = "test-file-exists"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["test"]
+
+[setup]
+files = { "/tmp/x.txt" = "data" }
+
+[input]
+script = "test -e /tmp/x.txt; echo $?"
+
+[expect]
+status = 0
+stdout = "0\n"

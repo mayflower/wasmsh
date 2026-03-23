@@ -1,0 +1,12 @@
+[test]
+name = "write-and-verify-file"
+tags = ["vfs", "P0"]
+tier = "P0"
+requires = ["redirection", "echo"]
+
+[input]
+script = "echo content > /file.txt"
+
+[expect]
+status = 0
+files = { "/file.txt" = "content\n" }

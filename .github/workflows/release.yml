@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Validate before release ────────────────────────────────
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Run all tests
+        run: cargo nextest run --workspace --all-features
+        env:
+          RUSTFLAGS: "-D warnings"
+      - name: Run TOML suite
+        run: cargo test -p wasmsh-testkit --test suite_runner
+        env:
+          RUSTFLAGS: "-D warnings"
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  # ── Build wasm32 release artifact ──────────────────────────
+  build-wasm:
+    name: build wasm32
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: rustup target add wasm32-unknown-unknown
+      - name: Build release
+        run: >
+          cargo build
+          --target wasm32-unknown-unknown
+          --profile dist
+          -p wasmsh-browser
+      - name: Package artifact
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          cp target/wasm32-unknown-unknown/dist/libwasmsh_browser.rlib dist/ 2>/dev/null || true
+          cp LICENSE README.md SUPPORTED.md CHANGELOG.md dist/
+          echo "$TAG_NAME" > dist/VERSION
+          tar czf "wasmsh-wasm32-${TAG_NAME}.tar.gz" -C dist .
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasmsh-wasm32
+          path: "wasmsh-wasm32-*.tar.gz"
+
+  # ── Create GitHub Release ──────────────────────────────────
+  release:
+    name: github release
+    needs: [validate, build-wasm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download wasm artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wasmsh-wasm32
+      - name: Extract changelog
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+          NOTES=$(sed -n "/^## \[${VERSION}\]/,/^## \[/p" CHANGELOG.md | head -n -1)
+          if [ -z "$NOTES" ]; then
+            NOTES="Release ${VERSION}"
+          fi
+          echo "$NOTES" > release_notes.md
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: "wasmsh-wasm32-*.tar.gz"
+          draft: false
+          prerelease: false

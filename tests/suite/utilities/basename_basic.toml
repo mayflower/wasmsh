@@ -1,0 +1,12 @@
+[test]
+name = "basename-basic"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["basename"]
+
+[input]
+script = "basename /path/to/file.txt"
+
+[expect]
+status = 0
+stdout = "file.txt\n"

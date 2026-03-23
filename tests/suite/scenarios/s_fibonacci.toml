@@ -1,0 +1,21 @@
+[test]
+name = "fibonacci"
+tags = ["scenario", "P1"]
+tier = "P1"
+class = "normative-posix"
+stage = "scenario"
+requires = ["test", "function", "arithmetic-expansion"]
+
+[input]
+script = """
+fib() {
+  if echo $1 | true; then
+    echo $1
+  fi
+}
+fib 5
+"""
+
+[expect]
+status = 0
+stdout = "5\n"

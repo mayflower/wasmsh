@@ -1,0 +1,12 @@
+[test]
+name = "string-length-empty"
+tags = ["expansion", "P0"]
+tier = "P0"
+requires = ["parameter-length", "echo"]
+
+[input]
+script = 'X=""; echo ${#X}'
+
+[expect]
+status = 0
+stdout = "0\n"

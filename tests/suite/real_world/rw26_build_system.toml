@@ -1,0 +1,69 @@
+[test]
+name = "rw26-makefile-like-build"
+tags = ["real-world", "build"]
+tier = "P2"
+requires = ["function", "if", "test", "echo", "cat", "touch", "mkdir", "for-in", "variable-assignment", "parameter-expansion", "command-substitution", "arithmetic-expansion", "redirection", "local", "basename", "grep"]
+
+[setup]
+files = { "/src/main.c" = "int main() {}\n", "/src/util.c" = "void util() {}\n", "/src/lib.c" = "void lib() {}\n" }
+
+[input]
+script = """
+BUILD_DIR=/build
+SRC_DIR=/src
+BUILT=0
+SKIPPED=0
+
+# Track built objects via a file
+mkdir -p /tmp
+touch /tmp/built.log
+
+compile() {
+  local src="$1"
+  local bname=$(basename "$src" .c)
+  local obj="$BUILD_DIR/${bname}.o"
+
+  local already=$(grep -c "^${obj}$" /tmp/built.log)
+  if test "$already" != "0"; then
+    echo "SKIP: $obj (up to date)"
+    SKIPPED=$((SKIPPED + 1))
+  else
+    echo "CC: $src -> $obj"
+    mkdir -p "$BUILD_DIR"
+    echo "compiled:$(basename $src)" > "$obj"
+    echo "$obj" >> /tmp/built.log
+    BUILT=$((BUILT + 1))
+  fi
+}
+
+link_binary() {
+  local output="$1"
+  shift
+  echo "LD: $@ -> $output"
+  echo -n "" > "$output"
+  for obj in "$@"; do
+    cat "$obj" >> "$output"
+  done
+  echo "LINKED: $output"
+}
+
+echo "=== Build Phase ==="
+for src in /src/main.c /src/util.c /src/lib.c; do
+  compile "$src"
+done
+
+# Try rebuilding (should skip)
+compile /src/main.c
+
+echo "=== Link Phase ==="
+link_binary "$BUILD_DIR/app" "$BUILD_DIR/main.o" "$BUILD_DIR/util.o" "$BUILD_DIR/lib.o"
+
+echo "=== Summary ==="
+echo "built=$BUILT skipped=$SKIPPED"
+echo "=== Binary ==="
+cat "$BUILD_DIR/app"
+"""
+
+[expect]
+status = 0
+stdout = "=== Build Phase ===\nCC: /src/main.c -> /build/main.o\nCC: /src/util.c -> /build/util.o\nCC: /src/lib.c -> /build/lib.o\nSKIP: /build/main.o (up to date)\n=== Link Phase ===\nLD: /build/main.o /build/util.o /build/lib.o -> /build/app\nLINKED: /build/app\n=== Summary ===\nbuilt=3 skipped=1\n=== Binary ===\ncompiled:main.c\ncompiled:util.c\ncompiled:lib.c\n"

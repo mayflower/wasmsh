@@ -1,0 +1,68 @@
+[test]
+name = "rw35-retry-exponential-backoff"
+tags = ["real-world", "infra"]
+tier = "P2"
+requires = ["function", "while", "if", "test", "echo", "variable-assignment", "parameter-expansion", "arithmetic-expansion", "local"]
+
+[input]
+script = """
+SERVICE_CALLS=0
+SERVICE_FAIL_UNTIL=3
+SERVICE_OK=no
+
+call_service() {
+  SERVICE_CALLS=$((SERVICE_CALLS + 1))
+  if test $SERVICE_CALLS -gt $SERVICE_FAIL_UNTIL; then
+    echo "  service: OK (call $SERVICE_CALLS)"
+    SERVICE_OK=yes
+  else
+    echo "  service: FAIL (call $SERVICE_CALLS)"
+    SERVICE_OK=no
+  fi
+}
+
+retry_with_backoff() {
+  local max="$1"
+  local delay="$2"
+  local attempt=0
+  local done=no
+
+  while test $attempt -lt $max; do
+    if test "$done" = "yes"; then
+      break
+    fi
+    attempt=$((attempt + 1))
+    echo "Attempt $attempt/$max (delay=${delay}s):"
+
+    call_service
+
+    if test "$SERVICE_OK" = "yes"; then
+      echo "SUCCESS after $attempt attempts"
+      done=yes
+    elif test $attempt -lt $max; then
+      echo "  backoff: ${delay}s"
+      delay=$((delay * 2))
+    fi
+  done
+
+  if test "$done" != "yes"; then
+    echo "EXHAUSTED after $max attempts"
+  fi
+}
+
+echo "=== Scenario 1: Recovers on call 4 ==="
+SERVICE_CALLS=0
+SERVICE_FAIL_UNTIL=3
+retry_with_backoff 5 1
+
+echo ""
+
+echo "=== Scenario 2: Never recovers ==="
+SERVICE_CALLS=0
+SERVICE_FAIL_UNTIL=999
+retry_with_backoff 3 2
+"""
+
+[expect]
+status = 0
+stdout = "=== Scenario 1: Recovers on call 4 ===\nAttempt 1/5 (delay=1s):\n  service: FAIL (call 1)\n  backoff: 1s\nAttempt 2/5 (delay=2s):\n  service: FAIL (call 2)\n  backoff: 2s\nAttempt 3/5 (delay=4s):\n  service: FAIL (call 3)\n  backoff: 4s\nAttempt 4/5 (delay=8s):\n  service: OK (call 4)\nSUCCESS after 4 attempts\n\n=== Scenario 2: Never recovers ===\nAttempt 1/3 (delay=2s):\n  service: FAIL (call 1)\n  backoff: 2s\nAttempt 2/3 (delay=4s):\n  service: FAIL (call 2)\n  backoff: 4s\nAttempt 3/3 (delay=8s):\n  service: FAIL (call 3)\nEXHAUSTED after 3 attempts\n"

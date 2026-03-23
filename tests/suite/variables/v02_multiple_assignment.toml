@@ -1,0 +1,12 @@
+[test]
+name = "multiple-variable-assignment"
+tags = ["variable-expansion", "P0"]
+tier = "P0"
+requires = ["variable-assignment", "echo"]
+
+[input]
+script = "A=1; B=2; echo $A $B"
+
+[expect]
+status = 0
+stdout = "1 2\n"

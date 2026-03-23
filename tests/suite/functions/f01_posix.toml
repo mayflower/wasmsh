@@ -1,0 +1,12 @@
+[test]
+name = "posix-function-definition"
+tags = ["function", "P0"]
+tier = "P0"
+requires = ["function", "echo"]
+
+[input]
+script = "greet() { echo hello; }; greet"
+
+[expect]
+status = 0
+stdout = "hello\n"

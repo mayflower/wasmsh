@@ -1,0 +1,12 @@
+[test]
+name = "uname-machine"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["uname"]
+
+[input]
+script = "uname -m"
+
+[expect]
+status = 0
+stdout = "wasm32\n"

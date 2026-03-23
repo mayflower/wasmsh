@@ -1,0 +1,21 @@
+[test]
+name = "config-parser-heredoc"
+tags = ["scenario", "P1"]
+tier = "P1"
+class = "normative-posix"
+stage = "scenario"
+requires = ["read", "echo", "here-doc", "here-doc-expansion"]
+
+[input]
+script = """
+read NAME AGE ROLE <<EOF
+Alice 30 eng
+EOF
+echo $NAME
+echo $AGE
+echo $ROLE
+"""
+
+[expect]
+status = 0
+stdout = "Alice\n30\neng\n"

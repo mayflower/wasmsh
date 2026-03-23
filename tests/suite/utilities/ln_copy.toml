@@ -1,0 +1,15 @@
+[test]
+name = "ln-hard-link"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["ln", "cat"]
+
+[setup]
+files = { "/src.txt" = "data" }
+
+[input]
+script = "ln /src.txt /dst.txt; cat /dst.txt"
+
+[expect]
+status = 0
+stdout = "data"

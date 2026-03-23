@@ -1,0 +1,12 @@
+[test]
+name = "parameter-substitution-global-replace"
+tags = ["expansion", "P0"]
+tier = "P0"
+requires = ["parameter-substitution", "echo"]
+
+[input]
+script = "X=aabaa; echo ${X//a/x}"
+
+[expect]
+status = 0
+stdout = "xxbxx\n"

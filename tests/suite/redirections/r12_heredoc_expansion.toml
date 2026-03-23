@@ -1,0 +1,12 @@
+[test]
+name = "heredoc-variable-expansion"
+tags = ["redirection", "P0"]
+tier = "P0"
+requires = ["here-doc", "cat", "parameter-expansion", "here-doc-expansion"]
+
+[input]
+script = "X=hello; cat <<EOF\n$X world\nEOF\n"
+
+[expect]
+status = 0
+stdout = "hello world\n"

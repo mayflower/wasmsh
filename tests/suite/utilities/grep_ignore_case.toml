@@ -1,0 +1,15 @@
+[test]
+name = "grep-ignore-case"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["grep"]
+
+[setup]
+files = { "/data.txt" = "Hello\nworld\n" }
+
+[input]
+script = "grep -i hello /data.txt"
+
+[expect]
+status = 0
+stdout = "Hello\n"

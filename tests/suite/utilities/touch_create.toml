@@ -1,0 +1,12 @@
+[test]
+name = "touch-create-file"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["touch", "ls"]
+
+[input]
+script = "touch /new.txt; ls /"
+
+[expect]
+status = 0
+stdout_contains = ["new.txt"]

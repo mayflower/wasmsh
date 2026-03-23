@@ -1,0 +1,12 @@
+[test]
+name = "type-builtin"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["type", "echo"]
+
+[input]
+script = "type echo"
+
+[expect]
+status = 0
+stdout_contains = ["builtin"]

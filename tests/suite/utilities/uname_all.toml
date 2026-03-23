@@ -1,0 +1,12 @@
+[test]
+name = "uname-all-flags"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["uname"]
+
+[input]
+script = "uname -a"
+
+[expect]
+status = 0
+stdout_contains = ["wasmsh"]

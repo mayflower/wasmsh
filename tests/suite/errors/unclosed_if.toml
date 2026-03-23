@@ -1,0 +1,12 @@
+[test]
+name = "unclosed if statement is a parse error"
+tags = ["error", "P0"]
+tier = "P0"
+requires = ["if", "true", "echo"]
+
+[input]
+script = "if true; then echo x"
+
+[expect]
+status = 2
+stderr_contains = ["error"]

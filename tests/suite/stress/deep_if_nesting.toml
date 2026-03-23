@@ -1,0 +1,26 @@
+[test]
+name = "deep-if-nesting"
+tags = ["stress", "P1"]
+tier = "P1"
+class = "normative-posix"
+stage = "stress"
+requires = ["if", "true", "echo"]
+
+[input]
+script = """
+if true; then
+  if true; then
+    if true; then
+      if true; then
+        if true; then
+          echo deep
+        fi
+      fi
+    fi
+  fi
+fi
+"""
+
+[expect]
+status = 0
+stdout = "deep\n"

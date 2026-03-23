@@ -1,0 +1,12 @@
+[test]
+name = "AND chain: true && echo yes"
+tags = ["and-or-list", "P0"]
+tier = "P0"
+requires = ["and-or-list", "true", "echo"]
+
+[input]
+script = "true && echo yes"
+
+[expect]
+status = 0
+stdout = "yes\n"

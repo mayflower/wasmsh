@@ -1,0 +1,12 @@
+[test]
+name = "shift-basic"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["shift", "function", "echo"]
+
+[input]
+script = "f() { shift; echo $1; }; f a b c"
+
+[expect]
+status = 0
+stdout = "b\n"

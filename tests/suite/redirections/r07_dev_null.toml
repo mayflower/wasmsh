@@ -1,0 +1,12 @@
+[test]
+name = "redirect-to-dev-null"
+tags = ["redirection", "P0"]
+tier = "P0"
+requires = ["redirection", "echo"]
+
+[input]
+script = "echo hidden > /dev/null; echo visible"
+
+[expect]
+status = 0
+stdout = "visible\n"

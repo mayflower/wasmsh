@@ -1,0 +1,18 @@
+[test]
+name = "heredoc-template-with-variable-expansion"
+tags = ["scenario", "P0"]
+tier = "P0"
+requires = ["here-doc", "here-doc-expansion", "cat", "variable-assignment", "parameter-expansion"]
+
+[input]
+script = """
+NAME=World
+cat <<EOF
+Hello $NAME
+Welcome to wasmsh
+EOF
+"""
+
+[expect]
+status = 0
+stdout = "Hello World\nWelcome to wasmsh\n"

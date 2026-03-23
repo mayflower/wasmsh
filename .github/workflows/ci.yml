@@ -1,0 +1,206 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # ── Format ─────────────────────────────────────────────────
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --all --check
+
+  # ── Clippy (native) ────────────────────────────────────────
+  clippy:
+    name: clippy (native)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  # ── Clippy (wasm32) ────────────────────────────────────────
+  clippy-wasm:
+    name: clippy (wasm32)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: wasm32
+      - run: rustup target add wasm32-unknown-unknown
+      - name: Clippy wasm32 crates
+        run: >
+          cargo clippy
+          --target wasm32-unknown-unknown
+          -p wasmsh-ast
+          -p wasmsh-lex
+          -p wasmsh-parse
+          -p wasmsh-expand
+          -p wasmsh-hir
+          -p wasmsh-ir
+          -p wasmsh-state
+          -p wasmsh-fs
+          -p wasmsh-builtins
+          -p wasmsh-utils
+          -p wasmsh-vm
+          -p wasmsh-protocol
+          -p wasmsh-browser
+          -- -D warnings
+
+  # ── Tests (native, matrix) ─────────────────────────────────
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Unit and integration tests
+        run: cargo nextest run --workspace --all-features
+      - name: Doc tests
+        run: cargo test --doc --workspace --all-features
+      - name: TOML suite tests
+        run: cargo test -p wasmsh-testkit --test suite_runner
+
+  # ── Wasm build ─────────────────────────────────────────────
+  wasm-build:
+    name: wasm32 build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: wasm32-build
+      - run: rustup target add wasm32-unknown-unknown
+      - name: Build core crates for wasm32
+        run: >
+          cargo build
+          --target wasm32-unknown-unknown
+          --release
+          -p wasmsh-browser
+      - name: Check wasm binary size
+        run: |
+          WASM_SIZE=$(stat -c%s target/wasm32-unknown-unknown/release/libwasmsh_browser.rlib 2>/dev/null || echo "0")
+          echo "wasmsh-browser rlib size: ${WASM_SIZE} bytes"
+      - name: Upload wasm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasmsh-wasm32
+          path: target/wasm32-unknown-unknown/release/
+          retention-days: 7
+
+  # ── MSRV ───────────────────────────────────────────────────
+  msrv:
+    name: MSRV (1.75)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: rustup install 1.75 --profile minimal
+      - run: cargo +1.75 check --workspace
+
+  # ── License and advisory audit ─────────────────────────────
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # ── Code coverage ──────────────────────────────────────────
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+      - name: Generate coverage
+        run: >
+          cargo llvm-cov nextest
+          --workspace
+          --all-features
+          --lcov
+          --output-path lcov.info
+      - uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: lcov.info
+          retention-days: 14
+
+  # ── Documentation build ────────────────────────────────────
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build rustdoc
+        run: cargo doc --workspace --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  # ── All checks gate ────────────────────────────────────────
+  ci-pass:
+    name: CI passed
+    if: always()
+    needs: [fmt, clippy, clippy-wasm, test, wasm-build, msrv, deny, docs]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all jobs
+        run: |
+          results="${{ needs.fmt.result }} ${{ needs.clippy.result }} ${{ needs.clippy-wasm.result }} ${{ needs.test.result }} ${{ needs.wasm-build.result }} ${{ needs.msrv.result }} ${{ needs.deny.result }} ${{ needs.docs.result }}"
+          for r in $results; do
+            if [ "$r" != "success" ]; then
+              echo "Job failed: $r"
+              exit 1
+            fi
+          done
+          echo "All CI checks passed"

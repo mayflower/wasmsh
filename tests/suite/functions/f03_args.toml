@@ -1,0 +1,12 @@
+[test]
+name = "function-arguments"
+tags = ["function", "P0"]
+tier = "P0"
+requires = ["function", "echo", "parameter-expansion"]
+
+[input]
+script = "greet() { echo hello $1; }; greet world"
+
+[expect]
+status = 0
+stdout = "hello world\n"

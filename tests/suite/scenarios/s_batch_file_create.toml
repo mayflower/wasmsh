@@ -1,0 +1,21 @@
+[test]
+name = "batch-file-create"
+tags = ["scenario", "P1"]
+tier = "P1"
+class = "normative-posix"
+stage = "scenario"
+requires = ["for-in", "echo", "redirection", "cat", "parameter-expansion"]
+
+[input]
+script = """
+for name in alpha beta gamma; do
+  echo "content of $name" > /$name.txt
+done
+cat /alpha.txt
+cat /beta.txt
+cat /gamma.txt
+"""
+
+[expect]
+status = 0
+stdout = "content of alpha\ncontent of beta\ncontent of gamma\n"

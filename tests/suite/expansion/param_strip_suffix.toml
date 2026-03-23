@@ -1,0 +1,12 @@
+[test]
+name = "param-strip-shortest-suffix"
+tags = ["expansion", "P1"]
+tier = "P1"
+requires = ["parameter-expansion", "parameter-strip"]
+
+[input]
+script = 'X=hello.tar.gz; echo ${X%.*}'
+
+[expect]
+status = 0
+stdout = "hello.tar\n"

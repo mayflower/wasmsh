@@ -1,0 +1,36 @@
+[test]
+name = "rw11-env-validator"
+tags = ["real-world", "cicd"]
+tier = "P2"
+requires = ["echo", "if", "test", "variable-assignment", "parameter-expansion", "arithmetic-expansion"]
+
+[input]
+script = """
+DB_HOST=localhost
+DB_PORT=5432
+API_KEY=
+SECRET=
+
+MISSING=0
+if test -z "$DB_HOST"; then
+  echo "MISSING: DB_HOST"
+  MISSING=$((MISSING + 1))
+fi
+if test -z "$DB_PORT"; then
+  echo "MISSING: DB_PORT"
+  MISSING=$((MISSING + 1))
+fi
+if test -z "$API_KEY"; then
+  echo "MISSING: API_KEY"
+  MISSING=$((MISSING + 1))
+fi
+if test -z "$SECRET"; then
+  echo "MISSING: SECRET"
+  MISSING=$((MISSING + 1))
+fi
+echo "$MISSING missing"
+"""
+
+[expect]
+status = 0
+stdout = "MISSING: API_KEY\nMISSING: SECRET\n2 missing\n"

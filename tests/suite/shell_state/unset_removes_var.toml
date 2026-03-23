@@ -1,0 +1,12 @@
+[test]
+name = "unset-removes-variable"
+tags = ["shell-state", "P0"]
+tier = "P0"
+requires = ["unset", "parameter-default", "echo"]
+
+[input]
+script = 'X=hello; unset X; echo ${X:-gone}'
+
+[expect]
+status = 0
+stdout = "gone\n"

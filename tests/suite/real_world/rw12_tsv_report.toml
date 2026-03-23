@@ -1,0 +1,19 @@
+[test]
+name = "rw12-status-report"
+tags = ["real-world", "data"]
+tier = "P2"
+requires = ["for-in", "echo", "cut", "pipeline", "command-substitution", "variable-assignment", "parameter-expansion"]
+
+[input]
+script = """
+ITEMS="web:ok api:err db:ok"
+for item in $ITEMS; do
+  NAME=$(echo $item | cut -d : -f 1)
+  STATUS=$(echo $item | cut -d : -f 2)
+  echo "$NAME $STATUS"
+done
+"""
+
+[expect]
+status = 0
+stdout = "web ok\napi err\ndb ok\n"

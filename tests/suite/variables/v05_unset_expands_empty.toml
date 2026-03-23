@@ -1,0 +1,12 @@
+[test]
+name = "unset-variable-expands-empty"
+tags = ["variable-expansion", "P0"]
+tier = "P0"
+requires = ["echo", "double-quoting", "parameter-expansion"]
+
+[input]
+script = 'echo "[$UNDEFINED]"'
+
+[expect]
+status = 0
+stdout = "[]\n"

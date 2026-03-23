@@ -1,0 +1,12 @@
+[test]
+name = "readonly-prevents-unset"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["readonly", "unset"]
+
+[input]
+script = "readonly X=val; unset X"
+
+[expect]
+status = 1
+stderr_contains = ["readonly"]

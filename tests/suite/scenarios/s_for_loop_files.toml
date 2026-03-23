@@ -1,0 +1,15 @@
+[test]
+name = "for-loop-over-files"
+tags = ["scenario", "P0"]
+tier = "P0"
+requires = ["for-in", "cat", "parameter-expansion"]
+
+[setup]
+files = { "/data/a.txt" = "alpha\n", "/data/b.txt" = "beta\n", "/data/c.txt" = "gamma\n" }
+
+[input]
+script = "for f in /data/a.txt /data/b.txt /data/c.txt; do cat $f; done"
+
+[expect]
+status = 0
+stdout = "alpha\nbeta\ngamma\n"

@@ -1,0 +1,15 @@
+[test]
+name = "readlink-path"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["readlink"]
+
+[setup]
+files = { "/some/path" = "data" }
+
+[input]
+script = "readlink /some/path"
+
+[expect]
+status = 0
+stdout = "/some/path\n"

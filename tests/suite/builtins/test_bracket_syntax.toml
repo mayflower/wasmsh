@@ -1,0 +1,12 @@
+[test]
+name = "test-bracket-syntax"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["test"]
+
+[input]
+script = '[ "hello" = "hello" ]; echo $?'
+
+[expect]
+status = 0
+stdout = "0\n"

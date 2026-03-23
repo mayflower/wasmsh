@@ -1,0 +1,15 @@
+[test]
+name = "stat-regular-file"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["stat"]
+
+[setup]
+files = { "/f.txt" = "hello" }
+
+[input]
+script = "stat /f.txt"
+
+[expect]
+status = 0
+stdout_contains = ["Size: 5", "regular file"]

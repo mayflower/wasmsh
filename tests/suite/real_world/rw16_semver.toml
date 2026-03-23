@@ -1,0 +1,26 @@
+[test]
+name = "rw16-semver-bumper"
+tags = ["real-world", "cicd"]
+tier = "P2"
+requires = ["echo", "cut", "case", "arithmetic-expansion", "command-substitution", "pipeline", "variable-assignment", "parameter-expansion"]
+
+[input]
+script = """
+VERSION="2.14.7"
+MAJOR=$(echo $VERSION | cut -d . -f 1)
+MINOR=$(echo $VERSION | cut -d . -f 2)
+PATCH=$(echo $VERSION | cut -d . -f 3)
+
+BUMP=minor
+case $BUMP in
+  major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0;;
+  minor) MINOR=$((MINOR + 1)); PATCH=0;;
+  patch) PATCH=$((PATCH + 1));;
+esac
+
+echo "$MAJOR.$MINOR.$PATCH"
+"""
+
+[expect]
+status = 0
+stdout = "2.15.0\n"

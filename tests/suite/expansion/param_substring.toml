@@ -1,0 +1,12 @@
+[test]
+name = "parameter-substring-extraction"
+tags = ["expansion", "P0"]
+tier = "P0"
+requires = ["parameter-substring", "echo"]
+
+[input]
+script = "X=hello; echo ${X:1:3}"
+
+[expect]
+status = 0
+stdout = "ell\n"

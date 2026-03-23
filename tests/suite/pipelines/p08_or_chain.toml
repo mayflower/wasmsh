@@ -1,0 +1,12 @@
+[test]
+name = "OR chain: false || echo fallback"
+tags = ["and-or-list", "P0"]
+tier = "P0"
+requires = ["and-or-list", "false", "echo"]
+
+[input]
+script = "false || echo fallback"
+
+[expect]
+status = 0
+stdout = "fallback\n"

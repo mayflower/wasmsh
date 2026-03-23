@@ -1,0 +1,16 @@
+doc-valid-idents = [
+    "WebAssembly",
+    "JavaScript",
+    "GitHub",
+    "POSIX",
+    "BusyBox",
+    "wasmsh",
+    "OPFS",
+    "VFS",
+    "MemoryFs",
+    "OpfsFs",
+    "OverlayFs",
+    "..",
+]
+check-private-items = true
+cognitive-complexity-threshold = 30

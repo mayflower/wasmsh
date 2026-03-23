@@ -1,0 +1,12 @@
+[test]
+name = "continue-in-loop"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["continue", "for-in", "if", "test", "echo", "parameter-expansion"]
+
+[input]
+script = "for i in a b c d; do if test $i = b; then continue; fi; echo $i; done"
+
+[expect]
+status = 0
+stdout = "a\nc\nd\n"

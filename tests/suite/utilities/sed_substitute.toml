@@ -1,0 +1,12 @@
+[test]
+name = "sed-substitute"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["sed"]
+
+[input]
+script = "echo hello | sed 's/hello/world/'"
+
+[expect]
+status = 0
+stdout = "world\n"

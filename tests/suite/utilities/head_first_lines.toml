@@ -1,0 +1,15 @@
+[test]
+name = "head-first-lines"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["head"]
+
+[setup]
+files = { "/lines.txt" = "a\nb\nc\nd\ne\n" }
+
+[input]
+script = "head -n 3 /lines.txt"
+
+[expect]
+status = 0
+stdout = "a\nb\nc\n"

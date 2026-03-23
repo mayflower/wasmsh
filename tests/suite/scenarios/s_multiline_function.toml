@@ -1,0 +1,21 @@
+[test]
+name = "multiline-function"
+tags = ["scenario", "P1"]
+tier = "P1"
+class = "normative-posix"
+stage = "scenario"
+requires = ["function", "echo", "parameter-expansion"]
+
+[input]
+script = """
+process() {
+  echo "processing $1"
+  echo "done with $1"
+}
+process alpha
+process beta
+"""
+
+[expect]
+status = 0
+stdout = "processing alpha\ndone with alpha\nprocessing beta\ndone with beta\n"

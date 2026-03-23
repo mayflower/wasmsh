@@ -1,0 +1,12 @@
+[test]
+name = "heredoc-strip-tabs"
+tags = ["redirection", "P0"]
+tier = "P0"
+requires = ["here-doc", "cat"]
+
+[input]
+script = "cat <<-EOF\n\thello\n\tworld\n\tEOF\n"
+
+[expect]
+status = 0
+stdout = "hello\nworld\n"

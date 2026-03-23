@@ -1,0 +1,25 @@
+[test]
+name = "rw18-flag-parser"
+tags = ["real-world", "cli"]
+tier = "P2"
+requires = ["for-in", "case", "echo", "variable-assignment", "parameter-expansion"]
+
+[input]
+script = """
+VERBOSE=0
+DRY_RUN=0
+NAME=default
+ARGS="-v -n myapp"
+for arg in $ARGS; do
+  case $arg in
+    -v) VERBOSE=1;;
+    -n) DRY_RUN=1;;
+    *) NAME=$arg;;
+  esac
+done
+echo "verbose=$VERBOSE dry_run=$DRY_RUN name=$NAME"
+"""
+
+[expect]
+status = 0
+stdout = "verbose=1 dry_run=1 name=myapp\n"

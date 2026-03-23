@@ -1,0 +1,12 @@
+[test]
+name = "dirname-no-slash"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["dirname"]
+
+[input]
+script = "dirname filename"
+
+[expect]
+status = 0
+stdout = ".\n"

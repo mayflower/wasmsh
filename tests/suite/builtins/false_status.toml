@@ -1,0 +1,12 @@
+[test]
+name = "false-status"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["false", "echo"]
+
+[input]
+script = "false; echo $?"
+
+[expect]
+status = 0
+stdout = "1\n"

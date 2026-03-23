@@ -1,0 +1,12 @@
+[test]
+name = "cat on missing file returns error"
+tags = ["error", "P0"]
+tier = "P0"
+requires = ["cat"]
+
+[input]
+script = "cat /this/does/not/exist"
+
+[expect]
+status = 1
+stderr_contains = ["not found"]

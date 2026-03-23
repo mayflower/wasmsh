@@ -1,0 +1,38 @@
+[test]
+name = "rw31-changelog-generator"
+tags = ["real-world", "cicd"]
+tier = "P2"
+requires = ["for-in", "echo", "grep", "sed", "variable-assignment", "parameter-expansion", "command-substitution", "arithmetic-expansion", "pipeline", "redirection"]
+
+[setup]
+files = { "/repo/commits.log" = "feat: add user authentication\nfix: resolve memory leak in cache\nfeat: implement search API\ndocs: update README\nfix: handle null pointer in parser\nchore: update dependencies\nfeat: add rate limiting\nfix: correct timezone handling\n" }
+
+[input]
+script = """
+COMMITS=/repo/commits.log
+
+echo "# Changelog v2.1.0"
+echo ""
+
+echo "## Features"
+grep "feat:" "$COMMITS" | sed 's/feat:/-/'
+
+echo ""
+
+echo "## Bug Fixes"
+grep "fix:" "$COMMITS" | sed 's/fix:/-/'
+
+echo ""
+
+echo "## Statistics"
+for type in feat fix docs chore; do
+  COUNT=$(grep -c "${type}:" "$COMMITS")
+  echo "$type: $COUNT"
+done
+TOTAL=$(grep -c "" $COMMITS)
+echo "total: $TOTAL"
+"""
+
+[expect]
+status = 0
+stdout = "# Changelog v2.1.0\n\n## Features\n- add user authentication\n- implement search API\n- add rate limiting\n\n## Bug Fixes\n- resolve memory leak in cache\n- handle null pointer in parser\n- correct timezone handling\n\n## Statistics\nfeat: 3\nfix: 3\ndocs: 1\nchore: 1\ntotal: 8\n"

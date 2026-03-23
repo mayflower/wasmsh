@@ -1,0 +1,12 @@
+[test]
+name = "echo-no-args"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["echo"]
+
+[input]
+script = "echo"
+
+[expect]
+status = 0
+stdout = "\n"

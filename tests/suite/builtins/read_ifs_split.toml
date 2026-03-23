@@ -1,0 +1,12 @@
+[test]
+name = "read-ifs-split"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["read", "here-string", "echo"]
+
+[input]
+script = 'read A B <<< "hello world"; echo $A; echo $B'
+
+[expect]
+status = 0
+stdout = "hello\nworld\n"

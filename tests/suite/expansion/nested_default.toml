@@ -1,0 +1,12 @@
+[test]
+name = "nested-default-value"
+tags = ["expansion", "P0"]
+tier = "P0"
+requires = ["parameter-default", "echo", "nested-expansion"]
+
+[input]
+script = "echo ${X:-${Y:-deep}}"
+
+[expect]
+status = 0
+stdout = "deep\n"

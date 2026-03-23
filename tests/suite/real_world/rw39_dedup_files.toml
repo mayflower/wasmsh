@@ -1,0 +1,54 @@
+[test]
+name = "rw39-file-deduplication"
+tags = ["real-world", "sysadmin"]
+tier = "P2"
+requires = ["for-in", "if", "test", "echo", "cat", "grep", "find", "variable-assignment", "parameter-expansion", "command-substitution", "arithmetic-expansion", "pipeline", "redirection", "tr", "basename"]
+
+[setup]
+files = { "/store/a.txt" = "hello world\n", "/store/b.txt" = "unique content\n", "/store/c.txt" = "hello world\n", "/store/d.txt" = "another file\n", "/store/e.txt" = "hello world\n", "/store/f.txt" = "another file\n" }
+
+[input]
+script = """
+STORE=/store
+TOTAL=0
+DUPS=0
+
+# Build content registry: for each file, check if content was seen before
+echo "=== Scanning ==="
+SEEN_CONTENT=""
+SEEN_FILES=""
+
+for f in $(find "$STORE" -type f | sort); do
+  NAME=$(basename "$f")
+  TOTAL=$((TOTAL + 1))
+  # Create a content fingerprint (replace spaces and newlines)
+  CONTENT=$(cat "$f" | tr ' ' '_' | tr '\n' '#')
+
+  # Check if this content was already seen
+  FOUND=no
+  if test -n "$SEEN_CONTENT"; then
+    for prev in $SEEN_CONTENT; do
+      if test "$prev" = "$CONTENT"; then
+        FOUND=yes
+      fi
+    done
+  fi
+
+  if test "$FOUND" = "yes"; then
+    echo "  DUP: $NAME"
+    DUPS=$((DUPS + 1))
+  else
+    echo "  NEW: $NAME"
+    SEEN_CONTENT="$SEEN_CONTENT $CONTENT"
+  fi
+done
+
+UNIQUE=$((TOTAL - DUPS))
+echo ""
+echo "=== Summary ==="
+echo "total=$TOTAL unique=$UNIQUE duplicates=$DUPS"
+"""
+
+[expect]
+status = 0
+stdout_contains = ["DUP:", "total=6 unique=3 duplicates=3"]

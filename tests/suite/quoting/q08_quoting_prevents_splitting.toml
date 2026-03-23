@@ -1,0 +1,12 @@
+[test]
+name = "double-quoting-prevents-field-splitting"
+tags = ["quoting", "P0"]
+tier = "P0"
+requires = ["function", "double-quoting", "parameter-expansion", "echo"]
+
+[input]
+script = "X=\"a b c\"; f() { echo $#; }; f \"$X\""
+
+[expect]
+status = 0
+stdout = "1\n"

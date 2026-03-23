@@ -1,0 +1,15 @@
+[test]
+name = "cp-file"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["cp", "cat"]
+
+[setup]
+files = { "/a.txt" = "data" }
+
+[input]
+script = "cp /a.txt /b.txt; cat /a.txt; cat /b.txt"
+
+[expect]
+status = 0
+stdout = "datadata"

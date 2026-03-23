@@ -1,0 +1,16 @@
+[test]
+name = "tee-append-file"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["tee", "echo", "pipeline"]
+
+[setup]
+files = { "/log.txt" = "line1\n" }
+
+[input]
+script = "echo line2 | tee -a /log.txt"
+
+[expect]
+status = 0
+stdout = "line2\n"
+files = { "/log.txt" = "line1\nline2\n" }

@@ -1,0 +1,15 @@
+[test]
+name = "cat-multiple-files"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["cat"]
+
+[setup]
+files = { "/a.txt" = "aaa\n", "/b.txt" = "bbb\n" }
+
+[input]
+script = "cat /a.txt /b.txt"
+
+[expect]
+status = 0
+stdout = "aaa\nbbb\n"

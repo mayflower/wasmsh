@@ -1,0 +1,15 @@
+[test]
+name = "realpath-relative"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["realpath", "cd"]
+
+[setup]
+files = { "/tmp/file" = "data" }
+
+[input]
+script = "cd /tmp; realpath ../tmp/file"
+
+[expect]
+status = 0
+stdout = "/tmp/file\n"

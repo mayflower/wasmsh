@@ -1,0 +1,12 @@
+[test]
+name = "semicolons without surrounding spaces"
+tags = ["lexer", "P0"]
+tier = "P0"
+requires = ["echo", "semicolon-list"]
+
+[input]
+script = "echo a;echo b"
+
+[expect]
+status = 0
+stdout = "a\nb\n"

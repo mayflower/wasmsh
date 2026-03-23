@@ -1,0 +1,12 @@
+[test]
+name = "tr-delete-chars"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["tr", "echo", "pipeline"]
+
+[input]
+script = "echo hello | tr -d l"
+
+[expect]
+status = 0
+stdout = "heo\n"

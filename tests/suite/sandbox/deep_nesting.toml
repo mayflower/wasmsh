@@ -1,0 +1,12 @@
+[test]
+name = "deeply nested if statements"
+tags = ["sandbox", "P0"]
+tier = "P0"
+requires = ["if", "true", "echo"]
+
+[input]
+script = "if true; then if true; then if true; then echo deep; fi; fi; fi"
+
+[expect]
+status = 0
+stdout = "deep\n"

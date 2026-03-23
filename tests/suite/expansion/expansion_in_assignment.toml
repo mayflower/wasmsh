@@ -1,0 +1,12 @@
+[test]
+name = "expansion-in-assignment"
+tags = ["expansion", "P0"]
+tier = "P0"
+requires = ["parameter-expansion", "variable-assignment", "echo"]
+
+[input]
+script = "X=hello; Y=${X}world; echo $Y"
+
+[expect]
+status = 0
+stdout = "helloworld\n"

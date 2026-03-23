@@ -1,0 +1,12 @@
+[test]
+name = "here-string-with-variable"
+tags = ["redirection", "here-string", "P0"]
+tier = "P0"
+requires = ["here-string", "cat", "variable-assignment"]
+
+[input]
+script = "X=world; cat <<< $X"
+
+[expect]
+status = 0
+stdout = "world\n"

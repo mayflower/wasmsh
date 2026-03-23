@@ -1,0 +1,12 @@
+[test]
+name = "arithmetic-multiplication"
+tags = ["expansion", "P0"]
+tier = "P0"
+requires = ["arithmetic-expansion", "echo"]
+
+[input]
+script = "echo $((3 * 7))"
+
+[expect]
+status = 0
+stdout = "21\n"

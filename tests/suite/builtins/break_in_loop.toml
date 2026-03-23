@@ -1,0 +1,12 @@
+[test]
+name = "break-in-loop"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["break", "for-in", "if", "test", "echo", "parameter-expansion"]
+
+[input]
+script = "for i in a b c d; do if test $i = c; then break; fi; echo $i; done"
+
+[expect]
+status = 0
+stdout = "a\nb\n"

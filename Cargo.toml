@@ -1,0 +1,107 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/wasmsh-ast",
+    "crates/wasmsh-lex",
+    "crates/wasmsh-parse",
+    "crates/wasmsh-expand",
+    "crates/wasmsh-hir",
+    "crates/wasmsh-ir",
+    "crates/wasmsh-vm",
+    "crates/wasmsh-state",
+    "crates/wasmsh-fs",
+    "crates/wasmsh-builtins",
+    "crates/wasmsh-utils",
+    "crates/wasmsh-browser",
+    "crates/wasmsh-protocol",
+    "crates/wasmsh-testkit",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+repository = "https://github.com/user/wasmsh"
+
+[workspace.dependencies]
+smol_str = "0.3"
+smallvec = "1"
+indexmap = "2"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Internal crates
+wasmsh-ast = { path = "crates/wasmsh-ast" }
+wasmsh-lex = { path = "crates/wasmsh-lex" }
+wasmsh-parse = { path = "crates/wasmsh-parse" }
+wasmsh-expand = { path = "crates/wasmsh-expand" }
+wasmsh-hir = { path = "crates/wasmsh-hir" }
+wasmsh-ir = { path = "crates/wasmsh-ir" }
+wasmsh-vm = { path = "crates/wasmsh-vm" }
+wasmsh-state = { path = "crates/wasmsh-state" }
+wasmsh-fs = { path = "crates/wasmsh-fs" }
+wasmsh-builtins = { path = "crates/wasmsh-builtins" }
+wasmsh-utils = { path = "crates/wasmsh-utils" }
+wasmsh-browser = { path = "crates/wasmsh-browser" }
+wasmsh-protocol = { path = "crates/wasmsh-protocol" }
+wasmsh-testkit = { path = "crates/wasmsh-testkit" }
+
+# ── Workspace Lints ──────────────────────────────────────────
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+# Pedantic baseline
+pedantic = { level = "warn", priority = -1 }
+
+# Silence noisy pedantic lints
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+too_many_lines = "allow"
+similar_names = "allow"
+needless_lifetimes = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+if_not_else = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+
+# Promote important lints
+doc_markdown = "warn"
+manual_let_else = "warn"
+match_same_arms = "warn"
+redundant_closure_for_method_calls = "warn"
+redundant_else = "warn"
+semicolon_if_nothing_returned = "warn"
+unwrap_or_default = "warn"
+
+# Prevent accidental debug output in library code
+print_stdout = "warn"
+print_stderr = "warn"
+dbg_macro = "warn"
+
+# ── Profiles ─────────────────────────────────────────────────
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.release]
+lto = "thin"
+codegen-units = 16
+
+[profile.dist]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

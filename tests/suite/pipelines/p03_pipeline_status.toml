@@ -1,0 +1,12 @@
+[test]
+name = "pipeline exit status from last command"
+tags = ["pipeline", "P0"]
+tier = "P0"
+requires = ["pipeline", "true", "false"]
+
+[input]
+script = "true | false"
+
+[expect]
+status = 1
+stdout = ""

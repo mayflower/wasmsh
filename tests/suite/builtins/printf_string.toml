@@ -1,0 +1,12 @@
+[test]
+name = "printf-string"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["printf"]
+
+[input]
+script = 'printf "hello %s\n" world'
+
+[expect]
+status = 0
+stdout = "hello world\n"

@@ -1,0 +1,12 @@
+[test]
+name = "pipe-data-echo-wc"
+tags = ["pipeline", "data-flow", "P0"]
+tier = "P0"
+requires = ["pipeline", "echo", "wc"]
+
+[input]
+script = "echo hello world | wc"
+
+[expect]
+status = 0
+stdout_contains = ["1", "2"]

@@ -1,0 +1,12 @@
+[test]
+name = "uname-basic"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["uname"]
+
+[input]
+script = "uname"
+
+[expect]
+status = 0
+stdout = "wasmsh\n"

@@ -1,0 +1,12 @@
+[test]
+name = "set-positional-params"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["set", "echo", "parameter-expansion"]
+
+[input]
+script = "set -- a b c; echo $1 $2 $3"
+
+[expect]
+status = 0
+stdout = "a b c\n"

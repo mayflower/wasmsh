@@ -1,0 +1,12 @@
+[test]
+name = "expr-add"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["expr"]
+
+[input]
+script = "expr 2 + 3"
+
+[expect]
+status = 0
+stdout = "5\n"

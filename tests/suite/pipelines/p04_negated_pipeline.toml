@@ -1,0 +1,12 @@
+[test]
+name = "negated pipeline: ! true"
+tags = ["pipeline-negation", "P0"]
+tier = "P0"
+requires = ["pipeline-negation", "true"]
+
+[input]
+script = "! true"
+
+[expect]
+status = 1
+stdout = ""

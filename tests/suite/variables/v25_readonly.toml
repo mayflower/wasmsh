@@ -1,0 +1,12 @@
+[test]
+name = "readonly-variable"
+tags = ["variable-expansion", "P0"]
+tier = "P0"
+requires = ["echo", "parameter-expansion", "readonly"]
+
+[input]
+script = "readonly X=locked; echo $X"
+
+[expect]
+status = 0
+stdout = "locked\n"

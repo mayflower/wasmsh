@@ -1,0 +1,23 @@
+[test]
+name = "rw07-blue-green-deploy"
+tags = ["real-world", "deploy"]
+tier = "P2"
+requires = ["echo", "redirection", "cat", "if", "test", "variable-assignment", "parameter-expansion", "command-substitution"]
+
+[input]
+script = """
+echo "v1" > /blue/version
+echo "v2" > /green/version
+CURRENT=blue
+echo "before: $(cat /${CURRENT}/version)"
+if test "$CURRENT" = "blue"; then
+  NEXT=green
+else
+  NEXT=blue
+fi
+echo "after: $(cat /${NEXT}/version)"
+"""
+
+[expect]
+status = 0
+stdout = "before: v1\nafter: v2\n"

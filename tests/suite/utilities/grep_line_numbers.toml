@@ -1,0 +1,15 @@
+[test]
+name = "grep-line-numbers"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["grep"]
+
+[setup]
+files = { "/data.txt" = "x\ny\nx\n" }
+
+[input]
+script = "grep -n x /data.txt"
+
+[expect]
+status = 0
+stdout = "1:x\n3:x\n"

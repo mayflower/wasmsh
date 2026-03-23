@@ -1,0 +1,19 @@
+[test]
+name = "rw01-cicd-version-stamp"
+tags = ["real-world", "cicd"]
+tier = "P2"
+requires = ["echo", "cat", "redirection", "variable-assignment", "parameter-expansion"]
+
+[input]
+script = """
+BUILD_NUM=142
+BRANCH=main
+echo "build: $BUILD_NUM" > /build/version.txt
+echo "branch: $BRANCH" >> /build/version.txt
+echo "sha: abc1234" >> /build/version.txt
+cat /build/version.txt
+"""
+
+[expect]
+status = 0
+stdout = "build: 142\nbranch: main\nsha: abc1234\n"

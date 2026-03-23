@@ -1,0 +1,12 @@
+[test]
+name = "heredoc-basic"
+tags = ["redirection", "P0"]
+tier = "P0"
+requires = ["here-doc", "cat"]
+
+[input]
+script = "cat <<EOF\nhello world\nEOF\n"
+
+[expect]
+status = 0
+stdout = "hello world\n"

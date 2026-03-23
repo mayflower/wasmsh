@@ -1,0 +1,18 @@
+[test]
+name = "rw14-access-log-ip-counter"
+tags = ["real-world", "monitoring"]
+tier = "P2"
+requires = ["cut", "sort", "uniq", "echo", "pipeline"]
+
+[setup]
+files = { "/access.log" = "10.0.0.1 GET /\n10.0.0.2 GET /api\n10.0.0.1 GET /css\n10.0.0.3 GET /\n10.0.0.1 POST /api\n10.0.0.2 GET /\n10.0.0.1 GET /favicon\n" }
+
+[input]
+script = """
+echo "Top IPs:"
+cut -d ' ' -f 1 /access.log | sort | uniq -c | sort -r
+"""
+
+[expect]
+status = 0
+stdout_contains = ["4 10.0.0.1", "2 10.0.0.2", "1 10.0.0.3"]

@@ -1,0 +1,15 @@
+[test]
+name = "grep-no-match"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["grep"]
+
+[setup]
+files = { "/data.txt" = "aaa\n" }
+
+[input]
+script = "grep zzz /data.txt"
+
+[expect]
+status = 1
+stdout = ""

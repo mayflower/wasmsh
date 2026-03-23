@@ -1,0 +1,12 @@
+[test]
+name = "ls-empty-directory"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["ls", "mkdir"]
+
+[input]
+script = "mkdir /empty; ls /empty"
+
+[expect]
+status = 0
+stdout = ""

@@ -1,0 +1,15 @@
+[test]
+name = "mv-file"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["mv", "cat"]
+
+[setup]
+files = { "/a.txt" = "data" }
+
+[input]
+script = "mv /a.txt /b.txt; cat /b.txt"
+
+[expect]
+status = 0
+stdout = "data"

@@ -1,0 +1,12 @@
+[test]
+name = "command-substitution"
+tags = ["expansion", "P0"]
+tier = "P0"
+requires = ["command-substitution", "echo"]
+
+[input]
+script = "echo $(echo hello)"
+
+[expect]
+status = 0
+stdout = "hello\n"

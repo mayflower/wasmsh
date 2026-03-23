@@ -1,0 +1,12 @@
+[test]
+name = "chmod-noop"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["chmod", "touch", "echo"]
+
+[input]
+script = "touch /f.txt; chmod 755 /f.txt; echo ok"
+
+[expect]
+status = 0
+stdout = "ok\n"

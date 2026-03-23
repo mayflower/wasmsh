@@ -1,0 +1,12 @@
+[test]
+name = "tilde-expansion"
+tags = ["expansion", "P0"]
+tier = "P0"
+requires = ["tilde-expansion", "echo"]
+
+[input]
+script = "HOME=/home/user; echo ~"
+
+[expect]
+status = 0
+stdout = "/home/user\n"

@@ -1,0 +1,16 @@
+[package]
+name = "wasmsh-builtins"
+description = "Shell builtin commands for wasmsh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+wasmsh-state = { workspace = true }
+wasmsh-fs = { workspace = true }
+indexmap = { workspace = true }
+smol_str = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,12 @@
+[test]
+name = "positional-parameters-in-function"
+tags = ["variable-expansion", "P0"]
+tier = "P0"
+requires = ["echo", "parameter-expansion", "function"]
+
+[input]
+script = "f() { echo $1 $2; }; f hello world"
+
+[expect]
+status = 0
+stdout = "hello world\n"

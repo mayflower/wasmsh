@@ -1,0 +1,16 @@
+[test]
+name = "case: exact pattern match"
+tags = ["case", "P0"]
+tier = "P0"
+requires = ["case", "echo"]
+
+[input]
+script = """
+case hello in
+hello) echo matched;;
+world) echo no;;
+esac"""
+
+[expect]
+status = 0
+stdout = "matched\n"

@@ -1,0 +1,15 @@
+[test]
+name = "glob-star"
+tags = ["expansion", "glob", "P0"]
+tier = "P0"
+requires = ["glob-expansion", "echo", "touch"]
+
+[setup]
+files = { "/a.txt" = "", "/b.txt" = "", "/c.log" = "" }
+
+[input]
+script = "echo /*.txt"
+
+[expect]
+status = 0
+stdout_contains = ["/a.txt", "/b.txt"]

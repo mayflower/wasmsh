@@ -1,0 +1,12 @@
+[test]
+name = "command-v-builtin"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["command-builtin"]
+
+[input]
+script = "command -v echo"
+
+[expect]
+status = 0
+stdout = "echo\n"

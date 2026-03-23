@@ -1,0 +1,15 @@
+[test]
+name = "cut-comma-delimiter"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["cut"]
+
+[setup]
+files = { "/data.csv" = "a,b,c\nd,e,f\n" }
+
+[input]
+script = "cut -d , -f 1 /data.csv"
+
+[expect]
+status = 0
+stdout = "a\nd\n"

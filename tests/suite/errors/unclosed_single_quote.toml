@@ -1,0 +1,12 @@
+[test]
+name = "unclosed single quote is a parse error"
+tags = ["error", "P0"]
+tier = "P0"
+requires = ["single-quoting", "echo"]
+
+[input]
+script = "echo 'hello"
+
+[expect]
+status = 2
+stderr_contains = ["error"]

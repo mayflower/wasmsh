@@ -1,0 +1,12 @@
+[test]
+name = "echo-escape-tab"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["echo-escape"]
+
+[input]
+script = 'echo -e "a\tb"'
+
+[expect]
+status = 0
+stdout = "a\tb\n"

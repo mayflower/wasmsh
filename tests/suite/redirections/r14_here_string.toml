@@ -1,0 +1,12 @@
+[test]
+name = "here-string-basic"
+tags = ["redirection", "here-string", "P0"]
+tier = "P0"
+requires = ["here-string", "cat"]
+
+[input]
+script = "cat <<< hello"
+
+[expect]
+status = 0
+stdout = "hello\n"

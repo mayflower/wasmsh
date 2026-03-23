@@ -1,0 +1,62 @@
+[test]
+name = "rw25-log-rotation"
+tags = ["real-world", "sysadmin"]
+tier = "P2"
+requires = ["function", "if", "test", "echo", "cat", "cp", "mv", "rm", "ls", "while", "variable-assignment", "parameter-expansion", "command-substitution", "arithmetic-expansion", "redirection", "local", "sort", "pipeline", "basename", "grep"]
+
+[setup]
+files = { "/var/log/app.log" = "line1\nline2\nline3\ncurrent data\n", "/var/log/app.log.1" = "old rotation 1\n", "/var/log/app.log.2" = "old rotation 2\n", "/var/log/app.log.3" = "old rotation 3\n" }
+
+[input]
+script = """
+LOG_DIR=/var/log
+LOG_FILE=$LOG_DIR/app.log
+MAX_ROTATIONS=3
+
+rotate_log() {
+  local base="$1"
+  local max="$2"
+  local i=$max
+
+  if test -f "${base}.${max}"; then
+    rm "${base}.${max}"
+    echo "PURGED: $(basename ${base}).${max}"
+  fi
+
+  while test $i -gt 1; do
+    local prev=$((i - 1))
+    if test -f "${base}.${prev}"; then
+      mv "${base}.${prev}" "${base}.${i}"
+      echo "ROTATED: $(basename ${base}).${prev} -> $(basename ${base}).${i}"
+    fi
+    i=$((i - 1))
+  done
+
+  if test -f "$base"; then
+    cp "$base" "${base}.1"
+    echo -n "" > "$base"
+    echo "ROTATED: $(basename ${base}) -> $(basename ${base}).1"
+  fi
+}
+
+echo "=== Before ==="
+ls $LOG_DIR | sort
+
+echo "=== Rotating ==="
+rotate_log "$LOG_FILE" "$MAX_ROTATIONS"
+
+echo "=== After ==="
+ls $LOG_DIR | sort
+
+echo "=== Current log ==="
+# Check if the file is empty by grepping for any content
+LINES=$(grep -c "" "$LOG_FILE")
+echo "lines=$LINES"
+
+echo "=== Backup .1 ==="
+cat "${LOG_FILE}.1"
+"""
+
+[expect]
+status = 0
+stdout = "=== Before ===\napp.log\napp.log.1\napp.log.2\napp.log.3\n=== Rotating ===\nPURGED: app.log.3\nROTATED: app.log.2 -> app.log.3\nROTATED: app.log.1 -> app.log.2\nROTATED: app.log -> app.log.1\n=== After ===\napp.log\napp.log.1\napp.log.2\napp.log.3\n=== Current log ===\nlines=0\n=== Backup .1 ===\nline1\nline2\nline3\ncurrent data\n"

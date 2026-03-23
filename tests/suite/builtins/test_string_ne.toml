@@ -1,0 +1,12 @@
+[test]
+name = "test-string-not-equal"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["test"]
+
+[input]
+script = 'test "a" != "b"; echo $?'
+
+[expect]
+status = 0
+stdout = "0\n"

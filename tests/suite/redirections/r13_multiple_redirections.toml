@@ -1,0 +1,12 @@
+[test]
+name = "multiple-redirections"
+tags = ["redirection", "P0"]
+tier = "P0"
+requires = ["redirection", "echo", "cat"]
+
+[input]
+script = "echo out > /a.txt; echo err > /b.txt; cat /a.txt; cat /b.txt"
+
+[expect]
+status = 0
+stdout = "out\nerr\n"

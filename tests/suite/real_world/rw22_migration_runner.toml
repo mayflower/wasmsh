@@ -1,0 +1,43 @@
+[test]
+name = "rw22-db-migration-runner"
+tags = ["real-world", "database"]
+tier = "P2"
+requires = ["function", "if", "test", "echo", "cat", "sort", "for-in", "grep", "basename", "variable-assignment", "parameter-expansion", "command-substitution", "arithmetic-expansion", "pipeline", "redirection", "local", "tr"]
+
+[setup]
+files = { "/migrations/001_create_users.sql" = "CREATE TABLE users;\n", "/migrations/002_create_orders.sql" = "CREATE TABLE orders;\n", "/migrations/003_add_email.sql" = "ALTER TABLE users ADD email;\n", "/db/applied" = "001_create_users.sql\n" }
+
+[input]
+script = """
+MIG_DIR=/migrations
+APPLIED=/db/applied
+
+apply_migration() {
+  local file="$1"
+  local name=$(basename "$file")
+  local already=$(grep -c "^${name}$" "$APPLIED")
+  if test "$already" != "0"; then
+    echo "SKIP: $name (already applied)"
+  else
+    echo "APPLYING: $name"
+    local sql=$(cat "$file" | tr -d '\n')
+    echo "  SQL: $sql"
+    echo "$name" >> "$APPLIED"
+  fi
+}
+
+echo "=== Migration Run ==="
+TOTAL=0
+for f in $(ls "$MIG_DIR" | sort); do
+  TOTAL=$((TOTAL + 1))
+  apply_migration "$MIG_DIR/$f"
+done
+
+echo "=== Summary ==="
+APPLIED_COUNT=$(grep -c '.' $APPLIED)
+echo "total=$TOTAL applied=$APPLIED_COUNT"
+"""
+
+[expect]
+status = 0
+stdout = "=== Migration Run ===\nSKIP: 001_create_users.sql (already applied)\nAPPLYING: 002_create_orders.sql\n  SQL: CREATE TABLE orders;\nAPPLYING: 003_add_email.sql\n  SQL: ALTER TABLE users ADD email;\n=== Summary ===\ntotal=3 applied=3\n"

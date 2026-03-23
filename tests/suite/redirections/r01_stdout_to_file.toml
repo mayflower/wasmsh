@@ -1,0 +1,12 @@
+[test]
+name = "stdout-redirect-to-file"
+tags = ["redirection", "P0"]
+tier = "P0"
+requires = ["redirection", "echo", "cat"]
+
+[input]
+script = "echo hello > /out.txt; cat /out.txt"
+
+[expect]
+status = 0
+stdout = "hello\n"

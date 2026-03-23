@@ -1,0 +1,13 @@
+[test]
+name = "tee-write-file"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["tee", "echo", "pipeline"]
+
+[input]
+script = "echo hello | tee /out.txt"
+
+[expect]
+status = 0
+stdout = "hello\n"
+files = { "/out.txt" = "hello\n" }

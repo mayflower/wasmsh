@@ -1,0 +1,15 @@
+[test]
+name = "case: wildcard default pattern"
+tags = ["case", "P0"]
+tier = "P0"
+requires = ["case", "echo"]
+
+[input]
+script = """
+case anything in
+*) echo default;;
+esac"""
+
+[expect]
+status = 0
+stdout = "default\n"

@@ -1,0 +1,20 @@
+[test]
+name = "rw13-project-scaffolder"
+tags = ["real-world", "cicd"]
+tier = "P2"
+requires = ["mkdir", "touch", "echo", "for-in", "find", "sort", "pipeline", "parameter-expansion"]
+
+[input]
+script = """
+for d in src test docs; do
+  mkdir /project/$d
+done
+touch /project/src/main.sh
+touch /project/test/test.sh
+touch /project/docs/readme.txt
+find /project -type f | sort
+"""
+
+[expect]
+status = 0
+stdout = "/project/docs/readme.txt\n/project/src/main.sh\n/project/test/test.sh\n"

@@ -1,0 +1,21 @@
+[test]
+name = "many-functions"
+tags = ["stress", "P1"]
+tier = "P1"
+class = "normative-posix"
+stage = "stress"
+requires = ["function", "echo"]
+
+[input]
+script = """
+f1() { echo 1; }
+f2() { echo 2; }
+f3() { echo 3; }
+f4() { echo 4; }
+f5() { echo 5; }
+f1; f2; f3; f4; f5
+"""
+
+[expect]
+status = 0
+stdout = "1\n2\n3\n4\n5\n"

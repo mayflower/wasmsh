@@ -1,0 +1,12 @@
+[test]
+name = "id-output"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["id"]
+
+[input]
+script = "id"
+
+[expect]
+status = 0
+stdout_contains = ["uid=", "gid="]

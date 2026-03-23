@@ -1,0 +1,12 @@
+[test]
+name = "function-variable-scope"
+tags = ["function", "P0"]
+tier = "P0"
+requires = ["function", "echo", "variable-assignment", "parameter-expansion"]
+
+[input]
+script = "X=outer; f() { X=inner; }; f; echo $X"
+
+[expect]
+status = 0
+stdout = "inner\n"

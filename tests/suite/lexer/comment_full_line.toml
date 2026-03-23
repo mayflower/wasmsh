@@ -1,0 +1,14 @@
+[test]
+name = "full-line comment is ignored"
+tags = ["lexer", "P0"]
+tier = "P0"
+requires = ["echo", "comment"]
+
+[input]
+script = """
+# this is a comment
+echo visible"""
+
+[expect]
+status = 0
+stdout = "visible\n"

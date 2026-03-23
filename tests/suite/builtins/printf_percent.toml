@@ -1,0 +1,12 @@
+[test]
+name = "printf-percent-literal"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["printf"]
+
+[input]
+script = 'printf "100%%\n"'
+
+[expect]
+status = 0
+stdout = "100%\n"

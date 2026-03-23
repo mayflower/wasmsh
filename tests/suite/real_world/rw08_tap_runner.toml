@@ -1,0 +1,32 @@
+[test]
+name = "rw08-tap-test-runner"
+tags = ["real-world", "testing"]
+tier = "P2"
+requires = ["function", "echo", "if", "test", "arithmetic-expansion", "variable-assignment", "parameter-expansion"]
+
+[input]
+script = """
+PASS=0
+FAIL=0
+NUM=0
+
+assert_eq() {
+  NUM=$((NUM + 1))
+  if test "$1" = "$2"; then
+    echo "ok $NUM - $3"
+    PASS=$((PASS + 1))
+  else
+    echo "not ok $NUM - $3"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_eq hello hello "string match"
+assert_eq 42 42 "number match"
+assert_eq foo bar "mismatch"
+echo "pass=$PASS fail=$FAIL"
+"""
+
+[expect]
+status = 0
+stdout = "ok 1 - string match\nok 2 - number match\nnot ok 3 - mismatch\npass=2 fail=1\n"

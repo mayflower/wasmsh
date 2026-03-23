@@ -1,0 +1,12 @@
+[test]
+name = "unclosed parenthesis is a parse error"
+tags = ["error", "P0"]
+tier = "P0"
+requires = ["subshell", "echo"]
+
+[input]
+script = "(echo hi"
+
+[expect]
+status = 2
+stderr_contains = ["error"]

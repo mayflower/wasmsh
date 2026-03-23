@@ -1,0 +1,12 @@
+[test]
+name = "and-or-error-chain"
+tags = ["scenario", "P0"]
+tier = "P0"
+requires = ["and-or-list", "true", "false", "echo"]
+
+[input]
+script = "false || echo \"recovered\"; true && echo \"continued\""
+
+[expect]
+status = 0
+stdout = "recovered\ncontinued\n"

@@ -1,0 +1,17 @@
+[test]
+name = "large-file-cat"
+tags = ["stress", "P1"]
+tier = "P1"
+class = "normative-posix"
+stage = "stress"
+requires = ["wc"]
+
+[setup]
+files = { "/data/large.txt" = "line01\nline02\nline03\nline04\nline05\nline06\nline07\nline08\nline09\nline10\nline11\nline12\nline13\nline14\nline15\nline16\nline17\nline18\nline19\nline20\nline21\nline22\nline23\nline24\nline25\nline26\nline27\nline28\nline29\nline30\nline31\nline32\nline33\nline34\nline35\nline36\nline37\nline38\nline39\nline40\nline41\nline42\nline43\nline44\nline45\nline46\nline47\nline48\nline49\nline50\n" }
+
+[input]
+script = "wc /data/large.txt"
+
+[expect]
+status = 0
+stdout_contains = ["50"]

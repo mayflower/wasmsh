@@ -1,0 +1,12 @@
+[test]
+name = "hostname-basic"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["hostname"]
+
+[input]
+script = "hostname"
+
+[expect]
+status = 0
+stdout = "wasmsh\n"

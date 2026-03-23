@@ -1,0 +1,12 @@
+[test]
+name = "arithmetic-precedence"
+tags = ["arithmetic", "P0"]
+tier = "P0"
+requires = ["arithmetic-expansion", "echo"]
+
+[input]
+script = "echo $((2 + 3 * 4))"
+
+[expect]
+status = 0
+stdout = "14\n"

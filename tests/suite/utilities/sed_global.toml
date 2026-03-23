@@ -1,0 +1,12 @@
+[test]
+name = "sed-global-replace"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["sed", "echo", "pipeline"]
+
+[input]
+script = "echo aaa | sed 's/a/b/g'"
+
+[expect]
+status = 0
+stdout = "bbb\n"

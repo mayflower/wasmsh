@@ -1,0 +1,87 @@
+[test]
+name = "rw28-service-dependency-resolver"
+tags = ["real-world", "infra"]
+tier = "P2"
+requires = ["function", "case", "for-in", "while", "if", "test", "echo", "grep", "touch", "variable-assignment", "parameter-expansion", "command-substitution", "arithmetic-expansion", "pipeline", "redirection"]
+
+[input]
+script = """
+# Service dependency graph
+# db: no deps, cache: db, api: db+cache, web: api+cache, worker: db
+
+get_deps() {
+  case "$1" in
+    db) echo "" ;;
+    cache) echo "db" ;;
+    api) echo "db cache" ;;
+    web) echo "api cache" ;;
+    worker) echo "db" ;;
+  esac
+}
+
+touch /tmp/started.txt
+
+is_started() {
+  local count=$(grep -c "^${1}$" /tmp/started.txt)
+  test "$count" != "0"
+}
+
+mark_started() {
+  echo "$1" >> /tmp/started.txt
+}
+
+SERVICES="db cache api web worker"
+REMAINING="$SERVICES"
+STEP=0
+ORDER=""
+PASS=0
+
+while test -n "$REMAINING"; do
+  PASS=$((PASS + 1))
+  NEXT_REMAINING=""
+  PROGRESS=0
+
+  for svc in $REMAINING; do
+    DEPS=$(get_deps "$svc")
+    ALL_MET=1
+    for dep in $DEPS; do
+      if ! is_started "$dep"; then
+        ALL_MET=0
+      fi
+    done
+
+    if test "$ALL_MET" = "1"; then
+      STEP=$((STEP + 1))
+      echo "[$STEP] START: $svc"
+      mark_started "$svc"
+      if test -z "$ORDER"; then
+        ORDER="$svc"
+      else
+        ORDER="$ORDER -> $svc"
+      fi
+      PROGRESS=1
+    else
+      if test -z "$NEXT_REMAINING"; then
+        NEXT_REMAINING="$svc"
+      else
+        NEXT_REMAINING="$NEXT_REMAINING $svc"
+      fi
+    fi
+  done
+
+  REMAINING="$NEXT_REMAINING"
+
+  if test "$PROGRESS" = "0"; then
+    echo "ERROR: circular dependency detected"
+    break
+  fi
+done
+
+echo "=== Boot Order ==="
+echo "$ORDER"
+echo "=== Total: $STEP services ==="
+"""
+
+[expect]
+status = 0
+stdout = "[1] START: db\n[2] START: cache\n[3] START: api\n[4] START: web\n[5] START: worker\n=== Boot Order ===\ndb -> cache -> api -> web -> worker\n=== Total: 5 services ===\n"

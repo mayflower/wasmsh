@@ -1,0 +1,12 @@
+[test]
+name = "brace group: sequential execution"
+tags = ["brace-group", "P0"]
+tier = "P0"
+requires = ["brace-group", "echo"]
+
+[input]
+script = "{ echo a; echo b; }"
+
+[expect]
+status = 0
+stdout = "a\nb\n"

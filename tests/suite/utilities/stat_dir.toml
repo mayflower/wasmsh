@@ -1,0 +1,12 @@
+[test]
+name = "stat-directory"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["stat", "mkdir"]
+
+[input]
+script = "mkdir /mydir; stat /mydir"
+
+[expect]
+status = 0
+stdout_contains = ["directory"]

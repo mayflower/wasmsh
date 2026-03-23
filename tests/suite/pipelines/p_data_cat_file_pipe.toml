@@ -1,0 +1,15 @@
+[test]
+name = "pipe-data-cat-file-to-head"
+tags = ["pipeline", "data-flow", "P1"]
+tier = "P1"
+requires = ["pipeline", "cat", "head"]
+
+[setup]
+files = { "/data/lines.txt" = "a\nb\nc\nd\ne\n" }
+
+[input]
+script = "cat /data/lines.txt | head -n 2"
+
+[expect]
+status = 0
+stdout = "a\nb\n"

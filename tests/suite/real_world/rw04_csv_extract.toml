@@ -1,0 +1,18 @@
+[test]
+name = "rw04-csv-column-extract"
+tags = ["real-world", "data"]
+tier = "P2"
+requires = ["grep", "cut", "sort", "uniq", "echo", "pipeline"]
+
+[setup]
+files = { "/data/sales.csv" = "date,region,amount\n2024-01-01,US,100\n2024-01-01,EU,200\n2024-01-02,US,150\n2024-01-02,EU,300\n" }
+
+[input]
+script = """
+echo "Regions:"
+grep -v "^date" /data/sales.csv | cut -d , -f 2 | sort | uniq
+"""
+
+[expect]
+status = 0
+stdout = "Regions:\nEU\nUS\n"

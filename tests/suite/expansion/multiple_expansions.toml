@@ -1,0 +1,12 @@
+[test]
+name = "multiple-expansions-in-double-quotes"
+tags = ["expansion", "P0"]
+tier = "P0"
+requires = ["parameter-expansion", "double-quoting", "echo"]
+
+[input]
+script = 'A=hello; B=world; echo "$A $B"'
+
+[expect]
+status = 0
+stdout = "hello world\n"

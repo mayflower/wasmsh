@@ -1,0 +1,12 @@
+[test]
+name = "brace-prefix-suffix"
+tags = ["expansion", "brace", "P0"]
+tier = "P0"
+requires = ["brace-expansion", "echo"]
+
+[input]
+script = "echo file{1,2,3}.txt"
+
+[expect]
+status = 0
+stdout = "file1.txt file2.txt file3.txt\n"

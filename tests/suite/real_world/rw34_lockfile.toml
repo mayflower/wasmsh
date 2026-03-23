@@ -1,0 +1,66 @@
+[test]
+name = "rw34-lockfile-mutex"
+tags = ["real-world", "infra"]
+tier = "P2"
+requires = ["function", "if", "test", "echo", "cat", "mkdir", "rm", "cut", "variable-assignment", "parameter-expansion", "command-substitution", "redirection", "local"]
+
+[input]
+script = """
+LOCK_DIR=/var/lock
+LOCK_FILE=$LOCK_DIR/deploy.lock
+
+acquire_lock() {
+  local name="$1"
+  mkdir -p "$LOCK_DIR"
+  if test -f "$LOCK_FILE"; then
+    local owner=$(cat "$LOCK_FILE")
+    echo "BLOCKED: lock held by $owner"
+  else
+    echo "$name" > "$LOCK_FILE"
+    echo "ACQUIRED: lock by $name"
+  fi
+}
+
+release_lock() {
+  local name="$1"
+  if test -f "$LOCK_FILE"; then
+    local owner=$(cat "$LOCK_FILE")
+    if test "$owner" = "$name"; then
+      rm "$LOCK_FILE"
+      echo "RELEASED: lock by $name"
+    else
+      echo "DENIED: lock owned by $owner, not $name"
+    fi
+  else
+    echo "NO LOCK: nothing to release"
+  fi
+}
+
+echo "=== Lock Test ==="
+
+# Normal acquire and release
+acquire_lock "deploy-1"
+release_lock "deploy-1"
+
+echo "---"
+
+# Acquire by deploy-2
+acquire_lock "deploy-2"
+# Try to acquire while held
+acquire_lock "deploy-3"
+# Wrong owner tries to release
+release_lock "deploy-3"
+# Correct owner releases
+release_lock "deploy-2"
+
+echo "---"
+
+# Should work again after release
+acquire_lock "deploy-4"
+release_lock "deploy-4"
+echo "=== Done ==="
+"""
+
+[expect]
+status = 0
+stdout = "=== Lock Test ===\nACQUIRED: lock by deploy-1\nRELEASED: lock by deploy-1\n---\nACQUIRED: lock by deploy-2\nBLOCKED: lock held by deploy-2\nDENIED: lock owned by deploy-2, not deploy-3\nRELEASED: lock by deploy-2\n---\nACQUIRED: lock by deploy-4\nRELEASED: lock by deploy-4\n=== Done ===\n"

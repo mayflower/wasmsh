@@ -1,0 +1,12 @@
+[test]
+name = "sleep-returns"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["sleep", "echo"]
+
+[input]
+script = "sleep 1; echo done"
+
+[expect]
+status = 0
+stdout = "done\n"

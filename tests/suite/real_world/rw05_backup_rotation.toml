@@ -1,0 +1,24 @@
+[test]
+name = "rw05-backup-rotation"
+tags = ["real-world", "backup"]
+tier = "P2"
+requires = ["cp", "ls", "echo", "for-in", "rm", "command-substitution", "pipeline", "sort", "head", "parameter-expansion"]
+
+[setup]
+files = { "/data/db.sql" = "data\n", "/backups/db.01.sql" = "old1\n", "/backups/db.02.sql" = "old2\n", "/backups/db.03.sql" = "old3\n" }
+
+[input]
+script = """
+cp /data/db.sql /backups/db.04.sql
+echo "before:"
+ls /backups | sort
+for f in $(ls /backups | sort | head -n 2); do
+  rm /backups/$f
+done
+echo "after:"
+ls /backups | sort
+"""
+
+[expect]
+status = 0
+stdout = "before:\ndb.01.sql\ndb.02.sql\ndb.03.sql\ndb.04.sql\nafter:\ndb.03.sql\ndb.04.sql\n"

@@ -1,0 +1,60 @@
+[test]
+name = "rw23-crontab-manager"
+tags = ["real-world", "sysadmin"]
+tier = "P2"
+requires = ["function", "if", "test", "echo", "cat", "grep", "variable-assignment", "parameter-expansion", "command-substitution", "pipeline", "redirection", "local", "rm"]
+
+[setup]
+files = { "/etc/crontab" = "cleanup\nbackup\n" }
+
+[input]
+script = """
+CRONTAB=/etc/crontab
+
+cron_list() {
+  local count=$(grep -c "" "$CRONTAB")
+  echo "=== $count scheduled jobs ==="
+  cat "$CRONTAB"
+}
+
+cron_add() {
+  local job="$1"
+  local found=$(grep -c "^${job}$" "$CRONTAB")
+  if test "$found" != "0"; then
+    echo "EXISTS: $job already scheduled"
+  else
+    echo "$job" >> "$CRONTAB"
+    echo "ADDED: $job"
+  fi
+}
+
+cron_remove() {
+  local job="$1"
+  local found=$(grep -c "^${job}$" "$CRONTAB")
+  if test "$found" = "0"; then
+    echo "NOT FOUND: $job"
+  else
+    grep -v "^${job}$" "$CRONTAB" > "${CRONTAB}.tmp"
+    cat "${CRONTAB}.tmp" > "$CRONTAB"
+    rm "${CRONTAB}.tmp"
+    echo "REMOVED: $job"
+  fi
+}
+
+cron_list
+
+echo "---"
+
+cron_add "healthcheck"
+cron_add "backup"
+cron_remove "cleanup"
+cron_remove "nonexistent"
+
+echo "---"
+
+cron_list
+"""
+
+[expect]
+status = 0
+stdout = "=== 2 scheduled jobs ===\ncleanup\nbackup\n---\nADDED: healthcheck\nEXISTS: backup already scheduled\nREMOVED: cleanup\nNOT FOUND: nonexistent\n---\n=== 2 scheduled jobs ===\nbackup\nhealthcheck\n"

@@ -1,0 +1,12 @@
+[test]
+name = "local-in-function"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["local", "function", "echo", "parameter-expansion"]
+
+[input]
+script = "X=outer; f() { local X=inner; echo $X; }; f; echo $X"
+
+[expect]
+status = 0
+stdout = "inner\nouter\n"

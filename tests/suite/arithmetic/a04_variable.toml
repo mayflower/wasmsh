@@ -1,0 +1,12 @@
+[test]
+name = "arithmetic-variable"
+tags = ["arithmetic", "P0"]
+tier = "P0"
+requires = ["arithmetic-expansion", "echo", "variable-assignment"]
+
+[input]
+script = "X=10; echo $((X + 5))"
+
+[expect]
+status = 0
+stdout = "15\n"

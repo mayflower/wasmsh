@@ -1,0 +1,17 @@
+[package]
+name = "wasmsh-vm"
+description = "Cooperative virtual machine for executing wasmsh IR"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+wasmsh-ir = { workspace = true }
+wasmsh-state = { workspace = true }
+wasmsh-builtins = { workspace = true }
+wasmsh-fs = { workspace = true }
+wasmsh-utils = { workspace = true }
+
+[lints]
+workspace = true

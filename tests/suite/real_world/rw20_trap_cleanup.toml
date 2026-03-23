@@ -1,0 +1,17 @@
+[test]
+name = "rw20-trap-cleanup"
+tags = ["real-world", "infra"]
+tier = "P2"
+requires = ["trap", "trap-exit", "echo", "exit"]
+
+[input]
+script = """
+trap 'echo cleanup' EXIT
+echo "working"
+echo "done"
+exit 0
+"""
+
+[expect]
+status = 0
+stdout = "working\ndone\ncleanup\n"

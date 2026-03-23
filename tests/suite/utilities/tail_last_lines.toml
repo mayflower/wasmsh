@@ -1,0 +1,15 @@
+[test]
+name = "tail-last-lines"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["tail"]
+
+[setup]
+files = { "/lines.txt" = "a\nb\nc\nd\ne\n" }
+
+[input]
+script = "tail -n 2 /lines.txt"
+
+[expect]
+status = 0
+stdout = "d\ne\n"

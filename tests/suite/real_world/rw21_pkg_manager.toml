@@ -1,0 +1,65 @@
+[test]
+name = "rw21-package-manager"
+tags = ["real-world", "sysadmin"]
+tier = "P2"
+requires = ["function", "case", "if", "test", "echo", "cat", "mkdir", "touch", "rm", "grep", "for-in", "variable-assignment", "parameter-expansion", "command-substitution", "arithmetic-expansion", "pipeline", "redirection", "local"]
+
+[setup]
+files = { "/var/pkg/registry" = "curl\nwget\njq\n", "/var/pkg/installed" = "curl\n" }
+
+[input]
+script = """
+PKG_DIR=/var/pkg
+REGISTRY=$PKG_DIR/registry
+INSTALLED=$PKG_DIR/installed
+
+pkg_install() {
+  local pkg="$1"
+  local avail=$(grep -c "^${pkg}$" "$REGISTRY")
+  local already=$(grep -c "^${pkg}$" "$INSTALLED")
+  if test "$avail" = "0"; then
+    echo "ERROR: $pkg not in registry"
+  elif test "$already" != "0"; then
+    echo "SKIP: $pkg already installed"
+  else
+    mkdir -p /opt/$pkg
+    touch /opt/$pkg/bin
+    echo "$pkg" >> "$INSTALLED"
+    echo "INSTALLED: $pkg"
+  fi
+}
+
+pkg_remove() {
+  local pkg="$1"
+  local found=$(grep -c "^${pkg}$" "$INSTALLED")
+  if test "$found" = "0"; then
+    echo "ERROR: $pkg not installed"
+  else
+    rm -r /opt/$pkg
+    grep -v "^${pkg}$" "$INSTALLED" > "${INSTALLED}.tmp"
+    cat "${INSTALLED}.tmp" > "$INSTALLED"
+    rm "${INSTALLED}.tmp"
+    echo "REMOVED: $pkg"
+  fi
+}
+
+# Install some packages
+for p in curl jq wget vim; do
+  pkg_install "$p"
+done
+
+echo "---"
+
+# Remove one
+pkg_remove curl
+
+echo "---"
+
+# Show what is installed
+echo "Installed:"
+cat "$INSTALLED"
+"""
+
+[expect]
+status = 0
+stdout = "SKIP: curl already installed\nINSTALLED: jq\nINSTALLED: wget\nERROR: vim not in registry\n---\nREMOVED: curl\n---\nInstalled:\njq\nwget\n"

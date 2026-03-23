@@ -1,0 +1,12 @@
+[test]
+name = "tr-replace"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["tr", "echo", "pipeline"]
+
+[input]
+script = "echo hello | tr 'el' 'EL'"
+
+[expect]
+status = 0
+stdout = "hELLo\n"

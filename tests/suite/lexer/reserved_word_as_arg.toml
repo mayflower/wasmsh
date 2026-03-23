@@ -1,0 +1,12 @@
+[test]
+name = "reserved words used as command arguments"
+tags = ["lexer", "P0"]
+tier = "P0"
+requires = ["echo"]
+
+[input]
+script = "echo if then else fi"
+
+[expect]
+status = 0
+stdout = "if then else fi\n"

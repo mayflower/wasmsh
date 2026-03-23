@@ -1,0 +1,12 @@
+[test]
+name = "stderr-merge-2>&1"
+tags = ["redirection", "stderr", "P0"]
+tier = "P0"
+requires = ["stderr-redirection", "fd-redirection"]
+
+[input]
+script = "nonexistent_cmd 2>&1 > /out.txt; cat /out.txt"
+
+[expect]
+status = 0
+stdout_contains = ["command not found"]

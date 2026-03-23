@@ -1,0 +1,12 @@
+[test]
+name = "env-prints-exported"
+tags = ["utility", "P1"]
+tier = "P1"
+requires = ["env", "export"]
+
+[input]
+script = "export FOO=bar; env"
+
+[expect]
+status = 0
+stdout_contains = ["FOO=bar"]

@@ -1,0 +1,12 @@
+[test]
+name = "ansi-c-quoting-tab"
+tags = ["quoting", "ansi-c", "P0"]
+tier = "P0"
+requires = ["ansi-c-quoting", "echo"]
+
+[input]
+script = "echo $'a\\tb'"
+
+[expect]
+status = 0
+stdout = "a\tb\n"

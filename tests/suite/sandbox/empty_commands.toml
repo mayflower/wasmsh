@@ -1,0 +1,12 @@
+[test]
+name = "colon no-ops followed by echo"
+tags = ["sandbox", "P0"]
+tier = "P0"
+requires = ["colon", "echo"]
+
+[input]
+script = ":; :; :; :; echo done"
+
+[expect]
+status = 0
+stdout = "done\n"

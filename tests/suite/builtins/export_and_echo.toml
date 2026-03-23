@@ -1,0 +1,12 @@
+[test]
+name = "export-and-echo"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["export", "echo", "parameter-expansion"]
+
+[input]
+script = "export X=hello; echo $X"
+
+[expect]
+status = 0
+stdout = "hello\n"

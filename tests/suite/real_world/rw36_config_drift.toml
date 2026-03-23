@@ -1,0 +1,60 @@
+[test]
+name = "rw36-config-drift-detector"
+tags = ["real-world", "infra"]
+tier = "P2"
+requires = ["if", "test", "echo", "cat", "cut", "grep", "for-in", "variable-assignment", "parameter-expansion", "command-substitution", "arithmetic-expansion", "pipeline", "redirection"]
+
+[setup]
+files = { "/baseline/nginx.conf" = "worker_processes=4\nkeepalive_timeout=65\nserver_name=app.example.com\nlisten=80\naccess_log=/var/log/access.log\n", "/current/nginx.conf" = "worker_processes=2\nkeepalive_timeout=65\nserver_name=app.example.com\nlisten=8080\naccess_log=/var/log/access.log\nerror_log=/var/log/error.log\n" }
+
+[input]
+script = """
+DRIFTS=0
+
+echo "=== Drift Report: nginx.conf ==="
+
+# Check baseline entries against current
+for LINE in $(cat /baseline/nginx.conf); do
+  KEY=$(echo "$LINE" | cut -d = -f 1)
+  BASE_VAL=$(echo "$LINE" | cut -d = -f 2)
+  CURR_COUNT=$(grep -c "${KEY}=" /current/nginx.conf)
+  if test "$CURR_COUNT" = "0"; then
+    echo "  REMOVED: $KEY (was: $BASE_VAL)"
+    DRIFTS=$((DRIFTS + 1))
+  else
+    CURR_VAL=$(grep "${KEY}=" /current/nginx.conf | cut -d = -f 2)
+    if test "$BASE_VAL" != "$CURR_VAL"; then
+      echo "  CHANGED: $KEY ($BASE_VAL -> $CURR_VAL)"
+      DRIFTS=$((DRIFTS + 1))
+    fi
+  fi
+done
+
+# Check for new keys in current
+for LINE in $(cat /current/nginx.conf); do
+  KEY=$(echo "$LINE" | cut -d = -f 1)
+  BASE_COUNT=$(grep -c "${KEY}=" /baseline/nginx.conf)
+  if test "$BASE_COUNT" = "0"; then
+    VAL=$(echo "$LINE" | cut -d = -f 2)
+    echo "  ADDED: $KEY=$VAL"
+    DRIFTS=$((DRIFTS + 1))
+  fi
+done
+
+if test $DRIFTS -eq 0; then
+  echo "  No drift detected."
+else
+  echo "  Total drifts: $DRIFTS"
+fi
+
+echo ""
+if test $DRIFTS -gt 0; then
+  echo "WARNING: Configuration drift detected ($DRIFTS changes)"
+else
+  echo "OK: No drift"
+fi
+"""
+
+[expect]
+status = 0
+stdout = "=== Drift Report: nginx.conf ===\n  CHANGED: worker_processes (4 -> 2)\n  CHANGED: listen (80 -> 8080)\n  ADDED: error_log=/var/log/error.log\n  Total drifts: 3\n\nWARNING: Configuration drift detected (3 changes)\n"

@@ -1,0 +1,12 @@
+[test]
+name = "brace-comma-expansion"
+tags = ["expansion", "brace", "P0"]
+tier = "P0"
+requires = ["brace-expansion", "echo"]
+
+[input]
+script = "echo {a,b,c}"
+
+[expect]
+status = 0
+stdout = "a b c\n"

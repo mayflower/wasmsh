@@ -1,0 +1,12 @@
+[test]
+name = "uname-release"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["uname"]
+
+[input]
+script = "uname -r"
+
+[expect]
+status = 0
+stdout = "0.1.0\n"

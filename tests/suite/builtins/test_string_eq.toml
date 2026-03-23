@@ -1,0 +1,12 @@
+[test]
+name = "test-string-equality"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["test"]
+
+[input]
+script = 'test "hello" = "hello"; echo $?'
+
+[expect]
+status = 0
+stdout = "0\n"

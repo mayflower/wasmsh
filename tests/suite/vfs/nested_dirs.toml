@@ -1,0 +1,12 @@
+[test]
+name = "nested-directory-creation"
+tags = ["vfs", "P0"]
+tier = "P0"
+requires = ["mkdir", "touch", "ls"]
+
+[input]
+script = "mkdir /a; mkdir /a/b; mkdir /a/b/c; touch /a/b/c/file.txt; ls /a/b/c"
+
+[expect]
+status = 0
+stdout_contains = ["file.txt"]

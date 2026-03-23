@@ -1,0 +1,12 @@
+[test]
+name = "test-not-file-exists"
+tags = ["builtin", "test"]
+tier = "P0"
+requires = ["test", "echo"]
+
+[input]
+script = "test ! -f /nonexistent; echo $?"
+
+[expect]
+status = 0
+stdout = "0\n"

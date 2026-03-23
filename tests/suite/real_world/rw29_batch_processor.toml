@@ -1,0 +1,50 @@
+[test]
+name = "rw29-batch-file-processor"
+tags = ["real-world", "data"]
+tier = "P2"
+requires = ["function", "for-in", "if", "test", "echo", "cat", "grep", "sed", "head", "mkdir", "cp", "variable-assignment", "parameter-expansion", "command-substitution", "arithmetic-expansion", "pipeline", "redirection", "local", "basename"]
+
+[setup]
+files = { "/inbox/report_jan.csv" = "name,score\nalice,85\nbob,92\ncharlie,78\n", "/inbox/report_feb.csv" = "name,score\nalice,90\nbob,88\n", "/inbox/summary.txt" = "not a csv file\n" }
+
+[input]
+script = """
+OUTBOX=/outbox
+ERRORS=/errors
+mkdir -p "$OUTBOX" "$ERRORS"
+
+PROCESSED=0
+FAILED=0
+
+process_csv() {
+  local file="$1"
+  local name=$(basename "$file")
+  local header=$(head -n 1 "$file")
+  if test "$header" != "name,score"; then
+    echo "REJECT: $name (bad header)"
+    cp "$file" "$ERRORS/$name"
+    FAILED=$((FAILED + 1))
+  else
+    local total=$(grep -c "" "$file")
+    local lines=$((total - 1))
+    sed 's/,/\t/g' "$file" > "$OUTBOX/$name"
+    echo "OK: $name ($lines records)"
+    PROCESSED=$((PROCESSED + 1))
+  fi
+}
+
+echo "=== Processing ==="
+for f in /inbox/report_feb.csv /inbox/report_jan.csv /inbox/summary.txt; do
+  process_csv "$f"
+done
+
+echo "=== Results ==="
+echo "processed=$PROCESSED failed=$FAILED"
+
+echo "=== Output ==="
+cat "$OUTBOX/report_jan.csv"
+"""
+
+[expect]
+status = 0
+stdout = "=== Processing ===\nOK: report_feb.csv (2 records)\nOK: report_jan.csv (3 records)\nREJECT: summary.txt (bad header)\n=== Results ===\nprocessed=2 failed=1\n=== Output ===\nname\tscore\nalice\t85\nbob\t92\ncharlie\t78\n"

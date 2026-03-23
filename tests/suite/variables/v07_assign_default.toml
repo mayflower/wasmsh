@@ -1,0 +1,12 @@
+[test]
+name = "assign-default-value"
+tags = ["variable-expansion", "P0"]
+tier = "P0"
+requires = ["echo", "parameter-expansion", "parameter-assign-default"]
+
+[input]
+script = "echo ${X:=assigned}; echo $X"
+
+[expect]
+status = 0
+stdout = "assigned\nassigned\n"

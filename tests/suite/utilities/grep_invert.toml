@@ -1,0 +1,15 @@
+[test]
+name = "grep-invert-match"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["grep"]
+
+[setup]
+files = { "/data.txt" = "aaa\nbbb\nccc\n" }
+
+[input]
+script = "grep -v bbb /data.txt"
+
+[expect]
+status = 0
+stdout = "aaa\nccc\n"

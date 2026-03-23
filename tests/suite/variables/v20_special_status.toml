@@ -1,0 +1,12 @@
+[test]
+name = "special-variable-exit-status"
+tags = ["variable-expansion", "P0"]
+tier = "P0"
+requires = ["echo", "parameter-expansion", "false"]
+
+[input]
+script = "false; echo $?"
+
+[expect]
+status = 0
+stdout = "1\n"

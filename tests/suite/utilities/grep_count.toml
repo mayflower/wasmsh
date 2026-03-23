@@ -1,0 +1,15 @@
+[test]
+name = "grep-count"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["grep"]
+
+[setup]
+files = { "/data.txt" = "a\nb\na\n" }
+
+[input]
+script = "grep -c a /data.txt"
+
+[expect]
+status = 0
+stdout = "2\n"

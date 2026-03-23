@@ -1,0 +1,12 @@
+[test]
+name = "alternative-value-when-unset"
+tags = ["variable-expansion", "P0"]
+tier = "P0"
+requires = ["echo", "parameter-expansion", "parameter-alternative"]
+
+[input]
+script = "echo ${X:+alt}"
+
+[expect]
+status = 0
+stdout = "\n"

@@ -1,0 +1,57 @@
+[test]
+name = "rw27-environment-switcher"
+tags = ["real-world", "config"]
+tier = "P2"
+requires = ["function", "case", "echo", "cat", "sed", "variable-assignment", "parameter-expansion", "redirection", "local", "for-in", "pipeline"]
+
+[setup]
+files = { "/config/base.conf" = "app_name=myservice\nlog_level=__LOG_LEVEL__\ndb_host=__DB_HOST__\ndb_port=__DB_PORT__\ncache_ttl=__CACHE_TTL__\n" }
+
+[input]
+script = """
+CONFIG_BASE=/config/base.conf
+
+load_env_vars() {
+  local env="$1"
+  case "$env" in
+    dev)
+      LOG_LEVEL=debug
+      DB_HOST=localhost
+      DB_PORT=5432
+      CACHE_TTL=0
+      ;;
+    staging)
+      LOG_LEVEL=info
+      DB_HOST=staging-db.internal
+      DB_PORT=5432
+      CACHE_TTL=60
+      ;;
+    prod)
+      LOG_LEVEL=warn
+      DB_HOST=prod-db.internal
+      DB_PORT=5433
+      CACHE_TTL=300
+      ;;
+  esac
+  echo "Loaded: $env"
+}
+
+render_config() {
+  local outfile="$1"
+  sed "s/__LOG_LEVEL__/$LOG_LEVEL/" "$CONFIG_BASE" | \
+    sed "s/__DB_HOST__/$DB_HOST/" | \
+    sed "s/__DB_PORT__/$DB_PORT/" | \
+    sed "s/__CACHE_TTL__/$CACHE_TTL/" > "$outfile"
+}
+
+for env in dev staging prod; do
+  echo "=== $env ==="
+  load_env_vars "$env"
+  render_config "/config/${env}.conf"
+  cat "/config/${env}.conf"
+done
+"""
+
+[expect]
+status = 0
+stdout = "=== dev ===\nLoaded: dev\napp_name=myservice\nlog_level=debug\ndb_host=localhost\ndb_port=5432\ncache_ttl=0\n=== staging ===\nLoaded: staging\napp_name=myservice\nlog_level=info\ndb_host=staging-db.internal\ndb_port=5432\ncache_ttl=60\n=== prod ===\nLoaded: prod\napp_name=myservice\nlog_level=warn\ndb_host=prod-db.internal\ndb_port=5433\ncache_ttl=300\n"

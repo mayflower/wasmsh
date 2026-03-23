@@ -1,0 +1,12 @@
+[test]
+name = "many sequential commands via semicolons"
+tags = ["sandbox", "P0"]
+tier = "P0"
+requires = ["echo", "semicolon-list"]
+
+[input]
+script = "echo a; echo b; echo c; echo d; echo e; echo f; echo g; echo h; echo i; echo j"
+
+[expect]
+status = 0
+stdout = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n"

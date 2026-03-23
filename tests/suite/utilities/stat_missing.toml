@@ -1,0 +1,11 @@
+[test]
+name = "stat-missing-file"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["stat"]
+
+[input]
+script = "stat /nope"
+
+[expect]
+status = 1

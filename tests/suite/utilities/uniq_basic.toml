@@ -1,0 +1,15 @@
+[test]
+name = "uniq-basic"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["uniq", "cat", "pipeline"]
+
+[setup]
+files = { "/data.txt" = "a\na\nb\nb\nc\n" }
+
+[input]
+script = "cat /data.txt | uniq"
+
+[expect]
+status = 0
+stdout = "a\nb\nc\n"

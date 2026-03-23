@@ -1,0 +1,12 @@
+[test]
+name = "glob-no-match-literal"
+tags = ["expansion", "glob", "P0"]
+tier = "P0"
+requires = ["glob-expansion", "echo"]
+
+[input]
+script = "echo /no_such_*.xyz"
+
+[expect]
+status = 0
+stdout = "/no_such_*.xyz\n"

@@ -1,0 +1,74 @@
+[test]
+name = "rw32-multi-tenant-provisioner"
+tags = ["real-world", "infra"]
+tier = "P2"
+requires = ["function", "for-in", "if", "test", "echo", "mkdir", "cat", "here-doc", "case", "variable-assignment", "parameter-expansion", "arithmetic-expansion", "redirection", "local", "touch"]
+
+[input]
+script = """
+BASE=/tenants
+TENANT_COUNT=0
+
+provision_tenant() {
+  local tenant_id="$1"
+  local plan="$2"
+  local dir="$BASE/$tenant_id"
+
+  if test -d "$dir"; then
+    echo "SKIP: $tenant_id already exists"
+  else
+    mkdir -p "$dir/data" "$dir/config" "$dir/logs"
+
+    local max_users=0
+    local max_storage=0
+    case "$plan" in
+      free)
+        max_users=5
+        max_storage=100
+        ;;
+      pro)
+        max_users=50
+        max_storage=1000
+        ;;
+      enterprise)
+        max_users=999
+        max_storage=10000
+        ;;
+    esac
+
+    cat <<EOF > "$dir/config/tenant.conf"
+tenant_id=$tenant_id
+plan=$plan
+max_users=$max_users
+max_storage_mb=$max_storage
+status=active
+EOF
+
+    echo "0" > "$dir/data/user_count"
+    touch "$dir/logs/audit.log"
+
+    TENANT_COUNT=$((TENANT_COUNT + 1))
+    echo "PROVISIONED: $tenant_id (plan=$plan, users=$max_users, storage=${max_storage}MB)"
+  fi
+}
+
+echo "=== Tenant Provisioning ==="
+provision_tenant "acme-corp" "enterprise"
+provision_tenant "startup-io" "pro"
+provision_tenant "demo-user" "free"
+
+# Try duplicate
+provision_tenant "acme-corp" "enterprise"
+
+echo "=== Tenant Configs ==="
+for t in acme-corp startup-io demo-user; do
+  echo "--- $t ---"
+  cat "$BASE/$t/config/tenant.conf"
+done
+
+echo "=== Total: $TENANT_COUNT tenants ==="
+"""
+
+[expect]
+status = 0
+stdout = "=== Tenant Provisioning ===\nPROVISIONED: acme-corp (plan=enterprise, users=999, storage=10000MB)\nPROVISIONED: startup-io (plan=pro, users=50, storage=1000MB)\nPROVISIONED: demo-user (plan=free, users=5, storage=100MB)\nSKIP: acme-corp already exists\n=== Tenant Configs ===\n--- acme-corp ---\ntenant_id=acme-corp\nplan=enterprise\nmax_users=999\nmax_storage_mb=10000\nstatus=active\n--- startup-io ---\ntenant_id=startup-io\nplan=pro\nmax_users=50\nmax_storage_mb=1000\nstatus=active\n--- demo-user ---\ntenant_id=demo-user\nplan=free\nmax_users=5\nmax_storage_mb=100\nstatus=active\n=== Total: 3 tenants ===\n"

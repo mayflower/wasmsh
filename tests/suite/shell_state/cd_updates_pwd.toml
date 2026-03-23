@@ -1,0 +1,13 @@
+[test]
+name = "cd-updates-pwd"
+tags = ["shell-state", "P0"]
+tier = "P0"
+requires = ["cd", "echo", "parameter-expansion"]
+
+[input]
+script = "cd /tmp; echo $PWD"
+
+[expect]
+status = 0
+stdout = "/tmp\n"
+env = { "PWD" = "/tmp" }

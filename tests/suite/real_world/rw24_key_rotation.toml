@@ -1,0 +1,55 @@
+[test]
+name = "rw24-ssh-key-rotation"
+tags = ["real-world", "security"]
+tier = "P2"
+requires = ["function", "if", "test", "echo", "cat", "mkdir", "cp", "sed", "basename", "variable-assignment", "parameter-expansion", "command-substitution", "pipeline", "redirection", "local", "rm", "for-in", "arithmetic-expansion"]
+
+[setup]
+files = { "/home/user/.ssh/id_rsa" = "OLD_PRIVATE_KEY_DATA\n", "/home/user/.ssh/id_rsa.pub" = "ssh-rsa OLDKEY user@host\n", "/home/user/.ssh/authorized_keys" = "ssh-rsa OLDKEY user@host\nssh-rsa OTHERKEY admin@host\n" }
+
+[input]
+script = """
+SSH_DIR=/home/user/.ssh
+
+rotate_key() {
+  local keyfile="$1"
+  local backup_dir="${SSH_DIR}/backups"
+  mkdir -p "$backup_dir"
+
+  if test -f "$keyfile"; then
+    local bname=$(basename "$keyfile")
+    cp "$keyfile" "${backup_dir}/${bname}_20240315"
+    echo "ARCHIVED: $bname"
+  fi
+
+  echo "NEW_PRIVATE_KEY_DATA" > "$keyfile"
+  echo "ssh-rsa NEWKEY user@host" > "${keyfile}.pub"
+  echo "GENERATED: new keypair"
+}
+
+echo "=== Key Rotation ==="
+
+echo "Old pub key:"
+cat "${SSH_DIR}/id_rsa.pub"
+
+rotate_key "${SSH_DIR}/id_rsa"
+
+# Update authorized_keys
+sed 's/OLDKEY/NEWKEY/' "${SSH_DIR}/authorized_keys" > "${SSH_DIR}/auth_tmp"
+cat "${SSH_DIR}/auth_tmp" > "${SSH_DIR}/authorized_keys"
+rm "${SSH_DIR}/auth_tmp"
+echo "UPDATED: authorized_keys"
+
+echo "New pub key:"
+cat "${SSH_DIR}/id_rsa.pub"
+
+echo "Authorized keys:"
+cat "${SSH_DIR}/authorized_keys"
+
+BACKUP_COUNT=$(grep -c '.' ${SSH_DIR}/backups/id_rsa_20240315)
+echo "Backups: archived"
+"""
+
+[expect]
+status = 0
+stdout = "=== Key Rotation ===\nOld pub key:\nssh-rsa OLDKEY user@host\nARCHIVED: id_rsa\nGENERATED: new keypair\nUPDATED: authorized_keys\nNew pub key:\nssh-rsa NEWKEY user@host\nAuthorized keys:\nssh-rsa NEWKEY user@host\nssh-rsa OTHERKEY admin@host\nBackups: archived\n"

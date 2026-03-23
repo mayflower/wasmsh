@@ -1,0 +1,12 @@
+[test]
+name = "xargs-default"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["xargs", "echo", "pipeline"]
+
+[input]
+script = "echo a b c | xargs"
+
+[expect]
+status = 0
+stdout = "a b c\n"

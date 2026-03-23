@@ -1,0 +1,12 @@
+[test]
+name = "end-of-line comment is stripped"
+tags = ["lexer", "P0"]
+tier = "P0"
+requires = ["echo", "comment"]
+
+[input]
+script = "echo hello # comment"
+
+[expect]
+status = 0
+stdout = "hello\n"

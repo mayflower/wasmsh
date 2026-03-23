@@ -1,0 +1,14 @@
+[test]
+name = "rm-then-cat-fails"
+tags = ["vfs", "P0"]
+tier = "P0"
+requires = ["rm", "cat"]
+
+[setup]
+files = { "/del.txt" = "data" }
+
+[input]
+script = "rm /del.txt; cat /del.txt"
+
+[expect]
+status = 1

@@ -1,0 +1,12 @@
+[test]
+name = "seq-step"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["seq"]
+
+[input]
+script = "seq 1 2 9"
+
+[expect]
+status = 0
+stdout = "1\n3\n5\n7\n9\n"

@@ -1,0 +1,15 @@
+[test]
+name = "source-file"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["source", "echo", "parameter-expansion"]
+
+[setup]
+files = { "/lib.sh" = "X=sourced\n" }
+
+[input]
+script = "source /lib.sh; echo $X"
+
+[expect]
+status = 0
+stdout = "sourced\n"

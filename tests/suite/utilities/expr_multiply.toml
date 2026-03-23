@@ -1,0 +1,12 @@
+[test]
+name = "expr-multiply"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["expr"]
+
+[input]
+script = "expr 4 '*' 5"
+
+[expect]
+status = 0
+stdout = "20\n"

@@ -1,0 +1,12 @@
+[test]
+name = "special-param-zero"
+tags = ["expansion", "P0"]
+tier = "P0"
+requires = ["parameter-expansion", "echo"]
+
+[input]
+script = "echo $0"
+
+[expect]
+status = 0
+stdout = "wasmsh\n"

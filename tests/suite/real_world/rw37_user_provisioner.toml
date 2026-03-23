@@ -1,0 +1,89 @@
+[test]
+name = "rw37-user-permission-provisioner"
+tags = ["real-world", "security"]
+tier = "P2"
+requires = ["function", "for-in", "if", "test", "echo", "cat", "mkdir", "cp", "grep", "variable-assignment", "parameter-expansion", "command-substitution", "arithmetic-expansion", "pipeline", "redirection", "local", "basename"]
+
+[setup]
+files = { "/etc/roles/admin" = "read\nwrite\ndelete\nadmin\n", "/etc/roles/editor" = "read\nwrite\n", "/etc/roles/viewer" = "read\n" }
+
+[input]
+script = """
+USER_DIR=/etc/users
+
+create_user() {
+  local username="$1"
+  local role="$2"
+  local udir="$USER_DIR/$username"
+  local rolefile="/etc/roles/$role"
+
+  if test -d "$udir"; then
+    echo "EXISTS: $username"
+  elif test -f "$rolefile"; then
+    mkdir -p "$udir"
+    echo "$role" > "$udir/role"
+    cp "$rolefile" "$udir/permissions"
+    echo "CREATED: $username (role=$role)"
+  else
+    echo "ERROR: unknown role '$role'"
+  fi
+}
+
+check_permission() {
+  local username="$1"
+  local perm="$2"
+  local permfile="$USER_DIR/$username/permissions"
+
+  if test -f "$permfile"; then
+    local found=$(grep -c "^${perm}$" "$permfile")
+    if test "$found" != "0"; then
+      echo "GRANTED: $username can $perm"
+    else
+      echo "DENIED: $username cannot $perm"
+    fi
+  else
+    echo "DENIED: $username (user not found)"
+  fi
+}
+
+format_perms() {
+  local file="$1"
+  local result=""
+  for p in $(cat "$file"); do
+    if test -z "$result"; then
+      result="$p"
+    else
+      result="${result},$p"
+    fi
+  done
+  echo "$result"
+}
+
+echo "=== Provisioning Users ==="
+create_user "alice" "admin"
+create_user "bob" "editor"
+create_user "charlie" "viewer"
+create_user "alice" "editor"
+create_user "dave" "superuser"
+
+echo ""
+
+echo "=== Permission Checks ==="
+for user in alice bob charlie; do
+  for perm in read write delete admin; do
+    check_permission "$user" "$perm"
+  done
+  echo ""
+done
+
+echo "=== User Registry ==="
+for uname in alice bob charlie; do
+  ROLE=$(cat "$USER_DIR/$uname/role")
+  PERMS=$(format_perms "$USER_DIR/$uname/permissions")
+  echo "  $uname: role=$ROLE perms=[$PERMS]"
+done
+"""
+
+[expect]
+status = 0
+stdout = "=== Provisioning Users ===\nCREATED: alice (role=admin)\nCREATED: bob (role=editor)\nCREATED: charlie (role=viewer)\nEXISTS: alice\nERROR: unknown role 'superuser'\n\n=== Permission Checks ===\nGRANTED: alice can read\nGRANTED: alice can write\nGRANTED: alice can delete\nGRANTED: alice can admin\n\nGRANTED: bob can read\nGRANTED: bob can write\nDENIED: bob cannot delete\nDENIED: bob cannot admin\n\nGRANTED: charlie can read\nDENIED: charlie cannot write\nDENIED: charlie cannot delete\nDENIED: charlie cannot admin\n\n=== User Registry ===\n  alice: role=admin perms=[read,write,delete,admin]\n  bob: role=editor perms=[read,write]\n  charlie: role=viewer perms=[read]\n"

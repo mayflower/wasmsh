@@ -1,0 +1,19 @@
+[test]
+name = "rw02-log-error-summary"
+tags = ["real-world", "monitoring"]
+tier = "P2"
+requires = ["grep", "echo", "command-substitution", "variable-assignment", "parameter-expansion"]
+
+[setup]
+files = { "/var/log/app.log" = "ERROR db timeout\nINFO ok\nWARN slow\nERROR null ptr\nINFO ok\nERROR db timeout\nWARN disk\n" }
+
+[input]
+script = """
+ERRORS=$(grep -c ERROR /var/log/app.log)
+WARNS=$(grep -c WARN /var/log/app.log)
+echo "errors=$ERRORS warnings=$WARNS"
+"""
+
+[expect]
+status = 0
+stdout = "errors=3 warnings=2\n"

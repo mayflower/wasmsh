@@ -1,0 +1,15 @@
+[test]
+name = "grep-basic-pattern"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["grep"]
+
+[setup]
+files = { "/log.txt" = "ERROR: fail\nINFO: ok\nERROR: bad\n" }
+
+[input]
+script = "grep ERROR /log.txt"
+
+[expect]
+status = 0
+stdout = "ERROR: fail\nERROR: bad\n"

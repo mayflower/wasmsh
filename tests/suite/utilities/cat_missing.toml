@@ -1,0 +1,11 @@
+[test]
+name = "cat-missing-file"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["cat"]
+
+[input]
+script = "cat /nonexistent"
+
+[expect]
+status = 1

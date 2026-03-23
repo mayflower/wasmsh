@@ -1,0 +1,20 @@
+[test]
+name = "rw10-wait-for-ready"
+tags = ["real-world", "docker"]
+tier = "P2"
+requires = ["if", "test", "echo", "touch", "exit"]
+
+[input]
+script = """
+touch /tmp/ready
+if test -f /tmp/ready; then
+  echo "ready"
+else
+  echo "TIMEOUT"
+  exit 1
+fi
+"""
+
+[expect]
+status = 0
+stdout = "ready\n"

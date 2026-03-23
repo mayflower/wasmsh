@@ -1,0 +1,22 @@
+[test]
+name = "nested-case-in-for"
+tags = ["scenario", "P1"]
+tier = "P1"
+class = "normative-posix"
+stage = "scenario"
+requires = ["for-in", "case", "echo", "parameter-expansion"]
+
+[input]
+script = """
+for x in a b c; do
+  case $x in
+  a) echo first;;
+  b) echo second;;
+  c) echo third;;
+  esac
+done
+"""
+
+[expect]
+status = 0
+stdout = "first\nsecond\nthird\n"

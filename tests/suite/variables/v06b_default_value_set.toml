@@ -1,0 +1,12 @@
+[test]
+name = "default-value-when-set"
+tags = ["variable-expansion", "P0"]
+tier = "P0"
+requires = ["variable-assignment", "echo", "parameter-expansion", "parameter-default"]
+
+[input]
+script = "X=hello; echo ${X:-fallback}"
+
+[expect]
+status = 0
+stdout = "hello\n"

@@ -1,0 +1,12 @@
+[test]
+name = "printenv-variable"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["printenv", "export"]
+
+[input]
+script = "export FOO=bar; printenv FOO"
+
+[expect]
+status = 0
+stdout = "bar\n"

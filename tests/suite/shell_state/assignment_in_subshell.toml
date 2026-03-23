@@ -1,0 +1,12 @@
+[test]
+name = "assignment-in-subshell-isolated"
+tags = ["shell-state", "P0"]
+tier = "P0"
+requires = ["subshell", "variable-assignment", "echo", "parameter-expansion"]
+
+[input]
+script = "X=outer; (X=inner); echo $X"
+
+[expect]
+status = 0
+stdout = "outer\n"

@@ -1,0 +1,12 @@
+[test]
+name = "wc-stdin"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["wc", "echo", "pipeline"]
+
+[input]
+script = "echo hello world | wc"
+
+[expect]
+status = 0
+stdout_contains = ["1", "2"]

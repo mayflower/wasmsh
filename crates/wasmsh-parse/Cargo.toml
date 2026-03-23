@@ -1,0 +1,17 @@
+[package]
+name = "wasmsh-parse"
+description = "Handwritten recursive-descent parser for the wasmsh shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+wasmsh-ast = { workspace = true }
+wasmsh-lex = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true

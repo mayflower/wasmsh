@@ -1,0 +1,12 @@
+[test]
+name = "unclosed double quote is a parse error"
+tags = ["error", "P0"]
+tier = "P0"
+requires = ["double-quoting", "echo"]
+
+[input]
+script = "echo \"hello"
+
+[expect]
+status = 2
+stderr_contains = ["error"]

@@ -1,0 +1,15 @@
+[test]
+name = "wc-word-and-line-counts"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["wc"]
+
+[setup]
+files = { "/test.txt" = "hello world\nfoo bar\n" }
+
+[input]
+script = "wc /test.txt"
+
+[expect]
+status = 0
+stdout_contains = ["2", "4"]

@@ -1,0 +1,12 @@
+[test]
+name = "export-visible-in-env"
+tags = ["shell-state", "P0"]
+tier = "P0"
+requires = ["export"]
+
+[input]
+script = "export MY_VAR=hello"
+
+[expect]
+status = 0
+env = { "MY_VAR" = "hello" }

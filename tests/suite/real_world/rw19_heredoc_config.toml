@@ -1,0 +1,21 @@
+[test]
+name = "rw19-heredoc-config-gen"
+tags = ["real-world", "config"]
+tier = "P2"
+requires = ["here-doc", "here-doc-expansion", "cat", "echo", "variable-assignment", "parameter-expansion", "redirection"]
+
+[input]
+script = """
+APP=myapp
+PORT=8080
+cat <<EOF > /app.yaml
+name: $APP
+port: $PORT
+debug: false
+EOF
+cat /app.yaml
+"""
+
+[expect]
+status = 0
+stdout = "name: myapp\nport: 8080\ndebug: false\n"

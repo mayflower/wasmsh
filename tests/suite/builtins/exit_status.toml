@@ -1,0 +1,11 @@
+[test]
+name = "exit-status"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["exit"]
+
+[input]
+script = "exit 42"
+
+[expect]
+status = 42

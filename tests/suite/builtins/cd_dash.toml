@@ -1,0 +1,12 @@
+[test]
+name = "cd-dash"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["cd"]
+
+[input]
+script = "cd /tmp; cd /; cd -"
+
+[expect]
+status = 0
+stdout = "/tmp\n"

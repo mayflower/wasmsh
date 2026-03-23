@@ -1,0 +1,15 @@
+[test]
+name = "sort-basic"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["sort"]
+
+[setup]
+files = { "/data.txt" = "banana\napple\ncherry\n" }
+
+[input]
+script = "sort /data.txt"
+
+[expect]
+status = 0
+stdout = "apple\nbanana\ncherry\n"

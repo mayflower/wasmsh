@@ -1,0 +1,12 @@
+[test]
+name = "cwd-default-is-root"
+tags = ["shell-state", "P0"]
+tier = "P0"
+requires = ["pwd"]
+
+[input]
+script = "pwd"
+
+[expect]
+status = 0
+stdout = "/\n"

@@ -1,0 +1,12 @@
+[test]
+name = "test-file-is-directory"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["test", "mkdir"]
+
+[input]
+script = "mkdir /testdir; test -d /testdir; echo $?"
+
+[expect]
+status = 0
+stdout = "0\n"

@@ -1,0 +1,12 @@
+[test]
+name = "nested if: inner else branch"
+tags = ["if", "P0"]
+tier = "P0"
+requires = ["if", "true", "false", "echo"]
+
+[input]
+script = "if true; then if false; then echo no; else echo yes; fi; fi"
+
+[expect]
+status = 0
+stdout = "yes\n"

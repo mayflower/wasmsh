@@ -1,0 +1,11 @@
+[test]
+name = "path traversal does not escape VFS"
+tags = ["sandbox", "P0"]
+tier = "P0"
+requires = ["cat"]
+
+[input]
+script = "cat /../../../etc/passwd"
+
+[expect]
+status = 1

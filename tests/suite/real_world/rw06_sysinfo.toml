@@ -1,0 +1,17 @@
+[test]
+name = "rw06-system-info-report"
+tags = ["real-world", "sysinfo"]
+tier = "P2"
+requires = ["uname", "hostname", "whoami", "echo", "command-substitution", "parameter-expansion"]
+
+[input]
+script = """
+echo "host=$(hostname)"
+echo "user=$(whoami)"
+echo "os=$(uname)"
+echo "arch=$(uname -m)"
+"""
+
+[expect]
+status = 0
+stdout = "host=wasmsh\nuser=user\nos=wasmsh\narch=wasm32\n"

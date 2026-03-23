@@ -1,0 +1,16 @@
+[test]
+name = "empty lines are ignored"
+tags = ["lexer", "P0"]
+tier = "P0"
+requires = ["echo"]
+
+[input]
+script = """
+
+echo hello
+
+"""
+
+[expect]
+status = 0
+stdout = "hello\n"

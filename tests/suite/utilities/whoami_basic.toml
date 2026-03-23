@@ -1,0 +1,12 @@
+[test]
+name = "whoami-basic"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["whoami"]
+
+[input]
+script = "whoami"
+
+[expect]
+status = 0
+stdout = "user\n"

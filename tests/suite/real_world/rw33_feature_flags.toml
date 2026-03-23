@@ -1,0 +1,81 @@
+[test]
+name = "rw33-feature-flag-manager"
+tags = ["real-world", "deploy"]
+tier = "P2"
+requires = ["function", "if", "test", "echo", "cat", "grep", "sed", "cut", "for-in", "variable-assignment", "parameter-expansion", "command-substitution", "arithmetic-expansion", "pipeline", "redirection", "local", "rm"]
+
+[setup]
+files = { "/flags/features.conf" = "dark_mode=on\nnew_checkout=off\nbeta_search=on\nv2_api=off\n" }
+
+[input]
+script = """
+FLAGS_FILE=/flags/features.conf
+
+flag_get() {
+  local name="$1"
+  local count=$(grep -c "${name}=" "$FLAGS_FILE")
+  if test "$count" = "0"; then
+    echo "undefined"
+  else
+    grep "${name}=" "$FLAGS_FILE" | cut -d = -f 2
+  fi
+}
+
+flag_set() {
+  local name="$1"
+  local value="$2"
+  local count=$(grep -c "${name}=" "$FLAGS_FILE")
+  if test "$count" != "0"; then
+    local old_val=$(grep "${name}=" "$FLAGS_FILE" | cut -d = -f 2)
+    sed "s/${name}=${old_val}/${name}=${value}/" "$FLAGS_FILE" > "${FLAGS_FILE}.tmp"
+    cat "${FLAGS_FILE}.tmp" > "$FLAGS_FILE"
+    rm "${FLAGS_FILE}.tmp"
+    echo "UPDATED: $name=$value"
+  else
+    echo "${name}=${value}" >> "$FLAGS_FILE"
+    echo "CREATED: $name=$value"
+  fi
+}
+
+flag_list() {
+  local on=0
+  local off=0
+  for entry in $(cat "$FLAGS_FILE"); do
+    local name=$(echo "$entry" | cut -d = -f 1)
+    local val=$(echo "$entry" | cut -d = -f 2)
+    if test "$val" = "on"; then
+      on=$((on + 1))
+      echo "  [*] $name"
+    else
+      off=$((off + 1))
+      echo "  [ ] $name"
+    fi
+  done
+  echo "  ($on enabled, $off disabled)"
+}
+
+echo "=== Current Flags ==="
+flag_list
+
+echo "=== Toggle Operations ==="
+flag_set "new_checkout" "on"
+flag_set "dark_mode" "off"
+flag_set "experimental_ai" "on"
+
+echo "=== Check Flags ==="
+for f in dark_mode new_checkout beta_search experimental_ai missing_flag; do
+  STATUS=$(flag_get "$f")
+  if test "$STATUS" = "on"; then
+    echo "$f: ENABLED"
+  else
+    echo "$f: DISABLED ($STATUS)"
+  fi
+done
+
+echo "=== Final State ==="
+flag_list
+"""
+
+[expect]
+status = 0
+stdout = "=== Current Flags ===\n  [*] dark_mode\n  [ ] new_checkout\n  [*] beta_search\n  [ ] v2_api\n  (2 enabled, 2 disabled)\n=== Toggle Operations ===\nUPDATED: new_checkout=on\nUPDATED: dark_mode=off\nCREATED: experimental_ai=on\n=== Check Flags ===\ndark_mode: DISABLED (off)\nnew_checkout: ENABLED\nbeta_search: ENABLED\nexperimental_ai: ENABLED\nmissing_flag: DISABLED (undefined)\n=== Final State ===\n  [ ] dark_mode\n  [*] new_checkout\n  [*] beta_search\n  [ ] v2_api\n  [*] experimental_ai\n  (3 enabled, 2 disabled)\n"

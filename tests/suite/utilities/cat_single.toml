@@ -1,0 +1,15 @@
+[test]
+name = "cat-single-file"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["cat"]
+
+[setup]
+files = { "/data/hello.txt" = "hello world\n" }
+
+[input]
+script = "cat /data/hello.txt"
+
+[expect]
+status = 0
+stdout = "hello world\n"

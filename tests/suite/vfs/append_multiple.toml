@@ -1,0 +1,12 @@
+[test]
+name = "append-multiple-lines"
+tags = ["vfs", "P0"]
+tier = "P0"
+requires = ["redirection", "echo"]
+
+[input]
+script = "echo line1 > /log.txt; echo line2 >> /log.txt; echo line3 >> /log.txt"
+
+[expect]
+status = 0
+files = { "/log.txt" = "line1\nline2\nline3\n" }

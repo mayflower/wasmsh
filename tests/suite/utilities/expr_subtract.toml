@@ -1,0 +1,12 @@
+[test]
+name = "expr-subtract"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["expr"]
+
+[input]
+script = "expr 10 - 3"
+
+[expect]
+status = 0
+stdout = "7\n"

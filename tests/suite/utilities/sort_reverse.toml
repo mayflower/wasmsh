@@ -1,0 +1,15 @@
+[test]
+name = "sort-reverse"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["sort"]
+
+[setup]
+files = { "/data.txt" = "a\nc\nb\n" }
+
+[input]
+script = "sort -r /data.txt"
+
+[expect]
+status = 0
+stdout = "c\nb\na\n"

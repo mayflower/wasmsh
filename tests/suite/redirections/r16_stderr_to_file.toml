@@ -1,0 +1,12 @@
+[test]
+name = "stderr-redirect-to-file"
+tags = ["redirection", "stderr", "P0"]
+tier = "P0"
+requires = ["stderr-redirection"]
+
+[input]
+script = "nonexistent_cmd 2> /err.txt; cat /err.txt"
+
+[expect]
+status = 0
+stdout_contains = ["command not found"]

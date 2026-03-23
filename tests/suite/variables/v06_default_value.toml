@@ -1,0 +1,12 @@
+[test]
+name = "default-value-when-unset"
+tags = ["variable-expansion", "P0"]
+tier = "P0"
+requires = ["echo", "parameter-expansion", "parameter-default"]
+
+[input]
+script = "echo ${X:-fallback}"
+
+[expect]
+status = 0
+stdout = "fallback\n"

@@ -1,0 +1,28 @@
+[test]
+name = "rw09-file-size-gate"
+tags = ["real-world", "git-hook"]
+tier = "P2"
+requires = ["for-in", "echo", "if", "test", "grep", "basename", "command-substitution", "variable-assignment", "parameter-expansion", "arithmetic-expansion", "exit"]
+
+[setup]
+files = { "/repo/small.txt" = "ok\n", "/repo/big.txt" = "ERROR found\nERROR again\nERROR third\n" }
+
+[input]
+script = """
+FAIL=0
+for f in /repo/small.txt /repo/big.txt; do
+  NAME=$(basename $f)
+  HITS=$(grep -c ERROR $f)
+  if test $HITS -gt 0; then
+    echo "REJECT: $NAME ($HITS errors)"
+    FAIL=1
+  else
+    echo "OK: $NAME"
+  fi
+done
+exit $FAIL
+"""
+
+[expect]
+status = 1
+stdout = "OK: small.txt\nREJECT: big.txt (3 errors)\n"

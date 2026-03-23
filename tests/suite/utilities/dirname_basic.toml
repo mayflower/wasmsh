@@ -1,0 +1,12 @@
+[test]
+name = "dirname-basic"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["dirname"]
+
+[input]
+script = "dirname /path/to/file.txt"
+
+[expect]
+status = 0
+stdout = "/path/to\n"

@@ -1,0 +1,12 @@
+[test]
+name = "mkdir-and-verify-contents"
+tags = ["vfs", "P0"]
+tier = "P0"
+requires = ["mkdir", "touch", "ls"]
+
+[input]
+script = "mkdir /mydir; touch /mydir/a.txt; ls /mydir"
+
+[expect]
+status = 0
+stdout_contains = ["a.txt"]

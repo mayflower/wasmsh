@@ -1,0 +1,12 @@
+[test]
+name = "basename-strip-suffix"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["basename"]
+
+[input]
+script = "basename /path/file.tar.gz .tar.gz"
+
+[expect]
+status = 0
+stdout = "file\n"

@@ -1,0 +1,12 @@
+[test]
+name = "find-type-directory"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["find", "mkdir"]
+
+[input]
+script = "mkdir -p /d/sub; find /d -type d"
+
+[expect]
+status = 0
+stdout_contains = ["sub"]

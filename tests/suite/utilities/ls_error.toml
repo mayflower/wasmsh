@@ -1,0 +1,11 @@
+[test]
+name = "ls-nonexistent-error"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["ls"]
+
+[input]
+script = "ls /nonexistent"
+
+[expect]
+status = 1

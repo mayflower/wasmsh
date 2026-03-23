@@ -1,0 +1,19 @@
+[test]
+name = "function-dispatch-with-case"
+tags = ["scenario", "P0"]
+tier = "P0"
+requires = ["function", "case", "echo"]
+
+[input]
+script = """
+handle_a() { echo "handling a"; }
+handle_b() { echo "handling b"; }
+case a in
+a) handle_a;;
+b) handle_b;;
+esac
+"""
+
+[expect]
+status = 0
+stdout = "handling a\n"

@@ -1,0 +1,112 @@
+[test]
+name = "rw40-etl-pipeline-with-checkpoints"
+tags = ["real-world", "data"]
+tier = "P2"
+requires = ["function", "if", "test", "echo", "cat", "grep", "sed", "cut", "sort", "uniq", "mkdir", "cp", "head", "tail", "for-in", "variable-assignment", "parameter-expansion", "command-substitution", "arithmetic-expansion", "pipeline", "redirection", "local"]
+
+[setup]
+files = { "/data/raw/sales.csv" = "date,product,region,amount,currency\n2024-01-15,Widget-A,US,100.00,USD\n2024-01-15,Widget-B,EU,200.00,EUR\n2024-01-16,Widget-A,US,150.00,USD\n2024-01-16,Widget-A,EU,300.00,EUR\n2024-01-17,Widget-C,US,50.00,USD\n" }
+
+[input]
+script = """
+PIPELINE_DIR=/pipeline
+CHECKPOINT_DIR=$PIPELINE_DIR/checkpoints
+mkdir -p "$PIPELINE_DIR/staging" "$PIPELINE_DIR/output" "$CHECKPOINT_DIR"
+
+set_checkpoint() {
+  local name="$1"
+  local rows="$2"
+  echo "$rows" > "$CHECKPOINT_DIR/$name"
+  echo "  [checkpoint] $name: $rows rows"
+}
+
+# Stage 1: EXTRACT
+etl_extract() {
+  echo "=== EXTRACT ==="
+  if test -f "$CHECKPOINT_DIR/extract"; then
+    echo "  SKIP (checkpoint exists)"
+  else
+    local src="/data/raw/sales.csv"
+    local dst="$PIPELINE_DIR/staging/extracted.csv"
+    local header=$(head -n 1 "$src")
+    if test "$header" != "date,product,region,amount,currency"; then
+      echo "  ERROR: unexpected schema"
+    else
+      cp "$src" "$dst"
+      local total=$(grep -c "" "$dst")
+      local count=$((total - 1))
+      echo "  Extracted $count records"
+      set_checkpoint "extract" "$count"
+    fi
+  fi
+}
+
+# Stage 2: TRANSFORM
+etl_transform() {
+  echo "=== TRANSFORM ==="
+  if test -f "$CHECKPOINT_DIR/transform"; then
+    echo "  SKIP (checkpoint exists)"
+  else
+    local src="$PIPELINE_DIR/staging/extracted.csv"
+    local dst="$PIPELINE_DIR/staging/transformed.csv"
+    echo "product,total_records" > "$dst"
+    # Build unique product list: grep data rows, extract product column
+    grep -v "date,product" "$src" > /tmp/data_rows.txt
+    SEEN=""
+    for row in $(cat /tmp/data_rows.txt); do
+      local prod=$(echo "$row" | cut -d , -f 2)
+      local already=$(echo "$SEEN" | grep -c "$prod")
+      if test "$already" = "0"; then
+        if test -z "$SEEN"; then
+          SEEN="$prod"
+        else
+          SEEN="$SEEN $prod"
+        fi
+      fi
+    done
+    local products="$SEEN"
+    for prod in $products; do
+      local cnt=$(grep -c ",$prod," "$src")
+      echo "$prod,$cnt" >> "$dst"
+    done
+    local out_total=$(grep -c "" "$dst")
+    local out_count=$((out_total - 1))
+    echo "  Aggregated to $out_count product groups"
+    set_checkpoint "transform" "$out_count"
+  fi
+}
+
+# Stage 3: LOAD
+etl_load() {
+  echo "=== LOAD ==="
+  if test -f "$CHECKPOINT_DIR/load"; then
+    echo "  SKIP (checkpoint exists)"
+  else
+    local src="$PIPELINE_DIR/staging/transformed.csv"
+    local dst="$PIPELINE_DIR/output/report.csv"
+    cp "$src" "$dst"
+    local total=$(grep -c "" "$dst")
+    local count=$((total - 1))
+    echo "  Loaded $count records to output"
+    set_checkpoint "load" "$count"
+  fi
+}
+
+etl_extract
+etl_transform
+etl_load
+
+echo ""
+echo "=== Pipeline Output ==="
+cat "$PIPELINE_DIR/output/report.csv"
+
+echo ""
+echo "=== Re-run (should skip all) ==="
+etl_extract
+etl_transform
+etl_load
+"""
+
+[expect]
+status = 0
+stdout = "=== EXTRACT ===\n  Extracted 5 records\n  [checkpoint] extract: 5 rows\n=== TRANSFORM ===\n  Aggregated to 3 product groups\n  [checkpoint] transform: 3 rows\n=== LOAD ===\n  Loaded 3 records to output\n  [checkpoint] load: 3 rows\n\n=== Pipeline Output ===\nproduct,total_records\nWidget-A,3\nWidget-B,1\nWidget-C,1\n\n=== Re-run (should skip all) ===\n=== EXTRACT ===\n  SKIP (checkpoint exists)\n=== TRANSFORM ===\n  SKIP (checkpoint exists)\n=== LOAD ===\n  SKIP (checkpoint exists)\n"

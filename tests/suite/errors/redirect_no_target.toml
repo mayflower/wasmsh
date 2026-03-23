@@ -1,0 +1,12 @@
+[test]
+name = "redirect without target is a parse error"
+tags = ["error", "P0"]
+tier = "P0"
+requires = ["redirection", "echo"]
+
+[input]
+script = "echo >"
+
+[expect]
+status = 2
+stderr_contains = ["error"]

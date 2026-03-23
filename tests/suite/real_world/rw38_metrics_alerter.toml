@@ -1,0 +1,80 @@
+[test]
+name = "rw38-metrics-collection-alerting"
+tags = ["real-world", "monitoring"]
+tier = "P2"
+requires = ["function", "case", "for-in", "if", "test", "echo", "cat", "cut", "sed", "grep", "touch", "variable-assignment", "parameter-expansion", "command-substitution", "arithmetic-expansion", "pipeline", "redirection", "local"]
+
+[setup]
+files = { "/metrics/cpu.dat" = "ts=1001,value=45\nts=1002,value=72\nts=1003,value=91\nts=1004,value=85\nts=1005,value=30\n", "/metrics/mem.dat" = "ts=1001,value=60\nts=1002,value=65\nts=1003,value=70\nts=1004,value=88\nts=1005,value=92\n", "/metrics/disk.dat" = "ts=1001,value=40\nts=1002,value=42\nts=1003,value=45\nts=1004,value=47\nts=1005,value=50\n" }
+
+[input]
+script = """
+ALERT_LOG=/alerts.log
+touch "$ALERT_LOG"
+
+get_threshold() {
+  case "$1" in
+    cpu) echo "80" ;;
+    mem) echo "85" ;;
+    disk) echo "90" ;;
+    *) echo "100" ;;
+  esac
+}
+
+check_metric() {
+  local name="$1"
+  local datafile="/metrics/${name}.dat"
+  local threshold=$(get_threshold "$name")
+  local alerts=0
+  local max=0
+  local samples=0
+
+  echo "--- $name (threshold: ${threshold}%) ---"
+
+  for entry in $(cat "$datafile"); do
+    local val=$(echo "$entry" | cut -d = -f 3)
+    local ts=$(echo "$entry" | cut -d = -f 2 | cut -d , -f 1)
+    samples=$((samples + 1))
+
+    if test $val -gt $max; then
+      max=$val
+    fi
+
+    if test $val -gt $threshold; then
+      local diff=$((val - threshold))
+      local severity="INFO"
+      if test $diff -gt 15; then
+        severity="CRITICAL"
+      elif test $diff -gt 5; then
+        severity="WARNING"
+      fi
+      echo "  [$severity] ts=$ts ${name}=${val}% (>${threshold}%)"
+      echo "$severity $name $val $ts" >> "$ALERT_LOG"
+      alerts=$((alerts + 1))
+    fi
+  done
+
+  echo "  samples=$samples max=${max}% alerts=$alerts"
+}
+
+echo "=== Metrics Scan ==="
+for metric in cpu mem disk; do
+  check_metric "$metric"
+done
+
+echo ""
+echo "=== Alert Summary ==="
+TOTAL=$(grep -c "" "$ALERT_LOG")
+echo "Total alerts: $TOTAL"
+
+for sev in CRITICAL WARNING INFO; do
+  COUNT=$(grep -c "$sev " "$ALERT_LOG")
+  if test "$COUNT" != "0"; then
+    echo "  $sev: $COUNT"
+  fi
+done
+"""
+
+[expect]
+status = 0
+stdout = "=== Metrics Scan ===\n--- cpu (threshold: 80%) ---\n  [WARNING] ts=1003 cpu=91% (>80%)\n  [INFO] ts=1004 cpu=85% (>80%)\n  samples=5 max=91% alerts=2\n--- mem (threshold: 85%) ---\n  [INFO] ts=1004 mem=88% (>85%)\n  [WARNING] ts=1005 mem=92% (>85%)\n  samples=5 max=92% alerts=2\n--- disk (threshold: 90%) ---\n  samples=5 max=50% alerts=0\n\n=== Alert Summary ===\nTotal alerts: 4\n  WARNING: 2\n  INFO: 2\n"

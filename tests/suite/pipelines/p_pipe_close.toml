@@ -1,0 +1,12 @@
+[test]
+name = "triple-pipe-close"
+tags = ["pipeline", "P0"]
+tier = "P0"
+requires = ["pipeline", "true"]
+
+[input]
+script = "true | true | true"
+
+[expect]
+status = 0
+stdout = ""

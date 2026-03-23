@@ -1,0 +1,13 @@
+[test]
+name = "long-pipeline"
+tags = ["stress", "P1"]
+tier = "P1"
+class = "normative-posix"
+stage = "stress"
+requires = ["pipeline", "true", "false"]
+
+[input]
+script = "true | true | true | true | true | true | true | true | true | false"
+
+[expect]
+status = 1

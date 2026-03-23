@@ -1,0 +1,15 @@
+[test]
+name = "ls-root-directory"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["ls"]
+
+[setup]
+files = { "/x.txt" = "" }
+
+[input]
+script = "ls /"
+
+[expect]
+status = 0
+stdout_contains = ["x.txt"]

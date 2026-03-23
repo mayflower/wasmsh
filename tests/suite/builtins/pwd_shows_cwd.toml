@@ -1,0 +1,12 @@
+[test]
+name = "pwd-shows-cwd"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["pwd"]
+
+[input]
+script = "pwd"
+
+[expect]
+status = 0
+stdout = "/\n"

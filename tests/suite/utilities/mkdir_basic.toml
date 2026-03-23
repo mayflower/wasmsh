@@ -1,0 +1,12 @@
+[test]
+name = "mkdir-basic"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["mkdir", "ls"]
+
+[input]
+script = "mkdir /newdir; ls /"
+
+[expect]
+status = 0
+stdout_contains = ["newdir"]

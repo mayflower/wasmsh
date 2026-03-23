@@ -1,0 +1,12 @@
+[test]
+name = "pipe-data-three-stages"
+tags = ["pipeline", "data-flow", "P0"]
+tier = "P0"
+requires = ["pipeline", "echo", "cat"]
+
+[input]
+script = "echo hello world | cat | cat"
+
+[expect]
+status = 0
+stdout = "hello world\n"

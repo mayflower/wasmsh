@@ -1,0 +1,12 @@
+[test]
+name = "head-stdin-pipe"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["head", "printf", "pipeline"]
+
+[input]
+script = 'printf "a\nb\nc\nd\ne\n" | head -n 2'
+
+[expect]
+status = 0
+stdout = "a\nb\n"

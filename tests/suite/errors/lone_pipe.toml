@@ -1,0 +1,12 @@
+[test]
+name = "lone pipe is a parse error"
+tags = ["error", "P0"]
+tier = "P0"
+requires = ["pipeline"]
+
+[input]
+script = "|"
+
+[expect]
+status = 2
+stderr_contains = ["error"]

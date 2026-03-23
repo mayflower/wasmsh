@@ -1,0 +1,15 @@
+[test]
+name = "sort-numeric"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["sort"]
+
+[setup]
+files = { "/nums.txt" = "10\n2\n30\n1\n" }
+
+[input]
+script = "sort -n /nums.txt"
+
+[expect]
+status = 0
+stdout = "1\n2\n10\n30\n"

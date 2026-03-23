@@ -1,0 +1,12 @@
+[test]
+name = "unset-removes-variable"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["unset", "echo", "parameter-default"]
+
+[input]
+script = 'X=hello; unset X; echo ${X:-gone}'
+
+[expect]
+status = 0
+stdout = "gone\n"

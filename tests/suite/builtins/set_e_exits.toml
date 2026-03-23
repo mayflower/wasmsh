@@ -1,0 +1,12 @@
+[test]
+name = "set-e-errexit"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["errexit", "echo", "true"]
+
+[input]
+script = "set -e; true; echo ok"
+
+[expect]
+status = 0
+stdout = "ok\n"

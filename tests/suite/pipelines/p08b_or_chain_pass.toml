@@ -1,0 +1,12 @@
+[test]
+name = "OR chain short-circuit: true || echo no"
+tags = ["and-or-list", "P0"]
+tier = "P0"
+requires = ["and-or-list", "true", "echo"]
+
+[input]
+script = "true || echo no"
+
+[expect]
+status = 0
+stdout = ""

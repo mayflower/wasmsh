@@ -1,0 +1,12 @@
+[test]
+name = "if-then: true branch"
+tags = ["if", "P0"]
+tier = "P0"
+requires = ["if", "true", "echo"]
+
+[input]
+script = "if true; then echo yes; fi"
+
+[expect]
+status = 0
+stdout = "yes\n"

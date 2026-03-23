@@ -1,0 +1,12 @@
+[test]
+name = "single-quotes-nested-in-double-quotes"
+tags = ["quoting", "P0"]
+tier = "P0"
+requires = ["double-quoting", "echo"]
+
+[input]
+script = "echo \"hello 'world'\""
+
+[expect]
+status = 0
+stdout = "hello 'world'\n"

@@ -1,0 +1,15 @@
+[test]
+name = "input-redirect-from-file"
+tags = ["redirection", "P0"]
+tier = "P0"
+requires = ["redirection", "cat"]
+
+[setup]
+files = { "/data/in.txt" = "test data\n" }
+
+[input]
+script = "cat < /data/in.txt"
+
+[expect]
+status = 0
+stdout = "test data\n"

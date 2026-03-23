@@ -1,0 +1,12 @@
+[test]
+name = "seq-basic"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["seq"]
+
+[input]
+script = "seq 5"
+
+[expect]
+status = 0
+stdout = "1\n2\n3\n4\n5\n"

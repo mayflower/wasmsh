@@ -1,0 +1,12 @@
+[test]
+name = "readonly-preserves-value"
+tags = ["shell-state", "P0"]
+tier = "P0"
+requires = ["readonly", "echo"]
+
+[input]
+script = "readonly R=immutable; echo $R"
+
+[expect]
+status = 0
+stdout = "immutable\n"

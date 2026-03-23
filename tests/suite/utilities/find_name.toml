@@ -1,0 +1,15 @@
+[test]
+name = "find-name-pattern"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["find"]
+
+[setup]
+files = { "/d/a.txt" = "x", "/d/b.log" = "y" }
+
+[input]
+script = 'find /d -name "*.txt"'
+
+[expect]
+status = 0
+stdout = "/d/a.txt\n"

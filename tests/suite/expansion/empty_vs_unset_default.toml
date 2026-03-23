@@ -1,0 +1,12 @@
+[test]
+name = "empty-vs-unset-colon-dash"
+tags = ["expansion", "P0"]
+tier = "P0"
+requires = ["parameter-default", "variable-assignment", "echo"]
+
+[input]
+script = 'X=""; echo ${X:-default}'
+
+[expect]
+status = 0
+stdout = "default\n"

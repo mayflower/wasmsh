@@ -1,0 +1,12 @@
+[test]
+name = "append-redirect"
+tags = ["redirection", "P0"]
+tier = "P0"
+requires = ["redirection", "echo", "cat"]
+
+[input]
+script = "echo a > /f.txt; echo b >> /f.txt; cat /f.txt"
+
+[expect]
+status = 0
+stdout = "a\nb\n"

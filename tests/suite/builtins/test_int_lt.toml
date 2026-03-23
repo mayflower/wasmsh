@@ -1,0 +1,12 @@
+[test]
+name = "test-integer-less-than"
+tags = ["builtin", "P0"]
+tier = "P0"
+requires = ["test"]
+
+[input]
+script = "test 3 -lt 5; echo $?"
+
+[expect]
+status = 0
+stdout = "0\n"

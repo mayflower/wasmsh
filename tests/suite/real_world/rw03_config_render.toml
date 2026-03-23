@@ -1,0 +1,18 @@
+[test]
+name = "rw03-config-template"
+tags = ["real-world", "config"]
+tier = "P2"
+requires = ["sed", "cat", "redirection", "pipeline"]
+
+[setup]
+files = { "/tpl.conf" = "host=PLACEHOLDER_HOST\nport=PLACEHOLDER_PORT\n" }
+
+[input]
+script = """
+sed 's/PLACEHOLDER_HOST/db.local/' /tpl.conf | sed 's/PLACEHOLDER_PORT/5432/' > /app.conf
+cat /app.conf
+"""
+
+[expect]
+status = 0
+stdout = "host=db.local\nport=5432\n"

@@ -1,0 +1,12 @@
+[test]
+name = "semicolon list: echo a; echo b; echo c"
+tags = ["semicolon-list", "P0"]
+tier = "P0"
+requires = ["semicolon-list", "echo"]
+
+[input]
+script = "echo a; echo b; echo c"
+
+[expect]
+status = 0
+stdout = "a\nb\nc\n"
