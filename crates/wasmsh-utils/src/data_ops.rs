@@ -4,13 +4,12 @@ use crate::helpers::require_args;
 use crate::UtilContext;
 
 fn seq_parse(s: &str, output: &mut dyn crate::UtilOutput) -> Option<i64> {
-    match s.parse::<i64>() {
-        Ok(v) => Some(v),
-        Err(_) => {
-            let msg = format!("seq: invalid argument: '{s}'\n");
-            output.stderr(msg.as_bytes());
-            None
-        }
+    if let Ok(v) = s.parse::<i64>() {
+        Some(v)
+    } else {
+        let msg = format!("seq: invalid argument: '{s}'\n");
+        output.stderr(msg.as_bytes());
+        None
     }
 }
 
