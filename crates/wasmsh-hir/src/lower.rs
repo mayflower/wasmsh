@@ -3,9 +3,9 @@
 use wasmsh_ast as ast;
 
 use crate::{
-    HirAndOr, HirAndOrOp, HirBlock, HirCase, HirCaseItem, HirCommand, HirCompleteCommand, HirElif,
-    HirExec, HirFor, HirFunctionDef, HirIf, HirLoop, HirPipeline, HirProgram, HirRedirectOnly,
-    HirAssign, HirAssignment, HirRedirection,
+    HirAndOr, HirAndOrOp, HirAssign, HirAssignment, HirBlock, HirCase, HirCaseItem, HirCommand,
+    HirCompleteCommand, HirElif, HirExec, HirFor, HirFunctionDef, HirIf, HirLoop, HirPipeline,
+    HirProgram, HirRedirectOnly, HirRedirection,
 };
 
 /// Lower an AST `Program` into an HIR `HirProgram`.

@@ -4,7 +4,7 @@
 //! - Test classification (normative-posix, compat-bash, etc.)
 //! - VFS state verification (expect.files)
 //! - Shell state verification (expect.env)
-//! - Performance budgets (expect.max_time_ms)
+//! - Performance budgets (`expect.max_time_ms`)
 //! - Oracle comparison
 //! - Known divergence documentation
 

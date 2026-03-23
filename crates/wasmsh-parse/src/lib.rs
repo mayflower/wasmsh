@@ -7,7 +7,12 @@ mod word_parser;
 
 use std::collections::VecDeque;
 
-use wasmsh_ast::*;
+use wasmsh_ast::{
+    AndOrList, AndOrOp, Assignment, CaseCommand, CaseItem, Command, CompleteCommand, ElifClause,
+    ForCommand, FunctionDef, GroupCommand, HereDocBody, IfCommand, Pipeline, Program, Redirection,
+    RedirectionOp, SimpleCommand, Span, SubshellCommand, UntilCommand, WhileCommand, Word,
+    WordPart,
+};
 use wasmsh_lex::{Lexer, Token, TokenKind};
 
 /// Parse errors with span information.
@@ -663,13 +668,12 @@ impl<'src> Parser<'src> {
         let op_tok = self.advance()?;
         let (op, is_heredoc) = match op_tok.kind {
             TokenKind::Less => (RedirectionOp::Input, false),
-            TokenKind::Greater => (RedirectionOp::Output, false),
+            TokenKind::Greater | TokenKind::AmpGreater => (RedirectionOp::Output, false),
             TokenKind::GreaterGreater => (RedirectionOp::Append, false),
             TokenKind::LessGreater => (RedirectionOp::ReadWrite, false),
             TokenKind::LessLess => (RedirectionOp::HereDoc, true),
             TokenKind::LessLessDash => (RedirectionOp::HereDocStrip, true),
             TokenKind::LessLessLess => (RedirectionOp::HereString, false),
-            TokenKind::AmpGreater => (RedirectionOp::Output, false),
             _ => {
                 return Err(ParseError {
                     message: format!("unexpected redirection operator: {:?}", op_tok.kind),
@@ -702,12 +706,11 @@ impl<'src> Parser<'src> {
                     here_doc_body: None,
                     span,
                 });
-            } else {
-                return Err(ParseError {
-                    message: "expected fd number after >&".into(),
-                    offset: self.current.span.start,
-                });
             }
+            return Err(ParseError {
+                message: "expected fd number after >&".into(),
+                offset: self.current.span.start,
+            });
         }
 
         if !self.at_word() {
@@ -823,7 +826,7 @@ impl<'src> Parser<'src> {
     }
 }
 
-/// Walk a CompleteCommand and assign here-doc bodies to here-doc redirections in source order.
+/// Walk a `CompleteCommand` and assign here-doc bodies to here-doc redirections in source order.
 fn assign_heredoc_bodies_cc(
     cc: &mut CompleteCommand,
     bodies: &mut impl Iterator<Item = HereDocBody>,
@@ -846,19 +849,16 @@ fn assign_heredoc_bodies_pipeline(
 }
 
 fn assign_heredoc_bodies_cmd(cmd: &mut Command, bodies: &mut impl Iterator<Item = HereDocBody>) {
-    match cmd {
-        Command::Simple(sc) => {
-            for redir in &mut sc.redirections {
-                if matches!(
-                    redir.op,
-                    RedirectionOp::HereDoc | RedirectionOp::HereDocStrip
-                ) && redir.here_doc_body.is_none()
-                {
-                    redir.here_doc_body = bodies.next();
-                }
+    if let Command::Simple(sc) = cmd {
+        for redir in &mut sc.redirections {
+            if matches!(
+                redir.op,
+                RedirectionOp::HereDoc | RedirectionOp::HereDocStrip
+            ) && redir.here_doc_body.is_none()
+            {
+                redir.here_doc_body = bodies.next();
             }
         }
-        _ => {}
     }
 }
 

@@ -47,7 +47,7 @@ pub struct WorkerRuntime {
     pending_stdin: Option<Vec<u8>>,
     /// Registered shell functions (name → HIR body).
     functions: HashMap<String, HirCommand>,
-    /// Stack of (name, old_value) for `local` variable restoration.
+    /// Stack of (name, `old_value`) for `local` variable restoration.
     local_save_stack: Vec<(smol_str::SmolStr, Option<smol_str::SmolStr>)>,
     /// Loop control: break/continue depth, set by builtins.
     break_depth: u32,
@@ -310,7 +310,7 @@ impl WorkerRuntime {
             }
         }
         if pipeline.negated {
-            self.vm.state.last_status = if self.vm.state.last_status == 0 { 1 } else { 0 };
+            self.vm.state.last_status = i32::from(self.vm.state.last_status == 0);
         }
     }
 
@@ -511,10 +511,10 @@ impl WorkerRuntime {
                                     for e in sub_events {
                                         match e {
                                             WorkerEvent::Stdout(d) => {
-                                                self.vm.stdout.extend_from_slice(&d)
+                                                self.vm.stdout.extend_from_slice(&d);
                                             }
                                             WorkerEvent::Stderr(d) => {
-                                                self.vm.stderr.extend_from_slice(&d)
+                                                self.vm.stderr.extend_from_slice(&d);
                                             }
                                             _ => {}
                                         }
@@ -685,26 +685,22 @@ impl WorkerRuntime {
             },
             HirCommand::For(for_cmd) => {
                 // Expand words and apply field splitting (so `$VAR` with spaces becomes multiple items)
-                let words: Vec<String> = for_cmd
-                    .words
-                    .as_ref()
-                    .map(|ws| {
-                        let resolved = self.resolve_command_subst(ws);
-                        let mut result = Vec::new();
-                        for w in &resolved {
-                            let expanded = wasmsh_expand::expand_word_split(w, &mut self.vm.state);
-                            result.extend(expanded.fields);
-                        }
-                        result
-                    })
-                    .unwrap_or_else(|| {
-                        self.vm
-                            .state
-                            .positional
-                            .iter()
-                            .map(|s| s.to_string())
-                            .collect()
-                    });
+                let words: Vec<String> = if let Some(ws) = &for_cmd.words {
+                    let resolved = self.resolve_command_subst(ws);
+                    let mut result = Vec::new();
+                    for w in &resolved {
+                        let expanded = wasmsh_expand::expand_word_split(w, &mut self.vm.state);
+                        result.extend(expanded.fields);
+                    }
+                    result
+                } else {
+                    self.vm
+                        .state
+                        .positional
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect()
+                };
                 for word in words {
                     self.vm.state.set_var(for_cmd.var_name.clone(), word.into());
                     self.execute_body(&for_cmd.body);
@@ -835,7 +831,7 @@ impl WorkerRuntime {
                         .filter(|e| glob_match(&pattern, &e.name))
                         .map(|e| {
                             if has_dir_prefix {
-                                let prefix = &arg[..arg.rfind('/').unwrap() + 1];
+                                let prefix = &arg[..=arg.rfind('/').unwrap()];
                                 format!("{}{}", prefix, e.name)
                             } else {
                                 e.name.clone()
@@ -932,20 +928,14 @@ impl WorkerRuntime {
                         self.vm.stderr.extend_from_slice(&stdout_data);
                     }
                 }
-                RedirectionOp::DupInput => {
-                    // N<&M — input fd duplication (rarely used in practice)
+                RedirectionOp::DupInput
+                | RedirectionOp::Input
+                | RedirectionOp::HereDoc
+                | RedirectionOp::HereDocStrip
+                | RedirectionOp::HereString
+                | RedirectionOp::ReadWrite => {
+                    // These redirections are handled elsewhere (pre-execution stdin setup, etc.)
                 }
-                RedirectionOp::Input => {
-                    // Input redirections handled pre-execution
-                }
-                RedirectionOp::HereDoc | RedirectionOp::HereDocStrip => {
-                    // Here-doc content is in redir.here_doc_body — available
-                    // for future stdin piping to commands.
-                }
-                RedirectionOp::HereString => {
-                    // Here-string handled in pre-execution stdin setup.
-                }
-                RedirectionOp::ReadWrite => {}
             }
         }
     }

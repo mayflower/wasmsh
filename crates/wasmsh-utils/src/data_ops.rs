@@ -1,6 +1,6 @@
 //! Data/string utilities: seq, basename, dirname, expr, xargs.
 
-use crate::helpers::*;
+use crate::helpers::require_args;
 use crate::UtilContext;
 
 pub(crate) fn util_seq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
@@ -90,37 +90,17 @@ pub(crate) fn util_expr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     0
                 }
             }
-            "=" => {
-                if args[0] == args[2] {
-                    1
-                } else {
-                    0
-                }
-            }
-            "!=" => {
-                if args[0] != args[2] {
-                    1
-                } else {
-                    0
-                }
-            }
+            "=" => i64::from(args[0] == args[2]),
+            "!=" => i64::from(args[0] != args[2]),
             _ => 0,
         };
         let s = format!("{result}\n");
         ctx.output.stdout(s.as_bytes());
-        if result == 0 {
-            1
-        } else {
-            0
-        }
+        i32::from(result == 0)
     } else if args.len() == 1 {
         ctx.output.stdout(args[0].as_bytes());
         ctx.output.stdout(b"\n");
-        if args[0] == "0" || args[0].is_empty() {
-            1
-        } else {
-            0
-        }
+        i32::from(args[0] == "0" || args[0].is_empty())
     } else {
         ctx.output.stderr(b"expr: syntax error\n");
         2

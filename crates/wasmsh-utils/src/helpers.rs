@@ -78,7 +78,7 @@ pub(crate) fn get_input_text(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> S
 }
 
 /// Parse `-n N` or `-N` line count from argv. Returns (count, remaining files).
-/// Returns (count, from_start, files). `from_start=true` means `+N` syntax.
+/// Returns (count, `from_start`, files). `from_start=true` means `+N` syntax.
 pub(crate) fn parse_line_count<'a>(
     argv: &'a [&'a str],
     default: usize,

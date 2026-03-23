@@ -28,11 +28,9 @@ pub fn expand_word(word: &Word, state: &mut ShellState) -> String {
         expand_part(part, state, &mut out);
     }
     // Tilde expansion: ~ at start of word → $HOME
-    if out.starts_with('~') {
-        if out == "~" || out.starts_with("~/") {
-            if let Some(home) = state.get_var("HOME") {
-                out = format!("{home}{}", &out[1..]);
-            }
+    if out.starts_with('~') && (out == "~" || out.starts_with("~/")) {
+        if let Some(home) = state.get_var("HOME") {
+            out = format!("{home}{}", &out[1..]);
         }
     }
     out
@@ -74,8 +72,7 @@ pub fn expand_string(text: &str, state: &mut ShellState) -> String {
 
 fn expand_part(part: &WordPart, state: &mut ShellState, out: &mut String) {
     match part {
-        WordPart::Literal(s) => out.push_str(s),
-        WordPart::SingleQuoted(s) => out.push_str(s),
+        WordPart::Literal(s) | WordPart::SingleQuoted(s) => out.push_str(s),
         WordPart::DoubleQuoted(parts) => {
             for p in parts {
                 expand_part(p, state, out);
@@ -85,7 +82,7 @@ fn expand_part(part: &WordPart, state: &mut ShellState, out: &mut String) {
             // ${#var} — string length
             if let Some(var_name) = name.strip_prefix('#') {
                 if !var_name.is_empty() {
-                    let len = state.get_var(var_name).map(|v| v.len()).unwrap_or(0);
+                    let len = state.get_var(var_name).map_or(0, |v| v.len());
                     out.push_str(&len.to_string());
                     return;
                 }
@@ -185,8 +182,7 @@ fn find_param_operator(name: &str) -> Option<usize> {
                 }
                 return Some(i);
             }
-            b'#' if i > 0 => return Some(i),
-            b'%' if i > 0 => return Some(i),
+            b'#' | b'%' if i > 0 => return Some(i),
             _ => {}
         }
     }
@@ -195,10 +191,8 @@ fn find_param_operator(name: &str) -> Option<usize> {
 
 fn param_op_len(name: &str, pos: usize) -> usize {
     let bytes = name.as_bytes();
-    if bytes[pos] == b':' {
-        2 // :-, :=, :+, :?
-    } else if pos + 1 < bytes.len() && bytes[pos] == bytes[pos + 1] {
-        2 // ##, %%
+    if bytes[pos] == b':' || (pos + 1 < bytes.len() && bytes[pos] == bytes[pos + 1]) {
+        2 // :-, :=, :+, :? or ##, %%
     } else {
         1
     }
@@ -284,14 +278,15 @@ fn expand_param_op(
                 out.push_str(&expanded);
             }
         },
-        "=" => match val {
-            Some(v) => out.push_str(&v),
-            None => {
+        "=" => {
+            if let Some(v) = val {
+                out.push_str(&v);
+            } else {
                 let expanded = expand_operand(operand, state);
                 state.set_var(SmolStr::from(var_name), SmolStr::from(expanded.as_str()));
                 out.push_str(&expanded);
             }
-        },
+        }
         ":?" => {
             // Error if unset or empty
             match val {
@@ -378,7 +373,7 @@ fn expand_param_op(
 /// If `greedy` is true, remove the longest match; otherwise the shortest.
 fn strip_prefix_glob<'a>(val: &'a str, pattern: &str, greedy: bool) -> Option<&'a str> {
     if pattern == "*" {
-        return Some(if greedy { "" } else { "" });
+        return Some("");
     }
     if let Some(suffix) = pattern.strip_prefix('*') {
         // *SUFFIX pattern — find where suffix appears
@@ -389,8 +384,8 @@ fn strip_prefix_glob<'a>(val: &'a str, pattern: &str, greedy: bool) -> Option<&'
         }
     } else if let Some(prefix) = pattern.strip_suffix('*') {
         // PREFIX* pattern — find prefix
-        if val.starts_with(prefix) {
-            Some(if greedy { "" } else { &val[prefix.len()..] })
+        if let Some(rest) = val.strip_prefix(prefix) {
+            Some(if greedy { "" } else { rest })
         } else {
             None
         }
@@ -404,7 +399,7 @@ fn strip_prefix_glob<'a>(val: &'a str, pattern: &str, greedy: bool) -> Option<&'
 /// If `greedy` is true, remove the longest match; otherwise the shortest.
 fn strip_suffix_glob<'a>(val: &'a str, pattern: &str, greedy: bool) -> Option<&'a str> {
     if pattern == "*" {
-        return Some(if greedy { "" } else { "" });
+        return Some("");
     }
     if let Some(prefix) = pattern.strip_suffix('*') {
         // PREFIX* pattern — find prefix
@@ -419,7 +414,7 @@ fn strip_suffix_glob<'a>(val: &'a str, pattern: &str, greedy: bool) -> Option<&'
             Some(if greedy {
                 ""
             } else {
-                &val[..val.len() - suffix.len()]
+                val.strip_suffix(suffix).unwrap_or("")
             })
         } else {
             None
@@ -606,11 +601,7 @@ fn split_brace_items(inner: &str) -> Option<Vec<String>> {
     for (i, &b) in bytes.iter().enumerate() {
         match b {
             b'{' => depth += 1,
-            b'}' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
-            }
+            b'}' => depth = depth.saturating_sub(1),
             b',' if depth == 0 => {
                 has_comma = true;
                 items.push(inner[start..i].to_string());

@@ -2,7 +2,9 @@
 
 use wasmsh_fs::{OpenOptions, Vfs};
 
-use crate::helpers::*;
+use crate::helpers::{
+    emit_error, get_input_text, grep_matches, parse_line_count, read_text, resolve_path,
+};
 use crate::{UtilContext, UtilOutput};
 
 pub(crate) fn util_head(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
@@ -192,11 +194,7 @@ pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         ctx.output.stdout(out.as_bytes());
     }
 
-    if found {
-        0
-    } else {
-        1
-    }
+    i32::from(!found)
 }
 
 pub(crate) fn util_sed(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
@@ -279,7 +277,7 @@ pub(crate) fn util_sort(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             na.cmp(&nb)
         });
     } else {
-        lines.sort();
+        lines.sort_unstable();
     }
     if reverse {
         lines.reverse();

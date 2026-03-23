@@ -2,7 +2,9 @@
 
 use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
 
-use crate::helpers::*;
+use crate::helpers::{
+    copy_file_contents, emit_error, require_args, resolve_path, simple_glob_match,
+};
 use crate::{UtilContext, UtilOutput};
 
 pub(crate) fn util_cat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
@@ -193,6 +195,43 @@ pub(crate) fn util_stat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 }
 
 pub(crate) fn util_find(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    fn walk_find(
+        fs: &MemoryFs,
+        path: &str,
+        name_pat: Option<&str>,
+        type_f: Option<&str>,
+        output: &mut dyn UtilOutput,
+    ) {
+        if let Ok(entries) = fs.read_dir(path) {
+            for entry in entries {
+                let child = if path == "/" {
+                    format!("/{}", entry.name)
+                } else {
+                    format!("{}/{}", path, entry.name)
+                };
+                let name_ok = name_pat.is_none_or(|p| {
+                    if p.contains('*') || p.contains('?') {
+                        simple_glob_match(p, &entry.name)
+                    } else {
+                        entry.name == p
+                    }
+                });
+                let type_ok = type_f.is_none_or(|t| match t {
+                    "f" => !entry.is_dir,
+                    "d" => entry.is_dir,
+                    _ => true,
+                });
+                if name_ok && type_ok {
+                    output.stdout(child.as_bytes());
+                    output.stdout(b"\n");
+                }
+                if entry.is_dir {
+                    walk_find(fs, &child, name_pat, type_f, output);
+                }
+            }
+        }
+    }
+
     let mut args = &argv[1..];
     let dir = if !args.is_empty() && !args[0].starts_with('-') {
         let d = args[0];
@@ -218,43 +257,6 @@ pub(crate) fn util_find(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             }
             _ => {
                 i += 1;
-            }
-        }
-    }
-
-    fn walk_find(
-        fs: &MemoryFs,
-        path: &str,
-        name_pat: Option<&str>,
-        type_f: Option<&str>,
-        output: &mut dyn UtilOutput,
-    ) {
-        if let Ok(entries) = fs.read_dir(path) {
-            for entry in entries {
-                let child = if path == "/" {
-                    format!("/{}", entry.name)
-                } else {
-                    format!("{}/{}", path, entry.name)
-                };
-                let name_ok = name_pat.map_or(true, |p| {
-                    if p.contains('*') || p.contains('?') {
-                        simple_glob_match(p, &entry.name)
-                    } else {
-                        entry.name == p
-                    }
-                });
-                let type_ok = type_f.map_or(true, |t| match t {
-                    "f" => !entry.is_dir,
-                    "d" => entry.is_dir,
-                    _ => true,
-                });
-                if name_ok && type_ok {
-                    output.stdout(child.as_bytes());
-                    output.stdout(b"\n");
-                }
-                if entry.is_dir {
-                    walk_find(fs, &child, name_pat, type_f, output);
-                }
             }
         }
     }

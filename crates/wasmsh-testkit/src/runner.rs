@@ -199,10 +199,6 @@ where
 
 /// Discover all `.toml` test case files under a directory.
 pub fn discover_cases(dir: &Path) -> Vec<std::path::PathBuf> {
-    let mut cases = Vec::new();
-    if !dir.exists() {
-        return cases;
-    }
     fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -214,6 +210,11 @@ pub fn discover_cases(dir: &Path) -> Vec<std::path::PathBuf> {
                 }
             }
         }
+    }
+
+    let mut cases = Vec::new();
+    if !dir.exists() {
+        return cases;
     }
     walk(dir, &mut cases);
     cases.sort();

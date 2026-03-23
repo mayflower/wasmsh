@@ -47,6 +47,7 @@ pub struct DirEntry {
 
 /// Open options for file operations.
 #[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct OpenOptions {
     pub read: bool,
     pub write: bool,

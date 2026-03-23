@@ -334,25 +334,21 @@ fn builtin_pwd(ctx: &mut BuiltinContext<'_>, _argv: &[&str]) -> i32 {
 fn builtin_cd(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     let target = if argv.len() < 2 {
         // cd with no args → HOME
-        match ctx.state.get_var("HOME") {
-            Some(home) => home.to_string(),
-            None => {
-                ctx.output.stderr(b"cd: HOME not set\n");
-                return 1;
-            }
+        if let Some(home) = ctx.state.get_var("HOME") {
+            home.to_string()
+        } else {
+            ctx.output.stderr(b"cd: HOME not set\n");
+            return 1;
         }
     } else if argv[1] == "-" {
-        match ctx.state.get_var("OLDPWD") {
-            Some(old) => {
-                let s = old.to_string();
-                ctx.output.stdout(s.as_bytes());
-                ctx.output.stdout(b"\n");
-                s
-            }
-            None => {
-                ctx.output.stderr(b"cd: OLDPWD not set\n");
-                return 1;
-            }
+        if let Some(old) = ctx.state.get_var("OLDPWD") {
+            let s = old.to_string();
+            ctx.output.stdout(s.as_bytes());
+            ctx.output.stdout(b"\n");
+            s
+        } else {
+            ctx.output.stderr(b"cd: OLDPWD not set\n");
+            return 1;
         }
     } else {
         argv[1].to_string()
@@ -452,11 +448,7 @@ fn builtin_test(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
         return 1;
     }
 
-    if test_check(&args, ctx) {
-        0
-    } else {
-        1
-    }
+    i32::from(!test_check(&args, ctx))
 }
 
 fn test_check(args: &[&str], ctx: &BuiltinContext<'_>) -> bool {
@@ -465,7 +457,6 @@ fn test_check(args: &[&str], ctx: &BuiltinContext<'_>) -> bool {
         return !test_check(&args[1..], ctx);
     }
     match args.len() {
-        0 => false,
         1 => !args[0].is_empty(),
         2 => test_unary(args[0], args[1], ctx),
         3 => test_binary(args[0], args[1], args[2]),
@@ -476,8 +467,7 @@ fn test_check(args: &[&str], ctx: &BuiltinContext<'_>) -> bool {
 fn test_unary(op: &str, val: &str, ctx: &BuiltinContext<'_>) -> bool {
     match op {
         "-n" => !val.is_empty(),
-        "-z" => val.is_empty(),
-        "!" => val.is_empty(),
+        "-z" | "!" => val.is_empty(),
         "-f" => ctx
             .fs
             .is_some_and(|fs| fs.stat(val).is_ok_and(|m| !m.is_dir)),
@@ -524,7 +514,7 @@ fn builtin_shift(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 
 /// `return` — return from a function with optional status.
 /// In our model this just sets the exit status; the function body
-/// execution loop in WorkerRuntime checks it.
+/// execution loop in `WorkerRuntime` checks it.
 fn builtin_return(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     argv.get(1)
         .and_then(|s| s.parse().ok())
@@ -539,7 +529,7 @@ fn builtin_exit(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 }
 
 /// `local` — declare local variables (in function scope).
-/// Since we use push_scope/pop_scope for functions, `local VAR=val`
+/// Since we use `push_scope`/`pop_scope` for functions, `local VAR=val`
 /// just sets the variable in the current scope.
 fn builtin_local(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     for arg in &argv[1..] {
@@ -709,7 +699,6 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     } else {
         return 1; // EOF / no stdin
     };
-    let line = line;
     // Store remaining data for subsequent read calls
     ctx.state.set_var(
         SmolStr::from("_STDIN_REMAINING"),

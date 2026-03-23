@@ -27,21 +27,12 @@ pub enum StepResult {
 }
 
 /// Configurable execution limits.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ExecutionLimits {
     /// Maximum VM steps (0 = unlimited).
     pub step_limit: u64,
     /// Maximum bytes of combined stdout+stderr output (0 = unlimited).
     pub output_byte_limit: u64,
-}
-
-impl Default for ExecutionLimits {
-    fn default() -> Self {
-        Self {
-            step_limit: 0,
-            output_byte_limit: 0,
-        }
-    }
 }
 
 /// A structured diagnostic event emitted during execution.
