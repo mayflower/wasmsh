@@ -12,7 +12,12 @@ pub(crate) fn resolve_path(cwd: &str, path: &str) -> String {
     }
 }
 
-pub(crate) fn emit_error(output: &mut dyn UtilOutput, cmd: &str, path: &str, err: &dyn std::fmt::Display) {
+pub(crate) fn emit_error(
+    output: &mut dyn UtilOutput,
+    cmd: &str,
+    path: &str,
+    err: &dyn std::fmt::Display,
+) {
     let msg = format!("{cmd}: {path}: {err}\n");
     output.stderr(msg.as_bytes());
 }
@@ -28,12 +33,22 @@ pub(crate) fn require_args(argv: &[&str], min: usize, output: &mut dyn UtilOutpu
 }
 
 pub(crate) fn copy_file_contents(fs: &mut MemoryFs, src: &str, dst: &str) -> Result<(), String> {
-    let h = fs.open(src, OpenOptions::read()).map_err(|e| e.to_string())?;
+    let h = fs
+        .open(src, OpenOptions::read())
+        .map_err(|e| e.to_string())?;
     let data = match fs.read_file(h) {
-        Ok(d) => { fs.close(h); d }
-        Err(e) => { fs.close(h); return Err(e.to_string()); }
+        Ok(d) => {
+            fs.close(h);
+            d
+        }
+        Err(e) => {
+            fs.close(h);
+            return Err(e.to_string());
+        }
     };
-    let wh = fs.open(dst, OpenOptions::write()).map_err(|e| e.to_string())?;
+    let wh = fs
+        .open(dst, OpenOptions::write())
+        .map_err(|e| e.to_string())?;
     if let Err(e) = fs.write_file(wh, &data) {
         fs.close(wh);
         return Err(e.to_string());
@@ -64,7 +79,10 @@ pub(crate) fn get_input_text(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> S
 
 /// Parse `-n N` or `-N` line count from argv. Returns (count, remaining files).
 /// Returns (count, from_start, files). `from_start=true` means `+N` syntax.
-pub(crate) fn parse_line_count<'a>(argv: &'a [&'a str], default: usize) -> (usize, bool, Vec<&'a str>) {
+pub(crate) fn parse_line_count<'a>(
+    argv: &'a [&'a str],
+    default: usize,
+) -> (usize, bool, Vec<&'a str>) {
     let args = &argv[1..];
     if args.is_empty() {
         return (default, false, vec![]);

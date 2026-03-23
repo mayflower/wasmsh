@@ -353,7 +353,11 @@ mod tests {
     #[test]
     fn diagnostics_collected() {
         let mut vm = Vm::default();
-        vm.emit_diagnostic(DiagLevel::Warning, DiagCategory::Budget, "step limit approaching".into());
+        vm.emit_diagnostic(
+            DiagLevel::Warning,
+            DiagCategory::Budget,
+            "step limit approaching".into(),
+        );
         assert_eq!(vm.diagnostics.len(), 1);
         assert_eq!(vm.diagnostics[0].level, DiagLevel::Warning);
         assert_eq!(vm.diagnostics[0].category, DiagCategory::Budget);

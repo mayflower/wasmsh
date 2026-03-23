@@ -178,11 +178,7 @@ impl<'src> Parser<'src> {
             self.advance()
         } else {
             Err(ParseError {
-                message: format!(
-                    "expected '{}', got '{}'",
-                    expected,
-                    self.current_text()
-                ),
+                message: format!("expected '{}', got '{}'", expected, self.current_text()),
                 offset: self.current.span.start,
             })
         }
@@ -686,12 +682,7 @@ impl<'src> Parser<'src> {
         let is_amp_greater = op_tok.kind == TokenKind::AmpGreater;
 
         // Check for >&N or <&N (fd duplication): > followed by & followed by digit word
-        if self.at(&TokenKind::Amp)
-            && matches!(
-                op_tok.kind,
-                TokenKind::Greater | TokenKind::Less
-            )
-        {
+        if self.at(&TokenKind::Amp) && matches!(op_tok.kind, TokenKind::Greater | TokenKind::Less) {
             self.advance()?; // consume &
             if self.at_word() {
                 let target = self.parse_word()?;
@@ -809,10 +800,7 @@ impl<'src> Parser<'src> {
 
                 if line_end >= self.source.len() {
                     return Err(ParseError {
-                        message: format!(
-                            "unterminated here-doc, expected '{}'",
-                            hd.delimiter
-                        ),
+                        message: format!("unterminated here-doc, expected '{}'", hd.delimiter),
                         offset: body_start as u32,
                     });
                 }
@@ -857,10 +845,7 @@ fn assign_heredoc_bodies_pipeline(
     }
 }
 
-fn assign_heredoc_bodies_cmd(
-    cmd: &mut Command,
-    bodies: &mut impl Iterator<Item = HereDocBody>,
-) {
+fn assign_heredoc_bodies_cmd(cmd: &mut Command, bodies: &mut impl Iterator<Item = HereDocBody>) {
     match cmd {
         Command::Simple(sc) => {
             for redir in &mut sc.redirections {
@@ -1054,9 +1039,7 @@ mod tests {
 
     #[test]
     fn parse_if_elif_else() {
-        let cmd = first_command(
-            "if a; then b; elif c; then d; elif e; then f; else g; fi",
-        );
+        let cmd = first_command("if a; then b; elif c; then d; elif e; then f; else g; fi");
         let Command::If(if_cmd) = cmd else {
             panic!("expected if");
         };

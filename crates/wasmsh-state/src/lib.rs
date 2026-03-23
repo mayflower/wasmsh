@@ -140,8 +140,7 @@ impl ShellState {
         let (exported, readonly) = self
             .env
             .get(&name)
-            .map(|v| (v.exported, v.readonly))
-            .unwrap_or((false, false));
+            .map_or((false, false), |v| (v.exported, v.readonly));
         self.env.set(
             name,
             ShellVar {
@@ -165,11 +164,7 @@ impl ShellState {
 
     /// Mark a variable as readonly with the given value.
     pub fn set_readonly(&mut self, name: SmolStr, value: SmolStr) {
-        let exported = self
-            .env
-            .get(&name)
-            .map(|v| v.exported)
-            .unwrap_or(false);
+        let exported = self.env.get(&name).map_or(false, |v| v.exported);
         self.env.set(
             name,
             ShellVar {

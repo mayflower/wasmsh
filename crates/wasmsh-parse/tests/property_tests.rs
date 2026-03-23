@@ -23,15 +23,13 @@ proptest! {
 }
 
 const RESERVED: &[&str] = &[
-    "if", "then", "else", "elif", "fi", "do", "done", "case", "esac",
-    "while", "until", "for", "in", "function", "select", "time",
+    "if", "then", "else", "elif", "fi", "do", "done", "case", "esac", "while", "until", "for",
+    "in", "function", "select", "time",
 ];
 
 /// Strategy for generating a non-reserved word.
 fn shell_word() -> impl Strategy<Value = String> {
-    "[a-z][a-z0-9]{0,7}".prop_filter("not a reserved word", |w| {
-        !RESERVED.contains(&w.as_str())
-    })
+    "[a-z][a-z0-9]{0,7}".prop_filter("not a reserved word", |w| !RESERVED.contains(&w.as_str()))
 }
 
 /// Strategy for generating simple valid commands.

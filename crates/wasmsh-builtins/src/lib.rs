@@ -191,12 +191,30 @@ fn process_echo_escapes(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
             match bytes[i + 1] {
-                b'n' => { result.push('\n'); i += 2; }
-                b't' => { result.push('\t'); i += 2; }
-                b'\\' => { result.push('\\'); i += 2; }
-                b'a' => { result.push('\x07'); i += 2; }
-                b'b' => { result.push('\x08'); i += 2; }
-                b'r' => { result.push('\r'); i += 2; }
+                b'n' => {
+                    result.push('\n');
+                    i += 2;
+                }
+                b't' => {
+                    result.push('\t');
+                    i += 2;
+                }
+                b'\\' => {
+                    result.push('\\');
+                    i += 2;
+                }
+                b'a' => {
+                    result.push('\x07');
+                    i += 2;
+                }
+                b'b' => {
+                    result.push('\x08');
+                    i += 2;
+                }
+                b'r' => {
+                    result.push('\r');
+                    i += 2;
+                }
                 b'0' => {
                     i += 2;
                     let mut val: u8 = 0;
@@ -208,7 +226,11 @@ fn process_echo_escapes(s: &str) -> String {
                     }
                     result.push(val as char);
                 }
-                _ => { result.push('\\'); result.push(bytes[i + 1] as char); i += 2; }
+                _ => {
+                    result.push('\\');
+                    result.push(bytes[i + 1] as char);
+                    i += 2;
+                }
             }
         } else {
             result.push(bytes[i] as char);
@@ -222,7 +244,8 @@ fn process_echo_escapes(s: &str) -> String {
 /// Repeats the format string while there are remaining arguments (POSIX behavior).
 fn builtin_printf(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     if argv.len() < 2 {
-        ctx.output.stderr(b"printf: usage: printf format [arguments]\n");
+        ctx.output
+            .stderr(b"printf: usage: printf format [arguments]\n");
         return 1;
     }
 
@@ -402,7 +425,8 @@ fn builtin_readonly(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
         if let Some(eq_pos) = arg.find('=') {
             let name = &arg[..eq_pos];
             let value = &arg[eq_pos + 1..];
-            ctx.state.set_readonly(SmolStr::from(name), SmolStr::from(value));
+            ctx.state
+                .set_readonly(SmolStr::from(name), SmolStr::from(value));
         } else {
             // Mark existing variable readonly
             let value = ctx.state.get_var(arg).unwrap_or_default();
@@ -428,7 +452,11 @@ fn builtin_test(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
         return 1;
     }
 
-    if test_check(&args, ctx) { 0 } else { 1 }
+    if test_check(&args, ctx) {
+        0
+    } else {
+        1
+    }
 }
 
 fn test_check(args: &[&str], ctx: &BuiltinContext<'_>) -> bool {
@@ -450,10 +478,16 @@ fn test_unary(op: &str, val: &str, ctx: &BuiltinContext<'_>) -> bool {
         "-n" => !val.is_empty(),
         "-z" => val.is_empty(),
         "!" => val.is_empty(),
-        "-f" => ctx.fs.is_some_and(|fs| fs.stat(val).is_ok_and(|m| !m.is_dir)),
-        "-d" => ctx.fs.is_some_and(|fs| fs.stat(val).is_ok_and(|m| m.is_dir)),
+        "-f" => ctx
+            .fs
+            .is_some_and(|fs| fs.stat(val).is_ok_and(|m| !m.is_dir)),
+        "-d" => ctx
+            .fs
+            .is_some_and(|fs| fs.stat(val).is_ok_and(|m| m.is_dir)),
         "-e" => ctx.fs.is_some_and(|fs| fs.stat(val).is_ok()),
-        "-s" => ctx.fs.is_some_and(|fs| fs.stat(val).is_ok_and(|m| m.size > 0)),
+        "-s" => ctx
+            .fs
+            .is_some_and(|fs| fs.stat(val).is_ok_and(|m| m.size > 0)),
         "-r" | "-w" | "-x" => ctx.fs.is_some_and(|fs| fs.stat(val).is_ok()),
         _ => false,
     }
@@ -492,12 +526,16 @@ fn builtin_shift(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 /// In our model this just sets the exit status; the function body
 /// execution loop in WorkerRuntime checks it.
 fn builtin_return(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
-    argv.get(1).and_then(|s| s.parse().ok()).unwrap_or(ctx.state.last_status)
+    argv.get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(ctx.state.last_status)
 }
 
 /// `exit` — exit the shell with optional status.
 fn builtin_exit(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
-    argv.get(1).and_then(|s| s.parse().ok()).unwrap_or(ctx.state.last_status)
+    argv.get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(ctx.state.last_status)
 }
 
 /// `local` — declare local variables (in function scope).
@@ -582,7 +620,8 @@ fn builtin_set(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
             for c in arg[1..].chars() {
                 let opt_name = format!("SHOPT_{c}");
                 let val = if enable { "1" } else { "0" };
-                ctx.state.set_var(SmolStr::from(opt_name.as_str()), SmolStr::from(val));
+                ctx.state
+                    .set_var(SmolStr::from(opt_name.as_str()), SmolStr::from(val));
             }
         }
     }
@@ -592,12 +631,15 @@ fn builtin_set(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 /// `getopts` — parse positional parameters for options.
 fn builtin_getopts(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     if argv.len() < 3 {
-        ctx.output.stderr(b"getopts: usage: getopts optstring name\n");
+        ctx.output
+            .stderr(b"getopts: usage: getopts optstring name\n");
         return 2;
     }
     let optstring = argv[1];
     let var_name = argv[2];
-    let optind: usize = ctx.state.get_var("OPTIND")
+    let optind: usize = ctx
+        .state
+        .get_var("OPTIND")
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
 
@@ -612,9 +654,11 @@ fn builtin_getopts(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 
     let opt_char = arg.chars().nth(1).unwrap_or('?');
     if optstring.contains(opt_char) {
-        ctx.state.set_var(SmolStr::from(var_name), SmolStr::from(&arg[1..2]));
+        ctx.state
+            .set_var(SmolStr::from(var_name), SmolStr::from(&arg[1..2]));
     } else {
-        ctx.state.set_var(SmolStr::from(var_name), SmolStr::from("?"));
+        ctx.state
+            .set_var(SmolStr::from(var_name), SmolStr::from("?"));
     }
     ctx.state.set_var(
         SmolStr::from("OPTIND"),
@@ -667,7 +711,10 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     };
     let line = line;
     // Store remaining data for subsequent read calls
-    ctx.state.set_var(SmolStr::from("_STDIN_REMAINING"), SmolStr::from(remaining.as_str()));
+    ctx.state.set_var(
+        SmolStr::from("_STDIN_REMAINING"),
+        SmolStr::from(remaining.as_str()),
+    );
 
     // Split line by IFS and assign to variables
     let ifs = ctx
@@ -687,11 +734,14 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
         if i == var_names.len() - 1 {
             // Last variable gets the rest of the line
             let rest: String = fields[i..].join(" ");
-            ctx.state.set_var(SmolStr::from(*var_name), SmolStr::from(rest.as_str()));
+            ctx.state
+                .set_var(SmolStr::from(*var_name), SmolStr::from(rest.as_str()));
         } else if let Some(field) = fields.get(i) {
-            ctx.state.set_var(SmolStr::from(*var_name), SmolStr::from(*field));
+            ctx.state
+                .set_var(SmolStr::from(*var_name), SmolStr::from(*field));
         } else {
-            ctx.state.set_var(SmolStr::from(*var_name), SmolStr::default());
+            ctx.state
+                .set_var(SmolStr::from(*var_name), SmolStr::default());
         }
     }
 
@@ -702,15 +752,19 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 /// In wasmsh, only EXIT and ERR traps are supported via shell variables.
 fn builtin_trap(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     let args = &argv[1..];
-    if args.len() < 2 { return 0; }
+    if args.len() < 2 {
+        return 0;
+    }
     let handler = args[0];
     for signal in &args[1..] {
         match *signal {
             "EXIT" | "0" => {
-                ctx.state.set_var(SmolStr::from("_TRAP_EXIT"), SmolStr::from(handler));
+                ctx.state
+                    .set_var(SmolStr::from("_TRAP_EXIT"), SmolStr::from(handler));
             }
             "ERR" => {
-                ctx.state.set_var(SmolStr::from("_TRAP_ERR"), SmolStr::from(handler));
+                ctx.state
+                    .set_var(SmolStr::from("_TRAP_ERR"), SmolStr::from(handler));
             }
             _ => {}
         }
@@ -739,11 +793,7 @@ mod tests {
         (status, sink)
     }
 
-    fn run_builtin_with_state(
-        name: &str,
-        argv: &[&str],
-        state: &mut ShellState,
-    ) -> (i32, VecSink) {
+    fn run_builtin_with_state(name: &str, argv: &[&str], state: &mut ShellState) -> (i32, VecSink) {
         let registry = BuiltinRegistry::new();
         let mut sink = VecSink::default();
         let builtin = registry.get(name).unwrap();

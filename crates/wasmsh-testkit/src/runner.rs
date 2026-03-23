@@ -62,7 +62,9 @@ pub fn run_toml_case(case: &TomlTestFile) -> TestOutcome {
 
     // Create runtime and initialize
     let mut rt = WorkerRuntime::new();
-    rt.handle_command(HostCommand::Init { step_budget: 100_000 });
+    rt.handle_command(HostCommand::Init {
+        step_budget: 100_000,
+    });
 
     // Set up VFS files
     for (path, content) in &case.setup.files {
@@ -81,9 +83,7 @@ pub fn run_toml_case(case: &TomlTestFile) -> TestOutcome {
             .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join("; ");
-        rt.handle_command(HostCommand::Run {
-            input: env_script,
-        });
+        rt.handle_command(HostCommand::Run { input: env_script });
     }
 
     // Execute the script
@@ -109,9 +109,7 @@ pub fn run_toml_case(case: &TomlTestFile) -> TestOutcome {
 
     if let Some(expected_status) = case.expect.status {
         if status != expected_status {
-            failures.push(format!(
-                "status: expected {expected_status}, got {status}"
-            ));
+            failures.push(format!("status: expected {expected_status}, got {status}"));
         }
     }
 
@@ -149,12 +147,8 @@ pub fn run_toml_case(case: &TomlTestFile) -> TestOutcome {
 
     // Verify VFS file contents after execution
     for (path, expected_content) in &case.expect.files {
-        let read_events = rt.handle_command(HostCommand::ReadFile {
-            path: path.clone(),
-        });
-        let file_data = collect_event_data(&read_events, |e| {
-            matches!(e, WorkerEvent::Stdout(_))
-        });
+        let read_events = rt.handle_command(HostCommand::ReadFile { path: path.clone() });
+        let file_data = collect_event_data(&read_events, |e| matches!(e, WorkerEvent::Stdout(_)));
         if file_data != *expected_content {
             failures.push(format!(
                 "file {path} mismatch:\n  expected: {expected_content:?}\n  got:      {file_data:?}"
@@ -167,9 +161,7 @@ pub fn run_toml_case(case: &TomlTestFile) -> TestOutcome {
         let check_events = rt.handle_command(HostCommand::Run {
             input: format!("echo ${name}"),
         });
-        let actual = collect_event_data(&check_events, |e| {
-            matches!(e, WorkerEvent::Stdout(_))
-        });
+        let actual = collect_event_data(&check_events, |e| matches!(e, WorkerEvent::Stdout(_)));
         let actual_trimmed = actual.trim_end_matches('\n');
         if actual_trimmed != expected_val.as_str() {
             failures.push(format!(

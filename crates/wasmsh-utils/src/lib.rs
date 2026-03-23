@@ -8,11 +8,11 @@ use indexmap::IndexMap;
 use wasmsh_fs::MemoryFs;
 use wasmsh_state::ShellState;
 
-mod helpers;
-mod file_ops;
-mod text_ops;
 mod data_ops;
+mod file_ops;
+mod helpers;
 mod system_ops;
+mod text_ops;
 
 /// Output sink for utility commands (same interface as builtins).
 pub trait UtilOutput {

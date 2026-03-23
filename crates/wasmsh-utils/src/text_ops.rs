@@ -192,7 +192,11 @@ pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         ctx.output.stdout(out.as_bytes());
     }
 
-    if found { 0 } else { 1 }
+    if found {
+        0
+    } else {
+        1
+    }
 }
 
 pub(crate) fn util_sed(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
@@ -291,7 +295,10 @@ pub(crate) fn util_sort(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 pub(crate) fn util_uniq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut args = &argv[1..];
     let mut count = false;
-    if args.first() == Some(&"-c") { count = true; args = &args[1..]; }
+    if args.first() == Some(&"-c") {
+        count = true;
+        args = &args[1..];
+    }
     let text = get_input_text(ctx, args);
     let mut prev: Option<String> = None;
     let mut cnt: usize = 0;
@@ -332,15 +339,25 @@ pub(crate) fn util_cut(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         } else if *arg == "-f" && args.len() > 1 {
             fields = args[1].split(',').filter_map(|s| s.parse().ok()).collect();
             args = &args[2..];
-        } else { break; }
+        } else {
+            break;
+        }
     }
     let text = get_input_text(ctx, args);
     for line in text.lines() {
         let parts: Vec<&str> = line.split(delim).collect();
-        let selected: Vec<&str> = fields.iter()
-            .filter_map(|&f| if f > 0 { parts.get(f - 1).copied() } else { None })
+        let selected: Vec<&str> = fields
+            .iter()
+            .filter_map(|&f| {
+                if f > 0 {
+                    parts.get(f - 1).copied()
+                } else {
+                    None
+                }
+            })
             .collect();
-        ctx.output.stdout(selected.join(&delim.to_string()).as_bytes());
+        ctx.output
+            .stdout(selected.join(&delim.to_string()).as_bytes());
         ctx.output.stdout(b"\n");
     }
     0
@@ -358,7 +375,9 @@ pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     }
     let text = if let Some(data) = ctx.stdin {
         String::from_utf8_lossy(data).to_string()
-    } else { return 1; };
+    } else {
+        return 1;
+    };
 
     if args.first() == Some(&"-d") && args.len() >= 2 {
         let del_chars = args[1];
@@ -370,11 +389,16 @@ pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let to = args[1];
     let from_chars: Vec<char> = from.chars().collect();
     let to_chars: Vec<char> = to.chars().collect();
-    let result: String = text.chars().map(|c| {
-        if let Some(pos) = from_chars.iter().position(|&fc| fc == c) {
-            to_chars.get(pos).or(to_chars.last()).copied().unwrap_or(c)
-        } else { c }
-    }).collect();
+    let result: String = text
+        .chars()
+        .map(|c| {
+            if let Some(pos) = from_chars.iter().position(|&fc| fc == c) {
+                to_chars.get(pos).or(to_chars.last()).copied().unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect();
     ctx.output.stdout(result.as_bytes());
     0
 }
@@ -382,12 +406,23 @@ pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 pub(crate) fn util_tee(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut args = &argv[1..];
     let mut append = false;
-    if args.first() == Some(&"-a") { append = true; args = &args[1..]; }
-    let data = if let Some(d) = ctx.stdin { d.to_vec() } else { Vec::new() };
+    if args.first() == Some(&"-a") {
+        append = true;
+        args = &args[1..];
+    }
+    let data = if let Some(d) = ctx.stdin {
+        d.to_vec()
+    } else {
+        Vec::new()
+    };
     ctx.output.stdout(&data);
     for path in args {
         let full = resolve_path(ctx.cwd, path);
-        let opts = if append { OpenOptions::append() } else { OpenOptions::write() };
+        let opts = if append {
+            OpenOptions::append()
+        } else {
+            OpenOptions::write()
+        };
         if let Ok(h) = ctx.fs.open(&full, opts) {
             let _ = ctx.fs.write_file(h, &data);
             ctx.fs.close(h);

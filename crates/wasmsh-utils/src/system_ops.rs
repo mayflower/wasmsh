@@ -33,7 +33,8 @@ pub(crate) fn util_printenv(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 }
 
 pub(crate) fn util_id(ctx: &mut UtilContext<'_>, _argv: &[&str]) -> i32 {
-    ctx.output.stdout(b"uid=1000(user) gid=1000(user) groups=1000(user)\n");
+    ctx.output
+        .stdout(b"uid=1000(user) gid=1000(user) groups=1000(user)\n");
     0
 }
 

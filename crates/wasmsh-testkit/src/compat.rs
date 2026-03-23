@@ -32,11 +32,7 @@ pub struct CompatResult {
 }
 
 /// Run a compatibility case against expected values (no oracle).
-pub fn check_case(
-    case: &CompatCase,
-    actual_status: i32,
-    actual_stdout: &str,
-) -> CompatResult {
+pub fn check_case(case: &CompatCase, actual_status: i32, actual_stdout: &str) -> CompatResult {
     let mut passed = true;
     let mut notes = Vec::new();
 

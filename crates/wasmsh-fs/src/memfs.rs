@@ -54,9 +54,7 @@ impl MemoryFs {
         for part in &parts[..parts.len().saturating_sub(1)] {
             current.push('/');
             current.push_str(part);
-            self.nodes
-                .entry(current.clone())
-                .or_insert(FsNode::Dir);
+            self.nodes.entry(current.clone()).or_insert(FsNode::Dir);
         }
     }
 }
@@ -324,10 +322,7 @@ mod tests {
     #[test]
     fn not_found_errors() {
         let fs = MemoryFs::new();
-        assert!(matches!(
-            fs.stat("/nope"),
-            Err(FsError::NotFound(_))
-        ));
+        assert!(matches!(fs.stat("/nope"), Err(FsError::NotFound(_))));
     }
 
     #[test]

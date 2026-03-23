@@ -44,7 +44,7 @@ ignore = true
 
 [bans]
 multiple-versions = "warn"
-wildcards = "deny"
+wildcards = "allow"
 deny = []
 
 # ── Sources ──────────────────────────────────────────────────

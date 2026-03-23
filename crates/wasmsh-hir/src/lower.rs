@@ -7,7 +7,11 @@ use crate::*;
 /// Lower an AST `Program` into an HIR `HirProgram`.
 pub fn lower(program: &ast::Program) -> HirProgram {
     HirProgram {
-        items: program.commands.iter().map(lower_complete_command).collect(),
+        items: program
+            .commands
+            .iter()
+            .map(lower_complete_command)
+            .collect(),
     }
 }
 

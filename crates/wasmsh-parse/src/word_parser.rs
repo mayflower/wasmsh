@@ -226,8 +226,7 @@ fn parse_dollar(text: &str, pos: &mut usize) -> Option<WordPart> {
         }
         b if b.is_ascii_alphabetic() || b == b'_' => {
             let start = *pos;
-            while *pos < bytes.len()
-                && (bytes[*pos].is_ascii_alphanumeric() || bytes[*pos] == b'_')
+            while *pos < bytes.len() && (bytes[*pos].is_ascii_alphanumeric() || bytes[*pos] == b'_')
             {
                 *pos += 1;
             }
@@ -268,24 +267,59 @@ fn parse_ansi_c_quoted(text: &str, pos: &mut usize) -> String {
                     break;
                 }
                 match bytes[*pos] {
-                    b'n' => { result.push('\n'); *pos += 1; }
-                    b't' => { result.push('\t'); *pos += 1; }
-                    b'r' => { result.push('\r'); *pos += 1; }
-                    b'a' => { result.push('\x07'); *pos += 1; }
-                    b'b' => { result.push('\x08'); *pos += 1; }
-                    b'e' | b'E' => { result.push('\x1b'); *pos += 1; }
-                    b'f' => { result.push('\x0c'); *pos += 1; }
-                    b'v' => { result.push('\x0b'); *pos += 1; }
-                    b'\\' => { result.push('\\'); *pos += 1; }
-                    b'\'' => { result.push('\''); *pos += 1; }
-                    b'"' => { result.push('"'); *pos += 1; }
+                    b'n' => {
+                        result.push('\n');
+                        *pos += 1;
+                    }
+                    b't' => {
+                        result.push('\t');
+                        *pos += 1;
+                    }
+                    b'r' => {
+                        result.push('\r');
+                        *pos += 1;
+                    }
+                    b'a' => {
+                        result.push('\x07');
+                        *pos += 1;
+                    }
+                    b'b' => {
+                        result.push('\x08');
+                        *pos += 1;
+                    }
+                    b'e' | b'E' => {
+                        result.push('\x1b');
+                        *pos += 1;
+                    }
+                    b'f' => {
+                        result.push('\x0c');
+                        *pos += 1;
+                    }
+                    b'v' => {
+                        result.push('\x0b');
+                        *pos += 1;
+                    }
+                    b'\\' => {
+                        result.push('\\');
+                        *pos += 1;
+                    }
+                    b'\'' => {
+                        result.push('\'');
+                        *pos += 1;
+                    }
+                    b'"' => {
+                        result.push('"');
+                        *pos += 1;
+                    }
                     b'0' => {
                         // Octal: \0NNN (up to 3 octal digits)
                         *pos += 1;
                         let mut val: u8 = 0;
                         let mut count = 0;
-                        while *pos < bytes.len() && count < 3
-                            && bytes[*pos] >= b'0' && bytes[*pos] <= b'7'
+                        while *pos < bytes.len()
+                            && count < 3
+                            && bytes[*pos] >= b'0'
+                            && bytes[*pos] <= b'7'
                         {
                             val = val * 8 + (bytes[*pos] - b'0');
                             *pos += 1;
@@ -369,10 +403,7 @@ mod tests {
 
     #[test]
     fn single_quoted() {
-        assert_eq!(
-            parse_word_parts("'hello world'"),
-            vec![sq("hello world")]
-        );
+        assert_eq!(parse_word_parts("'hello world'"), vec![sq("hello world")]);
     }
 
     #[test]
@@ -409,26 +440,17 @@ mod tests {
 
     #[test]
     fn brace_param_with_default() {
-        assert_eq!(
-            parse_word_parts("${FOO:-bar}"),
-            vec![param("FOO:-bar")]
-        );
+        assert_eq!(parse_word_parts("${FOO:-bar}"), vec![param("FOO:-bar")]);
     }
 
     #[test]
     fn command_substitution() {
-        assert_eq!(
-            parse_word_parts("$(ls -la)"),
-            vec![cmd_subst("ls -la")]
-        );
+        assert_eq!(parse_word_parts("$(ls -la)"), vec![cmd_subst("ls -la")]);
     }
 
     #[test]
     fn arithmetic_expansion() {
-        assert_eq!(
-            parse_word_parts("$((1+2))"),
-            vec![arith("1+2")]
-        );
+        assert_eq!(parse_word_parts("$((1+2))"), vec![arith("1+2")]);
     }
 
     #[test]
@@ -449,10 +471,7 @@ mod tests {
 
     #[test]
     fn backslash_escape() {
-        assert_eq!(
-            parse_word_parts("hello\\ world"),
-            vec![lit("hello world")]
-        );
+        assert_eq!(parse_word_parts("hello\\ world"), vec![lit("hello world")]);
     }
 
     #[test]
@@ -488,10 +507,7 @@ mod tests {
     #[test]
     fn assignment_like_word() {
         // FOO=bar is just a literal word at the word-parser level
-        assert_eq!(
-            parse_word_parts("FOO=bar"),
-            vec![lit("FOO=bar")]
-        );
+        assert_eq!(parse_word_parts("FOO=bar"), vec![lit("FOO=bar")]);
     }
 
     // ---- ANSI-C quoting ----
@@ -506,43 +522,28 @@ mod tests {
 
     #[test]
     fn ansi_c_quote_tab() {
-        assert_eq!(
-            parse_word_parts("$'a\\tb'"),
-            vec![lit("a\tb")]
-        );
+        assert_eq!(parse_word_parts("$'a\\tb'"), vec![lit("a\tb")]);
     }
 
     #[test]
     fn ansi_c_quote_backslash() {
-        assert_eq!(
-            parse_word_parts("$'a\\\\b'"),
-            vec![lit("a\\b")]
-        );
+        assert_eq!(parse_word_parts("$'a\\\\b'"), vec![lit("a\\b")]);
     }
 
     #[test]
     fn ansi_c_quote_hex() {
-        assert_eq!(
-            parse_word_parts("$'\\x41'"),
-            vec![lit("A")]
-        );
+        assert_eq!(parse_word_parts("$'\\x41'"), vec![lit("A")]);
     }
 
     #[test]
     fn ansi_c_quote_octal() {
         // \0101 = 'A' (65 in octal is 101)
-        assert_eq!(
-            parse_word_parts("$'\\0101'"),
-            vec![lit("A")]
-        );
+        assert_eq!(parse_word_parts("$'\\0101'"), vec![lit("A")]);
     }
 
     #[test]
     fn ansi_c_quote_escape() {
-        assert_eq!(
-            parse_word_parts("$'\\e'"),
-            vec![lit("\x1b")]
-        );
+        assert_eq!(parse_word_parts("$'\\e'"), vec![lit("\x1b")]);
     }
 
     #[test]

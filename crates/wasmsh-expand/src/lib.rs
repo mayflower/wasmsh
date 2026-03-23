@@ -46,9 +46,7 @@ pub fn expand_word_split(word: &Word, state: &mut ShellState) -> ExpandedFields 
         .unwrap_or_else(|| SmolStr::from(" \t\n"));
 
     if expanded.is_empty() {
-        return ExpandedFields {
-            fields: Vec::new(),
-        };
+        return ExpandedFields { fields: Vec::new() };
     }
 
     let fields: Vec<String> = if ifs.is_empty() {
@@ -87,10 +85,7 @@ fn expand_part(part: &WordPart, state: &mut ShellState, out: &mut String) {
             // ${#var} — string length
             if let Some(var_name) = name.strip_prefix('#') {
                 if !var_name.is_empty() {
-                    let len = state
-                        .get_var(var_name)
-                        .map(|v| v.len())
-                        .unwrap_or(0);
+                    let len = state.get_var(var_name).map(|v| v.len()).unwrap_or(0);
                     out.push_str(&len.to_string());
                     return;
                 }
@@ -123,7 +118,9 @@ fn expand_part(part: &WordPart, state: &mut ShellState, out: &mut String) {
                 let rest = &name[colon_pos + 1..];
                 // Check it's a numeric offset, not an operator like :-, :+, :=, :?
                 if rest.starts_with(|c: char| c.is_ascii_digit())
-                    || (rest.starts_with('-') && rest.len() > 1 && rest.as_bytes()[1].is_ascii_digit())
+                    || (rest.starts_with('-')
+                        && rest.len() > 1
+                        && rest.as_bytes()[1].is_ascii_digit())
                 {
                     if let Some(val) = state.get_var(var_name) {
                         let (offset_str, length_str) = if let Some(sep) = rest.find(':') {
@@ -175,14 +172,15 @@ fn find_param_operator(name: &str) -> Option<usize> {
             continue;
         }
         match b {
-            b':' if i + 1 < bytes.len()
-                && matches!(bytes[i + 1], b'-' | b'=' | b'+' | b'?') =>
-            {
+            b':' if i + 1 < bytes.len() && matches!(bytes[i + 1], b'-' | b'=' | b'+' | b'?') => {
                 return Some(i);
             }
             b'-' | b'=' | b'+' | b'?' if i > 0 => {
                 // Simple operators without colon
-                if !bytes[..i].iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_') {
+                if !bytes[..i]
+                    .iter()
+                    .all(|c| c.is_ascii_alphanumeric() || *c == b'_')
+                {
                     continue;
                 }
                 return Some(i);
@@ -222,17 +220,28 @@ fn expand_operand(operand: &str, state: &mut ShellState) -> String {
                 let start = pos;
                 let mut depth: u32 = 1;
                 while pos < bytes.len() && depth > 0 {
-                    if bytes[pos] == b'{' { depth += 1; }
-                    if bytes[pos] == b'}' { depth -= 1; }
-                    if depth > 0 { pos += 1; }
+                    if bytes[pos] == b'{' {
+                        depth += 1;
+                    }
+                    if bytes[pos] == b'}' {
+                        depth -= 1;
+                    }
+                    if depth > 0 {
+                        pos += 1;
+                    }
                 }
                 let inner = &operand[start..pos];
-                if pos < bytes.len() { pos += 1; } // skip }
-                // Recursively expand as a Parameter
+                if pos < bytes.len() {
+                    pos += 1;
+                } // skip }
+                  // Recursively expand as a Parameter
                 expand_part(&WordPart::Parameter(SmolStr::from(inner)), state, &mut out);
-            } else if pos < bytes.len() && (bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_') {
+            } else if pos < bytes.len() && (bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_')
+            {
                 let start = pos;
-                while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
+                while pos < bytes.len()
+                    && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_')
+                {
                     pos += 1;
                 }
                 let name = &operand[start..pos];
@@ -259,38 +268,30 @@ fn expand_param_op(
 ) {
     let val = state.get_var(var_name);
     match operator {
-        ":-" => {
-            match val {
-                Some(v) if !v.is_empty() => out.push_str(&v),
-                _ => out.push_str(&expand_operand(operand, state)),
+        ":-" => match val {
+            Some(v) if !v.is_empty() => out.push_str(&v),
+            _ => out.push_str(&expand_operand(operand, state)),
+        },
+        "-" => match val {
+            Some(v) => out.push_str(&v),
+            None => out.push_str(&expand_operand(operand, state)),
+        },
+        ":=" => match val {
+            Some(v) if !v.is_empty() => out.push_str(&v),
+            _ => {
+                let expanded = expand_operand(operand, state);
+                state.set_var(SmolStr::from(var_name), SmolStr::from(expanded.as_str()));
+                out.push_str(&expanded);
             }
-        }
-        "-" => {
-            match val {
-                Some(v) => out.push_str(&v),
-                None => out.push_str(&expand_operand(operand, state)),
+        },
+        "=" => match val {
+            Some(v) => out.push_str(&v),
+            None => {
+                let expanded = expand_operand(operand, state);
+                state.set_var(SmolStr::from(var_name), SmolStr::from(expanded.as_str()));
+                out.push_str(&expanded);
             }
-        }
-        ":=" => {
-            match val {
-                Some(v) if !v.is_empty() => out.push_str(&v),
-                _ => {
-                    let expanded = expand_operand(operand, state);
-                    state.set_var(SmolStr::from(var_name), SmolStr::from(expanded.as_str()));
-                    out.push_str(&expanded);
-                }
-            }
-        }
-        "=" => {
-            match val {
-                Some(v) => out.push_str(&v),
-                None => {
-                    let expanded = expand_operand(operand, state);
-                    state.set_var(SmolStr::from(var_name), SmolStr::from(expanded.as_str()));
-                    out.push_str(&expanded);
-                }
-            }
-        }
+        },
         ":?" => {
             // Error if unset or empty
             match val {
@@ -415,7 +416,11 @@ fn strip_suffix_glob<'a>(val: &'a str, pattern: &str, greedy: bool) -> Option<&'
     } else if let Some(suffix) = pattern.strip_prefix('*') {
         // *SUFFIX pattern — find suffix
         if val.ends_with(suffix) {
-            Some(if greedy { "" } else { &val[..val.len() - suffix.len()] })
+            Some(if greedy {
+                ""
+            } else {
+                &val[..val.len() - suffix.len()]
+            })
         } else {
             None
         }
@@ -546,7 +551,9 @@ fn try_brace_range(inner: &str) -> Option<Vec<String>> {
     let end: i64 = parts[1].parse().ok()?;
     let step: i64 = if parts.len() == 3 {
         let s: i64 = parts[2].parse().ok()?;
-        if s == 0 { return None; }
+        if s == 0 {
+            return None;
+        }
         s
     } else if start <= end {
         1
@@ -621,14 +628,28 @@ fn split_brace_items(inner: &str) -> Option<Vec<String>> {
     Some(items)
 }
 
-fn add(a: i64, b: i64) -> i64 { a + b }
-fn sub(a: i64, b: i64) -> i64 { a - b }
-fn mul(a: i64, b: i64) -> i64 { a * b }
+fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+fn sub(a: i64, b: i64) -> i64 {
+    a - b
+}
+fn mul(a: i64, b: i64) -> i64 {
+    a * b
+}
 fn div(a: i64, b: i64) -> i64 {
-    if b == 0 { 0 } else { a / b }
+    if b == 0 {
+        0
+    } else {
+        a / b
+    }
 }
 fn rem(a: i64, b: i64) -> i64 {
-    if b == 0 { 0 } else { a % b }
+    if b == 0 {
+        0
+    } else {
+        a % b
+    }
 }
 
 #[cfg(test)]
@@ -875,26 +896,17 @@ mod tests {
 
     #[test]
     fn brace_with_prefix_suffix() {
-        assert_eq!(
-            expand_braces("pre{x,y}suf"),
-            vec!["prexsuf", "preysuf"]
-        );
+        assert_eq!(expand_braces("pre{x,y}suf"), vec!["prexsuf", "preysuf"]);
     }
 
     #[test]
     fn brace_range_ascending() {
-        assert_eq!(
-            expand_braces("{1..5}"),
-            vec!["1", "2", "3", "4", "5"]
-        );
+        assert_eq!(expand_braces("{1..5}"), vec!["1", "2", "3", "4", "5"]);
     }
 
     #[test]
     fn brace_range_descending() {
-        assert_eq!(
-            expand_braces("{5..1}"),
-            vec!["5", "4", "3", "2", "1"]
-        );
+        assert_eq!(expand_braces("{5..1}"), vec!["5", "4", "3", "2", "1"]);
     }
 
     #[test]
@@ -909,10 +921,7 @@ mod tests {
 
     #[test]
     fn brace_nested() {
-        assert_eq!(
-            expand_braces("{a,{b,c}}"),
-            vec!["a", "b", "c"]
-        );
+        assert_eq!(expand_braces("{a,{b,c}}"), vec!["a", "b", "c"]);
     }
 
     #[test]

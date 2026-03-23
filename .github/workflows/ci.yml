@@ -121,7 +121,7 @@ jobs:
 
   # ── MSRV ───────────────────────────────────────────────────
   msrv:
-    name: MSRV (1.75)
+    name: MSRV (1.81)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -129,8 +129,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: rustup install 1.75 --profile minimal
-      - run: cargo +1.75 check --workspace
+      - run: rustup install 1.81 --profile minimal
+      - run: cargo +1.81 check --workspace
 
   # ── License and advisory audit ─────────────────────────────
   deny:

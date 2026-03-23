@@ -175,10 +175,14 @@ impl WorkerRuntime {
         };
         let hir = wasmsh_hir::lower(&ast);
         for cc in &hir.items {
-            if self.exit_requested.is_some() { break; }
+            if self.exit_requested.is_some() {
+                break;
+            }
             for and_or in &cc.list {
                 self.execute_pipeline_chain(and_or);
-                if self.exit_requested.is_some() { break; }
+                if self.exit_requested.is_some() {
+                    break;
+                }
                 if self.should_errexit(and_or) {
                     self.exit_requested = Some(self.vm.state.last_status);
                     break;
@@ -330,27 +334,38 @@ impl WorkerRuntime {
 
     /// Resolve command substitutions in a list of words by executing them.
     fn resolve_command_subst(&mut self, words: &[wasmsh_ast::Word]) -> Vec<wasmsh_ast::Word> {
-        words.iter().map(|w| {
-            let parts: Vec<wasmsh_ast::WordPart> = w.parts.iter().map(|p| {
-                match p {
-                    wasmsh_ast::WordPart::CommandSubstitution(inner) => {
-                        wasmsh_ast::WordPart::Literal(self.execute_subst(inner))
-                    }
-                    wasmsh_ast::WordPart::DoubleQuoted(inner_parts) => {
-                        let resolved: Vec<wasmsh_ast::WordPart> = inner_parts.iter().map(|ip| {
-                            if let wasmsh_ast::WordPart::CommandSubstitution(inner) = ip {
-                                wasmsh_ast::WordPart::Literal(self.execute_subst(inner))
-                            } else {
-                                ip.clone()
-                            }
-                        }).collect();
-                        wasmsh_ast::WordPart::DoubleQuoted(resolved)
-                    }
-                    other => other.clone(),
+        words
+            .iter()
+            .map(|w| {
+                let parts: Vec<wasmsh_ast::WordPart> = w
+                    .parts
+                    .iter()
+                    .map(|p| match p {
+                        wasmsh_ast::WordPart::CommandSubstitution(inner) => {
+                            wasmsh_ast::WordPart::Literal(self.execute_subst(inner))
+                        }
+                        wasmsh_ast::WordPart::DoubleQuoted(inner_parts) => {
+                            let resolved: Vec<wasmsh_ast::WordPart> = inner_parts
+                                .iter()
+                                .map(|ip| {
+                                    if let wasmsh_ast::WordPart::CommandSubstitution(inner) = ip {
+                                        wasmsh_ast::WordPart::Literal(self.execute_subst(inner))
+                                    } else {
+                                        ip.clone()
+                                    }
+                                })
+                                .collect();
+                            wasmsh_ast::WordPart::DoubleQuoted(resolved)
+                        }
+                        other => other.clone(),
+                    })
+                    .collect();
+                wasmsh_ast::Word {
+                    parts,
+                    span: w.span,
                 }
-            }).collect();
-            wasmsh_ast::Word { parts, span: w.span }
-        }).collect()
+            })
+            .collect()
     }
 
     fn execute_command(&mut self, cmd: &HirCommand) {
@@ -388,28 +403,22 @@ impl WorkerRuntime {
                         RedirectionOp::HereDoc | RedirectionOp::HereDocStrip => {
                             if let Some(body) = &redir.here_doc_body {
                                 // Expand $var references in unquoted here-doc bodies
-                                let expanded = wasmsh_expand::expand_string(
-                                    &body.content,
-                                    &mut self.vm.state,
-                                );
+                                let expanded =
+                                    wasmsh_expand::expand_string(&body.content, &mut self.vm.state);
                                 self.pending_stdin = Some(expanded.into_bytes());
                             }
                         }
                         RedirectionOp::HereString => {
-                            let content = wasmsh_expand::expand_word(
-                                &redir.target,
-                                &mut self.vm.state,
-                            );
+                            let content =
+                                wasmsh_expand::expand_word(&redir.target, &mut self.vm.state);
                             // Here-strings append a trailing newline
                             let mut data = content.into_bytes();
                             data.push(b'\n');
                             self.pending_stdin = Some(data);
                         }
                         RedirectionOp::Input => {
-                            let target = wasmsh_expand::expand_word(
-                                &redir.target,
-                                &mut self.vm.state,
-                            );
+                            let target =
+                                wasmsh_expand::expand_word(&redir.target, &mut self.vm.state);
                             let path = self.resolve_cwd_path(&target);
                             if let Ok(h) = self.fs.open(&path, OpenOptions::read()) {
                                 if let Ok(data) = self.fs.read_file(h) {
@@ -417,8 +426,7 @@ impl WorkerRuntime {
                                 }
                                 self.fs.close(h);
                             } else {
-                                let msg =
-                                    format!("wasmsh: {target}: No such file or directory\n");
+                                let msg = format!("wasmsh: {target}: No such file or directory\n");
                                 self.vm.stderr.extend_from_slice(msg.as_bytes());
                                 self.vm.state.last_status = 1;
                                 return;
@@ -444,10 +452,8 @@ impl WorkerRuntime {
                                 (arg.as_str(), None)
                             };
                             let old = self.vm.state.get_var(name);
-                            self.local_save_stack.push((
-                                smol_str::SmolStr::from(name),
-                                old,
-                            ));
+                            self.local_save_stack
+                                .push((smol_str::SmolStr::from(name), old));
                             if let Some(val) = value {
                                 self.vm.state.set_var(
                                     smol_str::SmolStr::from(name),
@@ -464,8 +470,7 @@ impl WorkerRuntime {
                         return;
                     }
                     "break" => {
-                        self.break_depth = argv.get(1)
-                            .and_then(|s| s.parse().ok()).unwrap_or(1);
+                        self.break_depth = argv.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
                         self.vm.state.last_status = 0;
                         return;
                     }
@@ -475,7 +480,8 @@ impl WorkerRuntime {
                         return;
                     }
                     "exit" => {
-                        let code = argv.get(1)
+                        let code = argv
+                            .get(1)
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(self.vm.state.last_status);
                         self.exit_requested = Some(code);
@@ -504,8 +510,12 @@ impl WorkerRuntime {
                                     let sub_events = self.execute_input_inner(&code);
                                     for e in sub_events {
                                         match e {
-                                            WorkerEvent::Stdout(d) => self.vm.stdout.extend_from_slice(&d),
-                                            WorkerEvent::Stderr(d) => self.vm.stderr.extend_from_slice(&d),
+                                            WorkerEvent::Stdout(d) => {
+                                                self.vm.stdout.extend_from_slice(&d)
+                                            }
+                                            WorkerEvent::Stderr(d) => {
+                                                self.vm.stderr.extend_from_slice(&d)
+                                            }
                                             _ => {}
                                         }
                                     }
@@ -633,32 +643,46 @@ impl WorkerRuntime {
                     }
                 }
             }
-            HirCommand::While(loop_cmd) => {
-                loop {
-                    let saved = self.errexit_suppressed;
-                    self.errexit_suppressed = true;
-                    self.execute_body(&loop_cmd.condition);
-                    self.errexit_suppressed = saved;
-                    if self.vm.state.last_status != 0 { break; }
-                    self.execute_body(&loop_cmd.body);
-                    if self.break_depth > 0 { self.break_depth -= 1; break; }
-                    if self.loop_continue { self.loop_continue = false; }
-                    if self.exit_requested.is_some() { break; }
+            HirCommand::While(loop_cmd) => loop {
+                let saved = self.errexit_suppressed;
+                self.errexit_suppressed = true;
+                self.execute_body(&loop_cmd.condition);
+                self.errexit_suppressed = saved;
+                if self.vm.state.last_status != 0 {
+                    break;
                 }
-            }
-            HirCommand::Until(loop_cmd) => {
-                loop {
-                    let saved = self.errexit_suppressed;
-                    self.errexit_suppressed = true;
-                    self.execute_body(&loop_cmd.condition);
-                    self.errexit_suppressed = saved;
-                    if self.vm.state.last_status == 0 { break; }
-                    self.execute_body(&loop_cmd.body);
-                    if self.break_depth > 0 { self.break_depth -= 1; break; }
-                    if self.loop_continue { self.loop_continue = false; }
-                    if self.exit_requested.is_some() { break; }
+                self.execute_body(&loop_cmd.body);
+                if self.break_depth > 0 {
+                    self.break_depth -= 1;
+                    break;
                 }
-            }
+                if self.loop_continue {
+                    self.loop_continue = false;
+                }
+                if self.exit_requested.is_some() {
+                    break;
+                }
+            },
+            HirCommand::Until(loop_cmd) => loop {
+                let saved = self.errexit_suppressed;
+                self.errexit_suppressed = true;
+                self.execute_body(&loop_cmd.condition);
+                self.errexit_suppressed = saved;
+                if self.vm.state.last_status == 0 {
+                    break;
+                }
+                self.execute_body(&loop_cmd.body);
+                if self.break_depth > 0 {
+                    self.break_depth -= 1;
+                    break;
+                }
+                if self.loop_continue {
+                    self.loop_continue = false;
+                }
+                if self.exit_requested.is_some() {
+                    break;
+                }
+            },
             HirCommand::For(for_cmd) => {
                 // Expand words and apply field splitting (so `$VAR` with spaces becomes multiple items)
                 let words: Vec<String> = for_cmd
@@ -674,14 +698,27 @@ impl WorkerRuntime {
                         result
                     })
                     .unwrap_or_else(|| {
-                        self.vm.state.positional.iter().map(|s| s.to_string()).collect()
+                        self.vm
+                            .state
+                            .positional
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect()
                     });
                 for word in words {
                     self.vm.state.set_var(for_cmd.var_name.clone(), word.into());
                     self.execute_body(&for_cmd.body);
-                    if self.break_depth > 0 { self.break_depth -= 1; break; }
-                    if self.loop_continue { self.loop_continue = false; continue; }
-                    if self.exit_requested.is_some() { break; }
+                    if self.break_depth > 0 {
+                        self.break_depth -= 1;
+                        break;
+                    }
+                    if self.loop_continue {
+                        self.loop_continue = false;
+                        continue;
+                    }
+                    if self.exit_requested.is_some() {
+                        break;
+                    }
                 }
             }
             HirCommand::Group(block) => {
@@ -712,7 +749,8 @@ impl WorkerRuntime {
                 }
             }
             HirCommand::FunctionDef(fd) => {
-                self.functions.insert(fd.name.to_string(), (*fd.body).clone());
+                self.functions
+                    .insert(fd.name.to_string(), (*fd.body).clone());
                 self.vm.state.last_status = 0;
             }
             HirCommand::RedirectOnly(ro) => {
@@ -747,9 +785,13 @@ impl WorkerRuntime {
 
     fn execute_body(&mut self, body: &[HirCompleteCommand]) {
         for cc in body {
-            if self.should_stop_execution() { break; }
+            if self.should_stop_execution() {
+                break;
+            }
             for and_or in &cc.list {
-                if self.should_stop_execution() { break; }
+                if self.should_stop_execution() {
+                    break;
+                }
                 self.execute_pipeline_chain(and_or);
                 if self.should_errexit(and_or) {
                     self.exit_requested = Some(self.vm.state.last_status);
@@ -1199,15 +1241,14 @@ mod tests {
             path: "/test.txt".into(),
             data: b"content".to_vec(),
         });
-        assert!(write_events.iter().any(|e| matches!(e, WorkerEvent::FsChanged(_))));
+        assert!(write_events
+            .iter()
+            .any(|e| matches!(e, WorkerEvent::FsChanged(_))));
 
         let read_events = rt.handle_command(HostCommand::ReadFile {
             path: "/test.txt".into(),
         });
-        assert_eq!(
-            read_events,
-            vec![WorkerEvent::Stdout(b"content".to_vec())]
-        );
+        assert_eq!(read_events, vec![WorkerEvent::Stdout(b"content".to_vec())]);
     }
 
     #[test]
@@ -1222,9 +1263,7 @@ mod tests {
             path: "/b.txt".into(),
             data: vec![],
         });
-        let events = rt.handle_command(HostCommand::ListDir {
-            path: "/".into(),
-        });
+        let events = rt.handle_command(HostCommand::ListDir { path: "/".into() });
         let stdout = get_stdout(&events);
         assert!(stdout.contains("a.txt"));
         assert!(stdout.contains("b.txt"));
@@ -1414,10 +1453,16 @@ mod tests {
         // Bash behavior: functions share parent scope (no isolation by default)
         let mut rt = WorkerRuntime::new();
         rt.handle_command(HostCommand::Init { step_budget: 0 });
-        rt.handle_command(HostCommand::Run { input: "X=outer".into() });
-        rt.handle_command(HostCommand::Run { input: "f() { X=inner; }".into() });
+        rt.handle_command(HostCommand::Run {
+            input: "X=outer".into(),
+        });
+        rt.handle_command(HostCommand::Run {
+            input: "f() { X=inner; }".into(),
+        });
         rt.handle_command(HostCommand::Run { input: "f".into() });
-        let events = rt.handle_command(HostCommand::Run { input: "echo $X".into() });
+        let events = rt.handle_command(HostCommand::Run {
+            input: "echo $X".into(),
+        });
         assert_eq!(get_stdout(&events), "inner\n");
     }
 
@@ -1426,9 +1471,15 @@ mod tests {
         // `local` creates a variable that is restored after function returns
         let mut rt = WorkerRuntime::new();
         rt.handle_command(HostCommand::Init { step_budget: 0 });
-        rt.handle_command(HostCommand::Run { input: "X=outer".into() });
-        rt.handle_command(HostCommand::Run { input: "f() { local X=inner; echo $X; }".into() });
-        let events = rt.handle_command(HostCommand::Run { input: "f; echo $X".into() });
+        rt.handle_command(HostCommand::Run {
+            input: "X=outer".into(),
+        });
+        rt.handle_command(HostCommand::Run {
+            input: "f() { local X=inner; echo $X; }".into(),
+        });
+        let events = rt.handle_command(HostCommand::Run {
+            input: "f; echo $X".into(),
+        });
         assert_eq!(get_stdout(&events), "inner\nouter\n");
     }
 
@@ -1488,9 +1539,15 @@ mod tests {
     fn glob_star_matches_files() {
         let mut rt = WorkerRuntime::new();
         rt.handle_command(HostCommand::Init { step_budget: 0 });
-        rt.handle_command(HostCommand::Run { input: "touch /a.txt".into() });
-        rt.handle_command(HostCommand::Run { input: "touch /b.txt".into() });
-        rt.handle_command(HostCommand::Run { input: "touch /c.log".into() });
+        rt.handle_command(HostCommand::Run {
+            input: "touch /a.txt".into(),
+        });
+        rt.handle_command(HostCommand::Run {
+            input: "touch /b.txt".into(),
+        });
+        rt.handle_command(HostCommand::Run {
+            input: "touch /c.log".into(),
+        });
         let events = rt.handle_command(HostCommand::Run {
             input: "echo /*.txt".into(),
         });
@@ -1510,9 +1567,15 @@ mod tests {
     fn glob_question_mark() {
         let mut rt = WorkerRuntime::new();
         rt.handle_command(HostCommand::Init { step_budget: 0 });
-        rt.handle_command(HostCommand::Run { input: "touch /ab".into() });
-        rt.handle_command(HostCommand::Run { input: "touch /ac".into() });
-        rt.handle_command(HostCommand::Run { input: "touch /abc".into() });
+        rt.handle_command(HostCommand::Run {
+            input: "touch /ab".into(),
+        });
+        rt.handle_command(HostCommand::Run {
+            input: "touch /ac".into(),
+        });
+        rt.handle_command(HostCommand::Run {
+            input: "touch /abc".into(),
+        });
         let events = rt.handle_command(HostCommand::Run {
             input: "echo /a?".into(),
         });

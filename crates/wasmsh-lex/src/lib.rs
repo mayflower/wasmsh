@@ -18,7 +18,9 @@ pub enum LexerMode {
 pub enum TokenKind {
     /// A word token. `is_reserved_candidate` is true when the text matches a
     /// shell reserved word (only meaningful when unquoted).
-    Word { is_reserved_candidate: bool },
+    Word {
+        is_reserved_candidate: bool,
+    },
     Semi,
     Newline,
     Pipe,
@@ -508,16 +510,7 @@ impl<'src> Lexer<'src> {
 fn is_word_break(b: u8) -> bool {
     matches!(
         b,
-        b' ' | b'\t'
-            | b'\n'
-            | b';'
-            | b'&'
-            | b'|'
-            | b'<'
-            | b'>'
-            | b'('
-            | b')'
-            | b'#'
+        b' ' | b'\t' | b'\n' | b';' | b'&' | b'|' | b'<' | b'>' | b'(' | b')' | b'#'
     )
 }
 
@@ -531,7 +524,11 @@ mod tests {
     use super::*;
 
     fn kinds(source: &str) -> Vec<TokenKind> {
-        tokenize(source).unwrap().into_iter().map(|t| t.kind).collect()
+        tokenize(source)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.kind)
+            .collect()
     }
 
     fn tokens_with_text(source: &str) -> Vec<(TokenKind, String)> {
@@ -612,7 +609,10 @@ mod tests {
 
     #[test]
     fn reserved_words() {
-        assert_eq!(kinds("if then fi"), vec![word(true), word(true), word(true)]);
+        assert_eq!(
+            kinds("if then fi"),
+            vec![word(true), word(true), word(true)]
+        );
     }
 
     #[test]
@@ -742,10 +742,7 @@ mod tests {
 
     #[test]
     fn here_string_token() {
-        assert_eq!(
-            kinds("<<<"),
-            vec![TokenKind::LessLessLess]
-        );
+        assert_eq!(kinds("<<<"), vec![TokenKind::LessLessLess]);
     }
 
     #[test]
@@ -760,10 +757,7 @@ mod tests {
 
     #[test]
     fn amp_greater_token() {
-        assert_eq!(
-            kinds("&>"),
-            vec![TokenKind::AmpGreater]
-        );
+        assert_eq!(kinds("&>"), vec![TokenKind::AmpGreater]);
     }
 
     #[test]

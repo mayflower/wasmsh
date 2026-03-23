@@ -21,11 +21,7 @@ pub fn run_oracle(script: &str, shell: &str) -> Option<OracleResult> {
         return None;
     }
 
-    let output = Command::new(shell)
-        .arg("-c")
-        .arg(script)
-        .output()
-        .ok()?;
+    let output = Command::new(shell).arg("-c").arg(script).output().ok()?;
 
     Some(OracleResult {
         shell: shell.to_string(),
