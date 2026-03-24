@@ -1,0 +1,3 @@
+# No Python dependencies required.
+# The Python example uses Node.js as the wasm runtime via subprocess.
+# Node.js must be installed and the wasm-pack nodejs target must be built.

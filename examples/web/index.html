@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>wasmsh Shell</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: monospace; background: #1e1e1e; color: #d4d4d4; padding: 20px; }
+    h1 { color: #569cd6; margin-bottom: 10px; font-size: 18px; }
+    #output {
+      background: #0d0d0d; border: 1px solid #333; border-radius: 4px;
+      padding: 12px; height: 400px; overflow-y: auto; white-space: pre-wrap;
+      font-size: 14px; line-height: 1.4; margin-bottom: 10px;
+    }
+    .stdout { color: #d4d4d4; }
+    .stderr { color: #f44747; }
+    .cmd { color: #569cd6; }
+    .info { color: #608b4e; }
+    #input-line { display: flex; gap: 8px; }
+    #prompt { color: #6a9955; font-size: 14px; line-height: 30px; }
+    #cmd {
+      flex: 1; background: #0d0d0d; border: 1px solid #333; border-radius: 4px;
+      color: #d4d4d4; font-family: monospace; font-size: 14px; padding: 4px 8px;
+      outline: none;
+    }
+    #cmd:focus { border-color: #569cd6; }
+  </style>
+</head>
+<body>
+  <h1>wasmsh - Browser Shell</h1>
+  <div id="output"></div>
+  <div id="input-line">
+    <span id="prompt">$</span>
+    <input id="cmd" type="text" autofocus placeholder="Type a shell command...">
+  </div>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>

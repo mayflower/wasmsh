@@ -1,0 +1,17 @@
+{
+  "name": "wasmsh-typescript-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "npx tsx example.ts",
+    "build-wasm": "cd ../.. && wasm-pack build crates/wasmsh-browser --target nodejs --release --out-dir ../../pkg/nodejs"
+  },
+  "dependencies": {
+    "wasmsh-browser": "file:../../pkg/nodejs"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

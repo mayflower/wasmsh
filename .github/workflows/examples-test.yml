@@ -1,0 +1,73 @@
+name: Examples
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test-typescript:
+    name: TypeScript example
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build wasmsh nodejs target
+        run: wasm-pack build crates/wasmsh-browser --target nodejs --release --out-dir ../../pkg/nodejs
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install TypeScript dependencies
+        working-directory: examples/typescript
+        run: npm install
+
+      - name: Run TypeScript example
+        working-directory: examples/typescript
+        run: npx tsx example.ts
+
+  test-python:
+    name: Python example
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build wasmsh nodejs target
+        run: wasm-pack build crates/wasmsh-browser --target nodejs --release --out-dir ../../pkg/nodejs
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run Python example
+        working-directory: examples/python
+        run: python example.py

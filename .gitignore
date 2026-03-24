@@ -7,3 +7,5 @@ proptest-regressions/
 /.claude/
 CLAUDE.md
 fuzz/target/
+examples/typescript/node_modules/
+pkg/
