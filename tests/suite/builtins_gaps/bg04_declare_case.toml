@@ -1,0 +1,17 @@
+[test]
+name = "declare-uppercase-lowercase"
+tags = ["builtins", "P1"]
+tier = "P1"
+requires = ["declare"]
+
+[input]
+script = """
+declare -u upper=hello
+declare -l lower=WORLD
+echo $upper
+echo $lower
+"""
+
+[expect]
+status = 0
+stdout = "HELLO\nworld\n"

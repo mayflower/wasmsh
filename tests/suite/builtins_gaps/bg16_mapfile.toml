@@ -1,0 +1,16 @@
+[test]
+name = "mapfile-basic"
+tags = ["builtins", "P2"]
+tier = "P2"
+requires = ["mapfile", "indexed-array"]
+
+[input]
+script = """
+printf "line1\nline2\nline3\n" | mapfile -t lines
+echo ${#lines[@]}
+echo ${lines[1]}
+"""
+
+[expect]
+status = 0
+stdout = "3\nline2\n"

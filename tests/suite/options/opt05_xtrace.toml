@@ -1,0 +1,18 @@
+[test]
+name = "set-xtrace"
+tags = ["options", "P1"]
+tier = "P1"
+requires = ["xtrace"]
+
+[input]
+script = """
+set -x
+echo hello
+set +x
+echo done
+"""
+
+[expect]
+status = 0
+stdout = "hello\ndone\n"
+stderr_contains = ["echo hello"]

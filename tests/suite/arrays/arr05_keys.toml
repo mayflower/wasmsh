@@ -1,0 +1,15 @@
+[test]
+name = "indexed-array-keys"
+tags = ["arrays", "P0"]
+tier = "P0"
+requires = ["indexed-array"]
+
+[input]
+script = """
+arr=(a b c)
+echo "${!arr[@]}"
+"""
+
+[expect]
+status = 0
+stdout = "0 1 2\n"

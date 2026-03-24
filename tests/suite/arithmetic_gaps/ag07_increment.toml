@@ -1,0 +1,18 @@
+[test]
+name = "arithmetic-pre-post-increment"
+tags = ["arithmetic", "P1"]
+tier = "P1"
+requires = ["arithmetic-assignment"]
+
+[input]
+script = """
+x=5
+echo $(( x++ ))
+echo $x
+echo $(( ++x ))
+echo $x
+"""
+
+[expect]
+status = 0
+stdout = "5\n6\n7\n7\n"

@@ -1,0 +1,19 @@
+[test]
+name = "case-continue-testing"
+tags = ["case-fallthrough", "P2"]
+tier = "P2"
+requires = ["case-continue-testing"]
+
+[input]
+script = """
+X=abc
+case $X in
+  a*) echo starts-a ;;&
+  *b*) echo contains-b ;;&
+  *c) echo ends-c ;;
+esac
+"""
+
+[expect]
+status = 0
+stdout = "starts-a\ncontains-b\nends-c\n"

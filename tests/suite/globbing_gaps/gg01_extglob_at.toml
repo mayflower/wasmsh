@@ -1,0 +1,20 @@
+[test]
+name = "extglob-at-pattern"
+tags = ["globbing", "P1"]
+tier = "P1"
+requires = ["extglob"]
+
+[setup.files]
+"/tmp/file.jpg" = ""
+"/tmp/file.png" = ""
+"/tmp/file.txt" = ""
+
+[input]
+script = """
+cd /tmp
+ls *.@(jpg|png) | sort
+"""
+
+[expect]
+status = 0
+stdout = "file.jpg\nfile.png\n"

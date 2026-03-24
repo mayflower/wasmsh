@@ -1,0 +1,17 @@
+[test]
+name = "mktemp-basic"
+tags = ["utilities", "P1"]
+tier = "P1"
+requires = ["mktemp"]
+
+[input]
+script = """
+F=$(mktemp)
+echo "created: $F"
+test -f "$F" && echo exists
+rm "$F"
+"""
+
+[expect]
+status = 0
+stdout_contains = ["created: /tmp/", "exists"]

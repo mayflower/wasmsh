@@ -1,0 +1,17 @@
+[test]
+name = "double-bracket-regex-match"
+tags = ["double-bracket", "P0"]
+tier = "P0"
+requires = ["double-bracket", "bash-rematch"]
+
+[input]
+script = """
+S="abc123def"
+if [[ $S =~ ([0-9]+) ]]; then
+  echo "matched: ${BASH_REMATCH[1]}"
+fi
+"""
+
+[expect]
+status = 0
+stdout = "matched: 123\n"

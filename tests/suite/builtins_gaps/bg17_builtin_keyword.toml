@@ -1,0 +1,17 @@
+[test]
+name = "builtin-keyword"
+tags = ["builtins", "P2"]
+tier = "P2"
+requires = ["builtin-keyword"]
+
+[input]
+script = """
+echo() {
+  builtin echo "wrapped: $@"
+}
+echo hello
+"""
+
+[expect]
+status = 0
+stdout = "wrapped: hello\n"

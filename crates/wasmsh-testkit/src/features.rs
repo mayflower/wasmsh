@@ -123,6 +123,78 @@ pub fn implemented_features() -> HashSet<&'static str> {
     f.insert("trap-exit");
     f.insert("parameter-strip");
 
+    // New syntax features (gap implementation)
+    f.insert("double-bracket");
+    f.insert("bash-rematch");
+    f.insert("c-style-for");
+    f.insert("arith-command");
+    f.insert("pipe-ampersand");
+    f.insert("case-fallthrough");
+    f.insert("case-continue-testing");
+    f.insert("select");
+    f.insert("locale-quoting");
+    f.insert("dynamic-fd");
+    f.insert("move-fd");
+
+    // Arrays
+    f.insert("indexed-array");
+    f.insert("associative-array");
+
+    // Variable features
+    f.insert("random-variable");
+    f.insert("lineno-variable");
+    f.insert("seconds-variable");
+    f.insert("pipestatus");
+    f.insert("funcname-variable");
+    f.insert("bash-source-variable");
+    f.insert("nameref");
+
+    // Expansion features
+    f.insert("case-modification");
+    f.insert("anchored-substitution");
+    f.insert("substitution-glob");
+    f.insert("indirect-expansion");
+    f.insert("prefix-expansion");
+    f.insert("transformation-operators");
+
+    // Arithmetic features
+    f.insert("arithmetic-comparison");
+    f.insert("arithmetic-parentheses");
+    f.insert("arithmetic-assignment");
+    f.insert("arithmetic-bases");
+
+    // Builtin features
+    f.insert("declare");
+    f.insert("alias");
+    f.insert("let");
+    f.insert("printf-format");
+    f.insert("read-flags");
+    f.insert("shopt");
+    f.insert("mapfile");
+    f.insert("builtin-keyword");
+    f.insert("source-path");
+
+    // Shell option features
+    f.insert("pipefail");
+    f.insert("nounset");
+    f.insert("xtrace");
+    f.insert("noglob");
+    f.insert("allexport");
+
+    // Glob features
+    f.insert("extglob");
+    f.insert("globstar");
+
+    // New utilities
+    f.insert("mktemp");
+    f.insert("yes");
+    f.insert("paste");
+    f.insert("md5sum");
+    f.insert("sha256sum");
+    f.insert("base64");
+    f.insert("rev");
+    f.insert("column");
+
     f
 }
 

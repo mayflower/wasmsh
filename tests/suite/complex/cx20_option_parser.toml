@@ -1,0 +1,30 @@
+[test]
+name = "option-dispatch-with-case"
+tags = ["complex", "case", "function", "P1"]
+tier = "P1"
+requires = ["function", "case", "echo", "local"]
+
+[input]
+script = """
+dispatch() {
+    local cmd="$1"
+    case "$cmd" in
+        start) echo "starting service" ;;
+        stop)  echo "stopping service" ;;
+        restart)
+            echo "stopping service"
+            echo "starting service"
+            ;;
+        status) echo "service is running" ;;
+        *) echo "unknown: $cmd" ;;
+    esac
+}
+dispatch start
+dispatch status
+dispatch restart
+dispatch unknown_cmd
+"""
+
+[expect]
+status = 0
+stdout = "starting service\nservice is running\nstopping service\nstarting service\nunknown: unknown_cmd\n"

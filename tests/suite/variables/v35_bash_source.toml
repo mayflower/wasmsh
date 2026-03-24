@@ -1,0 +1,17 @@
+[test]
+name = "bash-source-variable"
+tags = ["variables", "P2"]
+tier = "P2"
+requires = ["bash-source-variable"]
+
+[input]
+script = """
+show_source() {
+  echo "${BASH_SOURCE[0]}"
+}
+show_source
+"""
+
+[expect]
+status = 0
+stdout_contains = [""]

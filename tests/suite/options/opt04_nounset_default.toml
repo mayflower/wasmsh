@@ -1,0 +1,15 @@
+[test]
+name = "set-nounset-with-default"
+tags = ["options", "P0"]
+tier = "P0"
+requires = ["nounset"]
+
+[input]
+script = """
+set -u
+echo ${UNDEFINED_VAR:-fallback}
+"""
+
+[expect]
+status = 0
+stdout = "fallback\n"

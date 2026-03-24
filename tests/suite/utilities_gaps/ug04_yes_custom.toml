@@ -1,0 +1,14 @@
+[test]
+name = "yes-custom-string"
+tags = ["utilities", "P2"]
+tier = "P2"
+requires = ["yes"]
+
+[input]
+script = """
+yes no | head -2
+"""
+
+[expect]
+status = 0
+stdout = "no\nno\n"

@@ -1,0 +1,16 @@
+[test]
+name = "set-pipefail"
+tags = ["options", "P0"]
+tier = "P0"
+requires = ["pipefail"]
+
+[input]
+script = """
+set -o pipefail
+false | true
+echo $?
+"""
+
+[expect]
+status = 0
+stdout = "1\n"

@@ -1,0 +1,15 @@
+[test]
+name = "pipestatus-variable"
+tags = ["variables", "P2"]
+tier = "P2"
+requires = ["pipestatus"]
+
+[input]
+script = """
+true | false | true
+echo ${PIPESTATUS[0]} ${PIPESTATUS[1]} ${PIPESTATUS[2]}
+"""
+
+[expect]
+status = 0
+stdout = "0 1 0\n"

@@ -1,0 +1,14 @@
+[test]
+name = "column-utility"
+tags = ["utilities", "P3"]
+tier = "P3"
+requires = ["column"]
+
+[input]
+script = """
+printf "name:age:city\nalice:30:berlin\nbob:25:munich\n" | column -t -s ':'
+"""
+
+[expect]
+status = 0
+stdout_contains = ["alice", "berlin"]

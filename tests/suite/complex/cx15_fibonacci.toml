@@ -1,0 +1,19 @@
+[test]
+name = "fibonacci-sequence"
+tags = ["complex", "arithmetic", "P0"]
+tier = "P0"
+requires = ["c-style-for", "arith-command", "arithmetic-assignment", "echo"]
+
+[input]
+script = """
+a=0; b=1
+for (( i=0; i<10; i++ )); do
+    echo -n "$a "
+    (( tmp = a + b, a = b, b = tmp ))
+done
+echo
+"""
+
+[expect]
+status = 0
+stdout = "0 1 1 2 3 5 8 13 21 34 \n"

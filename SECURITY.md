@@ -45,6 +45,9 @@ sandbox:
 | Pipe buffer total size | 64 MiB | `wasmsh-vm` |
 | Glob expansion results | 10,000 entries | `wasmsh-browser` |
 | VFS file size | 64 MiB per file | `wasmsh-fs` |
+| `yes` utility output | 65,536 lines | `wasmsh-utils` |
+| Regex backtracking (`=~`) | bounded by input length | `wasmsh-browser` |
+| Extended glob recursion | bounded by pattern depth | `wasmsh-browser` |
 
 ## Known Limitations
 

@@ -1,0 +1,19 @@
+[test]
+name = "arithmetic-bitwise-operators"
+tags = ["arithmetic", "P0"]
+tier = "P0"
+requires = ["arithmetic-comparison"]
+
+[input]
+script = """
+echo $((0xFF & 0x0F))
+echo $((0x0F | 0xF0))
+echo $((0xFF ^ 0x0F))
+echo $((1 << 4))
+echo $((16 >> 2))
+echo $((~0))
+"""
+
+[expect]
+status = 0
+stdout = "15\n255\n240\n16\n4\n-1\n"

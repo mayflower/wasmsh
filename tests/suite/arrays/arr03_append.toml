@@ -1,0 +1,17 @@
+[test]
+name = "indexed-array-append"
+tags = ["arrays", "P0"]
+tier = "P0"
+requires = ["indexed-array"]
+
+[input]
+script = """
+arr=(one two)
+arr+=(three four)
+echo ${#arr[@]}
+echo ${arr[3]}
+"""
+
+[expect]
+status = 0
+stdout = "4\nfour\n"

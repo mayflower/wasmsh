@@ -1,0 +1,14 @@
+[test]
+name = "move-fd-operator"
+tags = ["redirections", "P3"]
+tier = "P3"
+requires = ["move-fd"]
+
+[input]
+script = """
+echo "test" 3>&1 1>&3-
+"""
+
+[expect]
+status = 0
+stdout = "test\n"

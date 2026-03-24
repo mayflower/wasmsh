@@ -1,0 +1,15 @@
+[test]
+name = "set-nounset"
+tags = ["options", "P0"]
+tier = "P0"
+requires = ["nounset"]
+
+[input]
+script = """
+set -u
+echo ${UNDEFINED_VAR} 2>&1
+"""
+
+[expect]
+status = 1
+stderr_contains = ["unbound variable"]

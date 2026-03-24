@@ -36,11 +36,11 @@ let events = rt.handle_command(HostCommand::Run {
 
 wasmsh supports a broad subset of Bash syntax and BusyBox-style utilities:
 
-**Shell syntax**: Pipelines, and/or lists, `if/elif/else`, `while/until/for/case`, functions, subshells, command substitution `$(...)`, arithmetic `$((...))`, all parameter expansion operators, glob/brace/tilde expansion, here-docs, here-strings, redirections including `2>` and `&>`, `set -e`, `trap EXIT`, `break/continue`, `local`
+**Shell syntax**: Pipelines, and/or lists, `if/elif/else`, `while/until/for/case`, C-style `for (( ))`, functions, subshells, command substitution `$(...)`, arithmetic `$((...))`, `(( ))` standalone, `[[ ]]` conditional expressions, all parameter expansion operators, glob/brace/tilde expansion, extended globbing (`extglob`), globstar (`**`), here-docs, here-strings, redirections including `2>` and `&>`, `set -euo pipefail`, `trap EXIT`, `break/continue`, `local`, indexed and associative arrays, full arithmetic operator set
 
-**Builtins** (18): `echo`, `printf`, `test`/`[`, `read`, `cd`, `pwd`, `export`, `unset`, `readonly`, `set`, `shift`, `eval`, `source`, `trap`, `type`, `command`, `getopts`, `local`
+**Builtins** (35): `echo`, `printf`, `test`/`[`, `[[`, `read`, `cd`, `pwd`, `export`, `unset`, `readonly`, `set`, `shift`, `return`, `exit`, `eval`, `source`/`.`, `trap`, `type`, `command`, `builtin`, `getopts`, `local`, `break`, `continue`, `declare`/`typeset`, `let`, `alias`/`unalias`, `shopt`, `mapfile`/`readarray`, `:`/`true`/`false`
 
-**Utilities** (38): `cat`, `ls`, `mkdir`, `rm`, `touch`, `mv`, `cp`, `ln`, `head`, `tail`, `wc`, `grep`, `sed`, `sort`, `uniq`, `cut`, `tr`, `tee`, `xargs`, `seq`, `find`, `stat`, `basename`, `dirname`, `readlink`, `realpath`, `chmod`, `date`, `sleep`, `env`, `printenv`, `expr`, `id`, `whoami`, `uname`, `hostname`, and more
+**Utilities** (44): `cat`, `ls`, `mkdir`, `rm`, `touch`, `mv`, `cp`, `ln`, `head`, `tail`, `wc`, `grep`, `sed`, `sort`, `uniq`, `cut`, `tr`, `tee`, `paste`, `rev`, `column`, `xargs`, `seq`, `find`, `stat`, `basename`, `dirname`, `readlink`, `realpath`, `chmod`, `mktemp`, `date`, `sleep`, `env`, `printenv`, `expr`, `id`, `whoami`, `uname`, `hostname`, `yes`, `md5sum`, `sha256sum`, `base64`
 
 See [SUPPORTED.md](SUPPORTED.md) for the complete feature matrix.
 
@@ -101,10 +101,10 @@ just deny     # license/advisory check
 
 ## Testing
 
-525 tests across two layers:
+940 tests across two layers:
 
-- **288 Rust unit/integration tests** including property-based fuzzing
-- **237 TOML declarative test cases** covering shell semantics, utility behavior, and 40 real-world production script patterns (CI/CD, log analysis, ETL pipelines, deployment automation, etc.)
+- **506 Rust unit/integration tests** including property-based fuzzing
+- **434 TOML declarative test cases** covering shell semantics, utility behavior, and real-world production script patterns (CI/CD, log analysis, ETL pipelines, deployment automation, etc.)
 
 ## License
 

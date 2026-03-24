@@ -1,0 +1,17 @@
+[test]
+name = "funcname-variable"
+tags = ["variables", "P2"]
+tier = "P2"
+requires = ["funcname-variable"]
+
+[input]
+script = """
+myfunc() {
+  echo $FUNCNAME
+}
+myfunc
+"""
+
+[expect]
+status = 0
+stdout = "myfunc\n"

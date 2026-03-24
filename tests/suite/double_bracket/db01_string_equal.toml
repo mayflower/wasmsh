@@ -1,0 +1,19 @@
+[test]
+name = "double-bracket-string-equal"
+tags = ["double-bracket", "P0"]
+tier = "P0"
+requires = ["double-bracket"]
+
+[input]
+script = """
+X=hello
+if [[ $X == hello ]]; then
+  echo yes
+else
+  echo no
+fi
+"""
+
+[expect]
+status = 0
+stdout = "yes\n"

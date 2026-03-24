@@ -1,0 +1,16 @@
+[test]
+name = "declare-array"
+tags = ["builtins", "P1"]
+tier = "P1"
+requires = ["declare", "indexed-array"]
+
+[input]
+script = """
+declare -a arr=(x y z)
+echo ${arr[1]}
+echo ${#arr[@]}
+"""
+
+[expect]
+status = 0
+stdout = "y\n3\n"

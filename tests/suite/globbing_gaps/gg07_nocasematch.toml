@@ -1,0 +1,19 @@
+[test]
+name = "nocasematch"
+tags = ["globbing", "P3"]
+tier = "P3"
+requires = ["shopt", "double-bracket"]
+
+[input]
+script = """
+shopt -s nocasematch
+X=Hello
+case $X in
+  hello) echo matched ;;
+  *) echo no-match ;;
+esac
+"""
+
+[expect]
+status = 0
+stdout = "matched\n"

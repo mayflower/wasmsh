@@ -27,6 +27,7 @@ pub enum TokenKind {
     AndAnd,
     OrOr,
     Amp,
+    PipeAmp,
     Less,
     Greater,
     GreaterGreater,
@@ -37,6 +38,8 @@ pub enum TokenKind {
     AmpGreater,
     LParen,
     RParen,
+    DblLBracket,
+    DblRBracket,
     Eof,
 }
 
@@ -75,7 +78,7 @@ impl std::error::Error for LexerError {}
 
 const RESERVED_WORDS: &[&str] = &[
     "if", "then", "else", "elif", "fi", "do", "done", "case", "esac", "while", "until", "for",
-    "in", "function", "select", "time", "!", "{", "}",
+    "in", "function", "select", "time", "!", "{", "}", "[[", "]]",
 ];
 
 fn is_reserved_word(s: &str) -> bool {
@@ -380,6 +383,38 @@ impl<'src> Lexer<'src> {
         }
     }
 
+    /// Consume an extglob pattern `?(...)`, `*(...)`, `+(...)`, `@(...)`, `!(...)`.
+    /// Called when pos is at the operator char (`?`, `*`, `+`, `@`, `!`) and
+    /// the next byte is `(`.
+    fn consume_extglob(&mut self) -> Result<(), LexerError> {
+        let start = self.pos;
+        self.pos += 2; // skip operator + (
+        let mut depth: u32 = 1;
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(LexerError {
+                        message: "unterminated extglob pattern".into(),
+                        span: self.span_from(start),
+                    });
+                }
+                Some(b'(') => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                Some(b')') => {
+                    self.pos += 1;
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(());
+                    }
+                }
+                Some(b'\\') => self.consume_backslash(),
+                Some(_) => self.pos += 1,
+            }
+        }
+    }
+
     /// Read a word token, handling quotes and dollar expansions within the word.
     fn read_word(&mut self) -> Result<Token, LexerError> {
         let start = self.pos;
@@ -393,24 +428,59 @@ impl<'src> Lexer<'src> {
                 Some(b'\'') => self.consume_single_quoted()?,
                 Some(b'"') => self.consume_double_quoted()?,
                 Some(b'\\') => self.consume_backslash(),
-                Some(b'$') => self.consume_dollar()?,
-                Some(_) => self.pos += 1,
+                Some(b'$') => {
+                    // $"..." locale quoting at the top level of a word
+                    if self.peek_ahead(1) == Some(b'"') {
+                        self.pos += 1; // skip $
+                        self.consume_double_quoted()?;
+                    } else {
+                        self.consume_dollar()?;
+                    }
+                }
+                Some(_) => {
+                    // Check for extglob: `?(`, `*(`, `+(`, `@(`, `!(` patterns.
+                    // These operators followed by `(` should consume the entire
+                    // pattern including `|` and `)` as part of the word.
+                    let cur = self.source[self.pos];
+                    if matches!(cur, b'?' | b'*' | b'+' | b'@' | b'!')
+                        && self.peek_ahead(1) == Some(b'(')
+                    {
+                        self.consume_extglob()?;
+                    } else {
+                        self.pos += 1;
+                    }
+                }
             }
         }
 
         let text = &source_str[start..self.pos];
-        // A word is only a reserved word candidate if it's unquoted plain text
-        let is_candidate = !text.contains('\'')
+        let span = self.span_from(start);
+        let is_plain = !text.contains('\'')
             && !text.contains('"')
             && !text.contains('\\')
-            && !text.contains('$')
-            && is_reserved_word(text);
+            && !text.contains('$');
+
+        // Emit dedicated tokens for `[[` and `]]`
+        if is_plain && text == "[[" {
+            return Ok(Token {
+                kind: TokenKind::DblLBracket,
+                span,
+            });
+        }
+        if is_plain && text == "]]" {
+            return Ok(Token {
+                kind: TokenKind::DblRBracket,
+                span,
+            });
+        }
+
+        let is_candidate = is_plain && is_reserved_word(text);
 
         Ok(Token {
             kind: TokenKind::Word {
                 is_reserved_candidate: is_candidate,
             },
-            span: self.span_from(start),
+            span,
         })
     }
 
@@ -455,6 +525,9 @@ impl<'src> Lexer<'src> {
                         b'|' => {
                             if self.peek_ahead(1) == Some(b'|') {
                                 return Ok(self.double_op(TokenKind::OrOr));
+                            }
+                            if self.peek_ahead(1) == Some(b'&') {
+                                return Ok(self.double_op(TokenKind::PipeAmp));
                             }
                             return Ok(self.single_op(TokenKind::Pipe));
                         }
@@ -782,5 +855,83 @@ mod tests {
         let toks = tokens_with_text("$'a\\nb'");
         assert_eq!(toks.len(), 1);
         assert_eq!(toks[0].1, "$'a\\nb'");
+    }
+
+    // --- Double bracket tokens ---
+
+    #[test]
+    fn double_bracket_tokens() {
+        assert_eq!(
+            kinds("[[ x ]]"),
+            vec![TokenKind::DblLBracket, word(false), TokenKind::DblRBracket]
+        );
+    }
+
+    #[test]
+    fn double_bracket_with_operators() {
+        assert_eq!(
+            kinds("[[ $x == hello ]]"),
+            vec![
+                TokenKind::DblLBracket,
+                word(false),
+                word(false),
+                word(false),
+                TokenKind::DblRBracket,
+            ]
+        );
+    }
+
+    #[test]
+    fn double_bracket_reserved_word() {
+        // [[ and ]] should be reserved words in the lexer
+        assert!(is_reserved_word("[["));
+        assert!(is_reserved_word("]]"));
+    }
+
+    // --- Pipe-ampersand (|&) ---
+
+    #[test]
+    fn pipe_amp_token() {
+        assert_eq!(kinds("|&"), vec![TokenKind::PipeAmp]);
+    }
+
+    #[test]
+    fn pipe_amp_in_pipeline() {
+        assert_eq!(
+            kinds("a |& b"),
+            vec![word(false), TokenKind::PipeAmp, word(false)]
+        );
+    }
+
+    // --- Extglob patterns ---
+
+    #[test]
+    fn extglob_at_pattern_is_single_word() {
+        let toks = tokens_with_text("*.@(jpg|png)");
+        assert_eq!(toks.len(), 1);
+        assert_eq!(toks[0].1, "*.@(jpg|png)");
+    }
+
+    #[test]
+    fn extglob_not_pattern_is_single_word() {
+        let toks = tokens_with_text("!(*.log)");
+        assert_eq!(toks.len(), 1);
+        assert_eq!(toks[0].1, "!(*.log)");
+    }
+
+    #[test]
+    fn extglob_question_pattern_is_single_word() {
+        let toks = tokens_with_text("colo?(u)r");
+        assert_eq!(toks.len(), 1);
+        assert_eq!(toks[0].1, "colo?(u)r");
+    }
+
+    // --- Locale quoting ---
+
+    #[test]
+    fn locale_quoting_is_word() {
+        let toks = tokens_with_text("$\"hello\"");
+        assert_eq!(toks.len(), 1);
+        assert_eq!(toks[0].1, "$\"hello\"");
     }
 }

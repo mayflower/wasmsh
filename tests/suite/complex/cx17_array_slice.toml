@@ -1,0 +1,19 @@
+[test]
+name = "array-indexing-and-length"
+tags = ["complex", "array", "P0"]
+tier = "P0"
+requires = ["indexed-array", "parameter-length", "echo"]
+
+[input]
+script = """
+arr=(zero one two three four five)
+echo "${arr[0]}"
+echo "${arr[3]}"
+echo "${arr[5]}"
+echo "${#arr[@]}"
+echo "first=${arr[0]} last=${arr[5]}"
+"""
+
+[expect]
+status = 0
+stdout = "zero\nthree\nfive\n6\nfirst=zero last=five\n"

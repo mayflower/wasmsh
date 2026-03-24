@@ -1,0 +1,23 @@
+[test]
+name = "double-bracket-complex"
+tags = ["complex", "double-bracket", "P0"]
+tier = "P0"
+requires = ["double-bracket", "parameter-length", "echo"]
+
+[input]
+script = """
+x="hello.txt"
+if [[ $x == *.txt && ${#x} -gt 5 ]]; then
+    echo "match"
+fi
+if [[ "abc" < "def" ]]; then
+    echo "ordered"
+fi
+if [[ ! -z "notempty" ]]; then
+    echo "not empty"
+fi
+"""
+
+[expect]
+status = 0
+stdout = "match\nordered\nnot empty\n"

@@ -1,0 +1,15 @@
+[test]
+name = "arithmetic-exponentiation"
+tags = ["arithmetic", "P1"]
+tier = "P1"
+requires = ["arithmetic-comparison"]
+
+[input]
+script = """
+echo $(( 2 ** 10 ))
+echo $(( 3 ** 3 ))
+"""
+
+[expect]
+status = 0
+stdout = "1024\n27\n"

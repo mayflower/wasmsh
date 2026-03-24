@@ -1,0 +1,20 @@
+[test]
+name = "bitwise-operations"
+tags = ["complex", "arithmetic", "P0"]
+tier = "P0"
+requires = ["arithmetic-expansion", "echo"]
+
+[input]
+script = """
+a=255
+b=15
+echo "AND: $(( a & b ))"
+echo "OR:  $(( a | b ))"
+echo "XOR: $(( a ^ b ))"
+echo "SHL: $(( 1 << 8 ))"
+echo "SHR: $(( 256 >> 4 ))"
+"""
+
+[expect]
+status = 0
+stdout = "AND: 15\nOR:  255\nXOR: 240\nSHL: 256\nSHR: 16\n"

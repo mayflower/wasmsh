@@ -1,0 +1,17 @@
+[test]
+name = "printf-hex-octal-float"
+tags = ["builtins", "P1"]
+tier = "P1"
+requires = ["printf-format"]
+
+[input]
+script = """
+printf "%x\n" 255
+printf "%o\n" 255
+printf "%c\n" A
+printf "%b\n" "hello\tworld"
+"""
+
+[expect]
+status = 0
+stdout = "ff\n377\nA\nhello\tworld\n"

@@ -14,7 +14,7 @@ mod lower;
 pub use lower::lower;
 
 use smol_str::SmolStr;
-use wasmsh_ast::{HereDocBody, RedirectionOp, Span, Word};
+use wasmsh_ast::{CaseTerminator, HereDocBody, RedirectionOp, Span, Word};
 
 /// A lowered shell program.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +47,8 @@ pub enum HirAndOrOp {
 pub struct HirPipeline {
     pub negated: bool,
     pub commands: Vec<HirCommand>,
+    /// Per-stage flags: `pipe_stderr[i]` is true when stage `i` uses `|&`.
+    pub pipe_stderr: Vec<bool>,
 }
 
 /// A normalized command.
@@ -74,6 +76,48 @@ pub enum HirCommand {
     FunctionDef(HirFunctionDef),
     /// `case word in ... esac`
     Case(HirCase),
+    /// `[[ expression ]]`
+    DoubleBracket(HirDoubleBracket),
+    /// C-style `for (( init; cond; step )) do body done`
+    ArithFor(HirArithFor),
+    /// `(( expr ))` arithmetic command
+    ArithCommand(HirArithCommand),
+    /// `select var in words; do body; done`
+    Select(HirSelect),
+}
+
+/// Extended test command `[[ ... ]]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirDoubleBracket {
+    pub words: Vec<Word>,
+    pub span: Span,
+}
+
+/// C-style for loop `for (( init; cond; step )) do body done`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirArithFor {
+    pub init: SmolStr,
+    pub cond: SmolStr,
+    pub step: SmolStr,
+    pub body: Vec<HirCompleteCommand>,
+    pub span: Span,
+}
+
+/// Arithmetic command `(( expr ))`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirArithCommand {
+    pub expr: SmolStr,
+    pub span: Span,
+}
+
+/// Select loop.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirSelect {
+    pub var_name: SmolStr,
+    pub words: Option<Vec<Word>>,
+    pub body: Vec<HirCompleteCommand>,
+    pub redirections: Vec<HirRedirection>,
+    pub span: Span,
 }
 
 /// A command to execute with its argv, environment overrides, and redirections.
@@ -179,6 +223,7 @@ pub struct HirCase {
 pub struct HirCaseItem {
     pub patterns: Vec<Word>,
     pub body: Vec<HirCompleteCommand>,
+    pub terminator: CaseTerminator,
 }
 
 #[cfg(test)]
@@ -337,5 +382,26 @@ mod tests {
     fn multiline() {
         let hir = lower_source("echo a\necho b\necho c");
         assert_eq!(hir.items.len(), 3);
+    }
+
+    #[test]
+    fn arith_command_lowered() {
+        let cmd = first_cmd("(( 1 + 2 ))");
+        let HirCommand::ArithCommand(ac) = cmd else {
+            panic!("expected ArithCommand, got {cmd:?}");
+        };
+        assert_eq!(ac.expr.as_str(), "1 + 2");
+    }
+
+    #[test]
+    fn arith_for_lowered() {
+        let cmd = first_cmd("for ((i=0; i<5; i++)) do echo $i; done");
+        let HirCommand::ArithFor(af) = cmd else {
+            panic!("expected ArithFor, got {cmd:?}");
+        };
+        assert_eq!(af.init.as_str(), "i=0");
+        assert_eq!(af.cond.as_str(), "i<5");
+        assert_eq!(af.step.as_str(), "i++");
+        assert!(!af.body.is_empty());
     }
 }

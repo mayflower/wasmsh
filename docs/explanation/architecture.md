@@ -25,9 +25,9 @@ wasmsh-expand       Expansion engine (params, arithmetic, glob, brace, tilde)
 wasmsh-hir          High-level IR: normalizes AST into Exec/Assign/RedirectOnly
 wasmsh-ir           Low-level IR instruction set (SetVar, PushArg, CallBuiltin)
 wasmsh-vm           Cooperative VM with step budgets, cancellation, pipe buffers
-wasmsh-state        Shell state: variables, scopes, positional params, cwd
-wasmsh-builtins     18 builtins (echo, test, cd, export, trap, eval, ...)
-wasmsh-utils        38 utilities (cat, grep, sed, sort, find, ...)
+wasmsh-state        Shell state: variables (scalar/array/assoc), scopes, positional params, cwd
+wasmsh-builtins     22 builtins (echo, test, cd, export, trap, eval, printf, read, ...)
+wasmsh-utils        43 utilities (cat, grep, sed, sort, find, md5sum, base64, ...)
 wasmsh-fs           VFS abstraction: MemoryFs, OpfsFs (stub), path normalization
 wasmsh-browser      WorkerRuntime: end-to-end pipeline, command dispatch
 wasmsh-protocol     Host↔Worker message types
@@ -88,18 +88,66 @@ No code is copied from Bash, BusyBox, or their test suites. Compatibility is a b
 
 See [ADR-0001](../adr/ADR-0001-clean-room-boundary.md).
 
+### Arrays and Variable Types
+
+Variables support three value types via `VarValue` enum:
+- `Scalar(SmolStr)` — default string values
+- `IndexedArray(IndexMap<usize, SmolStr>)` — `arr=(a b c)`, sparse indexing
+- `AssocArray(IndexMap<SmolStr, SmolStr>)` — `declare -A map`
+
+Variable attributes: `exported`, `readonly`, `integer` (auto-arithmetic), `nameref` (indirect reference).
+
+### Full Arithmetic Engine
+
+The arithmetic evaluator (`eval_arithmetic`) is a proper recursive-descent parser supporting all bash arithmetic operators with correct precedence: assignment, ternary, logical, bitwise, comparison, shift, arithmetic, exponentiation, unary, and postfix. Supports hex (`0xFF`), octal (`077`), binary (`0b1010`), and arbitrary base (`N#digits`) literals.
+
+### Extended Test `[[ ]]`
+
+`[[ ]]` is a full compound command with its own evaluation engine:
+- Glob pattern matching on `==`/`!=` RHS
+- Regex matching with `=~` and `BASH_REMATCH` capture groups
+- String ordering with `<`/`>`
+- No word splitting or globbing on variables
+- `&&`/`||`/`!` logical operators with grouping
+
+### Extended Globbing
+
+When `extglob` is enabled (default): `?(pat)`, `*(pat)`, `+(pat)`, `@(pat)`, `!(pat)`. Implemented via recursive backtracking matcher. `globstar` enables `**` recursive directory traversal.
+
+### Dynamic Variables
+
+Several variables are evaluated on read rather than storing a fixed value in `ShellState`:
+- `$RANDOM` — 16-bit value from an XorShift PRNG seeded at shell init; writable to reseed the generator
+- `$LINENO` — current source line, tracked by the VM from span information
+- `$SECONDS` — elapsed seconds since shell initialisation; writable to reset the origin
+- `$PIPESTATUS` — indexed array of exit codes from the most recent pipeline
+- `$FUNCNAME` / `$BASH_SOURCE` — call-stack arrays updated by the function call frame machinery
+
+### Alias Expansion
+
+Alias lookup and recursive expansion occurs in `wasmsh-browser`'s dispatch layer after
+tokenisation but before builtin/utility/function resolution. The `alias` and `unalias`
+builtins manage the alias table stored in `ShellState`. Alias expansion is suppressed
+for commands that are themselves alias definitions and for quoted command names, matching
+bash behaviour.
+
 ## Execution Flow
 
 When `HostCommand::Run { input }` is received:
 
 1. **Parse**: `wasmsh_parse::parse(input)` → `Program` AST
 2. **Lower**: `wasmsh_hir::lower(&ast)` → `HirProgram`
-3. **For each command**:
+3. **Update `$LINENO`** from span position
+4. **For each command**:
    a. Resolve command substitutions (`$(...)`) by recursive execution
-   b. Expand words (parameter, arithmetic, tilde)
-   c. Apply brace expansion
-   d. Apply glob expansion against VFS
-   e. Dispatch: builtin → direct call, utility → UtilContext, function → recursive execute
-   f. Apply output redirections (capture stdout → write to VFS file)
-4. **Collect events**: stdout, stderr, diagnostics → `Vec<WorkerEvent>`
-5. **Fire traps**: EXIT trap if exit was requested
+   b. Expand words (parameter, arithmetic, tilde, case modification, indirect)
+   c. Check `nounset` (`set -u`) for unbound variables
+   d. Apply brace expansion
+   e. Apply glob expansion against VFS (respects `noglob`, `nullglob`, `dotglob`, `extglob`, `globstar`)
+   f. Expand aliases before dispatch
+   g. Dispatch: runtime command (declare, alias, let, shopt, ...) → builtin → function → utility
+   h. Apply output redirections (capture stdout → write to VFS file)
+   i. Trace output if `xtrace` (`set -x`) is active
+5. **Collect events**: stdout, stderr, diagnostics → `Vec<WorkerEvent>`
+6. **Set `$PIPESTATUS`** array after pipeline execution
+7. **Fire traps**: EXIT trap if exit was requested

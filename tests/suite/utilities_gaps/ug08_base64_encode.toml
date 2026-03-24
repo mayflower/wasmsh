@@ -1,0 +1,14 @@
+[test]
+name = "base64-encode"
+tags = ["utilities", "P2"]
+tier = "P2"
+requires = ["base64"]
+
+[input]
+script = """
+echo -n "hello" | base64
+"""
+
+[expect]
+status = 0
+stdout = "aGVsbG8=\n"

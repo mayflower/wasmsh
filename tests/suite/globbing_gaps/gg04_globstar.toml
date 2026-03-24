@@ -1,0 +1,23 @@
+[test]
+name = "globstar-recursive"
+tags = ["globbing", "P1"]
+tier = "P1"
+requires = ["globstar"]
+
+[setup.files]
+"/project/a.txt" = ""
+"/project/sub/b.txt" = ""
+"/project/sub/deep/c.txt" = ""
+
+[input]
+script = """
+cd /project
+shopt -s globstar
+for f in **/*.txt; do
+  echo $f
+done | sort
+"""
+
+[expect]
+status = 0
+stdout = "a.txt\nsub/b.txt\nsub/deep/c.txt\n"

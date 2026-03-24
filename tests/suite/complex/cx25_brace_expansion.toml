@@ -1,0 +1,19 @@
+[test]
+name = "brace-expansion-variants"
+tags = ["complex", "expansion", "P0"]
+tier = "P0"
+requires = ["brace-expansion", "echo"]
+
+[input]
+script = """
+echo {1..5}
+echo {01..05}
+echo {1..10..3}
+echo {a,b}{1,2}
+echo file.{txt,md,rs}
+echo pre-{X,Y}-post
+"""
+
+[expect]
+status = 0
+stdout = "1 2 3 4 5\n01 02 03 04 05\n1 4 7 10\na1 a2 b1 b2\nfile.txt file.md file.rs\npre-X-post pre-Y-post\n"

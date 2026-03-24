@@ -3,71 +3,344 @@
 ## Shell Syntax
 
 ### Implemented
+
+**Commands and lists**
 - Simple commands: `cmd arg1 arg2 ...`
 - Pipelines: `cmd1 | cmd2 | cmd3`
+- Stderr-to-pipe: `cmd1 |& cmd2`
 - And/or lists: `cmd1 && cmd2`, `cmd1 || cmd2`
 - Semicolon lists: `cmd1; cmd2; cmd3`
+- Background execution: `cmd &` (parsed; browser runtime runs synchronously)
 - Pipeline negation: `! cmd`
 - Variable assignments: `VAR=value`, `VAR=value cmd`
-- Redirections: `<`, `>`, `>>`, `<>`
-- Here-documents: `<<DELIM`, `<<-DELIM` (tab-stripping)
-- Single quoting: `'literal text'`
-- Double quoting: `"text with $expansion"`
-- Parameter expansion: `$var`, `${var}`, `${var:-default}`, `${var:+alt}`, `${#var}`
-- Command substitution: `$(...)`
-- Arithmetic expansion: `$((expr))` with `+`, `-`, `*`, `/`, `%`
-- Backslash escaping: `\char`
-- Comments: `# comment`
-- Compound commands: `if/then/elif/else/fi`, `while/do/done`, `until/do/done`, `for/in/do/done`
+- Append assignments: `VAR+=value`
+
+**Compound commands**
+- `if/then/elif/else/fi`
+- `while/do/done`
+- `until/do/done`
+- `for var in words; do/done`
+- `for (( init; cond; step )); do/done` (C-style arithmetic for)
+- `case/esac` with `;;`, `;&` (fall-through), `;;&` (continue-testing)
+- `select/do/done` (menu-driven; single iteration in sandbox)
+- `(( expr ))` arithmetic command
+- `[[ expr ]]` extended test
 - Subshells: `( ... )`
 - Brace groups: `{ ...; }`
-- Function definitions: `name() { ... }`, `function name { ... }`
-- `case/esac`
+- Function definitions: `name() { ... }`, `function name { ... }`, `function name() { ... }`
+
+**Redirections**
+- Input: `<`
+- Output (truncate): `>`
+- Output (append): `>>`
+- Read-write: `<>`
+- Here-document: `<<DELIM`, `<<-DELIM` (tab-stripping), quoted delimiters suppress expansion
+- Here-string: `<<<`
+- FD-prefixed: `2>`, `2>>`, `2>&1`
+- Combined stdout+stderr: `&>`
+
+**Quoting and escaping**
+- Single quoting: `'literal text'`
+- Double quoting: `"text with $expansion"`
+- Backslash escaping: `\char`
+- ANSI-C quoting: `$'...'` (lexer support)
+- Comments: `# comment`
+
+**Expansions**
+- Parameter expansion: `$var`, `${var}` and all operators (see section below)
+- Command substitution: `$(...)`
+- Arithmetic expansion: `$(( expr ))`
 - Brace expansion: `{a,b,c}`, `{1..10}`
-- Tilde expansion: `~`
-- Here-strings: `<<<`
-- Glob/pathname expansion: `*`, `?`, `[...]`
+- Tilde expansion: `~`, `~/path`
+- Field splitting on `IFS`
+- Glob/pathname expansion: `*`, `?`, `[...]`, extglob patterns (see below)
 
 ### Not Yet Implemented
-- `select`
-- `[[ ... ]]` (extended test)
+
 - Process substitution: `<(cmd)`, `>(cmd)`
-- Coprocesses
-- Job control (`&`, `fg`, `bg`, `jobs`)
-- Signal handling (`trap`)
+- Coprocesses: `coproc`
+- Signal handling beyond EXIT and ERR traps
+
+---
 
 ## Builtins
 
-| Command    | Status | Notes |
-|------------|--------|-------|
-| `:`        | Done   | No-op, returns 0 |
-| `true`     | Done   | Returns 0 |
-| `false`    | Done   | Returns 1 |
-| `echo`     | Done   | Supports `-n` |
-| `printf`   | Done   | `%s`, `%d`, `%%`, `\n`, `\t`, `\\` |
-| `pwd`      | Done   | Prints working directory |
-| `cd`       | Done   | Supports `cd -`, `cd` (HOME) |
-| `export`   | Done   | `export NAME=VALUE`, `export NAME` |
-| `unset`    | Done   | Removes variable; respects readonly |
-| `readonly` | Done   | `readonly NAME=VALUE`, `readonly NAME` |
+| Command      | Status | Notes |
+|--------------|--------|-------|
+| `:`          | Done   | No-op, always returns 0 |
+| `true`       | Done   | Returns 0 |
+| `false`      | Done   | Returns 1 |
+| `echo`       | Done   | `-n` (suppress newline), `-e` (escape sequences: `\n \t \\ \a \b \r \0NNN`) |
+| `printf`     | Done   | `%s %d %x %o %f %c %b %q %%`; width, precision, `-` (left-align), `0` (zero-pad); repeats format for extra args |
+| `pwd`        | Done   | Prints working directory |
+| `cd`         | Done   | `cd -` (OLDPWD), `cd` (HOME); sets PWD and OLDPWD |
+| `export`     | Done   | `export NAME=VALUE`, `export NAME`; respects readonly |
+| `unset`      | Done   | Removes variable or array element (`unset 'arr[N]'`); respects readonly |
+| `readonly`   | Done   | `readonly NAME=VALUE`, `readonly NAME` |
+| `test` / `[` | Done   | Unary: `-n -z -f -d -e -s -r -w -x`; binary: `= == != -eq -ne -lt -gt -le -ge`; `!` negation |
+| `read`       | Done   | `-r` (raw), `-p prompt`, `-d delim`, `-n N`, `-N N`, `-a array`, `-t timeout`, `-s` (silent); IFS splitting; default var REPLY |
+| `shift`      | Done   | `shift [N]`; shifts positional parameters |
+| `return`     | Done   | Returns from function with optional exit status |
+| `exit`       | Done   | Exits shell with optional status; fires EXIT trap |
+| `local`      | Done   | `local VAR=val`; save/restore stack for function scope |
+| `type`       | Done   | Reports alias/function/builtin/utility classification |
+| `command`    | Done   | `-v` shows command type; bypasses functions |
+| `eval`       | Done   | Re-parses and executes concatenated arguments |
+| `set`        | Done   | `-e` (errexit), `-u` (nounset), `-x` (xtrace), `-f` (noglob), `-a` (allexport), `-C` (noclobber), `-o pipefail`; `set -- args` sets positionals |
+| `getopts`    | Done   | Parses short options from positional parameters; updates OPTIND |
+| `trap`       | Done   | EXIT and ERR traps only; other signals print a warning |
+| `declare` / `typeset` | Done | `-i` (integer), `-a` (indexed array), `-A` (assoc array), `-x` (export), `-r` (readonly), `-l` (lowercase), `-u` (uppercase), `-n` (nameref), `-p` (print); compound assignment `arr=(...)` |
+| `let`        | Done   | Evaluates arithmetic expressions; exit status is 0 if last result is non-zero |
+| `shopt`      | Done   | `-s` / `-u`; options: `extglob nullglob dotglob globstar nocasematch nocaseglob failglob lastpipe expand_aliases` |
+| `alias`      | Done   | Define and list aliases; aliases expand recursively |
+| `unalias`    | Done   | `-a` removes all aliases |
+| `source` / `.` | Done | Reads and executes a file from VFS; searches PATH for bare names |
+| `mapfile` / `readarray` | Done | `-t` (strip newline); default array MAPFILE |
+| `builtin`    | Done   | Bypasses aliases and functions; invokes named builtin directly |
+
+---
 
 ## Utilities
 
-| Command | Status | Notes |
-|---------|--------|-------|
-| `cat`   | Done   | File concatenation, here-doc stdin |
-| `ls`    | Done   | Directory listing |
-| `mkdir` | Done   | Create directories |
-| `rm`    | Done   | Remove files |
-| `touch` | Done   | Create empty files |
-| `head`  | Done   | First N lines (`-n N`) |
-| `tail`  | Done   | Last N lines (`-n N`) |
-| `wc`    | Done   | Line/word/byte counts |
+All utilities operate on the in-process VFS (no OS calls).
+
+### File utilities
+
+| Command      | Status | Notes |
+|--------------|--------|-------|
+| `cat`        | Done   | Concatenate files; reads stdin when no files given |
+| `ls`         | Done   | Directory listing |
+| `mkdir`      | Done   | Create directories |
+| `rm`         | Done   | Remove files and directories |
+| `touch`      | Done   | Create empty files or update timestamps |
+| `mv`         | Done   | Move/rename files |
+| `cp`         | Done   | Copy files |
+| `ln`         | Done   | Create hard and symbolic links |
+| `readlink`   | Done   | Read symlink target |
+| `realpath`   | Done   | Resolve to absolute path |
+| `stat`       | Done   | Show file metadata |
+| `find`       | Done   | Search filesystem |
+| `chmod`      | Done   | Change file permissions (VFS metadata) |
+| `mktemp`     | Done   | Create a temporary file |
+
+### Text utilities
+
+| Command      | Status | Notes |
+|--------------|--------|-------|
+| `head`       | Done   | First N lines (`-n N`) |
+| `tail`       | Done   | Last N lines (`-n N`) |
+| `wc`         | Done   | Line/word/byte counts (`-l -w -c`) |
+| `grep`       | Done   | Pattern search |
+| `sed`        | Done   | Stream editor |
+| `sort`       | Done   | Sort lines |
+| `uniq`       | Done   | Remove duplicate adjacent lines |
+| `cut`        | Done   | Cut fields or characters |
+| `tr`         | Done   | Translate or delete characters |
+| `tee`        | Done   | Write stdin to file and stdout |
+| `paste`      | Done   | Merge lines of files |
+| `rev`        | Done   | Reverse characters in each line |
+| `column`     | Done   | Format input into columns |
+
+### Data and string utilities
+
+| Command      | Status | Notes |
+|--------------|--------|-------|
+| `seq`        | Done   | Generate sequences of numbers |
+| `basename`   | Done   | Strip directory and suffix from path |
+| `dirname`    | Done   | Extract directory part of path |
+| `expr`       | Done   | Evaluate expression |
+| `xargs`      | Done   | Build and execute commands from stdin |
+| `yes`        | Done   | Output string repeatedly |
+| `md5sum`     | Done   | Compute MD5 checksums |
+| `sha256sum`  | Done   | Compute SHA-256 checksums |
+| `base64`     | Done   | Encode/decode base64 |
+
+### System and environment utilities
+
+| Command      | Status | Notes |
+|--------------|--------|-------|
+| `env`        | Done   | Print or set environment |
+| `printenv`   | Done   | Print environment variables |
+| `id`         | Done   | Print user/group identity (static sandbox values) |
+| `whoami`     | Done   | Print current user (static sandbox value) |
+| `uname`      | Done   | Print system information (static sandbox values) |
+| `hostname`   | Done   | Print hostname (static sandbox value) |
+| `sleep`      | Done   | Delay (no-op in sandbox; returns immediately) |
+| `date`       | Done   | Print date/time |
+
+---
+
+## Parameter Expansion
+
+| Operator                       | Meaning |
+|--------------------------------|---------|
+| `$var` / `${var}`              | Value of variable |
+| `${#var}`                      | String length of value |
+| `${var:-word}`                 | Value if set and non-empty, else `word` |
+| `${var-word}`                  | Value if set, else `word` |
+| `${var:=word}`                 | Value if set and non-empty, else assign and use `word` |
+| `${var=word}`                  | Value if set, else assign and use `word` |
+| `${var:+word}`                 | `word` if set and non-empty, else empty |
+| `${var+word}`                  | `word` if set, else empty |
+| `${var:?word}`                 | Value if set and non-empty, else error with `word` |
+| `${var#pattern}`               | Remove shortest prefix matching `pattern` |
+| `${var##pattern}`              | Remove longest prefix matching `pattern` |
+| `${var%pattern}`               | Remove shortest suffix matching `pattern` |
+| `${var%%pattern}`              | Remove longest suffix matching `pattern` |
+| `${var/pat/rep}`               | Replace first occurrence of `pat` with `rep` |
+| `${var//pat/rep}`              | Replace all occurrences of `pat` with `rep` |
+| `${var/#pat/rep}`              | Replace `pat` anchored at start |
+| `${var/%pat/rep}`              | Replace `pat` anchored at end |
+| `${var:offset}`                | Substring from `offset` |
+| `${var:offset:length}`         | Substring from `offset`, `length` chars |
+| `${var^}`                      | Uppercase first character |
+| `${var^^}`                     | Uppercase all characters |
+| `${var,}`                      | Lowercase first character |
+| `${var,,}`                     | Lowercase all characters |
+| `${var@Q}`                     | Quote value for reuse as shell input |
+| `${var@E}`                     | Expand backslash escape sequences |
+| `${var@U}`                     | Uppercase all characters |
+| `${var@L}`                     | Lowercase all characters |
+| `${var@u}`                     | Uppercase first character |
+| `${var@A}`                     | Assignment statement form (`declare -- var="value"`) |
+| `${!var}`                      | Indirect expansion (value of the variable named by `$var`) |
+| `${!prefix*}` / `${!prefix@}`  | Names of all variables with the given prefix |
+| `${arr[@]}` / `${arr[*]}`      | All elements of indexed or associative array |
+| `${arr[N]}`                    | Single element of array by index or key |
+| `${#arr[@]}` / `${#arr[*]}`    | Number of elements in array |
+| `${!arr[@]}` / `${!arr[*]}`    | All keys/indices of array |
+| `$?`                           | Exit status of last command |
+| `$$`                           | PID (fixed value in WASM) |
+| `$!`                           | PID of last background job |
+| `$#`                           | Number of positional parameters |
+| `$@` / `$*`                    | All positional parameters |
+| `$0`                           | Script/shell name |
+| `$1`–`$N`                      | Positional parameters |
+| `$-`                           | Current option flags |
+| `$_`                           | Last argument of previous command |
+
+---
+
+## Arithmetic
+
+Arithmetic is available in `$(( ))`, `(( ))`, `let`, and `declare -i` contexts. The evaluator is a full recursive-descent parser.
+
+### Operators (in precedence order, lowest to highest)
+
+| Operator            | Description |
+|---------------------|-------------|
+| `expr ? a : b`      | Ternary conditional |
+| `,`                 | Comma (evaluate both, return right) |
+| `= += -= *= /= %= <<= >>= &= ^= \|=` | Assignment operators |
+| `\|\|`              | Logical OR |
+| `&&`                | Logical AND |
+| `\|`                | Bitwise OR |
+| `^`                 | Bitwise XOR |
+| `&`                 | Bitwise AND |
+| `== !=`             | Equality |
+| `< > <= >=`         | Comparison |
+| `<< >>`             | Bitwise shift |
+| `+ -`               | Addition, subtraction |
+| `* / %`             | Multiplication, division, modulo |
+| `**`                | Exponentiation |
+| `! ~ - +`           | Unary NOT, bitwise complement, negate, plus |
+| `++ --`             | Prefix and postfix increment/decrement |
+
+### Literal formats
+
+| Format          | Example |
+|-----------------|---------|
+| Decimal         | `42` |
+| Hexadecimal     | `0xff` |
+| Binary          | `0b1010` |
+| Octal           | `0755` |
+| Arbitrary base  | `16#ff`, `2#1010` |
+
+---
+
+## Glob and Pathname Expansion
+
+| Pattern          | Description |
+|------------------|-------------|
+| `*`              | Match any string (not leading `.` unless `dotglob`) |
+| `?`              | Match any single character |
+| `[abc]`          | Match any character in the set |
+| `[a-z]`          | Match any character in the range |
+| `[!abc]`         | Match any character not in the set |
+| `**`             | Match zero or more directories (requires `shopt -s globstar`) |
+| `?(pat)`         | Match zero or one occurrence (requires `extglob`) |
+| `*(pat)`         | Match zero or more occurrences (requires `extglob`) |
+| `+(pat)`         | Match one or more occurrences (requires `extglob`) |
+| `@(pat)`         | Match exactly one occurrence (requires `extglob`) |
+| `!(pat)`         | Match anything except `pat` (requires `extglob`) |
+
+`extglob` is enabled by default. `nullglob`, `dotglob`, `globstar`, `nocasematch`, `nocaseglob`, `failglob` are available via `shopt`.
+
+---
+
+## Shell Options
+
+### `set` options
+
+| Flag      | Long name    | Description |
+|-----------|--------------|-------------|
+| `-e`      | `errexit`    | Exit on any command failure |
+| `-u`      | `nounset`    | Error on unset variable reference |
+| `-x`      | `xtrace`     | Print commands before executing (`PS4` prefix) |
+| `-f`      | `noglob`     | Disable glob expansion |
+| `-a`      | `allexport`  | Auto-export all variable assignments |
+| `-C`      | `noclobber`  | Prevent `>` from overwriting existing files |
+| `-o pipefail` | `pipefail` | Pipeline exit status is rightmost non-zero stage |
+
+### `shopt` options
+
+| Option           | Default | Description |
+|------------------|---------|-------------|
+| `extglob`        | on      | Enable extended glob patterns |
+| `nullglob`       | off     | Unmatched globs expand to nothing |
+| `dotglob`        | off     | Globs match filenames starting with `.` |
+| `globstar`       | off     | `**` matches directories recursively |
+| `nocasematch`    | off     | Case-insensitive `case` and `[[ =~ ]]` matching |
+| `nocaseglob`     | off     | Case-insensitive glob matching |
+| `failglob`       | off     | Error when glob matches nothing |
+| `lastpipe`       | off     | Last pipeline stage runs in current shell |
+| `expand_aliases` | off     | Enable alias expansion (always active in runtime) |
+
+---
+
+## Special Variables
+
+| Variable       | Description |
+|----------------|-------------|
+| `?`            | Exit status of last command |
+| `$`            | Current shell PID |
+| `!`            | PID of last background job |
+| `#`            | Number of positional parameters |
+| `@` / `*`      | All positional parameters |
+| `0`            | Shell/script name |
+| `IFS`          | Input field separator (default: space, tab, newline) |
+| `HOME`         | Home directory for tilde expansion and `cd` |
+| `PWD`          | Current working directory |
+| `OLDPWD`       | Previous working directory |
+| `PATH`         | Colon-separated search path for `source` |
+| `OPTIND`       | Current index for `getopts` |
+| `REPLY`        | Default variable for `read` |
+| `PIPESTATUS`   | Array of exit statuses for last pipeline stages |
+| `PS4`          | Prompt prefix for `set -x` xtrace output |
+| `LINENO`       | Current line number in executing script |
+| `FUNCNAME`     | Stack of currently executing function names |
+| `BASH_SOURCE`  | Stack of filenames for `source` calls |
+| `MAPFILE`      | Default array for `mapfile` |
+
+---
 
 ## Non-Goals
 
-- Not a BusyBox port or Bash fork
-- No real OS processes in the browser
-- No kernel/network admin tools
+- Not a BusyBox port or Bash fork — clean-room implementation
+- No real OS processes in the browser — all commands run in-process
+- No kernel or network administration tools
 - No TTY/terminal emulation
-- No job control or signal handling
+- No full job control (`fg`, `bg`, `jobs`); `&` parses but runs synchronously
+- No POSIX signal delivery; only EXIT and ERR trap handlers are executed
+- No process substitution `<(cmd)` or coprocesses
+- GPL/AGPL/SSPL code is forbidden in the core

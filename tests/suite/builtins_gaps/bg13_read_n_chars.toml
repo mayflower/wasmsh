@@ -1,0 +1,15 @@
+[test]
+name = "read-n-chars"
+tags = ["builtins", "P1"]
+tier = "P1"
+requires = ["read-flags"]
+
+[input]
+script = """
+echo "hello world" | read -n 5 chunk
+echo "$chunk"
+"""
+
+[expect]
+status = 0
+stdout = "hello\n"

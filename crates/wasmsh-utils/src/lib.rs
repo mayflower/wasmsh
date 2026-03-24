@@ -96,6 +96,7 @@ impl UtilRegistry {
         utils.insert("stat", file_ops::util_stat);
         utils.insert("find", file_ops::util_find);
         utils.insert("chmod", file_ops::util_chmod);
+        utils.insert("mktemp", file_ops::util_mktemp);
         // Text utilities
         utils.insert("head", text_ops::util_head);
         utils.insert("tail", text_ops::util_tail);
@@ -107,12 +108,19 @@ impl UtilRegistry {
         utils.insert("cut", text_ops::util_cut);
         utils.insert("tr", text_ops::util_tr);
         utils.insert("tee", text_ops::util_tee);
+        utils.insert("paste", text_ops::util_paste);
+        utils.insert("rev", text_ops::util_rev);
+        utils.insert("column", text_ops::util_column);
         // Data/string utilities
         utils.insert("seq", data_ops::util_seq);
         utils.insert("basename", data_ops::util_basename);
         utils.insert("dirname", data_ops::util_dirname);
         utils.insert("expr", data_ops::util_expr);
         utils.insert("xargs", data_ops::util_xargs);
+        utils.insert("yes", data_ops::util_yes);
+        utils.insert("md5sum", data_ops::util_md5sum);
+        utils.insert("sha256sum", data_ops::util_sha256sum);
+        utils.insert("base64", data_ops::util_base64);
         // System/env utilities
         utils.insert("env", system_ops::util_env);
         utils.insert("printenv", system_ops::util_printenv);

@@ -1,0 +1,19 @@
+[test]
+name = "arithmetic-comparison-operators"
+tags = ["arithmetic", "P0"]
+tier = "P0"
+requires = ["arithmetic-comparison"]
+
+[input]
+script = """
+echo $((5 > 3))
+echo $((3 > 5))
+echo $((5 == 5))
+echo $((5 != 3))
+echo $((3 <= 5))
+echo $((5 >= 5))
+"""
+
+[expect]
+status = 0
+stdout = "1\n0\n1\n1\n1\n1\n"

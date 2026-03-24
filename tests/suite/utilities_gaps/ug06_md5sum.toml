@@ -1,0 +1,17 @@
+[test]
+name = "md5sum-utility"
+tags = ["utilities", "P2"]
+tier = "P2"
+requires = ["md5sum"]
+
+[setup.files]
+"/tmp/test.txt" = "hello\n"
+
+[input]
+script = """
+md5sum /tmp/test.txt
+"""
+
+[expect]
+status = 0
+stdout_contains = ["b1946ac9"]

@@ -3,9 +3,10 @@
 use wasmsh_ast as ast;
 
 use crate::{
-    HirAndOr, HirAndOrOp, HirAssign, HirAssignment, HirBlock, HirCase, HirCaseItem, HirCommand,
-    HirCompleteCommand, HirElif, HirExec, HirFor, HirFunctionDef, HirIf, HirLoop, HirPipeline,
-    HirProgram, HirRedirectOnly, HirRedirection,
+    HirAndOr, HirAndOrOp, HirArithCommand, HirArithFor, HirAssign, HirAssignment, HirBlock,
+    HirCase, HirCaseItem, HirCommand, HirCompleteCommand, HirDoubleBracket, HirElif, HirExec,
+    HirFor, HirFunctionDef, HirIf, HirLoop, HirPipeline, HirProgram, HirRedirectOnly,
+    HirRedirection, HirSelect,
 };
 
 /// Lower an AST `Program` into an HIR `HirProgram`.
@@ -48,6 +49,7 @@ fn lower_pipeline(pipeline: &ast::Pipeline) -> HirPipeline {
     HirPipeline {
         negated: pipeline.negated,
         commands: pipeline.commands.iter().map(lower_command).collect(),
+        pipe_stderr: pipeline.pipe_stderr.clone(),
     }
 }
 
@@ -92,9 +94,32 @@ fn lower_command(cmd: &ast::Command) -> HirCommand {
                 .map(|item| HirCaseItem {
                     patterns: item.patterns.clone(),
                     body: lower_body(&item.body),
+                    terminator: item.terminator,
                 })
                 .collect(),
             span: c.span,
+        }),
+        ast::Command::DoubleBracket(db) => HirCommand::DoubleBracket(HirDoubleBracket {
+            words: db.words.clone(),
+            span: db.span,
+        }),
+        ast::Command::ArithFor(af) => HirCommand::ArithFor(HirArithFor {
+            init: af.init.clone(),
+            cond: af.cond.clone(),
+            step: af.step.clone(),
+            body: lower_body(&af.body),
+            span: af.span,
+        }),
+        ast::Command::ArithCommand(ac) => HirCommand::ArithCommand(HirArithCommand {
+            expr: ac.expr.clone(),
+            span: ac.span,
+        }),
+        ast::Command::Select(s) => HirCommand::Select(HirSelect {
+            var_name: s.var_name.clone(),
+            words: s.words.clone(),
+            body: lower_body(&s.body),
+            redirections: s.redirections.iter().map(lower_redirection).collect(),
+            span: s.span,
         }),
     }
 }

@@ -1,0 +1,16 @@
+[test]
+name = "c-style-for-loop-step"
+tags = ["c-style-for", "P0"]
+tier = "P0"
+requires = ["c-style-for"]
+
+[input]
+script = """
+for (( i=0; i<10; i+=3 )); do
+  echo $i
+done
+"""
+
+[expect]
+status = 0
+stdout = "0\n3\n6\n9\n"

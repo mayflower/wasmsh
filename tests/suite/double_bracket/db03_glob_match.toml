@@ -1,0 +1,17 @@
+[test]
+name = "double-bracket-glob-match"
+tags = ["double-bracket", "P0"]
+tier = "P0"
+requires = ["double-bracket"]
+
+[input]
+script = """
+FILE=report.txt
+if [[ $FILE == *.txt ]]; then
+  echo text
+fi
+"""
+
+[expect]
+status = 0
+stdout = "text\n"

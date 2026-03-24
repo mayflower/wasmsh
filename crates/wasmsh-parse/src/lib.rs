@@ -8,10 +8,11 @@ mod word_parser;
 use std::collections::VecDeque;
 
 use wasmsh_ast::{
-    AndOrList, AndOrOp, Assignment, CaseCommand, CaseItem, Command, CompleteCommand, ElifClause,
-    ForCommand, FunctionDef, GroupCommand, HereDocBody, IfCommand, Pipeline, Program, Redirection,
-    RedirectionOp, SimpleCommand, Span, SubshellCommand, UntilCommand, WhileCommand, Word,
-    WordPart,
+    AndOrList, AndOrOp, ArithCommandNode, ArithForCommand, Assignment, CaseCommand, CaseItem,
+    CaseTerminator, Command, CompleteCommand, DoubleBracketCommand, ElifClause, ForCommand,
+    FunctionDef, GroupCommand, HereDocBody, IfCommand, Pipeline, Program, Redirection,
+    RedirectionOp, SelectCommand, SimpleCommand, Span, SubshellCommand, UntilCommand,
+    WhileCommand, Word, WordPart,
 };
 use wasmsh_lex::{Lexer, Token, TokenKind};
 
@@ -140,6 +141,46 @@ impl<'src> Parser<'src> {
         }
     }
 
+    /// Check if the next token (after current) is `LParen`.
+    fn peek_is_lparen(&mut self) -> bool {
+        matches!(self.peek_nth(0), Ok(tok) if tok.kind == TokenKind::LParen)
+    }
+
+    /// Parse a word like `arr=(x y z)` where the current token is `arr=`
+    /// and the next token is `LParen`. Combines the name= with compound value.
+    fn parse_compound_assign_word(&mut self) -> Result<Word, ParseError> {
+        let tok = self.advance()?; // consume `arr=`
+        let text = tok.text(self.source);
+        self.advance()?; // consume '('
+        let mut elements = Vec::new();
+        while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+            if self.at(&TokenKind::Newline) {
+                self.advance()?;
+                continue;
+            }
+            if self.at_word() {
+                let w = self.advance()?;
+                elements.push(w.text(self.source).to_string());
+            } else {
+                break;
+            }
+        }
+        let end_span = if self.at(&TokenKind::RParen) {
+            self.advance()?.span.end
+        } else {
+            self.current.span.end
+        };
+        // Build a synthetic word like "arr=(x y z)"
+        let compound = format!("{text}({})", elements.join(" "));
+        Ok(Word {
+            parts: vec![WordPart::Literal(compound.into())],
+            span: Span {
+                start: tok.span.start,
+                end: end_span,
+            },
+        })
+    }
+
     /// True if the current token can start a new command.
     /// Check for `;;` (two consecutive semicolons — case item terminator).
     fn is_double_semi(&mut self) -> bool {
@@ -149,8 +190,27 @@ impl<'src> Parser<'src> {
         matches!(self.peek_nth(0), Ok(tok) if tok.kind == TokenKind::Semi)
     }
 
+    /// Check for `;&` (case fall-through): `;` followed by `&`.
+    fn is_case_fallthrough(&mut self) -> bool {
+        if !self.at(&TokenKind::Semi) {
+            return false;
+        }
+        matches!(self.peek_nth(0), Ok(tok) if tok.kind == TokenKind::Amp)
+    }
+
+    /// Check for `;;&` (case continue-testing): `;;` followed by `&`.
+    fn is_case_continue_testing(&mut self) -> bool {
+        if !self.at(&TokenKind::Semi) {
+            return false;
+        }
+        if !matches!(self.peek_nth(0), Ok(tok) if tok.kind == TokenKind::Semi) {
+            return false;
+        }
+        matches!(self.peek_nth(1), Ok(tok) if tok.kind == TokenKind::Amp)
+    }
+
     fn at_command_start(&self) -> bool {
-        if self.at(&TokenKind::LParen) {
+        if self.at(&TokenKind::LParen) || self.at(&TokenKind::DblLBracket) {
             return true;
         }
         if self.at_word() {
@@ -224,7 +284,11 @@ impl<'src> Parser<'src> {
         let mut list = Vec::new();
         list.push(self.parse_and_or()?);
 
-        while self.at(&TokenKind::Semi) && !self.is_double_semi() {
+        while self.at(&TokenKind::Semi)
+            && !self.is_double_semi()
+            && !self.is_case_fallthrough()
+            && !self.is_case_continue_testing()
+        {
             self.advance()?;
             // Don't skip newlines here if there are pending heredocs
             if self.pending_heredocs.is_empty() {
@@ -278,21 +342,47 @@ impl<'src> Parser<'src> {
         };
 
         let mut commands = Vec::new();
+        let mut pipe_stderr = Vec::new();
         commands.push(self.parse_command()?);
 
-        while self.at(&TokenKind::Pipe) {
-            self.advance()?;
-            self.skip_newlines()?;
-            commands.push(self.parse_command()?);
+        loop {
+            if self.at(&TokenKind::Pipe) {
+                pipe_stderr.push(false);
+                self.advance()?;
+                self.skip_newlines()?;
+                commands.push(self.parse_command()?);
+            } else if self.at(&TokenKind::PipeAmp) {
+                pipe_stderr.push(true);
+                self.advance()?;
+                self.skip_newlines()?;
+                commands.push(self.parse_command()?);
+            } else {
+                break;
+            }
         }
 
-        Ok(Pipeline { negated, commands })
+        Ok(Pipeline {
+            negated,
+            commands,
+            pipe_stderr,
+        })
     }
 
     fn parse_command(&mut self) -> Result<Command, ParseError> {
-        // Subshell: ( ... )
+        // Arithmetic command: (( expr ))
+        // Detected as LParen followed immediately by another LParen with no gap.
         if self.at(&TokenKind::LParen) {
+            if let Ok(next) = self.peek_nth(0) {
+                if next.kind == TokenKind::LParen && next.span.start == self.current.span.end {
+                    return self.parse_arith_command();
+                }
+            }
             return self.parse_subshell();
+        }
+
+        // Extended test: [[ expression ]]
+        if self.at(&TokenKind::DblLBracket) {
+            return self.parse_double_bracket();
         }
 
         if self.at_word() {
@@ -304,6 +394,7 @@ impl<'src> Parser<'src> {
                 "until" => return self.parse_until(),
                 "for" => return self.parse_for(),
                 "case" => return self.parse_case(),
+                "select" => return self.parse_select(),
                 "function" => return self.parse_function_bash(),
                 _ => {
                     // Check for POSIX function definition: name() ...
@@ -417,6 +508,15 @@ impl<'src> Parser<'src> {
         let start = self.current.span.start;
         self.expect_word("for")?;
 
+        // C-style for: for (( init; cond; step )) do body done
+        if self.at(&TokenKind::LParen) {
+            if let Ok(next) = self.peek_nth(0) {
+                if next.kind == TokenKind::LParen && next.span.start == self.current.span.end {
+                    return self.parse_arith_for(start);
+                }
+            }
+        }
+
         // Variable name
         if !self.at_word() {
             return Err(ParseError {
@@ -463,6 +563,166 @@ impl<'src> Parser<'src> {
         }))
     }
 
+    /// Parse `select name [in word ...]; do body; done`.
+    fn parse_select(&mut self) -> Result<Command, ParseError> {
+        let start = self.current.span.start;
+        self.expect_word("select")?;
+
+        if !self.at_word() {
+            return Err(ParseError {
+                message: "expected variable name after 'select'".into(),
+                offset: self.current.span.start,
+            });
+        }
+        let var_name = self.current_text().into();
+        self.advance()?;
+
+        // Optional `in word...` clause
+        let words = if self.at_word_eq("in") {
+            self.advance()?;
+            let mut words = Vec::new();
+            while self.at_word()
+                && !self.at_word_eq("do")
+                && !TERMINATOR_WORDS.contains(&self.current_text())
+            {
+                words.push(self.parse_word()?);
+            }
+            if self.at(&TokenKind::Semi) {
+                self.advance()?;
+            }
+            Some(words)
+        } else {
+            if self.at(&TokenKind::Semi) {
+                self.advance()?;
+            }
+            None
+        };
+
+        self.skip_newlines()?;
+        self.expect_word("do")?;
+        let body = self.parse_compound_list()?;
+        self.expect_word("done")?;
+
+        // Collect trailing redirections (e.g., `done <<< "input"`)
+        let mut redirections = Vec::new();
+        while self.at_redirection() || self.at_fd_prefix_redirection() {
+            if self.at_fd_prefix_redirection() {
+                let fd_text = self.current_text();
+                let fd: u32 = fd_text.parse().unwrap_or(0);
+                self.advance()?;
+                let mut redir = self.parse_redirection()?;
+                redir.fd = Some(fd);
+                redirections.push(redir);
+            } else {
+                redirections.push(self.parse_redirection()?);
+            }
+        }
+
+        Ok(Command::Select(SelectCommand {
+            var_name,
+            words,
+            body,
+            redirections,
+            span: self.span_from(start),
+        }))
+    }
+
+    /// Parse `(( expr ))` arithmetic command.
+    /// The lexer tokenizes `((` as two `LParen` tokens. We consume them, then
+    /// collect raw source characters until the matching `))`.
+    fn parse_arith_command(&mut self) -> Result<Command, ParseError> {
+        let start = self.current.span.start;
+        self.advance()?; // first (
+        self.advance()?; // second (
+
+        let expr = self.collect_arith_expr()?;
+
+        Ok(Command::ArithCommand(ArithCommandNode {
+            expr: expr.into(),
+            span: self.span_from(start),
+        }))
+    }
+
+    /// Parse C-style for loop: `for (( init; cond; step )) do body done`.
+    /// Called after `for` has been consumed. `start` is the span start of `for`.
+    fn parse_arith_for(&mut self, start: u32) -> Result<Command, ParseError> {
+        self.advance()?; // first (
+        self.advance()?; // second (
+
+        // Collect three semicolon-separated expressions until ))
+        let inner = self.collect_arith_expr()?;
+
+        // Split inner on ';' to get init, cond, step
+        let parts: Vec<&str> = inner.splitn(3, ';').collect();
+        let init = parts.first().map_or("", |s| s.trim());
+        let cond = parts.get(1).map_or("", |s| s.trim());
+        let step = parts.get(2).map_or("", |s| s.trim());
+
+        // Optional ; or newline before `do`
+        if self.at(&TokenKind::Semi) {
+            self.advance()?;
+        }
+        self.skip_newlines()?;
+        self.expect_word("do")?;
+        let body = self.parse_compound_list()?;
+        self.expect_word("done")?;
+
+        Ok(Command::ArithFor(ArithForCommand {
+            init: init.into(),
+            cond: cond.into(),
+            step: step.into(),
+            body,
+            span: self.span_from(start),
+        }))
+    }
+
+    /// Collect raw source text for an arithmetic expression until `))` is found.
+    /// Handles nested parentheses. Consumes the closing `))`.
+    fn collect_arith_expr(&mut self) -> Result<String, ParseError> {
+        // We need to read raw source text until we find ))
+        // The current token is the first token after ((.
+        // Strategy: track byte position in source and scan for )).
+        let expr_start = self.current.span.start as usize;
+        let src = self.source;
+        let bytes = src.as_bytes();
+        let mut pos = expr_start;
+        let mut depth: u32 = 0;
+
+        while pos < bytes.len() {
+            if bytes[pos] == b'(' {
+                depth += 1;
+                pos += 1;
+            } else if bytes[pos] == b')' {
+                if depth > 0 {
+                    depth -= 1;
+                    pos += 1;
+                } else if pos + 1 < bytes.len() && bytes[pos + 1] == b')' {
+                    // Found ))
+                    let expr = src[expr_start..pos].trim().to_string();
+                    let end_pos = pos + 2;
+                    // Reposition lexer past ))
+                    self.lexer.set_position(end_pos);
+                    self.peeked.clear();
+                    self.prev_end = end_pos as u32;
+                    self.current = self.lexer.next_token().map_err(lex_err)?;
+                    return Ok(expr);
+                } else {
+                    return Err(ParseError {
+                        message: "expected '))' to close arithmetic expression".into(),
+                        offset: pos as u32,
+                    });
+                }
+            } else {
+                pos += 1;
+            }
+        }
+
+        Err(ParseError {
+            message: "unterminated arithmetic expression, expected '))'".into(),
+            offset: expr_start as u32,
+        })
+    }
+
     /// Parse `case word in pattern) body ;; ... esac`.
     fn parse_case(&mut self) -> Result<Command, ParseError> {
         let start = self.current.span.start;
@@ -502,27 +762,83 @@ impl<'src> Parser<'src> {
             self.advance()?;
             self.skip_newlines()?;
 
-            // Parse body: commands until `;;` or `esac`
+            // Parse body: commands until `;;`, `;&`, `;;&`, or `esac`
             let mut body = Vec::new();
-            while self.at_command_start() && !self.is_double_semi() {
+            while self.at_command_start()
+                && !self.is_double_semi()
+                && !self.is_case_fallthrough()
+            {
                 body.push(self.parse_complete_command()?);
                 self.skip_newlines()?;
             }
 
-            // Consume ;; if present
-            if self.is_double_semi() {
+            // Consume terminator: `;;`, `;;&`, `;&`, or none (before esac)
+            let terminator = if self.is_case_continue_testing() {
                 self.advance()?; // first ;
                 self.advance()?; // second ;
-            }
+                self.advance()?; // &
+                CaseTerminator::ContinueTesting
+            } else if self.is_double_semi() {
+                self.advance()?; // first ;
+                self.advance()?; // second ;
+                CaseTerminator::Break
+            } else if self.is_case_fallthrough() {
+                self.advance()?; // ;
+                self.advance()?; // &
+                CaseTerminator::Fallthrough
+            } else {
+                CaseTerminator::Break
+            };
             self.skip_newlines()?;
 
-            items.push(CaseItem { patterns, body });
+            items.push(CaseItem {
+                patterns,
+                body,
+                terminator,
+            });
         }
 
         self.expect_word("esac")?;
         Ok(Command::Case(CaseCommand {
             word,
             items,
+            span: self.span_from(start),
+        }))
+    }
+
+    /// Parse `[[ expression ]]` extended test command.
+    fn parse_double_bracket(&mut self) -> Result<Command, ParseError> {
+        let start = self.current.span.start;
+        self.advance()?; // consume [[
+
+        let mut words = Vec::new();
+        loop {
+            if self.at(&TokenKind::DblRBracket) {
+                self.advance()?; // consume ]]
+                break;
+            }
+            if self.at(&TokenKind::Eof) {
+                return Err(ParseError {
+                    message: "expected ']]' to close extended test".into(),
+                    offset: self.current.span.start,
+                });
+            }
+            // Collect tokens as words (operators inside [[ ]] are expression tokens)
+            if self.at_word() {
+                words.push(self.parse_word()?);
+            } else {
+                // Operator tokens (&&, ||, <, >, (, )) become literal words
+                let tok = self.advance()?;
+                let text = tok.text(self.source);
+                words.push(Word {
+                    parts: vec![WordPart::Literal(text.into())],
+                    span: tok.span,
+                });
+            }
+        }
+
+        Ok(Command::DoubleBracket(DoubleBracketCommand {
+            words,
             span: self.span_from(start),
         }))
     }
@@ -603,8 +919,16 @@ impl<'src> Parser<'src> {
                 if !past_assignments && is_assignment_text(text) {
                     assignments.push(self.parse_assignment()?);
                 } else {
-                    past_assignments = true;
-                    words.push(self.parse_word()?);
+                    // Check if this word ends with '=' and is followed by LParen
+                    // (compound array assignment in command position, e.g. `declare -a arr=(...)`)
+                    if text.ends_with('=') && self.peek_is_lparen() {
+                        let word = self.parse_compound_assign_word()?;
+                        past_assignments = true;
+                        words.push(word);
+                    } else {
+                        past_assignments = true;
+                        words.push(self.parse_word()?);
+                    }
                 }
             } else {
                 break;
@@ -644,7 +968,41 @@ impl<'src> Parser<'src> {
         let val_str = &text[eq_pos + 1..];
 
         let value = if val_str.is_empty() {
-            None
+            // Check for compound array assignment: name=( ... )
+            if self.at(&TokenKind::LParen) {
+                self.advance()?; // consume '('
+                let paren_start = tok.span.start + eq_pos as u32 + 1;
+                let mut elements = Vec::new();
+                while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+                    if self.at(&TokenKind::Newline) {
+                        self.advance()?;
+                        continue;
+                    }
+                    if self.at_word() {
+                        let w = self.advance()?;
+                        elements.push(w.text(self.source).to_string());
+                    } else {
+                        break;
+                    }
+                }
+                let end_span = if self.at(&TokenKind::RParen) {
+                    self.advance()?.span.end
+                } else {
+                    self.current.span.end
+                };
+                // Build a synthetic word like "(one two three)" so
+                // execute_assignment can detect compound array syntax.
+                let compound = format!("({})", elements.join(" "));
+                Some(Word {
+                    parts: vec![WordPart::Literal(compound.into())],
+                    span: Span {
+                        start: paren_start,
+                        end: end_span,
+                    },
+                })
+            } else {
+                None
+            }
         } else {
             let val_start = tok.span.start + eq_pos as u32 + 1;
             let parts = word_parser::parse_word_parts(val_str);
@@ -885,7 +1243,25 @@ fn is_assignment_text(text: &str) -> bool {
     let Some(eq_pos) = text.find('=') else {
         return false;
     };
-    let name = &text[..eq_pos];
+    let mut name = &text[..eq_pos];
+    if name.is_empty() {
+        return false;
+    }
+    // Handle += operator: strip trailing '+'
+    if name.ends_with('+') {
+        name = &name[..name.len() - 1];
+        if name.is_empty() {
+            return false;
+        }
+    }
+    // Strip trailing [subscript] for array element assignment
+    if let Some(bracket_start) = name.find('[') {
+        if name.ends_with(']') {
+            name = &name[..bracket_start];
+        } else {
+            return false;
+        }
+    }
     if name.is_empty() {
         return false;
     }
@@ -1295,5 +1671,143 @@ mod tests {
         // &> is encoded as fd=MAX, op=Output
         assert_eq!(sc.redirections[0].fd, Some(u32::MAX));
         assert_eq!(sc.redirections[0].op, RedirectionOp::Output);
+    }
+
+    // ---- Double bracket ----
+
+    #[test]
+    fn parse_double_bracket_basic() {
+        let cmd = first_command("[[ hello == world ]]");
+        let Command::DoubleBracket(db) = cmd else {
+            panic!("expected DoubleBracket, got {cmd:?}");
+        };
+        assert_eq!(db.words.len(), 3);
+    }
+
+    #[test]
+    fn parse_double_bracket_with_var() {
+        let cmd = first_command("[[ $x == hello ]]");
+        let Command::DoubleBracket(db) = cmd else {
+            panic!("expected DoubleBracket");
+        };
+        assert_eq!(db.words.len(), 3);
+    }
+
+    #[test]
+    fn parse_double_bracket_logical_ops() {
+        // && and || inside [[ ]] should be captured as expression tokens
+        let cmd = first_command("[[ a == a && b == b ]]");
+        let Command::DoubleBracket(db) = cmd else {
+            panic!("expected DoubleBracket");
+        };
+        // a, ==, a, &&, b, ==, b
+        assert_eq!(db.words.len(), 7);
+    }
+
+    #[test]
+    fn parse_double_bracket_in_if() {
+        let prog = parse_ok("if [[ x == x ]]; then echo yes; fi");
+        let cmd = &prog.commands[0].list[0].first.commands[0];
+        assert!(matches!(cmd, Command::If(_)));
+    }
+
+    #[test]
+    fn parse_double_bracket_in_pipeline() {
+        let prog = parse_ok("[[ x == x ]] && echo yes");
+        assert!(!prog.commands.is_empty());
+    }
+
+    // ---- Arithmetic command (( )) ----
+
+    #[test]
+    fn parse_arith_command_basic() {
+        let cmd = first_command("((1+2))");
+        let Command::ArithCommand(ac) = cmd else {
+            panic!("expected ArithCommand, got {cmd:?}");
+        };
+        assert_eq!(ac.expr.as_str(), "1+2");
+    }
+
+    #[test]
+    fn parse_arith_command_with_spaces() {
+        let cmd = first_command("(( x = 1 + 2 ))");
+        let Command::ArithCommand(ac) = cmd else {
+            panic!("expected ArithCommand, got {cmd:?}");
+        };
+        assert_eq!(ac.expr.as_str(), "x = 1 + 2");
+    }
+
+    #[test]
+    fn parse_arith_command_with_parens() {
+        let cmd = first_command("(( (1+2) * 3 ))");
+        let Command::ArithCommand(ac) = cmd else {
+            panic!("expected ArithCommand, got {cmd:?}");
+        };
+        assert_eq!(ac.expr.as_str(), "(1+2) * 3");
+    }
+
+    #[test]
+    fn parse_arith_command_in_if() {
+        let prog = parse_ok("if (( x > 0 )); then echo yes; fi");
+        let cmd = &prog.commands[0].list[0].first.commands[0];
+        assert!(matches!(cmd, Command::If(_)));
+    }
+
+    #[test]
+    fn parse_arith_command_in_and_or() {
+        let prog = parse_ok("(( x > 0 )) && echo yes");
+        assert!(!prog.commands.is_empty());
+    }
+
+    // ---- C-style for (( )) ----
+
+    #[test]
+    fn parse_arith_for_basic() {
+        let cmd = first_command("for ((i=0; i<10; i++)) do echo $i; done");
+        let Command::ArithFor(af) = cmd else {
+            panic!("expected ArithFor, got {cmd:?}");
+        };
+        assert_eq!(af.init.as_str(), "i=0");
+        assert_eq!(af.cond.as_str(), "i<10");
+        assert_eq!(af.step.as_str(), "i++");
+        assert_eq!(af.body.len(), 1);
+    }
+
+    #[test]
+    fn parse_arith_for_with_spaces() {
+        let cmd = first_command("for (( i = 0; i < 5; i++ )) do echo $i; done");
+        let Command::ArithFor(af) = cmd else {
+            panic!("expected ArithFor, got {cmd:?}");
+        };
+        assert_eq!(af.init.as_str(), "i = 0");
+        assert_eq!(af.cond.as_str(), "i < 5");
+        assert_eq!(af.step.as_str(), "i++");
+    }
+
+    #[test]
+    fn parse_arith_for_with_semicolon_before_do() {
+        let cmd = first_command("for ((i=0; i<3; i++)); do echo $i; done");
+        let Command::ArithFor(af) = cmd else {
+            panic!("expected ArithFor, got {cmd:?}");
+        };
+        assert_eq!(af.init.as_str(), "i=0");
+        assert_eq!(af.cond.as_str(), "i<3");
+        assert_eq!(af.step.as_str(), "i++");
+    }
+
+    #[test]
+    fn parse_arith_for_newline_before_do() {
+        let cmd = first_command("for ((i=0; i<3; i++))\ndo\necho $i\ndone");
+        let Command::ArithFor(af) = cmd else {
+            panic!("expected ArithFor, got {cmd:?}");
+        };
+        assert_eq!(af.init.as_str(), "i=0");
+    }
+
+    #[test]
+    fn parse_subshell_not_confused_with_arith() {
+        // A subshell ( echo hi ) should not be confused with (( ))
+        let cmd = first_command("(echo hi)");
+        assert!(matches!(cmd, Command::Subshell(_)));
     }
 }

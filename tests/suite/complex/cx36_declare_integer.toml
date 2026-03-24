@@ -1,0 +1,21 @@
+[test]
+name = "declare-integer-and-case-attrs"
+tags = ["complex", "declare", "P1"]
+tier = "P1"
+requires = ["declare", "echo"]
+
+[input]
+script = """
+declare -i num=5+3
+echo $num
+num="10 * 2"
+echo $num
+declare -u upper="hello"
+echo $upper
+declare -l lower="WORLD"
+echo $lower
+"""
+
+[expect]
+status = 0
+stdout = "8\n20\nHELLO\nworld\n"

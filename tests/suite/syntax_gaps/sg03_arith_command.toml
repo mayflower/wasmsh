@@ -1,0 +1,16 @@
+[test]
+name = "arithmetic-command-basic"
+tags = ["arith-command", "P1"]
+tier = "P1"
+requires = ["arith-command"]
+
+[input]
+script = """
+x=5
+(( x += 3 ))
+echo $x
+"""
+
+[expect]
+status = 0
+stdout = "8\n"

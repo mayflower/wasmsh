@@ -1,0 +1,19 @@
+[test]
+name = "env-builder"
+tags = ["complex", "expansion", "P1"]
+tier = "P1"
+requires = ["export", "parameter-default", "indirect-expansion", "for-in", "indexed-array", "echo"]
+
+[input]
+script = """
+export PATH="/usr/bin:/bin"
+BUILD_TYPE="${BUILD_TYPE:-release}"
+vars=("PATH" "BUILD_TYPE")
+for var in "${vars[@]}"; do
+    echo "$var=${!var}"
+done
+"""
+
+[expect]
+status = 0
+stdout = "PATH=/usr/bin:/bin\nBUILD_TYPE=release\n"

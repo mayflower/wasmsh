@@ -1,0 +1,14 @@
+[test]
+name = "rev-utility"
+tags = ["utilities", "P3"]
+tier = "P3"
+requires = ["rev"]
+
+[input]
+script = """
+echo "hello" | rev
+"""
+
+[expect]
+status = 0
+stdout = "olleh\n"

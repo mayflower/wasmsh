@@ -1,0 +1,15 @@
+[test]
+name = "alias-expansion"
+tags = ["builtins", "P1"]
+tier = "P1"
+requires = ["alias"]
+
+[input]
+script = """
+alias greet='echo hello'
+greet world
+"""
+
+[expect]
+status = 0
+stdout = "hello world\n"

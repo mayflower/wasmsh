@@ -1,0 +1,23 @@
+[test]
+name = "positional-parameters"
+tags = ["complex", "function", "P0"]
+tier = "P0"
+requires = ["function", "for-in", "local", "arith-command", "arithmetic-assignment", "echo"]
+
+[input]
+script = """
+show() {
+    echo "count=$#"
+    echo "all=[$*]"
+    local i=1
+    for arg in "$@"; do
+        echo "  $i=$arg"
+        (( i++ ))
+    done
+}
+show alpha beta gamma
+"""
+
+[expect]
+status = 0
+stdout = "count=3\nall=[alpha beta gamma]\n  1=alpha\n  2=beta\n  3=gamma\n"

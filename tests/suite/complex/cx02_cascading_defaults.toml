@@ -1,0 +1,18 @@
+[test]
+name = "cascading-defaults"
+tags = ["complex", "expansion", "P0"]
+tier = "P0"
+requires = ["parameter-default", "parameter-alternative", "variable-assignment", "echo"]
+
+[input]
+script = """
+HOME=/home/user
+config_dir="${XDG_CONFIG_HOME:-${HOME:-/tmp}/.config}"
+log_level="${DEBUG:+verbose}"
+log_level="${log_level:-info}"
+echo "config=$config_dir level=$log_level"
+"""
+
+[expect]
+status = 0
+stdout = "config=/home/user/.config level=info\n"

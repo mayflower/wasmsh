@@ -45,6 +45,9 @@ pub enum AndOrOp {
 pub struct Pipeline {
     pub negated: bool,
     pub commands: Vec<Command>,
+    /// Per-stage flags: `pipe_stderr[i]` is true when stage `i` uses `|&`
+    /// (its stderr should also be piped to the next stage's stdin).
+    pub pipe_stderr: Vec<bool>,
 }
 
 /// A single command in the AST.
@@ -57,8 +60,48 @@ pub enum Command {
     While(WhileCommand),
     Until(UntilCommand),
     For(ForCommand),
+    ArithFor(ArithForCommand),
     FunctionDef(FunctionDef),
     Case(CaseCommand),
+    DoubleBracket(DoubleBracketCommand),
+    ArithCommand(ArithCommandNode),
+    Select(SelectCommand),
+}
+
+/// A C-style `for (( init; cond; step )) do body done` command.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArithForCommand {
+    pub init: SmolStr,
+    pub cond: SmolStr,
+    pub step: SmolStr,
+    pub body: Vec<CompleteCommand>,
+    pub span: Span,
+}
+
+/// A `(( expr ))` arithmetic command.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArithCommandNode {
+    pub expr: SmolStr,
+    pub span: Span,
+}
+
+/// A `select name [in word ...]; do body; done` command.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectCommand {
+    pub var_name: SmolStr,
+    /// `None` means iterate over `"$@"` (no `in` clause).
+    pub words: Option<Vec<Word>>,
+    pub body: Vec<CompleteCommand>,
+    /// Trailing redirections (e.g., `done <<< "input"`).
+    pub redirections: Vec<Redirection>,
+    pub span: Span,
+}
+
+/// A `[[ expression ]]` extended test command.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DoubleBracketCommand {
+    pub words: Vec<Word>,
+    pub span: Span,
 }
 
 /// A subshell command `( compound_list )`.
@@ -126,11 +169,23 @@ pub struct CaseCommand {
     pub span: Span,
 }
 
+/// Terminator for a case item arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseTerminator {
+    /// `;;` — stop matching after this arm.
+    Break,
+    /// `;&` — fall through to the next arm's body unconditionally.
+    Fallthrough,
+    /// `;;&` — continue testing remaining patterns.
+    ContinueTesting,
+}
+
 /// A single `pattern) body ;;` arm in a case statement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaseItem {
     pub patterns: Vec<Word>,
     pub body: Vec<CompleteCommand>,
+    pub terminator: CaseTerminator,
 }
 
 /// A function definition: `name() body` or `function name body`.

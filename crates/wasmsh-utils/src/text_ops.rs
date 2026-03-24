@@ -1,4 +1,4 @@
-//! Text utilities: head, tail, wc, grep, sed, sort, uniq, cut, tr, tee.
+//! Text utilities: head, tail, wc, grep, sed, sort, uniq, cut, tr, tee, paste, rev, column.
 
 use wasmsh_fs::{OpenOptions, Vfs};
 
@@ -427,4 +427,212 @@ pub(crate) fn util_tee(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     }
     status
+}
+
+pub(crate) fn util_paste(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let mut args = &argv[1..];
+    let mut delimiter = "\t".to_string();
+    let mut serial = false;
+
+    // Parse flags
+    while let Some(arg) = args.first() {
+        if *arg == "-d" && args.len() > 1 {
+            delimiter = args[1].to_string();
+            args = &args[2..];
+        } else if *arg == "-s" {
+            serial = true;
+            args = &args[1..];
+        } else if arg.starts_with('-') && arg.len() > 1 {
+            // Try combined flags like -sd or -ds
+            let flags = &arg[1..];
+            let mut consumed = true;
+            for c in flags.chars() {
+                match c {
+                    's' => serial = true,
+                    'd' => {
+                        // -d requires next arg as delimiter
+                        if args.len() > 1 {
+                            delimiter = args[1].to_string();
+                            args = &args[1..];
+                        }
+                    }
+                    _ => {
+                        consumed = false;
+                        break;
+                    }
+                }
+            }
+            if consumed {
+                args = &args[1..];
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    if args.is_empty() {
+        // Read from stdin
+        let text = if let Some(data) = ctx.stdin {
+            String::from_utf8_lossy(data).to_string()
+        } else {
+            ctx.output.stderr(b"paste: missing operand\n");
+            return 1;
+        };
+        // Just pass through stdin
+        ctx.output.stdout(text.as_bytes());
+        if !text.ends_with('\n') {
+            ctx.output.stdout(b"\n");
+        }
+        return 0;
+    }
+
+    // Read all files
+    let mut file_lines: Vec<Vec<String>> = Vec::new();
+    for path in args {
+        if *path == "-" {
+            // Read from stdin
+            let text = if let Some(data) = ctx.stdin {
+                String::from_utf8_lossy(data).to_string()
+            } else {
+                String::new()
+            };
+            file_lines.push(text.lines().map(String::from).collect());
+        } else {
+            let full = resolve_path(ctx.cwd, path);
+            match read_text(ctx.fs, &full) {
+                Ok(text) => {
+                    file_lines.push(text.lines().map(String::from).collect());
+                }
+                Err(e) => {
+                    emit_error(ctx.output, "paste", path, &e);
+                    return 1;
+                }
+            }
+        }
+    }
+
+    if serial {
+        // Serial mode: each file's lines on one output line
+        for lines in &file_lines {
+            let joined = lines.join(&delimiter);
+            ctx.output.stdout(joined.as_bytes());
+            ctx.output.stdout(b"\n");
+        }
+    } else {
+        // Normal mode: merge corresponding lines
+        let max_lines = file_lines.iter().map(Vec::len).max().unwrap_or(0);
+        for i in 0..max_lines {
+            for (fi, lines) in file_lines.iter().enumerate() {
+                if fi > 0 {
+                    ctx.output.stdout(delimiter.as_bytes());
+                }
+                if let Some(line) = lines.get(i) {
+                    ctx.output.stdout(line.as_bytes());
+                }
+            }
+            ctx.output.stdout(b"\n");
+        }
+    }
+    0
+}
+
+pub(crate) fn util_rev(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let file_args = &argv[1..];
+    let text = get_input_text(ctx, file_args);
+    if text.is_empty() && file_args.is_empty() && ctx.stdin.is_none() {
+        ctx.output.stderr(b"rev: missing operand\n");
+        return 1;
+    }
+    for line in text.lines() {
+        let reversed: String = line.chars().rev().collect();
+        ctx.output.stdout(reversed.as_bytes());
+        ctx.output.stdout(b"\n");
+    }
+    0
+}
+
+pub(crate) fn util_column(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let mut args = &argv[1..];
+    let mut table_mode = false;
+    let mut input_delim: Option<String> = None;
+
+    // Parse flags
+    while let Some(arg) = args.first() {
+        if *arg == "-t" {
+            table_mode = true;
+            args = &args[1..];
+        } else if *arg == "-s" && args.len() > 1 {
+            input_delim = Some(args[1].to_string());
+            args = &args[2..];
+        } else if arg.starts_with('-') && arg.len() > 1 {
+            args = &args[1..];
+        } else {
+            break;
+        }
+    }
+
+    let text = get_input_text(ctx, args);
+    if text.is_empty() {
+        return 0;
+    }
+
+    if table_mode {
+        // Split each line into fields and align columns
+        let rows: Vec<Vec<&str>> = text
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|line| {
+                if let Some(ref d) = input_delim {
+                    line.split(d.as_str()).collect()
+                } else {
+                    line.split_whitespace().collect()
+                }
+            })
+            .collect();
+
+        if rows.is_empty() {
+            return 0;
+        }
+
+        // Compute maximum width for each column
+        let max_cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+        let mut col_widths = vec![0usize; max_cols];
+        for row in &rows {
+            for (i, field) in row.iter().enumerate() {
+                col_widths[i] = col_widths[i].max(field.len());
+            }
+        }
+
+        // Output aligned table
+        for row in &rows {
+            let mut line = String::new();
+            for (i, field) in row.iter().enumerate() {
+                if i > 0 {
+                    line.push_str("  ");
+                }
+                if i < row.len() - 1 {
+                    // Left-align and pad
+                    line.push_str(field);
+                    let padding = col_widths[i].saturating_sub(field.len());
+                    for _ in 0..padding {
+                        line.push(' ');
+                    }
+                } else {
+                    // Last column: no trailing padding
+                    line.push_str(field);
+                }
+            }
+            line.push('\n');
+            ctx.output.stdout(line.as_bytes());
+        }
+    } else {
+        // Simple mode: just pass through
+        ctx.output.stdout(text.as_bytes());
+        if !text.ends_with('\n') {
+            ctx.output.stdout(b"\n");
+        }
+    }
+    0
 }

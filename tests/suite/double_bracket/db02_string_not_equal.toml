@@ -1,0 +1,17 @@
+[test]
+name = "double-bracket-string-not-equal"
+tags = ["double-bracket", "P0"]
+tier = "P0"
+requires = ["double-bracket"]
+
+[input]
+script = """
+X=hello
+if [[ $X != world ]]; then
+  echo different
+fi
+"""
+
+[expect]
+status = 0
+stdout = "different\n"

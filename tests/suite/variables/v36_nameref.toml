@@ -1,0 +1,18 @@
+[test]
+name = "nameref-variable"
+tags = ["variables", "P3"]
+tier = "P3"
+requires = ["nameref"]
+
+[input]
+script = """
+X=hello
+declare -n ref=X
+echo $ref
+ref=world
+echo $X
+"""
+
+[expect]
+status = 0
+stdout = "hello\nworld\n"

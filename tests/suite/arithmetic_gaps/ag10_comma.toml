@@ -1,0 +1,14 @@
+[test]
+name = "arithmetic-comma-operator"
+tags = ["arithmetic", "P1"]
+tier = "P1"
+requires = ["arithmetic-assignment"]
+
+[input]
+script = """
+echo $(( x=1, y=2, x+y ))
+"""
+
+[expect]
+status = 0
+stdout = "3\n"

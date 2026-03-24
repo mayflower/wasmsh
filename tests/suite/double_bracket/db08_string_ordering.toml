@@ -1,0 +1,16 @@
+[test]
+name = "double-bracket-string-ordering"
+tags = ["double-bracket", "P0"]
+tier = "P0"
+requires = ["double-bracket"]
+
+[input]
+script = """
+if [[ "apple" < "banana" ]]; then
+  echo correct
+fi
+"""
+
+[expect]
+status = 0
+stdout = "correct\n"

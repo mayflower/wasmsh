@@ -1,0 +1,17 @@
+[test]
+name = "declare-integer"
+tags = ["builtins", "P1"]
+tier = "P1"
+requires = ["declare"]
+
+[input]
+script = """
+declare -i num=5+3
+echo $num
+num=10/2
+echo $num
+"""
+
+[expect]
+status = 0
+stdout = "8\n5\n"

@@ -1,0 +1,22 @@
+[test]
+name = "arithmetic-expression-chain"
+tags = ["complex", "arithmetic", "P1"]
+tier = "P1"
+requires = ["arithmetic-expansion", "arithmetic-assignment", "variable-assignment", "echo"]
+
+[input]
+script = """
+a=3
+b=5
+sum=$(( a + b ))
+echo "sum=$sum"
+product=$(( sum * 2 ))
+echo "product=$product"
+result=$(( (a + b) * (a - 1) ))
+echo "result=$result"
+echo "ternary=$(( sum > 10 ? sum : 10 ))"
+"""
+
+[expect]
+status = 0
+stdout = "sum=8\nproduct=16\nresult=16\nternary=10\n"

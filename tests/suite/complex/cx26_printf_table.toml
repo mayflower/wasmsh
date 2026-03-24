@@ -1,0 +1,17 @@
+[test]
+name = "printf-formatted-table"
+tags = ["complex", "printf", "P0"]
+tier = "P0"
+requires = ["printf", "printf-format"]
+
+[input]
+script = """
+printf "%-8s %5s\n" "Name" "Score"
+printf "%-8s %5d\n" "Alice" 95
+printf "%-8s %5d\n" "Bob" 87
+printf "%-8s %5d\n" "Charlie" 72
+"""
+
+[expect]
+status = 0
+stdout = "Name     Score\nAlice       95\nBob         87\nCharlie     72\n"

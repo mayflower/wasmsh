@@ -1,0 +1,15 @@
+[test]
+name = "read-prompt-flag"
+tags = ["builtins", "P1"]
+tier = "P1"
+requires = ["read-flags"]
+
+[input]
+script = """
+echo "test" | read -r line
+echo "line: $line"
+"""
+
+[expect]
+status = 0
+stdout_contains = ["line: test"]

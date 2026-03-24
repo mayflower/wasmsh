@@ -1,0 +1,14 @@
+[test]
+name = "yes-utility"
+tags = ["utilities", "P2"]
+tier = "P2"
+requires = ["yes"]
+
+[input]
+script = """
+yes | head -3
+"""
+
+[expect]
+status = 0
+stdout = "y\ny\ny\n"

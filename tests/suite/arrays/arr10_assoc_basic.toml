@@ -1,0 +1,18 @@
+[test]
+name = "associative-array-basic"
+tags = ["arrays", "P1"]
+tier = "P1"
+requires = ["associative-array"]
+
+[input]
+script = """
+declare -A colors
+colors[red]="#ff0000"
+colors[green]="#00ff00"
+echo ${colors[red]}
+echo ${colors[green]}
+"""
+
+[expect]
+status = 0
+stdout = "#ff0000\n#00ff00\n"

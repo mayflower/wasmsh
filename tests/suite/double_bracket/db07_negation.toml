@@ -1,0 +1,16 @@
+[test]
+name = "double-bracket-negation"
+tags = ["double-bracket", "P0"]
+tier = "P0"
+requires = ["double-bracket"]
+
+[input]
+script = """
+if [[ ! -z "notempty" ]]; then
+  echo ok
+fi
+"""
+
+[expect]
+status = 0
+stdout = "ok\n"

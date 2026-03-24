@@ -1,0 +1,14 @@
+[test]
+name = "read-delimiter"
+tags = ["builtins", "P1"]
+tier = "P1"
+requires = ["read-flags"]
+
+[input]
+script = """
+echo -n "a:b:c" | { read -d ':' first; echo "$first"; }
+"""
+
+[expect]
+status = 0
+stdout = "a\n"

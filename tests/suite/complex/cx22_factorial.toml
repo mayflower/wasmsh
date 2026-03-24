@@ -1,0 +1,26 @@
+[test]
+name = "recursive-factorial"
+tags = ["complex", "function", "recursion", "P0"]
+tier = "P0"
+requires = ["function", "local", "arith-command", "command-substitution", "arithmetic-expansion", "echo"]
+
+[input]
+script = """
+factorial() {
+    local n=$1
+    if (( n <= 1 )); then
+        echo 1
+    else
+        local sub
+        sub=$(factorial $(( n - 1 )))
+        echo $(( n * sub ))
+    fi
+}
+echo "$(factorial 1)"
+echo "$(factorial 5)"
+echo "$(factorial 10)"
+"""
+
+[expect]
+status = 0
+stdout = "1\n120\n3628800\n"

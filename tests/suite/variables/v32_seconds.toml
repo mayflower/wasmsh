@@ -1,0 +1,17 @@
+[test]
+name = "seconds-variable"
+tags = ["variables", "P2"]
+tier = "P2"
+requires = ["seconds-variable"]
+
+[input]
+script = """
+S=$SECONDS
+if [ "$S" -ge 0 ]; then
+  echo ok
+fi
+"""
+
+[expect]
+status = 0
+stdout = "ok\n"

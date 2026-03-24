@@ -1,0 +1,27 @@
+[test]
+name = "complex-case-classify"
+tags = ["complex", "case", "function", "P0"]
+tier = "P0"
+requires = ["function", "case", "command-substitution", "echo"]
+
+[input]
+script = """
+classify() {
+    case "$1" in
+        [0-9]) echo "digit" ;;
+        [a-zA-Z]*) echo "word" ;;
+        -*) echo "flag" ;;
+        '') echo "empty" ;;
+        *) echo "other" ;;
+    esac
+}
+echo "$(classify 5)"
+echo "$(classify hello)"
+echo "$(classify -v)"
+echo "$(classify "")"
+echo "$(classify @)"
+"""
+
+[expect]
+status = 0
+stdout = "digit\nword\nflag\nempty\nother\n"

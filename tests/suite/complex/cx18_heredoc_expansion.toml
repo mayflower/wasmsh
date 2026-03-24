@@ -1,0 +1,20 @@
+[test]
+name = "heredoc-expansion-with-variables"
+tags = ["complex", "heredoc", "P0"]
+tier = "P0"
+requires = ["here-doc", "here-doc-expansion", "cat", "variable-assignment"]
+
+[input]
+script = """
+name="World"
+count=$((2 + 3))
+greeting="Hi"
+cat <<EOF
+$greeting, $name!
+Count is $count.
+EOF
+"""
+
+[expect]
+status = 0
+stdout = "Hi, World!\nCount is 5.\n"

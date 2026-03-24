@@ -1,0 +1,22 @@
+[test]
+name = "array-pattern-filter"
+tags = ["complex", "array", "P0"]
+tier = "P0"
+requires = ["indexed-array", "for-in", "double-bracket", "echo"]
+
+[input]
+script = """
+files=("readme.md" "main.rs" "lib.rs" "test.py" "config.toml")
+rs_count=0
+for f in "${files[@]}"; do
+    if [[ "$f" == *.rs ]]; then
+        echo "rust: $f"
+        (( rs_count++ ))
+    fi
+done
+echo "total: $rs_count"
+"""
+
+[expect]
+status = 0
+stdout = "rust: main.rs\nrust: lib.rs\ntotal: 2\n"

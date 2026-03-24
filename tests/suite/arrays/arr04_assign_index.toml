@@ -1,0 +1,18 @@
+[test]
+name = "indexed-array-assign-index"
+tags = ["arrays", "P0"]
+tier = "P0"
+requires = ["indexed-array"]
+
+[input]
+script = """
+arr[0]=first
+arr[5]=sixth
+echo ${arr[0]}
+echo ${arr[5]}
+echo ${#arr[@]}
+"""
+
+[expect]
+status = 0
+stdout = "first\nsixth\n2\n"

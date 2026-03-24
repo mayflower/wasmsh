@@ -1,0 +1,21 @@
+[test]
+name = "funcname-variable"
+tags = ["complex", "function", "P1"]
+tier = "P1"
+requires = ["function", "funcname-variable", "echo"]
+
+[input]
+script = """
+outer() {
+    echo "in $FUNCNAME"
+    inner
+}
+inner() {
+    echo "in $FUNCNAME"
+}
+outer
+"""
+
+[expect]
+status = 0
+stdout = "in outer\nin inner\n"

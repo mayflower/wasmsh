@@ -1,0 +1,14 @@
+[test]
+name = "pipe-ampersand-stderr"
+tags = ["pipe-amp", "P2"]
+tier = "P2"
+requires = ["pipe-ampersand"]
+
+[input]
+script = """
+echo error >&2 |& cat
+"""
+
+[expect]
+status = 0
+stdout = "error\n"

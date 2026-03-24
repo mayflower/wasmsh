@@ -1,0 +1,20 @@
+[test]
+name = "extglob-not-pattern"
+tags = ["globbing", "P1"]
+tier = "P1"
+requires = ["extglob"]
+
+[setup.files]
+"/tmp/a.txt" = ""
+"/tmp/b.log" = ""
+"/tmp/c.txt" = ""
+
+[input]
+script = """
+cd /tmp
+ls !(*.log) | sort
+"""
+
+[expect]
+status = 0
+stdout = "a.txt\nc.txt\n"

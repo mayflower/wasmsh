@@ -1,0 +1,15 @@
+[test]
+name = "alias-basic"
+tags = ["builtins", "P1"]
+tier = "P1"
+requires = ["alias"]
+
+[input]
+script = """
+alias ll='ls -la'
+type ll
+"""
+
+[expect]
+status = 0
+stdout_contains = ["alias"]

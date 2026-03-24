@@ -1,0 +1,16 @@
+[test]
+name = "case-modification-uppercase"
+tags = ["expansion", "P1"]
+tier = "P1"
+requires = ["case-modification"]
+
+[input]
+script = """
+X=hello
+echo ${X^}
+echo ${X^^}
+"""
+
+[expect]
+status = 0
+stdout = "Hello\nHELLO\n"

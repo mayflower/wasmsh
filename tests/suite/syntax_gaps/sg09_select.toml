@@ -1,0 +1,18 @@
+[test]
+name = "select-loop"
+tags = ["select", "P3"]
+tier = "P3"
+requires = ["select"]
+
+[input]
+script = """
+REPLY=2
+select item in apple banana cherry; do
+  echo "chose: $item"
+  break
+done <<< "2"
+"""
+
+[expect]
+status = 0
+stdout_contains = ["chose: banana"]

@@ -1,0 +1,16 @@
+[test]
+name = "mktemp-directory"
+tags = ["utilities", "P1"]
+tier = "P1"
+requires = ["mktemp"]
+
+[input]
+script = """
+D=$(mktemp -d)
+test -d "$D" && echo is_dir
+rm -r "$D"
+"""
+
+[expect]
+status = 0
+stdout = "is_dir\n"

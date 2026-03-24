@@ -1,0 +1,23 @@
+[test]
+name = "tree-printer"
+tags = ["complex", "vfs", "P1"]
+tier = "P1"
+requires = ["mkdir", "touch", "for-in", "test", "parameter-strip", "echo"]
+
+[input]
+script = """
+mkdir -p /tmp/tree/a
+touch /tmp/tree/a/file1 /tmp/tree/file2
+for entry in /tmp/tree/*; do
+    name="${entry##*/}"
+    if [ -d "$entry" ]; then
+        echo "dir: $name"
+    else
+        echo "file: $name"
+    fi
+done
+"""
+
+[expect]
+status = 0
+stdout = "dir: a\nfile: file2\n"

@@ -1,0 +1,17 @@
+[test]
+name = "indexed-array-basic"
+tags = ["arrays", "P0"]
+tier = "P0"
+requires = ["indexed-array"]
+
+[input]
+script = """
+arr=(one two three)
+echo ${arr[0]}
+echo ${arr[1]}
+echo ${arr[2]}
+"""
+
+[expect]
+status = 0
+stdout = "one\ntwo\nthree\n"

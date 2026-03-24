@@ -1,0 +1,16 @@
+[test]
+name = "transformation-upper-lower"
+tags = ["expansion", "P3"]
+tier = "P3"
+requires = ["transformation-operators"]
+
+[input]
+script = """
+X=Hello
+echo ${X@U}
+echo ${X@L}
+"""
+
+[expect]
+status = 0
+stdout = "HELLO\nhello\n"

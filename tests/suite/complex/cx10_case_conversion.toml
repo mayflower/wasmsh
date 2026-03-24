@@ -1,0 +1,19 @@
+[test]
+name = "case-conversion"
+tags = ["complex", "expansion", "P0"]
+tier = "P0"
+requires = ["case-modification", "parameter-substitution", "echo"]
+
+[input]
+script = """
+str="Hello World, Hello Bash"
+echo "${str,,}"
+echo "${str^^}"
+echo "${str/Hello/Goodbye}"
+echo "${str//Hello/Goodbye}"
+echo "${str// /_}"
+"""
+
+[expect]
+status = 0
+stdout = "hello world, hello bash\nHELLO WORLD, HELLO BASH\nGoodbye World, Hello Bash\nGoodbye World, Goodbye Bash\nHello_World,_Hello_Bash\n"

@@ -1,0 +1,16 @@
+[test]
+name = "printf-width-precision"
+tags = ["builtins", "P1"]
+tier = "P1"
+requires = ["printf-format"]
+
+[input]
+script = """
+printf "%10s\n" hello
+printf "%-10s|\n" left
+printf "%05d\n" 42
+"""
+
+[expect]
+status = 0
+stdout = "     hello\nleft      |\n00042\n"

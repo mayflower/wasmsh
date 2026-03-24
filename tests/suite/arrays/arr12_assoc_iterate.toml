@@ -1,0 +1,19 @@
+[test]
+name = "associative-array-iterate-keys"
+tags = ["arrays", "P1"]
+tier = "P1"
+requires = ["associative-array"]
+
+[input]
+script = """
+declare -A counts
+counts[a]=10
+counts[b]=20
+for key in "${!counts[@]}"; do
+  echo "$key=${counts[$key]}"
+done | sort
+"""
+
+[expect]
+status = 0
+stdout = "a=10\nb=20\n"

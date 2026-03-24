@@ -1,0 +1,20 @@
+[test]
+name = "dotglob"
+tags = ["globbing", "P2"]
+tier = "P2"
+requires = ["shopt"]
+
+[setup.files]
+"/tmp/.hidden" = ""
+"/tmp/visible" = ""
+
+[input]
+script = """
+cd /tmp
+shopt -s dotglob
+echo * | tr ' ' '\n' | sort
+"""
+
+[expect]
+status = 0
+stdout = ".hidden\nvisible\n"

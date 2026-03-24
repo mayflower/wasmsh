@@ -1,0 +1,17 @@
+[test]
+name = "read-into-array"
+tags = ["builtins", "P1"]
+tier = "P1"
+requires = ["read-flags", "indexed-array"]
+
+[input]
+script = """
+echo "one two three" | read -a words
+echo ${words[0]}
+echo ${words[2]}
+echo ${#words[@]}
+"""
+
+[expect]
+status = 0
+stdout = "one\nthree\n3\n"

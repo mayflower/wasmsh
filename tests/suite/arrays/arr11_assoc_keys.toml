@@ -1,0 +1,18 @@
+[test]
+name = "associative-array-keys"
+tags = ["arrays", "P1"]
+tier = "P1"
+requires = ["associative-array"]
+
+[input]
+script = """
+declare -A m
+m[x]=1
+m[y]=2
+m[z]=3
+echo ${#m[@]}
+"""
+
+[expect]
+status = 0
+stdout = "3\n"

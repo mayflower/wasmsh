@@ -1,0 +1,25 @@
+[test]
+name = "retry-loop"
+tags = ["complex", "arithmetic", "control-flow", "P0"]
+tier = "P0"
+requires = ["while", "arith-command", "arithmetic-expansion", "arithmetic-assignment", "break", "echo"]
+
+[input]
+script = """
+max=5
+delay=1
+attempt=0
+while (( attempt < max )); do
+    (( attempt++ ))
+    if (( attempt == 3 )); then
+        echo "Success on attempt $attempt"
+        break
+    fi
+    (( delay *= 2 ))
+done
+echo "delay=$delay"
+"""
+
+[expect]
+status = 0
+stdout = "Success on attempt 3\ndelay=4\n"

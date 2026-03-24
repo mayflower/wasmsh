@@ -1,0 +1,17 @@
+[test]
+name = "declare-export-readonly"
+tags = ["builtins", "P1"]
+tier = "P1"
+requires = ["declare"]
+
+[input]
+script = """
+declare -x EXPORTED=hello
+declare -r LOCKED=frozen
+echo $EXPORTED
+echo $LOCKED
+"""
+
+[expect]
+status = 0
+stdout = "hello\nfrozen\n"

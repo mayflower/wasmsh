@@ -1,0 +1,15 @@
+[test]
+name = "arithmetic-parentheses"
+tags = ["arithmetic", "P1"]
+tier = "P1"
+requires = ["arithmetic-parentheses"]
+
+[input]
+script = """
+echo $(( (2 + 3) * 4 ))
+echo $(( 2 + 3 * 4 ))
+"""
+
+[expect]
+status = 0
+stdout = "20\n14\n"

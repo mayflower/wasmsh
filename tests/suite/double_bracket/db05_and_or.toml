@@ -1,0 +1,17 @@
+[test]
+name = "double-bracket-and-or"
+tags = ["double-bracket", "P0"]
+tier = "P0"
+requires = ["double-bracket"]
+
+[input]
+script = """
+X=5
+if [[ $X -gt 0 && $X -lt 10 ]]; then
+  echo in-range
+fi
+"""
+
+[expect]
+status = 0
+stdout = "in-range\n"

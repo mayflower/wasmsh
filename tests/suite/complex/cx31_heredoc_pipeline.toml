@@ -1,0 +1,20 @@
+[test]
+name = "heredoc-piped-through-utilities"
+tags = ["complex", "heredoc", "pipeline", "P1"]
+tier = "P1"
+requires = ["here-doc", "pipeline", "cat", "grep", "wc"]
+
+[input]
+script = """
+cat <<EOF | grep "x"
+alpha
+bravo-x
+charlie
+delta-x
+echo-x
+EOF
+"""
+
+[expect]
+status = 0
+stdout = "bravo-x\ndelta-x\necho-x\n"

@@ -1,0 +1,16 @@
+[test]
+name = "set-pipefail-all-success"
+tags = ["options", "P0"]
+tier = "P0"
+requires = ["pipefail"]
+
+[input]
+script = """
+set -o pipefail
+true | true | true
+echo $?
+"""
+
+[expect]
+status = 0
+stdout = "0\n"

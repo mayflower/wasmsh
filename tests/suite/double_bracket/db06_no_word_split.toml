@@ -1,0 +1,17 @@
+[test]
+name = "double-bracket-no-word-splitting"
+tags = ["double-bracket", "P0"]
+tier = "P0"
+requires = ["double-bracket"]
+
+[input]
+script = """
+X="hello world"
+if [[ $X == "hello world" ]]; then
+  echo ok
+fi
+"""
+
+[expect]
+status = 0
+stdout = "ok\n"

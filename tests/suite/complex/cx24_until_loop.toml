@@ -1,0 +1,20 @@
+[test]
+name = "until-loop-sum"
+tags = ["complex", "control-flow", "P0"]
+tier = "P0"
+requires = ["until", "arith-command", "arithmetic-assignment", "echo"]
+
+[input]
+script = """
+counter=1
+sum=0
+until (( counter > 5 )); do
+    (( sum += counter ))
+    (( counter++ ))
+done
+echo "sum=$sum"
+"""
+
+[expect]
+status = 0
+stdout = "sum=15\n"

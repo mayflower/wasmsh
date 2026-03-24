@@ -1,0 +1,18 @@
+[test]
+name = "arithmetic-command-increment"
+tags = ["arith-command", "P1"]
+tier = "P1"
+requires = ["arith-command"]
+
+[input]
+script = """
+count=0
+(( count++ ))
+(( count++ ))
+(( count++ ))
+echo $count
+"""
+
+[expect]
+status = 0
+stdout = "3\n"

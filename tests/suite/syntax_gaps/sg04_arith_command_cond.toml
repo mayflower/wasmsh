@@ -1,0 +1,17 @@
+[test]
+name = "arithmetic-command-as-condition"
+tags = ["arith-command", "P1"]
+tier = "P1"
+requires = ["arith-command"]
+
+[input]
+script = """
+x=10
+if (( x > 5 )); then
+  echo big
+fi
+"""
+
+[expect]
+status = 0
+stdout = "big\n"

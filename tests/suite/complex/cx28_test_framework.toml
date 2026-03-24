@@ -1,0 +1,23 @@
+[test]
+name = "mini-test-framework"
+tags = ["complex", "function", "P1"]
+tier = "P1"
+requires = ["function", "if", "test", "arith-command", "arithmetic-assignment", "case-modification", "parameter-substitution", "parameter-length", "echo", "command-substitution", "arithmetic-expansion"]
+
+[input]
+script = """
+pass=0; fail=0
+assert_eq() {
+    if [ "$2" = "$3" ]; then (( pass++ )); else (( fail++ )); echo "FAIL: $1"; fi
+}
+assert_eq "math" "5" "$(echo $(( 2 + 3 )))"
+str="HELLO"
+assert_eq "lower" "hello" "${str,,}"
+assert_eq "len" "5" "${#str}"
+assert_eq "replace" "HALLO" "${str/E/A}"
+echo "$pass passed, $fail failed"
+"""
+
+[expect]
+status = 0
+stdout = "4 passed, 0 failed\n"

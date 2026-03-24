@@ -1,0 +1,20 @@
+[test]
+name = "indirect-variable-expansion"
+tags = ["complex", "expansion", "P1"]
+tier = "P1"
+requires = ["indirect-expansion", "for-in", "echo"]
+
+[input]
+script = """
+color_red="#FF0000"
+color_green="#00FF00"
+color_blue="#0000FF"
+for name in red green blue; do
+    varname="color_${name}"
+    echo "$name = ${!varname}"
+done
+"""
+
+[expect]
+status = 0
+stdout = "red = #FF0000\ngreen = #00FF00\nblue = #0000FF\n"

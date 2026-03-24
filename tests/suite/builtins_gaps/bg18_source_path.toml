@@ -1,0 +1,19 @@
+[test]
+name = "source-path-search"
+tags = ["builtins", "P2"]
+tier = "P2"
+requires = ["source-path"]
+
+[setup.files]
+"/lib/helpers.sh" = "helper_loaded=yes\n"
+
+[input]
+script = """
+PATH=/lib:$PATH
+source helpers.sh
+echo $helper_loaded
+"""
+
+[expect]
+status = 0
+stdout = "yes\n"

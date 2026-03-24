@@ -1,0 +1,15 @@
+[test]
+name = "transformation-quote"
+tags = ["expansion", "P3"]
+tier = "P3"
+requires = ["transformation-operators"]
+
+[input]
+script = """
+X="hello world"
+echo ${X@Q}
+"""
+
+[expect]
+status = 0
+stdout = "'hello world'\n"

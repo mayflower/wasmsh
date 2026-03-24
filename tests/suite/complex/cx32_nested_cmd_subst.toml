@@ -1,0 +1,16 @@
+[test]
+name = "nested-command-substitution"
+tags = ["complex", "expansion", "P0"]
+tier = "P0"
+requires = ["command-substitution", "nested-expansion", "echo"]
+
+[input]
+script = """
+inner=$(echo "hello")
+middle=$(echo "${inner} $(echo "world")")
+echo "$middle"
+"""
+
+[expect]
+status = 0
+stdout = "hello world\n"

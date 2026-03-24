@@ -47,6 +47,13 @@ pub(crate) fn parse_word_parts(text: &str) -> Vec<WordPart> {
                     pos += 2; // skip $'
                     let s = parse_ansi_c_quoted(text, &mut pos);
                     parts.push(WordPart::Literal(s.into()));
+                } else if pos + 1 < bytes.len() && bytes[pos + 1] == b'"' {
+                    // $"..." locale quoting — in sandbox, treat as regular double-quoted string
+                    flush(&mut lit, &mut parts);
+                    pos += 1; // skip $, let the " be handled by double-quote parsing
+                    pos += 1; // skip opening "
+                    let inner = parse_double_quoted(text, &mut pos);
+                    parts.push(WordPart::DoubleQuoted(inner));
                 } else {
                     flush(&mut lit, &mut parts);
                     pos += 1;

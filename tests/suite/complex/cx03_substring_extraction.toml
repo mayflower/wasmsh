@@ -1,0 +1,17 @@
+[test]
+name = "substring-extraction"
+tags = ["complex", "expansion", "P0"]
+tier = "P0"
+requires = ["parameter-substring", "parameter-length", "echo"]
+
+[input]
+script = """
+str="Hello, World!"
+echo "${#str}"
+echo "${str:7}"
+echo "${str:0:5}"
+"""
+
+[expect]
+status = 0
+stdout = "13\nWorld!\nHello\n"

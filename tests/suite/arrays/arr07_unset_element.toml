@@ -1,0 +1,17 @@
+[test]
+name = "indexed-array-unset-element"
+tags = ["arrays", "P0"]
+tier = "P0"
+requires = ["indexed-array"]
+
+[input]
+script = """
+arr=(a b c d)
+unset 'arr[1]'
+echo ${#arr[@]}
+echo "${arr[@]}"
+"""
+
+[expect]
+status = 0
+stdout = "3\na c d\n"

@@ -1,0 +1,18 @@
+[test]
+name = "subshell-vs-brace-group"
+tags = ["complex", "subshell", "P0"]
+tier = "P0"
+requires = ["subshell", "brace-group", "variable-assignment", "echo"]
+
+[input]
+script = """
+count=0
+( count=100; echo "sub: $count" )
+echo "after sub: $count"
+{ count=200; echo "brace: $count"; }
+echo "after brace: $count"
+"""
+
+[expect]
+status = 0
+stdout = "sub: 100\nafter sub: 0\nbrace: 200\nafter brace: 200\n"

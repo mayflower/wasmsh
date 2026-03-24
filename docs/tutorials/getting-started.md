@@ -80,6 +80,33 @@ let events = rt.handle_command(HostCommand::Run {
 // Output: wasmsh running on wasm32
 ```
 
+Arrays, `[[ ]]`, arithmetic commands, and advanced expansion:
+
+```rust
+let events = rt.handle_command(HostCommand::Run {
+    input: r#"
+        # Arrays and [[ ]]
+        fruits=(apple banana cherry)
+        for f in "${fruits[@]}"; do
+            if [[ $f == b* ]]; then
+                echo "found: $f"
+            fi
+        done
+
+        # Arithmetic
+        for (( i=1; i<=5; i++ )); do
+            (( sum += i ))
+        done
+        echo "sum=$sum"
+
+        # Case modification and declare
+        declare -u SHOUT="hello world"
+        echo "$SHOUT"
+    "#.into(),
+});
+// Output: found: banana\nsum=15\nHELLO WORLD\n
+```
+
 ## Step 5: Use the Virtual Filesystem
 
 Files live in an in-memory VFS. You can populate it via the protocol:

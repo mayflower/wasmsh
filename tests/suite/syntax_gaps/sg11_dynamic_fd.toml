@@ -1,0 +1,20 @@
+[test]
+name = "dynamic-fd-variable"
+tags = ["redirections", "P3"]
+tier = "P3"
+requires = ["dynamic-fd"]
+
+[setup.files]
+"/tmp/out.txt" = ""
+
+[input]
+script = """
+exec {myfd}>/tmp/out.txt
+echo "hello" >&$myfd
+exec {myfd}>&-
+cat /tmp/out.txt
+"""
+
+[expect]
+status = 0
+stdout = "hello\n"

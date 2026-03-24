@@ -1,0 +1,17 @@
+[test]
+name = "shopt-basic"
+tags = ["builtins", "P2"]
+tier = "P2"
+requires = ["shopt"]
+
+[input]
+script = """
+shopt -s nullglob
+echo *.nonexistent
+shopt -u nullglob
+echo *.nonexistent
+"""
+
+[expect]
+status = 0
+stdout = "\n*.nonexistent\n"

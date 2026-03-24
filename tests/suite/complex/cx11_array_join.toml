@@ -1,0 +1,19 @@
+[test]
+name = "array-join-and-reverse"
+tags = ["complex", "array", "P1"]
+tier = "P1"
+requires = ["indexed-array", "c-style-for", "echo"]
+
+[input]
+script = """
+parts=("host=localhost" "port=5432" "dbname=myapp")
+echo "${parts[*]}"
+echo "len=${#parts[@]}"
+for (( i=2; i>=0; i-- )); do
+    echo "  ${parts[$i]}"
+done
+"""
+
+[expect]
+status = 0
+stdout = "host=localhost port=5432 dbname=myapp\nlen=3\n  dbname=myapp\n  port=5432\n  host=localhost\n"

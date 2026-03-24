@@ -1,0 +1,15 @@
+[test]
+name = "anchored-substitution-suffix"
+tags = ["expansion", "P1"]
+tier = "P1"
+requires = ["anchored-substitution"]
+
+[input]
+script = """
+X=file.txt
+echo ${X/%.txt/.md}
+"""
+
+[expect]
+status = 0
+stdout = "file.md\n"

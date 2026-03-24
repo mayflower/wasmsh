@@ -1,0 +1,20 @@
+[test]
+name = "nullglob-empty"
+tags = ["globbing", "P2"]
+tier = "P2"
+requires = ["shopt"]
+
+[input]
+script = """
+shopt -s nullglob
+result=$(echo /nonexistent/*.xyz)
+if [ -z "$result" ]; then
+  echo empty
+else
+  echo "$result"
+fi
+"""
+
+[expect]
+status = 0
+stdout = "empty\n"

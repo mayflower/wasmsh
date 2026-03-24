@@ -1,0 +1,16 @@
+[test]
+name = "indirect-expansion"
+tags = ["expansion", "P2"]
+tier = "P2"
+requires = ["indirect-expansion"]
+
+[input]
+script = """
+FOO=hello
+VAR=FOO
+echo ${!VAR}
+"""
+
+[expect]
+status = 0
+stdout = "hello\n"

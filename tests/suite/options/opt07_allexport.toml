@@ -1,0 +1,16 @@
+[test]
+name = "set-allexport"
+tags = ["options", "P2"]
+tier = "P2"
+requires = ["allexport"]
+
+[input]
+script = """
+set -a
+MY_VAR=exported
+env | grep MY_VAR
+"""
+
+[expect]
+status = 0
+stdout_contains = ["MY_VAR=exported"]

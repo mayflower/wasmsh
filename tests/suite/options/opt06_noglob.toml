@@ -1,0 +1,16 @@
+[test]
+name = "set-noglob"
+tags = ["options", "P2"]
+tier = "P2"
+requires = ["noglob"]
+
+[input]
+script = """
+set -f
+echo *.txt
+set +f
+"""
+
+[expect]
+status = 0
+stdout = "*.txt\n"

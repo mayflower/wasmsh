@@ -1,0 +1,20 @@
+[test]
+name = "word-frequency-with-assoc-array"
+tags = ["complex", "associative-array", "P1"]
+tier = "P1"
+requires = ["associative-array", "declare", "for-in", "echo"]
+
+[input]
+script = """
+declare -A freq
+freq[dog]=1
+freq[fox]=3
+freq[the]=3
+for word in dog fox the; do
+    echo "$word=${freq[$word]}"
+done
+"""
+
+[expect]
+status = 0
+stdout = "dog=1\nfox=3\nthe=3\n"

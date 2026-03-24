@@ -1,0 +1,15 @@
+[test]
+name = "lineno-variable"
+tags = ["variables", "P1"]
+tier = "P1"
+requires = ["lineno-variable"]
+
+[input]
+script = """
+echo $LINENO
+echo $LINENO
+"""
+
+[expect]
+status = 0
+stdout = "1\n2\n"

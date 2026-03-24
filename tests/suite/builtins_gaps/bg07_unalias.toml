@@ -1,0 +1,16 @@
+[test]
+name = "unalias"
+tags = ["builtins", "P1"]
+tier = "P1"
+requires = ["alias"]
+
+[input]
+script = """
+alias greet='echo hello'
+unalias greet
+type greet 2>&1
+"""
+
+[expect]
+status = 1
+stderr_contains = ["not found"]

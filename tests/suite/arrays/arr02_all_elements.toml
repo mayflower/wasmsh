@@ -1,0 +1,16 @@
+[test]
+name = "indexed-array-all-elements"
+tags = ["arrays", "P0"]
+tier = "P0"
+requires = ["indexed-array"]
+
+[input]
+script = """
+arr=(a b c d)
+echo "${arr[@]}"
+echo ${#arr[@]}
+"""
+
+[expect]
+status = 0
+stdout = "a b c d\n4\n"

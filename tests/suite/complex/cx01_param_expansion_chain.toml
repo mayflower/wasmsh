@@ -1,0 +1,19 @@
+[test]
+name = "param-expansion-chain"
+tags = ["complex", "expansion", "P0"]
+tier = "P0"
+requires = ["parameter-strip", "variable-assignment", "echo"]
+
+[input]
+script = """
+file="/home/user/documents/report.final.2024.tar.gz"
+echo "${file##*/}"
+echo "${file%.tar.gz}"
+base="${file##*/}"
+echo "${base%%.*}"
+echo "${base#*.}"
+"""
+
+[expect]
+status = 0
+stdout = "report.final.2024.tar.gz\n/home/user/documents/report.final.2024\nreport\nfinal.2024.tar.gz\n"

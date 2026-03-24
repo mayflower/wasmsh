@@ -1,0 +1,18 @@
+[test]
+name = "random-variable"
+tags = ["variables", "P1"]
+tier = "P1"
+requires = ["random-variable"]
+
+[input]
+script = """
+R1=$RANDOM
+R2=$RANDOM
+if [ "$R1" != "$R2" ] || [ -n "$R1" ]; then
+  echo ok
+fi
+"""
+
+[expect]
+status = 0
+stdout = "ok\n"

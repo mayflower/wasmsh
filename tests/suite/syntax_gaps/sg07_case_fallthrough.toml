@@ -1,0 +1,19 @@
+[test]
+name = "case-fallthrough"
+tags = ["case-fallthrough", "P2"]
+tier = "P2"
+requires = ["case-fallthrough"]
+
+[input]
+script = """
+X=a
+case $X in
+  a) echo one ;&
+  b) echo two ;;
+  c) echo three ;;
+esac
+"""
+
+[expect]
+status = 0
+stdout = "one\ntwo\n"

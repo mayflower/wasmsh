@@ -7,7 +7,7 @@
 use indexmap::IndexMap;
 use smol_str::SmolStr;
 use wasmsh_fs::Vfs;
-use wasmsh_state::{ShellState, ShellVar};
+use wasmsh_state::{ShellState, ShellVar, VarValue};
 
 /// Abstraction for stdout/stderr output, suitable for browser streaming.
 pub trait OutputSink {
@@ -240,7 +240,9 @@ fn process_echo_escapes(s: &str) -> String {
     result
 }
 
-/// `printf` — formatted output (minimal subset: `%s`, `%d`, `%%`, `\n`, `\t`, `\\`).
+/// `printf` — formatted output.
+/// Supports: `%s`, `%d`, `%x`, `%o`, `%f`, `%c`, `%b`, `%q`, `%%`, width/precision,
+/// left-align (`%-`), zero-pad (`%0`), and `\n`, `\t`, `\\` escape sequences.
 /// Repeats the format string while there are remaining arguments (POSIX behavior).
 fn builtin_printf(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     if argv.len() < 2 {
@@ -261,29 +263,121 @@ fn builtin_printf(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 
         while i < bytes.len() {
             if bytes[i] == b'%' && i + 1 < bytes.len() {
-                match bytes[i + 1] {
-                    b's' => {
-                        output.push_str(args.get(arg_idx).unwrap_or(&""));
-                        arg_idx += 1;
-                        i += 2;
+                if bytes[i + 1] == b'%' {
+                    output.push('%');
+                    i += 2;
+                    continue;
+                }
+                // Parse format specifier: %[-0][width][.precision][sdxofcbq]
+                i += 1; // skip '%'
+                let mut left_align = false;
+                let mut zero_pad = false;
+                // Parse flags
+                loop {
+                    if i < bytes.len() && bytes[i] == b'-' {
+                        left_align = true;
+                        i += 1;
+                    } else if i < bytes.len() && bytes[i] == b'0' && !left_align {
+                        zero_pad = true;
+                        i += 1;
+                    } else {
+                        break;
                     }
-                    b'd' => {
-                        let val = args
-                            .get(arg_idx)
-                            .and_then(|s| s.parse::<i64>().ok())
-                            .unwrap_or(0);
-                        output.push_str(&val.to_string());
-                        arg_idx += 1;
-                        i += 2;
-                    }
-                    b'%' => {
-                        output.push('%');
-                        i += 2;
-                    }
-                    _ => {
-                        output.push('%');
+                }
+                // Parse width
+                let mut width: usize = 0;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    width = width * 10 + (bytes[i] - b'0') as usize;
+                    i += 1;
+                }
+                // Parse precision
+                let mut precision: Option<usize> = None;
+                if i < bytes.len() && bytes[i] == b'.' {
+                    i += 1;
+                    let mut prec: usize = 0;
+                    while i < bytes.len() && bytes[i].is_ascii_digit() {
+                        prec = prec * 10 + (bytes[i] - b'0') as usize;
                         i += 1;
                     }
+                    precision = Some(prec);
+                }
+                // Parse conversion character
+                if i >= bytes.len() {
+                    output.push('%');
+                    break;
+                }
+                let conv = bytes[i];
+                i += 1;
+                let arg_str = args.get(arg_idx).copied().unwrap_or("");
+                let formatted = match conv {
+                    b's' => {
+                        arg_idx += 1;
+                        let s = if let Some(prec) = precision {
+                            if prec < arg_str.len() {
+                                &arg_str[..prec]
+                            } else {
+                                arg_str
+                            }
+                        } else {
+                            arg_str
+                        };
+                        s.to_string()
+                    }
+                    b'd' => {
+                        arg_idx += 1;
+                        let val: i64 = arg_str.parse().unwrap_or(0);
+                        val.to_string()
+                    }
+                    b'x' => {
+                        arg_idx += 1;
+                        let val: i64 = arg_str.parse().unwrap_or(0);
+                        format!("{val:x}")
+                    }
+                    b'o' => {
+                        arg_idx += 1;
+                        let val: i64 = arg_str.parse().unwrap_or(0);
+                        format!("{val:o}")
+                    }
+                    b'f' => {
+                        arg_idx += 1;
+                        let val: f64 = arg_str.parse().unwrap_or(0.0);
+                        let prec = precision.unwrap_or(6);
+                        format!("{val:.prec$}")
+                    }
+                    b'c' => {
+                        arg_idx += 1;
+                        arg_str.chars().next().map_or(String::new(), |c| c.to_string())
+                    }
+                    b'b' => {
+                        arg_idx += 1;
+                        process_printf_backslash_escapes(arg_str)
+                    }
+                    b'q' => {
+                        arg_idx += 1;
+                        shell_quote(arg_str)
+                    }
+                    _ => {
+                        // Unknown specifier, output literally
+                        format!("%{}", conv as char)
+                    }
+                };
+                // Apply width and alignment
+                if width > 0 && formatted.len() < width {
+                    let pad_char = if zero_pad && !left_align { '0' } else { ' ' };
+                    let padding = width - formatted.len();
+                    if left_align {
+                        output.push_str(&formatted);
+                        for _ in 0..padding {
+                            output.push(' ');
+                        }
+                    } else {
+                        for _ in 0..padding {
+                            output.push(pad_char);
+                        }
+                        output.push_str(&formatted);
+                    }
+                } else {
+                    output.push_str(&formatted);
                 }
             } else if bytes[i] == b'\\' && i + 1 < bytes.len() {
                 match bytes[i + 1] {
@@ -297,6 +391,18 @@ fn builtin_printf(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
                     }
                     b'\\' => {
                         output.push('\\');
+                        i += 2;
+                    }
+                    b'r' => {
+                        output.push('\r');
+                        i += 2;
+                    }
+                    b'a' => {
+                        output.push('\x07');
+                        i += 2;
+                    }
+                    b'b' => {
+                        output.push('\x08');
                         i += 2;
                     }
                     _ => {
@@ -318,6 +424,92 @@ fn builtin_printf(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 
     ctx.output.stdout(output.as_bytes());
     0
+}
+
+/// Process backslash escape sequences for `%b` in printf.
+fn process_printf_backslash_escapes(s: &str) -> String {
+    let mut result = String::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'n' => {
+                    result.push('\n');
+                    i += 2;
+                }
+                b't' => {
+                    result.push('\t');
+                    i += 2;
+                }
+                b'\\' => {
+                    result.push('\\');
+                    i += 2;
+                }
+                b'a' => {
+                    result.push('\x07');
+                    i += 2;
+                }
+                b'b' => {
+                    result.push('\x08');
+                    i += 2;
+                }
+                b'r' => {
+                    result.push('\r');
+                    i += 2;
+                }
+                b'0' => {
+                    i += 2;
+                    let mut val: u8 = 0;
+                    let mut count = 0;
+                    while i < bytes.len() && count < 3 && bytes[i] >= b'0' && bytes[i] <= b'7' {
+                        val = val * 8 + (bytes[i] - b'0');
+                        i += 1;
+                        count += 1;
+                    }
+                    result.push(val as char);
+                }
+                _ => {
+                    result.push('\\');
+                    result.push(bytes[i + 1] as char);
+                    i += 2;
+                }
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
+}
+
+/// Shell-quote a string for `%q` in printf: wrap in $'...' with escapes.
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    // Check if the string needs quoting
+    let needs_quoting = s
+        .bytes()
+        .any(|b| !b.is_ascii_alphanumeric() && !matches!(b, b'_' | b'-' | b'.' | b'/' | b':'));
+    if !needs_quoting {
+        return s.to_string();
+    }
+    let mut result = String::from("$'");
+    for ch in s.chars() {
+        match ch {
+            '\'' => result.push_str("\\'"),
+            '\\' => result.push_str("\\\\"),
+            '\n' => result.push_str("\\n"),
+            '\t' => result.push_str("\\t"),
+            '\r' => result.push_str("\\r"),
+            '\x07' => result.push_str("\\a"),
+            '\x08' => result.push_str("\\b"),
+            _ => result.push(ch),
+        }
+    }
+    result.push('\'');
+    result
 }
 
 /// `pwd` — print working directory.
@@ -380,9 +572,11 @@ fn builtin_export(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
             ctx.state.env.set(
                 SmolStr::from(name),
                 ShellVar {
-                    value: SmolStr::from(value),
+                    value: VarValue::Scalar(SmolStr::from(value)),
                     exported: true,
                     readonly: false,
+                    integer: false,
+                    nameref: false,
                 },
             );
         } else {
@@ -396,9 +590,11 @@ fn builtin_export(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
                 ctx.state.env.set(
                     SmolStr::from(*arg),
                     ShellVar {
-                        value: SmolStr::default(),
+                        value: VarValue::Scalar(SmolStr::default()),
                         exported: true,
                         readonly: false,
+                        integer: false,
+                        nameref: false,
                     },
                 );
             }
@@ -408,9 +604,19 @@ fn builtin_export(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 }
 
 /// `unset` — remove variables from the environment.
+/// Supports `unset 'arr[N]'` to remove a single array element.
 fn builtin_unset(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     let mut status = 0;
     for name in &argv[1..] {
+        // Check for array element syntax: name[index]
+        if let Some(bracket_pos) = name.find('[') {
+            if name.ends_with(']') {
+                let base = &name[..bracket_pos];
+                let index = &name[bracket_pos + 1..name.len() - 1];
+                ctx.state.unset_array_element(base, index);
+                continue;
+            }
+        }
         if let Err(e) = ctx.state.unset_var(name) {
             let msg = format!("unset: {e}\n");
             ctx.output.stderr(msg.as_bytes());
@@ -598,6 +804,21 @@ fn builtin_eval(_ctx: &mut BuiltinContext<'_>, _argv: &[&str]) -> i32 {
 }
 
 /// `set` — set shell options or positional parameters.
+/// Map a long option name (used with `-o`/`+o`) to its short-flag equivalent.
+/// Returns the `SHOPT_*` variable name for the option.
+fn set_long_option_var(name: &str) -> Option<&'static str> {
+    match name {
+        "errexit" => Some("SHOPT_e"),
+        "nounset" => Some("SHOPT_u"),
+        "xtrace" => Some("SHOPT_x"),
+        "noglob" => Some("SHOPT_f"),
+        "allexport" => Some("SHOPT_a"),
+        "noclobber" => Some("SHOPT_C"),
+        "pipefail" => Some("SHOPT_o_pipefail"),
+        _ => None,
+    }
+}
+
 fn builtin_set(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     let args = &argv[1..];
     if args.is_empty() {
@@ -609,18 +830,37 @@ fn builtin_set(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
         ctx.state.positional = args[1..].iter().map(|s| SmolStr::from(*s)).collect();
         return 0;
     }
-    // Parse options like -e, -u, +e, etc.
+    // Parse options like -e, -u, +e, -o pipefail, +o pipefail, etc.
     // Store as shell option variables for runtime to check
-    for arg in args {
-        if arg.starts_with('-') || arg.starts_with('+') {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i];
+        if (arg.starts_with('-') || arg.starts_with('+')) && arg.len() > 1 {
             let enable = arg.starts_with('-');
-            for c in arg[1..].chars() {
-                let opt_name = format!("SHOPT_{c}");
-                let val = if enable { "1" } else { "0" };
-                ctx.state
-                    .set_var(SmolStr::from(opt_name.as_str()), SmolStr::from(val));
+            let flags = &arg[1..];
+            if flags == "o" {
+                // -o optname / +o optname
+                i += 1;
+                if i < args.len() {
+                    let opt_name = args[i];
+                    let val = if enable { "1" } else { "0" };
+                    if let Some(var) = set_long_option_var(opt_name) {
+                        ctx.state.set_var(SmolStr::from(var), SmolStr::from(val));
+                    } else {
+                        let msg = format!("set: unrecognized option: {opt_name}\n");
+                        ctx.output.stderr(msg.as_bytes());
+                    }
+                }
+            } else {
+                for c in flags.chars() {
+                    let opt_name = format!("SHOPT_{c}");
+                    let val = if enable { "1" } else { "0" };
+                    ctx.state
+                        .set_var(SmolStr::from(opt_name.as_str()), SmolStr::from(val));
+                }
             }
         }
+        i += 1;
     }
     0
 }
@@ -665,52 +905,177 @@ fn builtin_getopts(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 }
 
 /// `read` — read a line from stdin into variable(s).
-/// Supports `-r` (no backslash interpretation).
+/// Supports: `-r` (no backslash interpretation), `-p prompt`, `-d delim`,
+/// `-n nchars`, `-N nchars`, `-a array`, `-t timeout`, `-s` (silent).
 fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     let mut args = &argv[1..];
     let mut _raw = false;
+    let mut prompt: Option<&str> = None;
+    let mut delimiter: char = '\n';
+    let mut nchars: Option<usize> = None;
+    let mut exact_nchars: Option<usize> = None;
+    let mut array_name: Option<&str> = None;
+    let mut _timeout: Option<f64> = None;
+    let mut _silent = false;
 
     // Parse flags
     while let Some(arg) = args.first() {
-        if *arg == "-r" {
-            _raw = true;
-            args = &args[1..];
-        } else {
-            break;
+        match *arg {
+            "-r" => {
+                _raw = true;
+                args = &args[1..];
+            }
+            "-s" => {
+                _silent = true;
+                args = &args[1..];
+            }
+            "-p" => {
+                if args.len() > 1 {
+                    prompt = Some(args[1]);
+                    args = &args[2..];
+                } else {
+                    args = &args[1..];
+                }
+            }
+            "-d" => {
+                if args.len() > 1 {
+                    delimiter = args[1].chars().next().unwrap_or('\n');
+                    args = &args[2..];
+                } else {
+                    args = &args[1..];
+                }
+            }
+            "-n" => {
+                if args.len() > 1 {
+                    nchars = args[1].parse().ok();
+                    args = &args[2..];
+                } else {
+                    args = &args[1..];
+                }
+            }
+            "-N" => {
+                if args.len() > 1 {
+                    exact_nchars = args[1].parse().ok();
+                    args = &args[2..];
+                } else {
+                    args = &args[1..];
+                }
+            }
+            "-a" => {
+                if args.len() > 1 {
+                    array_name = Some(args[1]);
+                    args = &args[2..];
+                } else {
+                    args = &args[1..];
+                }
+            }
+            "-t" => {
+                if args.len() > 1 {
+                    _timeout = args[1].parse().ok();
+                    args = &args[2..];
+                } else {
+                    args = &args[1..];
+                }
+            }
+            _ => break,
         }
     }
 
+    // Output prompt to stderr
+    if let Some(p) = prompt {
+        ctx.output.stderr(p.as_bytes());
+    }
+
     // Get variable names (default: REPLY)
-    let var_names: Vec<&str> = if args.is_empty() {
+    let var_names: Vec<&str> = if array_name.is_some() || args.is_empty() {
         vec!["REPLY"]
     } else {
         args.to_vec()
     };
 
-    // Read one line from stdin, or from _STDIN_REMAINING if a previous read
-    // left unconsumed lines.
-    let (line, remaining) = if let Some(data) = ctx.stdin {
-        let text = String::from_utf8_lossy(data);
-        let mut parts = text.splitn(2, '\n');
-        let first = parts.next().unwrap_or("").to_string();
-        let rest = parts.next().unwrap_or("").to_string();
-        (first, rest)
+    // Read input from stdin or _STDIN_REMAINING
+    let input_text = if let Some(data) = ctx.stdin {
+        String::from_utf8_lossy(data).to_string()
     } else if let Some(rem) = ctx.state.get_var("_STDIN_REMAINING") {
         if rem.is_empty() {
             return 1; // EOF
         }
-        let mut parts = rem.splitn(2, '\n');
-        let first = parts.next().unwrap_or("").to_string();
-        let rest = parts.next().unwrap_or("").to_string();
-        (first, rest)
+        rem.to_string()
     } else {
         return 1; // EOF / no stdin
     };
+
+    // Handle -N (exact nchars, ignores delimiter)
+    let (line, remaining) = if let Some(n) = exact_nchars {
+        let chars: String = input_text.chars().take(n).collect();
+        let rest_start = chars.len();
+        let rest = if rest_start < input_text.len() {
+            &input_text[rest_start..]
+        } else {
+            ""
+        };
+        (chars, rest.to_string())
+    } else if let Some(n) = nchars {
+        // -n: read at most N characters, but stop at delimiter too
+        let mut chars = String::new();
+        let mut rest_start = 0;
+        for ch in input_text.chars() {
+            if chars.len() >= n || ch == delimiter {
+                break;
+            }
+            chars.push(ch);
+            rest_start += ch.len_utf8();
+        }
+        // Skip the delimiter if present
+        if rest_start < input_text.len()
+            && input_text.as_bytes().get(rest_start) == Some(&(delimiter as u8))
+        {
+            rest_start += 1;
+        }
+        let rest = if rest_start < input_text.len() {
+            &input_text[rest_start..]
+        } else {
+            ""
+        };
+        (chars, rest.to_string())
+    } else {
+        // Normal line-based read using delimiter
+        let mut parts = input_text.splitn(2, delimiter);
+        let first = parts.next().unwrap_or("").to_string();
+        let rest = parts.next().unwrap_or("").to_string();
+        (first, rest)
+    };
+
     // Store remaining data for subsequent read calls
     ctx.state.set_var(
         SmolStr::from("_STDIN_REMAINING"),
         SmolStr::from(remaining.as_str()),
     );
+
+    // Handle -a (read into array)
+    if let Some(arr_name) = array_name {
+        let ifs = ctx
+            .state
+            .get_var("IFS")
+            .unwrap_or_else(|| SmolStr::from(" \t\n"));
+        let fields: Vec<&str> = if ifs.is_empty() {
+            vec![line.as_str()]
+        } else {
+            line.split(|c: char| ifs.contains(c))
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        ctx.state
+            .init_indexed_array(SmolStr::from(arr_name));
+        for (i, field) in fields.iter().enumerate() {
+            ctx.state.set_array_element(
+                SmolStr::from(arr_name),
+                &i.to_string(),
+                SmolStr::from(*field),
+            );
+        }
+        return 0;
+    }
 
     // Split line by IFS and assign to variables
     let ifs = ctx
@@ -729,7 +1094,11 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     for (i, var_name) in var_names.iter().enumerate() {
         if i == var_names.len() - 1 {
             // Last variable gets the rest of the line
-            let rest: String = fields[i..].join(" ");
+            let rest: String = if i < fields.len() {
+                fields[i..].join(" ")
+            } else {
+                String::new()
+            };
             ctx.state
                 .set_var(SmolStr::from(*var_name), SmolStr::from(rest.as_str()));
         } else if let Some(field) = fields.get(i) {
@@ -916,7 +1285,7 @@ mod tests {
         let mut state = ShellState::new();
         run_builtin_with_state("export", &["export", "FOO=bar"], &mut state);
         let var = state.env.get("FOO").unwrap();
-        assert_eq!(var.value, "bar");
+        assert_eq!(var.value.as_scalar(), "bar");
         assert!(var.exported);
     }
 
@@ -972,5 +1341,88 @@ mod tests {
         assert!(registry.is_builtin(":"));
         assert!(registry.is_builtin("readonly"));
         assert!(!registry.is_builtin("ls"));
+    }
+
+    // ---- set builtin: -o option tests ----
+
+    #[test]
+    fn set_short_flag() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("set", &["set", "-e"], &mut state);
+        assert_eq!(state.get_var("SHOPT_e").unwrap(), "1");
+    }
+
+    #[test]
+    fn set_plus_disables_flag() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("set", &["set", "-e"], &mut state);
+        run_builtin_with_state("set", &["set", "+e"], &mut state);
+        assert_eq!(state.get_var("SHOPT_e").unwrap(), "0");
+    }
+
+    #[test]
+    fn set_o_pipefail() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("set", &["set", "-o", "pipefail"], &mut state);
+        assert_eq!(state.get_var("SHOPT_o_pipefail").unwrap(), "1");
+    }
+
+    #[test]
+    fn set_plus_o_pipefail() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("set", &["set", "-o", "pipefail"], &mut state);
+        run_builtin_with_state("set", &["set", "+o", "pipefail"], &mut state);
+        assert_eq!(state.get_var("SHOPT_o_pipefail").unwrap(), "0");
+    }
+
+    #[test]
+    fn set_o_errexit_aliases_e() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("set", &["set", "-o", "errexit"], &mut state);
+        assert_eq!(state.get_var("SHOPT_e").unwrap(), "1");
+    }
+
+    #[test]
+    fn set_o_nounset_aliases_u() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("set", &["set", "-o", "nounset"], &mut state);
+        assert_eq!(state.get_var("SHOPT_u").unwrap(), "1");
+    }
+
+    #[test]
+    fn set_o_xtrace_aliases_x() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("set", &["set", "-o", "xtrace"], &mut state);
+        assert_eq!(state.get_var("SHOPT_x").unwrap(), "1");
+    }
+
+    #[test]
+    fn set_o_noglob_aliases_f() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("set", &["set", "-o", "noglob"], &mut state);
+        assert_eq!(state.get_var("SHOPT_f").unwrap(), "1");
+    }
+
+    #[test]
+    fn set_o_allexport_aliases_a() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("set", &["set", "-o", "allexport"], &mut state);
+        assert_eq!(state.get_var("SHOPT_a").unwrap(), "1");
+    }
+
+    #[test]
+    fn set_o_noclobber_aliases_capital_c() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("set", &["set", "-o", "noclobber"], &mut state);
+        assert_eq!(state.get_var("SHOPT_C").unwrap(), "1");
+    }
+
+    #[test]
+    fn set_o_unrecognized_option_reports_error() {
+        let mut state = ShellState::new();
+        let (status, sink) =
+            run_builtin_with_state("set", &["set", "-o", "nonexistent"], &mut state);
+        assert_eq!(status, 0); // set doesn't fail, just warns on stderr
+        assert!(sink.stderr_str().contains("unrecognized option"));
     }
 }

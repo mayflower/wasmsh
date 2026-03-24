@@ -1,0 +1,15 @@
+[test]
+name = "anchored-substitution-prefix"
+tags = ["expansion", "P1"]
+tier = "P1"
+requires = ["anchored-substitution"]
+
+[input]
+script = """
+X=hello_world
+echo ${X/#hello/goodbye}
+"""
+
+[expect]
+status = 0
+stdout = "goodbye_world\n"

@@ -1,0 +1,18 @@
+[test]
+name = "pipefail-interaction"
+tags = ["complex", "pipeline", "P1"]
+tier = "P1"
+requires = ["pipefail", "set", "pipeline", "echo", "false", "true"]
+
+[input]
+script = """
+set -o pipefail
+echo "data" | true
+echo "ok: $?"
+false | echo "hello"
+echo "fail: $?"
+"""
+
+[expect]
+status = 0
+stdout = "ok: 0\nhello\nfail: 1\n"

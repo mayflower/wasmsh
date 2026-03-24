@@ -1,0 +1,21 @@
+[test]
+name = "csv-field-extraction"
+tags = ["complex", "expansion", "P1"]
+tier = "P1"
+requires = ["parameter-strip", "for-in", "printf"]
+
+[input]
+script = """
+rows=("alice,30,engineer" "bob,25,designer")
+for row in "${rows[@]}"; do
+    name="${row%%,*}"
+    rest="${row#*,}"
+    age="${rest%%,*}"
+    role="${rest#*,}"
+    printf "%-10s %3s %s\n" "$name" "$age" "$role"
+done
+"""
+
+[expect]
+status = 0
+stdout = "alice       30 engineer\nbob         25 designer\n"

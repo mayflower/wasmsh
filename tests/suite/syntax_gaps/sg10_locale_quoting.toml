@@ -1,0 +1,14 @@
+[test]
+name = "locale-dollar-double-quote"
+tags = ["quoting", "P3"]
+tier = "P3"
+requires = ["locale-quoting"]
+
+[input]
+script = """
+echo $"hello"
+"""
+
+[expect]
+status = 0
+stdout = "hello\n"

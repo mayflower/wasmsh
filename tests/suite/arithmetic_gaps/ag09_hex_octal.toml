@@ -1,0 +1,17 @@
+[test]
+name = "arithmetic-hex-octal-literals"
+tags = ["arithmetic", "P2"]
+tier = "P2"
+requires = ["arithmetic-bases"]
+
+[input]
+script = """
+echo $(( 0xFF ))
+echo $(( 077 ))
+echo $(( 16#ff ))
+echo $(( 2#1010 ))
+"""
+
+[expect]
+status = 0
+stdout = "255\n63\n255\n10\n"

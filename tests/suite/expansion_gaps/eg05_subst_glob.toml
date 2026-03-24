@@ -1,0 +1,15 @@
+[test]
+name = "substitution-with-glob-pattern"
+tags = ["expansion", "P1"]
+tier = "P1"
+requires = ["substitution-glob"]
+
+[input]
+script = """
+X="foo-bar-baz"
+echo ${X//-*-/-X-}
+"""
+
+[expect]
+status = 0
+stdout = "foo-X-baz\n"

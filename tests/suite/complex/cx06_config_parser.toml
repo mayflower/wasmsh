@@ -1,0 +1,21 @@
+[test]
+name = "config-parser-assoc-array"
+tags = ["complex", "associative-array", "P1"]
+tier = "P1"
+requires = ["associative-array", "declare", "for-in", "echo"]
+
+[input]
+script = """
+declare -A config
+config[DB_HOST]=localhost
+config[DB_PORT]=5432
+config[DB_NAME]=myapp
+config[LOG_LEVEL]=debug
+for key in DB_HOST DB_PORT DB_NAME LOG_LEVEL; do
+    echo "$key=${config[$key]}"
+done
+"""
+
+[expect]
+status = 0
+stdout = "DB_HOST=localhost\nDB_PORT=5432\nDB_NAME=myapp\nLOG_LEVEL=debug\n"

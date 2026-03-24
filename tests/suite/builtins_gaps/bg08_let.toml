@@ -1,0 +1,17 @@
+[test]
+name = "let-builtin"
+tags = ["builtins", "P1"]
+tier = "P1"
+requires = ["let"]
+
+[input]
+script = """
+let "x = 5 + 3"
+echo $x
+let "x += 2"
+echo $x
+"""
+
+[expect]
+status = 0
+stdout = "8\n10\n"

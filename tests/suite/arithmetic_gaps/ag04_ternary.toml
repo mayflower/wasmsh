@@ -1,0 +1,16 @@
+[test]
+name = "arithmetic-ternary"
+tags = ["arithmetic", "P0"]
+tier = "P0"
+requires = ["arithmetic-comparison"]
+
+[input]
+script = """
+X=10
+echo $(( X > 5 ? 1 : 0 ))
+echo $(( X < 5 ? 1 : 0 ))
+"""
+
+[expect]
+status = 0
+stdout = "1\n0\n"

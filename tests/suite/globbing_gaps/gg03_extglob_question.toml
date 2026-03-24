@@ -1,0 +1,19 @@
+[test]
+name = "extglob-optional-pattern"
+tags = ["globbing", "P1"]
+tier = "P1"
+requires = ["extglob"]
+
+[setup.files]
+"/tmp/color" = ""
+"/tmp/colour" = ""
+
+[input]
+script = """
+cd /tmp
+ls colo?(u)r | sort
+"""
+
+[expect]
+status = 0
+stdout = "color\ncolour\n"

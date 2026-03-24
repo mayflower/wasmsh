@@ -1,0 +1,19 @@
+[test]
+name = "path-manipulation"
+tags = ["complex", "expansion", "P0"]
+tier = "P0"
+requires = ["parameter-strip", "for-in", "indexed-array", "echo"]
+
+[input]
+script = """
+paths=("/usr/local/bin/bash" "/home/user/.bashrc" "/etc/nginx/nginx.conf")
+for p in "${paths[@]}"; do
+    dir="${p%/*}"
+    file="${p##*/}"
+    echo "dir=$dir file=$file"
+done
+"""
+
+[expect]
+status = 0
+stdout = "dir=/usr/local/bin file=bash\ndir=/home/user file=.bashrc\ndir=/etc/nginx file=nginx.conf\n"

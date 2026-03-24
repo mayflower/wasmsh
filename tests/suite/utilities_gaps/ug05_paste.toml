@@ -1,0 +1,18 @@
+[test]
+name = "paste-utility"
+tags = ["utilities", "P2"]
+tier = "P2"
+requires = ["paste"]
+
+[setup.files]
+"/tmp/a.txt" = "1\n2\n3\n"
+"/tmp/b.txt" = "a\nb\nc\n"
+
+[input]
+script = """
+paste /tmp/a.txt /tmp/b.txt
+"""
+
+[expect]
+status = 0
+stdout = "1\ta\n2\tb\n3\tc\n"
