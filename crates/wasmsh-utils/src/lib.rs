@@ -8,11 +8,23 @@ use indexmap::IndexMap;
 use wasmsh_fs::MemoryFs;
 use wasmsh_state::ShellState;
 
+mod archive_ops;
+mod awk_ops;
+mod binary_ops;
 mod data_ops;
+mod diff_ops;
+mod disk_ops;
 mod file_ops;
+mod hash_ops;
 mod helpers;
+mod jq_ops;
+mod math_ops;
+mod search_ops;
 mod system_ops;
 mod text_ops;
+mod tree_ops;
+mod trivial_ops;
+mod yaml_ops;
 
 /// Output sink for utility commands (same interface as builtins).
 pub trait UtilOutput {
@@ -82,7 +94,8 @@ impl UtilRegistry {
     #[must_use]
     pub fn new() -> Self {
         let mut utils = IndexMap::<&'static str, UtilFn>::new();
-        // File utilities
+
+        // --- File utilities ---
         utils.insert("cat", file_ops::util_cat);
         utils.insert("ls", file_ops::util_ls);
         utils.insert("mkdir", file_ops::util_mkdir);
@@ -97,7 +110,8 @@ impl UtilRegistry {
         utils.insert("find", file_ops::util_find);
         utils.insert("chmod", file_ops::util_chmod);
         utils.insert("mktemp", file_ops::util_mktemp);
-        // Text utilities
+
+        // --- Text utilities ---
         utils.insert("head", text_ops::util_head);
         utils.insert("tail", text_ops::util_tail);
         utils.insert("wc", text_ops::util_wc);
@@ -111,7 +125,8 @@ impl UtilRegistry {
         utils.insert("paste", text_ops::util_paste);
         utils.insert("rev", text_ops::util_rev);
         utils.insert("column", text_ops::util_column);
-        // Data/string utilities
+
+        // --- Data/string utilities ---
         utils.insert("seq", data_ops::util_seq);
         utils.insert("basename", data_ops::util_basename);
         utils.insert("dirname", data_ops::util_dirname);
@@ -121,7 +136,8 @@ impl UtilRegistry {
         utils.insert("md5sum", data_ops::util_md5sum);
         utils.insert("sha256sum", data_ops::util_sha256sum);
         utils.insert("base64", data_ops::util_base64);
-        // System/env utilities
+
+        // --- System/env utilities ---
         utils.insert("env", system_ops::util_env);
         utils.insert("printenv", system_ops::util_printenv);
         utils.insert("id", system_ops::util_id);
@@ -130,6 +146,73 @@ impl UtilRegistry {
         utils.insert("hostname", system_ops::util_hostname);
         utils.insert("sleep", system_ops::util_sleep);
         utils.insert("date", system_ops::util_date);
+
+        // --- Trivial utilities (P0+P2) ---
+        utils.insert("which", trivial_ops::util_which);
+        utils.insert("rmdir", trivial_ops::util_rmdir);
+        utils.insert("tac", trivial_ops::util_tac);
+        utils.insert("nl", trivial_ops::util_nl);
+        utils.insert("shuf", trivial_ops::util_shuf);
+        utils.insert("cmp", trivial_ops::util_cmp);
+        utils.insert("comm", trivial_ops::util_comm);
+        utils.insert("fold", trivial_ops::util_fold);
+        utils.insert("nproc", trivial_ops::util_nproc);
+        utils.insert("expand", trivial_ops::util_expand);
+        utils.insert("unexpand", trivial_ops::util_unexpand);
+        utils.insert("truncate", trivial_ops::util_truncate);
+        utils.insert("factor", trivial_ops::util_factor);
+        utils.insert("cksum", trivial_ops::util_cksum);
+        utils.insert("tsort", trivial_ops::util_tsort);
+        utils.insert("install", trivial_ops::util_install);
+        utils.insert("timeout", trivial_ops::util_timeout);
+        utils.insert("cal", trivial_ops::util_cal);
+
+        // --- Diff/patch ---
+        utils.insert("diff", diff_ops::util_diff);
+        utils.insert("patch", diff_ops::util_patch);
+
+        // --- Tree ---
+        utils.insert("tree", tree_ops::util_tree);
+
+        // --- Search (ripgrep-like) ---
+        utils.insert("rg", search_ops::util_rg);
+
+        // --- Awk ---
+        utils.insert("awk", awk_ops::util_awk);
+
+        // --- jq (JSON processor) ---
+        utils.insert("jq", jq_ops::util_jq);
+
+        // --- Hash utilities ---
+        utils.insert("sha1sum", hash_ops::util_sha1sum);
+        utils.insert("sha512sum", hash_ops::util_sha512sum);
+
+        // --- Binary utilities ---
+        utils.insert("xxd", binary_ops::util_xxd);
+        utils.insert("dd", binary_ops::util_dd);
+        utils.insert("strings", binary_ops::util_strings);
+        utils.insert("split", binary_ops::util_split);
+
+        // --- Math ---
+        utils.insert("bc", math_ops::util_bc);
+
+        // --- Archive/compression ---
+        utils.insert("tar", archive_ops::util_tar);
+        utils.insert("gzip", archive_ops::util_gzip);
+        utils.insert("gunzip", archive_ops::util_gunzip);
+        utils.insert("zcat", archive_ops::util_zcat);
+
+        // --- Disk usage ---
+        utils.insert("du", disk_ops::util_du);
+        utils.insert("df", disk_ops::util_df);
+
+        // --- Additional utilities ---
+        utils.insert("fd", search_ops::util_fd);
+        utils.insert("file", binary_ops::util_file);
+        utils.insert("bat", text_ops::util_bat);
+        utils.insert("unzip", archive_ops::util_unzip);
+        utils.insert("yq", yaml_ops::util_yq);
+
         Self { utils }
     }
 
@@ -248,7 +331,6 @@ mod tests {
         let mut fs = make_fs_with_file("/test.txt", b"hello world\nfoo bar\n");
         let (status, out) = run_util("wc", &["wc", "/test.txt"], &mut fs);
         assert_eq!(status, 0);
-        // 2 lines, 4 words, 20 bytes
         assert!(out.stdout_str().contains('2'));
         assert!(out.stdout_str().contains('4'));
     }
@@ -258,6 +340,11 @@ mod tests {
         let reg = UtilRegistry::new();
         assert!(reg.is_utility("cat"));
         assert!(reg.is_utility("wc"));
+        assert!(reg.is_utility("jq"));
+        assert!(reg.is_utility("awk"));
+        assert!(reg.is_utility("diff"));
+        assert!(reg.is_utility("tree"));
+        assert!(reg.is_utility("rg"));
         assert!(!reg.is_utility("echo")); // echo is a builtin, not a utility
     }
 }

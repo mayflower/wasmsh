@@ -553,6 +553,259 @@ pub(crate) fn util_rev(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     0
 }
 
+// ---------------------------------------------------------------------------
+// bat — cat with line numbers and file header
+// ---------------------------------------------------------------------------
+
+pub(crate) fn util_bat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let mut args = &argv[1..];
+    let mut show_numbers = true;
+    let mut show_header = true;
+    let mut line_range: Option<(Option<usize>, Option<usize>)> = None;
+    let mut show_all = false;
+
+    while let Some(arg) = args.first() {
+        match *arg {
+            "-n" | "--number" => {
+                show_numbers = true;
+                args = &args[1..];
+            }
+            "-p" | "--plain" => {
+                show_numbers = false;
+                show_header = false;
+                args = &args[1..];
+            }
+            "-A" | "--show-all" => {
+                show_all = true;
+                args = &args[1..];
+            }
+            "-r" | "--line-range" if args.len() > 1 => {
+                line_range = parse_bat_range(args[1]);
+                args = &args[2..];
+            }
+            "-l" | "--language" if args.len() > 1 => {
+                // Accepted but ignored (no highlighting in VFS)
+                args = &args[2..];
+            }
+            "--paging" if args.len() > 1 => {
+                // Accepted, no-op
+                args = &args[2..];
+            }
+            _ if arg.starts_with("--style=") => {
+                let style = &arg["--style=".len()..];
+                match style {
+                    "plain" => {
+                        show_numbers = false;
+                        show_header = false;
+                    }
+                    "numbers" => {
+                        show_numbers = true;
+                        show_header = false;
+                    }
+                    "header" => {
+                        show_numbers = false;
+                        show_header = true;
+                    }
+                    _ => {
+                        show_numbers = true;
+                        show_header = true;
+                    }
+                }
+                args = &args[1..];
+            }
+            _ if arg.starts_with("--line-range=") => {
+                line_range = parse_bat_range(&arg["--line-range=".len()..]);
+                args = &args[1..];
+            }
+            _ if arg.starts_with("--paging=") => {
+                // No-op
+                args = &args[1..];
+            }
+            _ if arg.starts_with("--language=") => {
+                // No-op
+                args = &args[1..];
+            }
+            _ if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") => {
+                // Combined short flags
+                let flags = &arg[1..];
+                let mut recognized = true;
+                for ch in flags.chars() {
+                    match ch {
+                        'n' => show_numbers = true,
+                        'p' => {
+                            show_numbers = false;
+                            show_header = false;
+                        }
+                        'A' => show_all = true,
+                        _ => {
+                            recognized = false;
+                            break;
+                        }
+                    }
+                }
+                if recognized {
+                    args = &args[1..];
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    // File args
+    let file_args: Vec<&str> = args.to_vec();
+
+    if file_args.is_empty() {
+        // Read from stdin
+        if let Some(data) = ctx.stdin {
+            let text = String::from_utf8_lossy(data).to_string();
+            bat_output(
+                ctx,
+                None,
+                &text,
+                show_numbers,
+                show_header,
+                line_range,
+                show_all,
+            );
+            return 0;
+        }
+        ctx.output.stderr(b"bat: missing operand\n");
+        return 1;
+    }
+
+    let mut status = 0;
+    for path in &file_args {
+        let full = resolve_path(ctx.cwd, path);
+        match read_text(ctx.fs, &full) {
+            Ok(text) => {
+                bat_output(
+                    ctx,
+                    Some(path),
+                    &text,
+                    show_numbers,
+                    show_header,
+                    line_range,
+                    show_all,
+                );
+            }
+            Err(e) => {
+                emit_error(ctx.output, "bat", path, &e);
+                status = 1;
+            }
+        }
+    }
+
+    status
+}
+
+fn parse_bat_range(s: &str) -> Option<(Option<usize>, Option<usize>)> {
+    if let Some((start, end)) = s.split_once(':') {
+        let s = if start.is_empty() {
+            None
+        } else {
+            start.parse().ok()
+        };
+        let e = if end.is_empty() {
+            None
+        } else {
+            end.parse().ok()
+        };
+        Some((s, e))
+    } else {
+        // Single line
+        let n: usize = s.parse().ok()?;
+        Some((Some(n), Some(n)))
+    }
+}
+
+fn bat_output(
+    ctx: &mut UtilContext<'_>,
+    filename: Option<&str>,
+    text: &str,
+    show_numbers: bool,
+    show_header: bool,
+    line_range: Option<(Option<usize>, Option<usize>)>,
+    show_all: bool,
+) {
+    let separator = "\u{2500}";
+    let top_corner = "\u{252C}";
+    let mid_corner = "\u{253C}";
+    let bot_corner = "\u{2534}";
+    let vert = "\u{2502}";
+
+    let rule_left: String = separator.repeat(7);
+    let rule_right: String = separator.repeat(20);
+
+    if show_header {
+        let header_line = format!("{rule_left}{top_corner}{rule_right}\n");
+        ctx.output.stdout(header_line.as_bytes());
+        if let Some(name) = filename {
+            let file_line = format!("       {vert} File: {name}\n");
+            ctx.output.stdout(file_line.as_bytes());
+        }
+        let sep_line = format!("{rule_left}{mid_corner}{rule_right}\n");
+        ctx.output.stdout(sep_line.as_bytes());
+    }
+
+    let lines: Vec<&str> = text.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        let line_num = i + 1;
+
+        // Apply line range filter
+        if let Some((start, end)) = line_range {
+            if let Some(s) = start {
+                if line_num < s {
+                    continue;
+                }
+            }
+            if let Some(e) = end {
+                if line_num > e {
+                    continue;
+                }
+            }
+        }
+
+        let display_line = if show_all {
+            make_visible(line)
+        } else {
+            line.to_string()
+        };
+
+        if show_numbers {
+            let out = format!("{line_num:>5}   {vert} {display_line}\n");
+            ctx.output.stdout(out.as_bytes());
+        } else {
+            let out = format!("{display_line}\n");
+            ctx.output.stdout(out.as_bytes());
+        }
+    }
+
+    if show_header {
+        let footer = format!("{rule_left}{bot_corner}{rule_right}\n");
+        ctx.output.stdout(footer.as_bytes());
+    }
+}
+
+/// Replace non-printable characters with visible representations.
+fn make_visible(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if ch == '\t' {
+            out.push_str("\\t");
+        } else if ch == '\r' {
+            out.push_str("\\r");
+        } else if ch.is_control() {
+            let _ = write!(out, "\\x{:02x}", ch as u32);
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 pub(crate) fn util_column(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut args = &argv[1..];
     let mut table_mode = false;
