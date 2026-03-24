@@ -5120,9 +5120,9 @@ mod tests {
         assert_eq!(status, 0);
         let out = get_stdout(&events);
         // Each element includes trailing newline by default
-        assert!(out.contains("a"));
-        assert!(out.contains("b"));
-        assert!(out.contains("c"));
+        assert!(out.contains('a'));
+        assert!(out.contains('b'));
+        assert!(out.contains('c'));
     }
 
     #[test]

@@ -42,7 +42,11 @@ pub(crate) fn util_cat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 }
 
 pub(crate) fn util_ls(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let args: Vec<&str> = argv[1..].iter().copied().filter(|a| !a.starts_with('-')).collect();
+    let args: Vec<&str> = argv[1..]
+        .iter()
+        .copied()
+        .filter(|a| !a.starts_with('-'))
+        .collect();
     if args.is_empty() {
         // No arguments: list cwd
         let full = resolve_path(ctx.cwd, ctx.cwd);
@@ -393,7 +397,11 @@ impl XorShift64 {
     fn new(seed: u64) -> Self {
         // Ensure non-zero seed
         Self {
-            state: if seed == 0 { 0xDEAD_BEEF_CAFE_BABE } else { seed },
+            state: if seed == 0 {
+                0xDEAD_BEEF_CAFE_BABE
+            } else {
+                seed
+            },
         }
     }
 
@@ -437,8 +445,7 @@ pub(crate) fn util_mktemp(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     // Count trailing X's in the template
     let x_count = template.chars().rev().take_while(|&c| c == 'X').count();
     if x_count < 3 {
-        ctx.output
-            .stderr(b"mktemp: too few X's in template\n");
+        ctx.output.stderr(b"mktemp: too few X's in template\n");
         return 1;
     }
 
@@ -498,7 +505,6 @@ pub(crate) fn util_mktemp(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         return 0;
     }
 
-    ctx.output
-        .stderr(b"mktemp: failed to create unique name\n");
+    ctx.output.stderr(b"mktemp: failed to create unique name\n");
     1
 }

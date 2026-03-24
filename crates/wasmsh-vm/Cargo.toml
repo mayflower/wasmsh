@@ -15,8 +15,6 @@ categories.workspace = true
 wasmsh-ir = { workspace = true }
 wasmsh-state = { workspace = true }
 wasmsh-builtins = { workspace = true }
-wasmsh-fs = { workspace = true }
-wasmsh-utils = { workspace = true }
 
 [lints]
 workspace = true

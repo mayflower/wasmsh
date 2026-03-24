@@ -1022,7 +1022,6 @@ dependencies = [
 name = "wasmsh-lex"
 version = "0.1.0"
 dependencies = [
- "smol_str",
  "wasmsh-ast",
 ]
 
@@ -1054,9 +1053,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "toml",
- "wasmsh-ast",
  "wasmsh-browser",
- "wasmsh-fs",
  "wasmsh-hir",
  "wasmsh-parse",
  "wasmsh-protocol",
@@ -1076,10 +1073,8 @@ name = "wasmsh-vm"
 version = "0.1.0"
 dependencies = [
  "wasmsh-builtins",
- "wasmsh-fs",
  "wasmsh-ir",
  "wasmsh-state",
- "wasmsh-utils",
 ]
 
 [[package]]

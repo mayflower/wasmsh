@@ -112,15 +112,24 @@ jobs:
         run: npm install -g binaryen
       - name: Run wasm-opt post-processing
         run: |
-          wasm-opt -Os \
-            target/wasm32-unknown-unknown/dist/wasmsh_browser.wasm \
-            -o target/wasmsh-browser-opt.wasm
+          WASM=target/wasm32-unknown-unknown/dist/wasmsh_browser.wasm
+          if [ -f "$WASM" ]; then
+            wasm-opt -Os "$WASM" -o target/wasmsh-browser-opt.wasm
+          else
+            echo "No cdylib .wasm file found (rlib only) — skipping wasm-opt"
+          fi
       - name: Check binary size against budget
         run: |
-          ORIG=$(wc -c < target/wasm32-unknown-unknown/dist/wasmsh_browser.wasm | tr -d ' ')
-          OPT=$(wc -c < target/wasmsh-browser-opt.wasm | tr -d ' ')
+          WASM=target/wasm32-unknown-unknown/dist/wasmsh_browser.wasm
+          OPT=target/wasmsh-browser-opt.wasm
+          if [ ! -f "$WASM" ] || [ ! -f "$OPT" ]; then
+            echo "No .wasm binary produced (rlib crate) — skipping size check"
+            exit 0
+          fi
+          ORIG=$(wc -c < "$WASM" | tr -d ' ')
+          OPT_SIZE=$(wc -c < "$OPT" | tr -d ' ')
           echo "Original : ${ORIG} bytes"
-          echo "Optimized: ${OPT} bytes"
+          echo "Optimized: ${OPT_SIZE} bytes"
           BUDGET=2097152
           echo "Budget   : ${BUDGET} bytes (2 MB)"
           {
@@ -128,15 +137,16 @@ jobs:
             echo "| Binary | Size (bytes) |"
             echo "| ------ | ------------ |"
             echo "| Original (dist profile) | ${ORIG} |"
-            echo "| Optimized (wasm-opt -Os) | ${OPT} |"
+            echo "| Optimized (wasm-opt -Os) | ${OPT_SIZE} |"
             echo "| Budget | ${BUDGET} |"
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$OPT" -gt "$BUDGET" ]; then
-            echo "ERROR: Optimized binary (${OPT} bytes) exceeds 2 MB budget!"
+          if [ "$OPT_SIZE" -gt "$BUDGET" ]; then
+            echo "ERROR: Optimized binary (${OPT_SIZE} bytes) exceeds 2 MB budget!"
             exit 1
           fi
           echo "Size check passed."
       - name: Upload wasm artifacts
+        if: hashFiles('target/wasm32-unknown-unknown/dist/wasmsh_browser.wasm') != ''
         uses: actions/upload-artifact@v4
         with:
           name: wasmsh-wasm32

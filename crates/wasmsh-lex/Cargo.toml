@@ -13,7 +13,6 @@ categories.workspace = true
 
 [dependencies]
 wasmsh-ast = { workspace = true }
-smol_str = { workspace = true }
 
 [lints]
 workspace = true

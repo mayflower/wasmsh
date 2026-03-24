@@ -12,10 +12,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-wasmsh-ast = { workspace = true }
 wasmsh-parse = { workspace = true }
 wasmsh-hir = { workspace = true }
-wasmsh-fs = { workspace = true }
 wasmsh-browser = { workspace = true }
 wasmsh-protocol = { workspace = true }
 serde = { workspace = true }

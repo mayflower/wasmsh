@@ -34,7 +34,11 @@ fn bench_parse_complex_script(c: &mut Criterion) {
 fn bench_parse_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse_scaling");
     for size in [1, 10, 50, 100] {
-        let input: String = (0..size).map(|i| format!("echo line_{i}\n")).collect();
+        let input = (0..size).fold(String::new(), |mut acc, i| {
+            use std::fmt::Write;
+            let _ = writeln!(acc, "echo line_{i}");
+            acc
+        });
         group.bench_with_input(BenchmarkId::from_parameter(size), &input, |b, input| {
             b.iter(|| wasmsh_parse::parse(black_box(input.as_str())));
         });
