@@ -114,6 +114,42 @@ pub(crate) fn parse_line_count<'a>(
     (default, false, args.to_vec())
 }
 
+// ---------------------------------------------------------------------------
+// CRC-32 (ISO 3309, polynomial 0xEDB88320) — shared by cksum, gzip, etc.
+// ---------------------------------------------------------------------------
+
+/// Build CRC-32 lookup table at compile time.
+pub(crate) const fn build_crc32_table() -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut i = 0u32;
+    while i < 256 {
+        let mut crc = i;
+        let mut j = 0;
+        while j < 8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB8_8320;
+            } else {
+                crc >>= 1;
+            }
+            j += 1;
+        }
+        table[i as usize] = crc;
+        i += 1;
+    }
+    table
+}
+
+pub(crate) const CRC32_TABLE: [u32; 256] = build_crc32_table();
+
+pub(crate) fn crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        let index = ((crc ^ u32::from(byte)) & 0xFF) as usize;
+        crc = (crc >> 8) ^ CRC32_TABLE[index];
+    }
+    !crc
+}
+
 /// Basic grep pattern matching with `^` and `$` anchor support.
 pub(crate) fn grep_matches(line: &str, pattern: &str, ignore_case: bool) -> bool {
     let (l, p) = if ignore_case {

@@ -50,14 +50,21 @@ pub(crate) fn util_xxd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                 args = &args[2..];
             }
             "-s" if args.len() > 1 => {
-                skip = args[1].parse().unwrap_or(0);
+                let Ok(v) = args[1].parse::<usize>() else {
+                    let msg = format!("xxd: invalid number: '{}'\n", args[1]);
+                    ctx.output.stderr(msg.as_bytes());
+                    return 1;
+                };
+                skip = v;
                 args = &args[2..];
             }
             "-c" if args.len() > 1 => {
-                cols = args[1].parse().unwrap_or(16);
-                if cols == 0 {
-                    cols = 16;
-                }
+                let Ok(v) = args[1].parse::<usize>() else {
+                    let msg = format!("xxd: invalid number: '{}'\n", args[1]);
+                    ctx.output.stderr(msg.as_bytes());
+                    return 1;
+                };
+                cols = if v == 0 { 16 } else { v };
                 args = &args[2..];
             }
             _ if arg.starts_with('-') && arg.len() > 1 => {
@@ -272,13 +279,28 @@ pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         } else if let Some(val) = arg.strip_prefix("of=") {
             output_file = Some(val);
         } else if let Some(val) = arg.strip_prefix("bs=") {
-            block_size = parse_size(val).unwrap_or(512);
+            let Some(v) = parse_size(val) else {
+                let msg = format!("dd: invalid number: '{val}'\n");
+                ctx.output.stderr(msg.as_bytes());
+                return 1;
+            };
+            block_size = v;
         } else if let Some(val) = arg.strip_prefix("count=") {
             count = val.parse().ok();
         } else if let Some(val) = arg.strip_prefix("skip=") {
-            skip_blocks = val.parse().unwrap_or(0);
+            let Ok(v) = val.parse::<u64>() else {
+                let msg = format!("dd: invalid number: '{val}'\n");
+                ctx.output.stderr(msg.as_bytes());
+                return 1;
+            };
+            skip_blocks = v;
         } else if let Some(val) = arg.strip_prefix("seek=") {
-            seek_blocks = val.parse().unwrap_or(0);
+            let Ok(v) = val.parse::<u64>() else {
+                let msg = format!("dd: invalid number: '{val}'\n");
+                ctx.output.stderr(msg.as_bytes());
+                return 1;
+            };
+            seek_blocks = v;
         } else if let Some(val) = arg.strip_prefix("conv=") {
             for opt in val.split(',') {
                 match opt {
@@ -428,16 +450,26 @@ pub(crate) fn util_strings(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     while let Some(arg) = args.first() {
         if (*arg == "-n" || *arg == "--bytes") && args.len() > 1 {
-            min_len = args[1].parse().unwrap_or(4);
-            if min_len == 0 {
-                min_len = 1;
-            }
+            min_len = match args[1].parse::<usize>() {
+                Ok(0) => 1,
+                Ok(v) => v,
+                Err(_) => {
+                    let msg = format!("strings: invalid number: '{}'\n", args[1]);
+                    ctx.output.stderr(msg.as_bytes());
+                    return 1;
+                }
+            };
             args = &args[2..];
         } else if let Some(rest) = arg.strip_prefix("-n") {
-            min_len = rest.parse().unwrap_or(4);
-            if min_len == 0 {
-                min_len = 1;
-            }
+            min_len = match rest.parse::<usize>() {
+                Ok(0) => 1,
+                Ok(v) => v,
+                Err(_) => {
+                    let msg = format!("strings: invalid number: '{rest}'\n");
+                    ctx.output.stderr(msg.as_bytes());
+                    return 1;
+                }
+            };
             args = &args[1..];
         } else if arg.starts_with('-') && arg.len() > 1 {
             args = &args[1..];

@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use wasmsh_fs::{OpenOptions, Vfs};
 
-use crate::helpers::{copy_file_contents, emit_error, get_input_text, read_text, resolve_path};
+use crate::helpers::{
+    copy_file_contents, crc32, emit_error, get_input_text, read_text, resolve_path,
+};
 use crate::UtilContext;
 
 // ---------------------------------------------------------------------------
@@ -207,7 +209,9 @@ pub(crate) fn util_which(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             show_all = true;
             args = &args[1..];
         } else if arg.starts_with('-') && arg.len() > 1 {
-            args = &args[1..];
+            let msg = format!("which: invalid option -- '{}'\n", &arg[1..]);
+            ctx.output.stderr(msg.as_bytes());
+            return 1;
         } else {
             break;
         }
@@ -555,7 +559,11 @@ pub(crate) fn util_comm(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     '1' => suppress1 = true,
                     '2' => suppress2 = true,
                     '3' => suppress3 = true,
-                    _ => {}
+                    _ => {
+                        let msg = format!("comm: invalid option -- '{ch}'\n");
+                        ctx.output.stderr(msg.as_bytes());
+                        return 1;
+                    }
                 }
             }
             args = &args[1..];
@@ -667,7 +675,12 @@ pub(crate) fn util_fold(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     while let Some(arg) = args.first() {
         if *arg == "-w" && args.len() > 1 {
-            width = args[1].parse().unwrap_or(80);
+            let Ok(w) = args[1].parse::<usize>() else {
+                let msg = format!("fold: invalid number: '{}'\n", args[1]);
+                ctx.output.stderr(msg.as_bytes());
+                return 1;
+            };
+            width = w;
             args = &args[2..];
         } else if *arg == "-s" {
             break_at_spaces = true;
@@ -768,7 +781,12 @@ pub(crate) fn util_expand(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     while let Some(arg) = args.first() {
         if *arg == "-t" && args.len() > 1 {
-            tab_width = args[1].parse().unwrap_or(8);
+            let Ok(w) = args[1].parse::<usize>() else {
+                let msg = format!("expand: invalid number: '{}'\n", args[1]);
+                ctx.output.stderr(msg.as_bytes());
+                return 1;
+            };
+            tab_width = w;
             args = &args[2..];
         } else if arg.starts_with('-') && arg.len() > 1 {
             if let Some(rest) = arg.strip_prefix("-t") {
@@ -823,7 +841,12 @@ pub(crate) fn util_unexpand(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     while let Some(arg) = args.first() {
         if *arg == "-t" && args.len() > 1 {
-            tab_width = args[1].parse().unwrap_or(8);
+            let Ok(w) = args[1].parse::<usize>() else {
+                let msg = format!("unexpand: invalid number: '{}'\n", args[1]);
+                ctx.output.stderr(msg.as_bytes());
+                return 1;
+            };
+            tab_width = w;
             args = &args[2..];
         } else if *arg == "-a" || *arg == "--all" {
             all = true;
@@ -1061,13 +1084,14 @@ pub(crate) fn util_factor(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     let mut status = 0;
     for num_str in &numbers {
-        let Ok(mut n) = num_str.parse::<u64>() else {
+        let Ok(orig) = num_str.parse::<u64>() else {
             let msg = format!("factor: '{num_str}' is not a valid positive integer\n");
             ctx.output.stderr(msg.as_bytes());
             status = 1;
             continue;
         };
 
+        let mut n = orig;
         let mut factors = Vec::new();
         let mut d = 2u64;
 
@@ -1082,7 +1106,6 @@ pub(crate) fn util_factor(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             factors.push(n);
         }
 
-        let orig: u64 = num_str.parse().unwrap_or(0);
         let factors_str: Vec<String> = factors.iter().map(ToString::to_string).collect();
         let out = format!("{orig}: {}\n", factors_str.join(" "));
         ctx.output.stdout(out.as_bytes());
@@ -1093,38 +1116,6 @@ pub(crate) fn util_factor(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 // ---------------------------------------------------------------------------
 // cksum — CRC-32 checksum (ISO 3309, polynomial 0xEDB88320)
 // ---------------------------------------------------------------------------
-
-/// Build CRC-32 lookup table at compile time.
-const fn build_crc32_table() -> [u32; 256] {
-    let mut table = [0u32; 256];
-    let mut i = 0u32;
-    while i < 256 {
-        let mut crc = i;
-        let mut j = 0;
-        while j < 8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
-            }
-            j += 1;
-        }
-        table[i as usize] = crc;
-        i += 1;
-    }
-    table
-}
-
-const CRC32_TABLE: [u32; 256] = build_crc32_table();
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &byte in data {
-        let index = ((crc ^ u32::from(byte)) & 0xFF) as usize;
-        crc = (crc >> 8) ^ CRC32_TABLE[index];
-    }
-    !crc
-}
 
 pub(crate) fn util_cksum(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let file_args = &argv[1..];

@@ -2,39 +2,8 @@
 
 use wasmsh_fs::{OpenOptions, Vfs};
 
-use crate::helpers::{emit_error, resolve_path};
+use crate::helpers::{crc32, emit_error, resolve_path};
 use crate::UtilContext;
-
-// ---------------------------------------------------------------------------
-// CRC-32 (ISO 3309) — needed for gzip trailer
-// ---------------------------------------------------------------------------
-
-/// Pre-computed CRC-32 lookup table (polynomial 0xEDB88320).
-fn crc32_table() -> [u32; 256] {
-    let mut table = [0u32; 256];
-    for i in 0..256u32 {
-        let mut crc = i;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
-            }
-        }
-        table[i as usize] = crc;
-    }
-    table
-}
-
-fn crc32(data: &[u8]) -> u32 {
-    let table = crc32_table();
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
-        let idx = ((crc ^ u32::from(b)) & 0xFF) as usize;
-        crc = (crc >> 8) ^ table[idx];
-    }
-    !crc
-}
 
 // ---------------------------------------------------------------------------
 // gzip / gunzip / zcat
@@ -672,7 +641,11 @@ fn tar_extract(
             .trim_matches('\0')
             .trim()
             .to_string();
-        let size = u64::from_str_radix(&size_str, 8).unwrap_or(0) as usize;
+        let Ok(size) = u64::from_str_radix(&size_str, 8).map(|v| v as usize) else {
+            let msg = format!("tar: invalid size in header for '{name}'\n");
+            ctx.output.stderr(msg.as_bytes());
+            return 1;
+        };
 
         // Parse typeflag
         let typeflag = header[156];
@@ -825,6 +798,7 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let data = &archive_data;
     let mut total_files = 0u32;
     let mut total_size = 0u64;
+    let mut status = 0;
 
     while pos + 30 <= data.len() {
         // Look for local file header signature: PK\x03\x04
@@ -905,9 +879,13 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                 let msg = format!("unzip: {name}: deflate not supported in sandbox\n");
                 ctx.output.stderr(msg.as_bytes());
             }
-        } else if !quiet {
-            let msg = format!("unzip: {name}: unsupported compression method {compression}\n");
-            ctx.output.stderr(msg.as_bytes());
+            status = 1;
+        } else {
+            if !quiet {
+                let msg = format!("unzip: {name}: unsupported compression method {compression}\n");
+                ctx.output.stderr(msg.as_bytes());
+            }
+            status = 1;
         }
 
         total_files += 1;
@@ -921,7 +899,7 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         ctx.output.stdout(footer.as_bytes());
     }
 
-    0
+    status
 }
 
 /// Find the next PK\x03\x04 signature in the data.
@@ -991,7 +969,11 @@ fn tar_list(ctx: &mut UtilContext<'_>, archive_path: &str, gzipped: bool) -> i32
             .trim_matches('\0')
             .trim()
             .to_string();
-        let size = u64::from_str_radix(&size_str, 8).unwrap_or(0) as usize;
+        let Ok(size) = u64::from_str_radix(&size_str, 8).map(|v| v as usize) else {
+            let msg = format!("tar: invalid size in header for '{name}'\n");
+            ctx.output.stderr(msg.as_bytes());
+            return 1;
+        };
 
         let line = format!("{name}\n");
         ctx.output.stdout(line.as_bytes());

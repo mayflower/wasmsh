@@ -129,7 +129,11 @@ pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     'v' => invert = true,
                     'c' => count_only = true,
                     'n' => show_line_numbers = true,
-                    _ => {}
+                    _ => {
+                        let msg = format!("grep: invalid option -- '{c}'\n");
+                        ctx.output.stderr(msg.as_bytes());
+                        return 2;
+                    }
                 }
             }
             args = &args[1..];

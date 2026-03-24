@@ -168,7 +168,11 @@ fn walk_tree(
             entries.sort_by(|a, b| a.name.cmp(&b.name));
             entries
         }
-        Err(_) => return,
+        Err(e) => {
+            let msg = format!("tree: {dir_path}: {e}\n");
+            ctx.output.stderr(msg.as_bytes());
+            return;
+        }
     };
 
     // Filter entries
