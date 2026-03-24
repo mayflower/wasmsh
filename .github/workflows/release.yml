@@ -61,7 +61,7 @@ jobs:
           for dir in pkg/bundler pkg/web pkg/nodejs; do
             for f in "$dir"/*.wasm; do
               if [ -f "$f" ]; then
-                wasm-opt -Os "$f" -o "$f.opt"
+                wasm-opt -Os --enable-bulk-memory --enable-mutable-globals --enable-sign-ext --enable-nontrapping-float-to-int "$f" -o "$f.opt"
                 mv "$f.opt" "$f"
               fi
             done
@@ -74,7 +74,7 @@ jobs:
           cp -r pkg/bundler dist/bundler
           cp -r pkg/web dist/web
           cp -r pkg/nodejs dist/nodejs
-          cp LICENSE README.md SUPPORTED.md CHANGELOG.md dist/
+          cp LICENSE README.md SUPPORTED.md dist/
           echo "$TAG_NAME" > dist/VERSION
           tar czf "wasmsh-wasm32-${TAG_NAME}.tar.gz" -C dist .
       - name: Upload artifact
@@ -95,20 +95,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasmsh-wasm32
-      - name: Extract changelog
-        env:
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          VERSION="${TAG_NAME#v}"
-          NOTES=$(sed -n "/^## \[${VERSION}\]/,/^## \[/p" CHANGELOG.md | head -n -1)
-          if [ -z "$NOTES" ]; then
-            NOTES="Release ${VERSION}"
-          fi
-          echo "$NOTES" > release_notes.md
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          body_path: release_notes.md
+          generate_release_notes: true
           files: "wasmsh-wasm32-*.tar.gz"
           draft: false
           prerelease: false

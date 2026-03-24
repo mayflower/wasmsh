@@ -47,7 +47,7 @@ jobs:
           for dir in pkg/bundler pkg/web pkg/nodejs; do
             for f in "$dir"/*.wasm; do
               if [ -f "$f" ]; then
-                wasm-opt -Os --enable-bulk-memory "$f" -o "$f.opt"
+                wasm-opt -Os --enable-bulk-memory --enable-mutable-globals --enable-sign-ext --enable-nontrapping-float-to-int "$f" -o "$f.opt"
                 mv "$f.opt" "$f"
               fi
             done
@@ -64,7 +64,7 @@ jobs:
               if [ -f "$f" ]; then
                 size=$(wc -c < "$f" | tr -d ' ')
                 gzip_size=$(gzip -c "$f" | wc -c | tr -d ' ')
-                echo "| $target | $(basename "$f") | ${size} bytes (${gzip_size} gzipped) |" >> "$GITHUB_STEP_SUMMARY"
+                echo "| $target | $(basename \"$f\") | ${size} bytes (${gzip_size} gzipped) |" >> "$GITHUB_STEP_SUMMARY"
               fi
             done
           done
@@ -86,3 +86,21 @@ jobs:
         with:
           name: wasmsh-nodejs
           path: pkg/nodejs/
+
+      - name: Package release tarball
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          for target in bundler web nodejs; do
+            tar czf "wasmsh-${target}-${TAG_NAME}.tar.gz" -C pkg/${target} .
+          done
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: wasmsh-*-v*.tar.gz
+          generate_release_notes: true
+          draft: false
+          prerelease: false
