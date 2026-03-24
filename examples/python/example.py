@@ -222,7 +222,8 @@ def main() -> None:
     print("=== 10. Utilities ===")
     shell.write_file("/data/hello.txt", b"hello\n")
     print(f"MD5: {sh(shell, 'md5sum /data/hello.txt').rstrip()}")
-    print(f"Base64: {sh(shell, 'echo -n \"wasmsh\" | base64').rstrip()}")
+    b64_result = sh(shell, "echo -n 'wasmsh' | base64").rstrip()
+    print(f"Base64: {b64_result}")
     print()
 
     print("All examples completed successfully!")
