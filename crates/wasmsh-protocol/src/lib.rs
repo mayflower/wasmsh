@@ -12,7 +12,7 @@
 pub const PROTOCOL_VERSION: &str = "0.1.0";
 
 /// A command sent from the host to the worker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum HostCommand {
     /// Initialize the shell runtime with optional configuration.
@@ -52,7 +52,7 @@ pub enum HostCommand {
 }
 
 /// An event sent from the worker to the host.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum WorkerEvent {
     /// Shell produced stdout output.
@@ -70,7 +70,7 @@ pub enum WorkerEvent {
 }
 
 /// Diagnostic severity level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum DiagnosticLevel {
     /// Informational message.

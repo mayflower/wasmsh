@@ -11,6 +11,9 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [features]
 default = ["browser-core"]
 browser-core = []
@@ -29,6 +32,12 @@ wasmsh-utils = { workspace = true }
 wasmsh-builtins = { workspace = true }
 smol_str = { workspace = true }
 indexmap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true }
+console_error_panic_hook = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

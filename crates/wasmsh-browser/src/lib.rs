@@ -5415,3 +5415,80 @@ mod tests {
         assert!(stdout.contains("sub/deep/c.txt"), "got: {stdout}");
     }
 }
+
+// ── wasm-bindgen entry points (wasm32 only) ────────────────────────
+
+#[cfg(target_arch = "wasm32")]
+mod wasm_bindings {
+    use wasm_bindgen::prelude::*;
+    use wasmsh_protocol::HostCommand;
+
+    use crate::WorkerRuntime;
+
+    /// Browser-facing shell instance exposed via `wasm-bindgen`.
+    #[wasm_bindgen]
+    #[allow(missing_debug_implementations)]
+    pub struct WasmShell {
+        runtime: WorkerRuntime,
+    }
+
+    #[wasm_bindgen]
+    impl WasmShell {
+        /// Create a new shell instance.
+        #[wasm_bindgen(constructor)]
+        pub fn new() -> Self {
+            console_error_panic_hook::set_once();
+            Self {
+                runtime: WorkerRuntime::new(),
+            }
+        }
+
+        /// Initialize the shell with a step budget.  Returns a JSON array of events.
+        pub fn init(&mut self, step_budget: u64) -> String {
+            let events = self
+                .runtime
+                .handle_command(HostCommand::Init { step_budget });
+            serde_json::to_string(&events).unwrap_or_default()
+        }
+
+        /// Execute a shell command.  Returns a JSON array of events.
+        #[wasm_bindgen(js_name = "exec")]
+        pub fn run(&mut self, input: &str) -> String {
+            let events = self.runtime.handle_command(HostCommand::Run {
+                input: input.to_string(),
+            });
+            serde_json::to_string(&events).unwrap_or_default()
+        }
+
+        /// Write a file to the VFS.  Returns a JSON array of events.
+        pub fn write_file(&mut self, path: &str, data: &[u8]) -> String {
+            let events = self.runtime.handle_command(HostCommand::WriteFile {
+                path: path.to_string(),
+                data: data.to_vec(),
+            });
+            serde_json::to_string(&events).unwrap_or_default()
+        }
+
+        /// Read a file from the VFS.  Returns a JSON array of events.
+        pub fn read_file(&mut self, path: &str) -> String {
+            let events = self.runtime.handle_command(HostCommand::ReadFile {
+                path: path.to_string(),
+            });
+            serde_json::to_string(&events).unwrap_or_default()
+        }
+
+        /// List a directory.  Returns a JSON array of events.
+        pub fn list_dir(&mut self, path: &str) -> String {
+            let events = self.runtime.handle_command(HostCommand::ListDir {
+                path: path.to_string(),
+            });
+            serde_json::to_string(&events).unwrap_or_default()
+        }
+
+        /// Cancel the currently running execution.  Returns a JSON array of events.
+        pub fn cancel(&mut self) -> String {
+            let events = self.runtime.handle_command(HostCommand::Cancel);
+            serde_json::to_string(&events).unwrap_or_default()
+        }
+    }
+}

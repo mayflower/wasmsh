@@ -34,7 +34,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-  # ── Build wasm32 release artifact ──────────────────────────
+  # ── Build wasm32 release artifacts ─────────────────────────
   build-wasm:
     name: build wasm32
     needs: validate
@@ -42,20 +42,38 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - run: rustup target add wasm32-unknown-unknown
-      - name: Build release
-        run: >
-          cargo build
-          --target wasm32-unknown-unknown
-          --profile dist
-          -p wasmsh-browser
-      - name: Package artifact
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Install wasm-opt (binaryen)
+        run: sudo apt-get install -y binaryen
+      - name: Build with wasm-pack (bundler)
+        run: wasm-pack build crates/wasmsh-browser --target bundler --release --out-dir ../../pkg/bundler
+      - name: Build with wasm-pack (web)
+        run: wasm-pack build crates/wasmsh-browser --target web --release --out-dir ../../pkg/web
+      - name: Build with wasm-pack (nodejs)
+        run: wasm-pack build crates/wasmsh-browser --target nodejs --release --out-dir ../../pkg/nodejs
+      - name: Optimize with wasm-opt
+        run: |
+          for dir in pkg/bundler pkg/web pkg/nodejs; do
+            for f in "$dir"/*.wasm; do
+              if [ -f "$f" ]; then
+                wasm-opt -Os "$f" -o "$f.opt"
+                mv "$f.opt" "$f"
+              fi
+            done
+          done
+      - name: Package artifacts
         env:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           mkdir -p dist
-          cp target/wasm32-unknown-unknown/dist/libwasmsh_browser.rlib dist/ 2>/dev/null || true
+          cp -r pkg/bundler dist/bundler
+          cp -r pkg/web dist/web
+          cp -r pkg/nodejs dist/nodejs
           cp LICENSE README.md SUPPORTED.md CHANGELOG.md dist/
           echo "$TAG_NAME" > dist/VERSION
           tar czf "wasmsh-wasm32-${TAG_NAME}.tar.gz" -C dist .

@@ -1,0 +1,88 @@
+name: Build WASM
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-wasm:
+    name: Build WASM artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Install wasm-opt (binaryen)
+        run: sudo apt-get install -y binaryen
+
+      - name: Build with wasm-pack (bundler target)
+        run: wasm-pack build crates/wasmsh-browser --target bundler --release --out-dir ../../pkg/bundler
+
+      - name: Build with wasm-pack (web target)
+        run: wasm-pack build crates/wasmsh-browser --target web --release --out-dir ../../pkg/web
+
+      - name: Build with wasm-pack (nodejs target)
+        run: wasm-pack build crates/wasmsh-browser --target nodejs --release --out-dir ../../pkg/nodejs
+
+      - name: Optimize with wasm-opt
+        run: |
+          for dir in pkg/bundler pkg/web pkg/nodejs; do
+            for f in "$dir"/*.wasm; do
+              if [ -f "$f" ]; then
+                wasm-opt -Os "$f" -o "$f.opt"
+                mv "$f.opt" "$f"
+              fi
+            done
+          done
+
+      - name: Report sizes
+        run: |
+          echo "## WASM Binary Sizes" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Target | File | Size |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|------|------|" >> "$GITHUB_STEP_SUMMARY"
+          for dir in pkg/bundler pkg/web pkg/nodejs; do
+            target=$(basename "$dir")
+            for f in "$dir"/*.wasm; do
+              if [ -f "$f" ]; then
+                size=$(wc -c < "$f" | tr -d ' ')
+                gzip_size=$(gzip -c "$f" | wc -c | tr -d ' ')
+                echo "| $target | $(basename "$f") | ${size} bytes (${gzip_size} gzipped) |" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            done
+          done
+
+      - name: Upload bundler artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasmsh-bundler
+          path: pkg/bundler/
+
+      - name: Upload web artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasmsh-web
+          path: pkg/web/
+
+      - name: Upload nodejs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasmsh-nodejs
+          path: pkg/nodejs/
