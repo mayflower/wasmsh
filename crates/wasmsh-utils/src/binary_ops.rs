@@ -1120,6 +1120,142 @@ mod tests {
         assert_eq!(&d, b"9");
     }
 
+    // -----------------------------------------------------------------------
+    // file tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn file_png_magic() {
+        let mut fs = MemoryFs::new();
+        let mut png = vec![0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&[0; 32]); // some extra data
+        let h = fs.open("/image.png", OpenOptions::write()).unwrap();
+        fs.write_file(h, &png).unwrap();
+        fs.close(h);
+
+        let (status, out) = run_util(util_file, &["file", "/image.png"], &mut fs, None);
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("PNG image data"), "got: {s}");
+    }
+
+    #[test]
+    fn file_json_content() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/data.json", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"{\"key\":\"val\"}").unwrap();
+        fs.close(h);
+
+        let (status, out) = run_util(util_file, &["file", "/data.json"], &mut fs, None);
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("JSON text data"), "got: {s}");
+    }
+
+    #[test]
+    fn file_plain_text() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/readme.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"Hello world, this is ASCII text.").unwrap();
+        fs.close(h);
+
+        let (status, out) = run_util(util_file, &["file", "/readme.txt"], &mut fs, None);
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("ASCII text"), "got: {s}");
+    }
+
+    #[test]
+    fn file_extension_fallback() {
+        let mut fs = MemoryFs::new();
+        // Plain text content but .py extension — should detect via extension
+        let h = fs.open("/script.py", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"print('hello')").unwrap();
+        fs.close(h);
+
+        let (status, out) = run_util(util_file, &["file", "/script.py"], &mut fs, None);
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("Python script"), "got: {s}");
+    }
+
+    #[test]
+    fn file_binary_data() {
+        let mut fs = MemoryFs::new();
+        let data: Vec<u8> = (0u8..=255).collect();
+        let h = fs.open("/binary.bin", OpenOptions::write()).unwrap();
+        fs.write_file(h, &data).unwrap();
+        fs.close(h);
+
+        let (status, out) = run_util(util_file, &["file", "/binary.bin"], &mut fs, None);
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("data"), "got: {s}");
+    }
+
+    #[test]
+    fn file_brief_mode() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/test.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"just text").unwrap();
+        fs.close(h);
+
+        let (status, out) = run_util(util_file, &["file", "-b", "/test.txt"], &mut fs, None);
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        // Brief mode should NOT include the filename prefix
+        assert!(!s.contains("/test.txt:"), "got: {s}");
+        assert!(s.contains("ASCII text") || s.contains("text"), "got: {s}");
+    }
+
+    #[test]
+    fn file_mime_type() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/doc.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"plain text content").unwrap();
+        fs.close(h);
+
+        let (status, out) = run_util(util_file, &["file", "-i", "/doc.txt"], &mut fs, None);
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("text/plain"), "got: {s}");
+    }
+
+    #[test]
+    fn file_gzip_magic() {
+        let mut fs = MemoryFs::new();
+        let mut gz = vec![0x1Fu8, 0x8B, 0x08, 0x00];
+        gz.extend_from_slice(&[0; 20]); // filler
+        let h = fs.open("/archive.gz", OpenOptions::write()).unwrap();
+        fs.write_file(h, &gz).unwrap();
+        fs.close(h);
+
+        let (status, out) = run_util(util_file, &["file", "/archive.gz"], &mut fs, None);
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("gzip compressed data"), "got: {s}");
+    }
+
+    #[test]
+    fn file_shebang() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/run.sh", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"#!/bin/bash\necho hi\n").unwrap();
+        fs.close(h);
+
+        let (status, out) = run_util(util_file, &["file", "/run.sh"], &mut fs, None);
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("script text executable"), "got: {s}");
+    }
+
+    #[test]
+    fn file_missing() {
+        let mut fs = MemoryFs::new();
+        let (status, _out) = run_util(util_file, &["file", "/nonexistent"], &mut fs, None);
+        assert_eq!(status, 1);
+    }
+
     #[test]
     fn parse_size_values() {
         assert_eq!(parse_size("512"), Some(512));

@@ -889,3 +889,190 @@ pub(crate) fn util_column(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     }
     0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{UtilContext, VecOutput};
+    use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
+
+    fn make_fs() -> MemoryFs {
+        MemoryFs::new()
+    }
+
+    fn make_fs_with_file(path: &str, content: &[u8]) -> MemoryFs {
+        let mut fs = MemoryFs::new();
+        let h = fs.open(path, OpenOptions::write()).unwrap();
+        fs.write_file(h, content).unwrap();
+        fs.close(h);
+        fs
+    }
+
+    fn run(
+        f: fn(&mut UtilContext<'_>, &[&str]) -> i32,
+        argv: &[&str],
+        fs: &mut MemoryFs,
+    ) -> (i32, String, String) {
+        let mut output = VecOutput::default();
+        let status = {
+            let mut ctx = UtilContext {
+                fs,
+                output: &mut output,
+                cwd: "/",
+                stdin: None,
+                state: None,
+            };
+            f(&mut ctx, argv)
+        };
+        (
+            status,
+            String::from_utf8_lossy(&output.stdout).to_string(),
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        )
+    }
+
+    fn run_stdin(
+        f: fn(&mut UtilContext<'_>, &[&str]) -> i32,
+        argv: &[&str],
+        stdin: &[u8],
+        fs: &mut MemoryFs,
+    ) -> (i32, String, String) {
+        let mut output = VecOutput::default();
+        let status = {
+            let mut ctx = UtilContext {
+                fs,
+                output: &mut output,
+                cwd: "/",
+                stdin: Some(stdin),
+                state: None,
+            };
+            f(&mut ctx, argv)
+        };
+        (
+            status,
+            String::from_utf8_lossy(&output.stdout).to_string(),
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        )
+    }
+
+    #[test]
+    fn bat_full_style() {
+        let mut fs = make_fs_with_file("/code.rs", b"fn main() {\n    println!(\"hi\");\n}\n");
+        let (status, out, _) = run(util_bat, &["bat", "/code.rs"], &mut fs);
+        assert_eq!(status, 0);
+        // Should contain box-drawing characters for header
+        assert!(out.contains('\u{2500}'), "expected horizontal rule char");
+        assert!(out.contains('\u{252C}'), "expected top corner char");
+        assert!(out.contains("File: /code.rs"), "expected file header");
+        // Should contain line numbers
+        assert!(out.contains("1"), "expected line number 1");
+    }
+
+    #[test]
+    fn bat_plain() {
+        let mut fs = make_fs_with_file("/plain.txt", b"line one\nline two\n");
+        let (status, out, _) = run(util_bat, &["bat", "-p", "/plain.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // Plain mode: no box-drawing, no header
+        assert!(!out.contains('\u{2500}'), "should not contain decoration");
+        assert!(!out.contains("File:"), "should not contain file header");
+        assert!(out.contains("line one"));
+        assert!(out.contains("line two"));
+    }
+
+    #[test]
+    fn bat_line_numbers() {
+        let mut fs = make_fs_with_file("/nums.txt", b"aaa\nbbb\nccc\n");
+        let (status, out, _) = run(util_bat, &["bat", "--style=numbers", "/nums.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // Should show line numbers
+        assert!(out.contains("1"));
+        assert!(out.contains("2"));
+        assert!(out.contains("3"));
+        // Should NOT show file header
+        assert!(!out.contains("File:"));
+    }
+
+    #[test]
+    fn bat_header_only() {
+        let mut fs = make_fs_with_file("/hdr.txt", b"content\n");
+        let (status, out, _) = run(util_bat, &["bat", "--style=header", "/hdr.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // Should show file header
+        assert!(out.contains("File: /hdr.txt"));
+        // Should contain the content
+        assert!(out.contains("content"));
+    }
+
+    #[test]
+    fn bat_line_range() {
+        let mut fs = make_fs_with_file("/range.txt", b"one\ntwo\nthree\nfour\nfive\n");
+        let (status, out, _) = run(
+            util_bat,
+            &["bat", "-p", "-r", "2:3", "/range.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        assert!(out.contains("two"));
+        assert!(out.contains("three"));
+        assert!(!out.contains("one"));
+        assert!(!out.contains("four"));
+        assert!(!out.contains("five"));
+    }
+
+    #[test]
+    fn bat_line_range_open_end() {
+        let mut fs = make_fs_with_file("/range2.txt", b"a\nb\nc\nd\ne\n");
+        let (status, out, _) = run(
+            util_bat,
+            &["bat", "-p", "-r", "3:", "/range2.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(out.contains("c"));
+        assert!(out.contains("d"));
+        assert!(out.contains("e"));
+    }
+
+    #[test]
+    fn bat_line_range_open_start() {
+        let mut fs = make_fs_with_file("/range3.txt", b"alpha\nbeta\ngamma\ndelta\n");
+        let (status, out, _) = run(
+            util_bat,
+            &["bat", "-p", "-r", ":2", "/range3.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        assert!(out.contains("alpha"));
+        assert!(out.contains("beta"));
+        assert!(!out.contains("gamma"));
+        assert!(!out.contains("delta"));
+    }
+
+    #[test]
+    fn bat_stdin() {
+        let mut fs = make_fs();
+        let (status, out, _) = run_stdin(util_bat, &["bat", "-p"], b"from stdin\n", &mut fs);
+        assert_eq!(status, 0);
+        assert!(out.contains("from stdin"));
+    }
+
+    #[test]
+    fn bat_missing_file() {
+        let mut fs = make_fs();
+        let (status, _out, err) = run(util_bat, &["bat", "/no_such_file"], &mut fs);
+        assert_eq!(status, 1);
+        assert!(!err.is_empty(), "expected error on stderr");
+    }
+
+    #[test]
+    fn bat_show_all() {
+        let mut fs = make_fs_with_file("/tabs.txt", b"col1\tcol2\n");
+        let (status, out, _) = run(util_bat, &["bat", "-A", "-p", "/tabs.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // -A should convert tab to visible representation
+        assert!(out.contains("\\t"), "expected \\t for tab, got: {out}");
+    }
+}

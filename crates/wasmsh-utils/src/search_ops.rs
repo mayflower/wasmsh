@@ -1418,6 +1418,176 @@ mod tests {
         assert!(out.contains("findme"));
     }
 
+    // -----------------------------------------------------------------------
+    // fd tests
+    // -----------------------------------------------------------------------
+
+    fn run_fd(argv: &[&str], fs: &mut MemoryFs, cwd: &str) -> (i32, String, String) {
+        let mut output = VecOutput::default();
+        let status = {
+            let mut ctx = UtilContext {
+                fs,
+                output: &mut output,
+                cwd,
+                stdin: None,
+                state: None,
+            };
+            util_fd(&mut ctx, argv)
+        };
+        (
+            status,
+            output.stdout_str().to_string(),
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        )
+    }
+
+    fn make_fd_fs() -> MemoryFs {
+        let mut fs = MemoryFs::new();
+        fs.create_dir("/root").unwrap();
+        fs.create_dir("/root/sub").unwrap();
+        fs.create_dir("/root/sub/deep").unwrap();
+
+        let h = fs.open("/root/hello.rs", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"fn main() {}").unwrap();
+        fs.close(h);
+
+        let h = fs.open("/root/test_foo.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"foo").unwrap();
+        fs.close(h);
+
+        let h = fs.open("/root/sub/test_bar.rs", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"bar").unwrap();
+        fs.close(h);
+
+        let h = fs.open("/root/sub/deep/notes.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"notes").unwrap();
+        fs.close(h);
+
+        let h = fs.open("/root/.hidden", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"secret").unwrap();
+        fs.close(h);
+
+        fs
+    }
+
+    #[test]
+    fn fd_list_all() {
+        let mut fs = make_fd_fs();
+        let (status, out, _) = run_fd(&["fd"], &mut fs, "/root");
+        assert_eq!(status, 0);
+        // Should list files and directories
+        assert!(out.contains("hello.rs"));
+        assert!(out.contains("test_foo.txt"));
+        assert!(out.contains("sub"));
+    }
+
+    #[test]
+    fn fd_substring_match() {
+        let mut fs = make_fd_fs();
+        let (status, out, _) = run_fd(&["fd", "test"], &mut fs, "/root");
+        assert_eq!(status, 0);
+        assert!(out.contains("test_foo.txt"));
+        assert!(out.contains("test_bar.rs"));
+        assert!(!out.contains("hello.rs"));
+    }
+
+    #[test]
+    fn fd_type_file() {
+        let mut fs = make_fd_fs();
+        let (status, out, _) = run_fd(&["fd", "-t", "f"], &mut fs, "/root");
+        assert_eq!(status, 0);
+        assert!(out.contains("hello.rs"));
+        // Directories should not appear
+        assert!(!out.lines().any(|l| l == "sub" || l == "sub/deep"));
+    }
+
+    #[test]
+    fn fd_type_dir() {
+        let mut fs = make_fd_fs();
+        let (status, out, _) = run_fd(&["fd", "-t", "d"], &mut fs, "/root");
+        assert_eq!(status, 0);
+        assert!(out.contains("sub"));
+        // Files should not appear
+        assert!(!out.contains("hello.rs"));
+        assert!(!out.contains("test_foo.txt"));
+    }
+
+    #[test]
+    fn fd_extension() {
+        let mut fs = make_fd_fs();
+        let (status, out, _) = run_fd(&["fd", "-e", "rs"], &mut fs, "/root");
+        assert_eq!(status, 0);
+        assert!(out.contains("hello.rs"));
+        assert!(out.contains("test_bar.rs"));
+        assert!(!out.contains("test_foo.txt"));
+        assert!(!out.contains("notes.txt"));
+    }
+
+    #[test]
+    fn fd_hidden() {
+        let mut fs = make_fd_fs();
+        // Without -H, dotfiles should be hidden
+        let (_, out_no_hidden, _) = run_fd(&["fd"], &mut fs, "/root");
+        assert!(!out_no_hidden.contains(".hidden"));
+
+        // With -H, dotfiles should be shown
+        let (_, out_hidden, _) = run_fd(&["fd", "-H"], &mut fs, "/root");
+        assert!(out_hidden.contains(".hidden"));
+    }
+
+    #[test]
+    fn fd_max_depth() {
+        let mut fs = make_fd_fs();
+        let (status, out, _) = run_fd(&["fd", "-d", "1"], &mut fs, "/root");
+        assert_eq!(status, 0);
+        // Should see top-level entries
+        assert!(out.contains("hello.rs"));
+        assert!(out.contains("sub"));
+        // Should NOT see deeply nested entries
+        assert!(!out.contains("test_bar.rs"));
+        assert!(!out.contains("notes.txt"));
+    }
+
+    #[test]
+    fn fd_glob_mode() {
+        let mut fs = make_fd_fs();
+        let (status, out, _) = run_fd(&["fd", "-g", "*.txt"], &mut fs, "/root");
+        assert_eq!(status, 0);
+        assert!(out.contains("test_foo.txt"));
+        assert!(out.contains("notes.txt"));
+        assert!(!out.contains("hello.rs"));
+    }
+
+    #[test]
+    fn fd_first_match() {
+        let mut fs = make_fd_fs();
+        let (status, out, _) = run_fd(&["fd", "-1"], &mut fs, "/root");
+        assert_eq!(status, 0);
+        // Should output exactly one result
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn fd_absolute_path() {
+        let mut fs = make_fd_fs();
+        let (status, out, _) = run_fd(&["fd", "-a"], &mut fs, "/root");
+        assert_eq!(status, 0);
+        // Every result line should start with /
+        for line in out.lines() {
+            assert!(line.starts_with('/'), "Expected absolute path, got: {line}");
+        }
+    }
+
+    #[test]
+    fn fd_no_results() {
+        let mut fs = make_fd_fs();
+        let (status, out, _) = run_fd(&["fd", "zzzznothing"], &mut fs, "/root");
+        // fd returns 1 when pattern given but no results
+        assert_eq!(status, 1);
+        assert!(out.is_empty());
+    }
+
     #[test]
     fn type_mapping_coverage() {
         assert!(!type_to_extensions("rs").is_empty());

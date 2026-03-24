@@ -1137,6 +1137,132 @@ mod tests {
         assert!(decompressed.is_empty());
     }
 
+    // -----------------------------------------------------------------------
+    // unzip tests
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal valid stored ZIP archive with one file entry.
+    fn make_stored_zip(name: &str, content: &[u8]) -> Vec<u8> {
+        let mut zip = Vec::new();
+        // Local file header
+        zip.extend_from_slice(b"PK\x03\x04"); // signature
+        zip.extend_from_slice(&[20, 0]); // version needed (2.0)
+        zip.extend_from_slice(&[0, 0]); // flags
+        zip.extend_from_slice(&[0, 0]); // compression method 0 (stored)
+        zip.extend_from_slice(&[0, 0]); // mod time
+        zip.extend_from_slice(&[0, 0]); // mod date
+        zip.extend_from_slice(&[0, 0, 0, 0]); // crc32 (unused)
+        zip.extend_from_slice(&(content.len() as u32).to_le_bytes()); // compressed size
+        zip.extend_from_slice(&(content.len() as u32).to_le_bytes()); // uncompressed size
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes()); // name length
+        zip.extend_from_slice(&[0, 0]); // extra length
+        zip.extend_from_slice(name.as_bytes()); // filename
+        zip.extend_from_slice(content); // data
+        zip
+    }
+
+    fn run_unzip(argv: &[&str], fs: &mut MemoryFs) -> (i32, VecOutput) {
+        run_util(util_unzip, argv, fs, "/")
+    }
+
+    #[test]
+    fn unzip_stored() {
+        let mut fs = MemoryFs::new();
+        let zip_data = make_stored_zip("hello.txt", b"Hello World!");
+        let h = fs.open("/test.zip", OpenOptions::write()).unwrap();
+        fs.write_file(h, &zip_data).unwrap();
+        fs.close(h);
+
+        let (status, _) = run_unzip(&["unzip", "/test.zip"], &mut fs);
+        assert_eq!(status, 0);
+
+        // Verify extracted file
+        let h = fs.open("/hello.txt", OpenOptions::read()).unwrap();
+        let data = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&data, b"Hello World!");
+    }
+
+    #[test]
+    fn unzip_list() {
+        let mut fs = MemoryFs::new();
+        let zip_data = make_stored_zip("data.csv", b"a,b,c\n1,2,3\n");
+        let h = fs.open("/archive.zip", OpenOptions::write()).unwrap();
+        fs.write_file(h, &zip_data).unwrap();
+        fs.close(h);
+
+        let (status, out) = run_unzip(&["unzip", "-l", "/archive.zip"], &mut fs);
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("data.csv"), "got: {s}");
+        // Should NOT extract the file
+        assert!(fs.stat("/data.csv").is_err());
+    }
+
+    #[test]
+    fn unzip_to_dir() {
+        let mut fs = MemoryFs::new();
+        let zip_data = make_stored_zip("readme.txt", b"README content");
+        let h = fs.open("/pkg.zip", OpenOptions::write()).unwrap();
+        fs.write_file(h, &zip_data).unwrap();
+        fs.close(h);
+
+        let (status, _) = run_unzip(&["unzip", "/pkg.zip", "-d", "/out"], &mut fs);
+        assert_eq!(status, 0);
+
+        // File should be extracted into /out
+        let h = fs.open("/out/readme.txt", OpenOptions::read()).unwrap();
+        let data = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&data, b"README content");
+    }
+
+    #[test]
+    fn unzip_quiet() {
+        let mut fs = MemoryFs::new();
+        let zip_data = make_stored_zip("file.txt", b"data");
+        let h = fs.open("/q.zip", OpenOptions::write()).unwrap();
+        fs.write_file(h, &zip_data).unwrap();
+        fs.close(h);
+
+        let (status, out) = run_unzip(&["unzip", "-q", "/q.zip"], &mut fs);
+        assert_eq!(status, 0);
+        // Quiet mode should suppress "inflating:" messages
+        assert!(
+            !out.stdout_str().contains("inflating"),
+            "stdout should be quiet, got: {}",
+            out.stdout_str()
+        );
+    }
+
+    #[test]
+    fn unzip_missing_file() {
+        let mut fs = MemoryFs::new();
+        let (status, out) = run_unzip(&["unzip", "/nonexistent.zip"], &mut fs);
+        assert_eq!(status, 1);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!err.is_empty(), "expected error message on stderr");
+    }
+
+    #[test]
+    fn unzip_creates_dirs() {
+        let mut fs = MemoryFs::new();
+        // ZIP entry with a path that includes a directory
+        let zip_data = make_stored_zip("subdir/nested.txt", b"nested content");
+        let h = fs.open("/dirs.zip", OpenOptions::write()).unwrap();
+        fs.write_file(h, &zip_data).unwrap();
+        fs.close(h);
+
+        let (status, _) = run_unzip(&["unzip", "/dirs.zip"], &mut fs);
+        assert_eq!(status, 0);
+
+        // The parent directory should have been created
+        let h = fs.open("/subdir/nested.txt", OpenOptions::read()).unwrap();
+        let data = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&data, b"nested content");
+    }
+
     #[test]
     fn gzip_large_data() {
         // Test data larger than one stored block (65535 bytes)

@@ -1488,3 +1488,777 @@ fn day_of_week(year: u32, month: u32, day: u32) -> u32 {
     // Convert to 0=Sunday, 1=Monday, ...
     ((h + 6) % 7) as u32
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{UtilContext, VecOutput};
+    use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
+
+    fn make_fs() -> MemoryFs {
+        MemoryFs::new()
+    }
+
+    fn make_fs_with_file(path: &str, content: &[u8]) -> MemoryFs {
+        let mut fs = MemoryFs::new();
+        let h = fs.open(path, OpenOptions::write()).unwrap();
+        fs.write_file(h, content).unwrap();
+        fs.close(h);
+        fs
+    }
+
+    fn run(
+        f: fn(&mut UtilContext<'_>, &[&str]) -> i32,
+        argv: &[&str],
+        fs: &mut MemoryFs,
+    ) -> (i32, String, String) {
+        let mut output = VecOutput::default();
+        let status = {
+            let mut ctx = UtilContext {
+                fs,
+                output: &mut output,
+                cwd: "/",
+                stdin: None,
+                state: None,
+            };
+            f(&mut ctx, argv)
+        };
+        (
+            status,
+            String::from_utf8_lossy(&output.stdout).to_string(),
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        )
+    }
+
+    fn run_stdin(
+        f: fn(&mut UtilContext<'_>, &[&str]) -> i32,
+        argv: &[&str],
+        stdin: &[u8],
+        fs: &mut MemoryFs,
+    ) -> (i32, String, String) {
+        let mut output = VecOutput::default();
+        let status = {
+            let mut ctx = UtilContext {
+                fs,
+                output: &mut output,
+                cwd: "/",
+                stdin: Some(stdin),
+                state: None,
+            };
+            f(&mut ctx, argv)
+        };
+        (
+            status,
+            String::from_utf8_lossy(&output.stdout).to_string(),
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // which
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn which_known_command() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run(util_which, &["which", "cat"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "/usr/bin/cat\n");
+    }
+
+    #[test]
+    fn which_unknown_command() {
+        let mut fs = make_fs();
+        let (status, stdout, stderr) = run(util_which, &["which", "nonexistent_cmd"], &mut fs);
+        assert_eq!(status, 1);
+        assert!(stdout.is_empty());
+        assert!(stderr.contains("no nonexistent_cmd"));
+    }
+
+    #[test]
+    fn which_flag_a() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run(util_which, &["which", "-a", "echo"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "/usr/bin/echo\n");
+    }
+
+    #[test]
+    fn which_multiple_commands() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run(util_which, &["which", "cat", "ls"], &mut fs);
+        assert_eq!(status, 0);
+        assert!(stdout.contains("/usr/bin/cat\n"));
+        assert!(stdout.contains("/usr/bin/ls\n"));
+    }
+
+    #[test]
+    fn which_missing_operand() {
+        let mut fs = make_fs();
+        let (status, _, stderr) = run(util_which, &["which"], &mut fs);
+        assert_eq!(status, 1);
+        assert!(stderr.contains("missing operand"));
+    }
+
+    // -----------------------------------------------------------------------
+    // rmdir
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rmdir_empty_dir() {
+        let mut fs = make_fs();
+        fs.create_dir("/emptydir").unwrap();
+        let (status, _, _) = run(util_rmdir, &["rmdir", "/emptydir"], &mut fs);
+        assert_eq!(status, 0);
+        assert!(fs.stat("/emptydir").is_err());
+    }
+
+    #[test]
+    fn rmdir_nonempty_dir_fails() {
+        let mut fs = make_fs_with_file("/mydir/file.txt", b"data");
+        let (status, _, stderr) = run(util_rmdir, &["rmdir", "/mydir"], &mut fs);
+        assert_eq!(status, 1);
+        assert!(stderr.contains("not empty") || stderr.contains("Not empty") || stderr.contains("Directory not empty"));
+    }
+
+    #[test]
+    fn rmdir_parents() {
+        let mut fs = make_fs();
+        fs.create_dir("/a").unwrap();
+        fs.create_dir("/a/b").unwrap();
+        fs.create_dir("/a/b/c").unwrap();
+        let (status, _, _) = run(util_rmdir, &["rmdir", "-p", "/a/b/c"], &mut fs);
+        assert_eq!(status, 0);
+        // c should be removed; b should be removed (was empty after c removed);
+        // a should be removed (was empty after b removed)
+        assert!(fs.stat("/a/b/c").is_err());
+        assert!(fs.stat("/a/b").is_err());
+        assert!(fs.stat("/a").is_err());
+    }
+
+    #[test]
+    fn rmdir_nonexistent_dir() {
+        let mut fs = make_fs();
+        let (status, _, stderr) = run(util_rmdir, &["rmdir", "/nope"], &mut fs);
+        assert_eq!(status, 1);
+        assert!(!stderr.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // tac
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tac_reverse_lines() {
+        let mut fs = make_fs_with_file("/lines.txt", b"a\nb\nc");
+        let (status, stdout, _) = run(util_tac, &["tac", "/lines.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "c\nb\na\n");
+    }
+
+    #[test]
+    fn tac_single_line() {
+        let mut fs = make_fs_with_file("/one.txt", b"only");
+        let (status, stdout, _) = run(util_tac, &["tac", "/one.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "only\n");
+    }
+
+    #[test]
+    fn tac_stdin() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run_stdin(util_tac, &["tac"], b"x\ny\nz", &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "z\ny\nx\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // nl
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nl_skip_empty_lines_default() {
+        let mut fs = make_fs_with_file("/f.txt", b"hello\n\nworld");
+        let (status, stdout, _) = run(util_nl, &["nl", "/f.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // Default: -b t (non-empty only)
+        assert!(stdout.contains("1\thello"));
+        assert!(stdout.contains("\n\n")); // blank line not numbered
+        assert!(stdout.contains("2\tworld"));
+    }
+
+    #[test]
+    fn nl_number_all_lines() {
+        let mut fs = make_fs_with_file("/f.txt", b"a\n\nb");
+        let (status, stdout, _) = run(util_nl, &["nl", "-b", "a", "/f.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // With -b a, even empty lines get numbered
+        assert!(stdout.contains("1\ta"));
+        assert!(stdout.contains("2\t"));
+        assert!(stdout.contains("3\tb"));
+    }
+
+    #[test]
+    fn nl_stdin() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run_stdin(util_nl, &["nl"], b"foo\nbar", &mut fs);
+        assert_eq!(status, 0);
+        assert!(stdout.contains("1\tfoo"));
+        assert!(stdout.contains("2\tbar"));
+    }
+
+    // -----------------------------------------------------------------------
+    // shuf
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn shuf_same_line_count() {
+        let mut fs = make_fs_with_file("/data.txt", b"a\nb\nc\nd\ne");
+        let (status, stdout, _) = run(util_shuf, &["shuf", "/data.txt"], &mut fs);
+        assert_eq!(status, 0);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 5);
+        // All original values present
+        for v in &["a", "b", "c", "d", "e"] {
+            assert!(lines.contains(v));
+        }
+    }
+
+    #[test]
+    fn shuf_n_limits_count() {
+        let mut fs = make_fs_with_file("/data.txt", b"a\nb\nc\nd\ne");
+        let (status, stdout, _) = run(util_shuf, &["shuf", "-n", "2", "/data.txt"], &mut fs);
+        assert_eq!(status, 0);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn shuf_empty_input() {
+        let mut fs = make_fs_with_file("/empty.txt", b"");
+        let (status, stdout, _) = run(util_shuf, &["shuf", "/empty.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert!(stdout.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // cmp
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cmp_identical_files() {
+        let mut fs = make_fs_with_file("/a.txt", b"hello world");
+        let h = fs.open("/b.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"hello world").unwrap();
+        fs.close(h);
+        let (status, stdout, _) = run(util_cmp, &["cmp", "/a.txt", "/b.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert!(stdout.is_empty());
+    }
+
+    #[test]
+    fn cmp_different_files() {
+        let mut fs = make_fs_with_file("/a.txt", b"hello");
+        let h = fs.open("/b.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"hallo").unwrap();
+        fs.close(h);
+        let (status, stdout, _) = run(util_cmp, &["cmp", "/a.txt", "/b.txt"], &mut fs);
+        assert_eq!(status, 1);
+        assert!(stdout.contains("differ"));
+        assert!(stdout.contains("byte 2"));
+    }
+
+    #[test]
+    fn cmp_silent_flag() {
+        let mut fs = make_fs_with_file("/a.txt", b"abc");
+        let h = fs.open("/b.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"axc").unwrap();
+        fs.close(h);
+        let (status, stdout, _) = run(util_cmp, &["cmp", "-s", "/a.txt", "/b.txt"], &mut fs);
+        assert_eq!(status, 1);
+        assert!(stdout.is_empty());
+    }
+
+    #[test]
+    fn cmp_verbose_flag() {
+        let mut fs = make_fs_with_file("/a.txt", b"ab");
+        let h = fs.open("/b.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"ax").unwrap();
+        fs.close(h);
+        let (status, stdout, _) = run(util_cmp, &["cmp", "-l", "/a.txt", "/b.txt"], &mut fs);
+        assert_eq!(status, 1);
+        // -l shows byte position, byte values for each difference
+        assert!(stdout.contains('2'));
+    }
+
+    // -----------------------------------------------------------------------
+    // comm
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn comm_two_sorted_files() {
+        let mut fs = make_fs_with_file("/a.txt", b"a\nb\nc\nd");
+        let h = fs.open("/b.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"b\nc\ne").unwrap();
+        fs.close(h);
+        let (status, stdout, _) = run(util_comm, &["comm", "/a.txt", "/b.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // Column 1 (only in a): a, d — no prefix
+        // Column 2 (only in b): e — one tab prefix
+        // Column 3 (both): b, c — two tab prefix
+        assert!(stdout.contains("a\n"));
+        assert!(stdout.contains("\t\tb\n"));
+        assert!(stdout.contains("\t\tc\n"));
+        assert!(stdout.contains("d\n"));
+        assert!(stdout.contains("\te\n"));
+    }
+
+    #[test]
+    fn comm_suppress_column_1() {
+        let mut fs = make_fs_with_file("/a.txt", b"a\nb\nc");
+        let h = fs.open("/b.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"b\nd").unwrap();
+        fs.close(h);
+        let (status, stdout, _) = run(util_comm, &["comm", "-1", "/a.txt", "/b.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // Column 1 suppressed, so "a" and "c" should not appear
+        assert!(!stdout.contains("a\n"));
+        assert!(!stdout.contains("c\n"));
+        // Column 2 (only in b): d
+        assert!(stdout.contains("d\n"));
+        // Column 3 (both): b
+        assert!(stdout.contains("\tb\n"));
+    }
+
+    #[test]
+    fn comm_suppress_column_3() {
+        let mut fs = make_fs_with_file("/a.txt", b"a\nb");
+        let h = fs.open("/b.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"b\nc").unwrap();
+        fs.close(h);
+        let (status, stdout, _) = run(util_comm, &["comm", "-3", "/a.txt", "/b.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // Common "b" should not appear
+        assert!(!stdout.contains('b'));
+        assert!(stdout.contains("a\n"));
+        assert!(stdout.contains("\tc\n"));
+    }
+
+    // -----------------------------------------------------------------------
+    // fold
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fold_default_80() {
+        // Line shorter than 80 should pass through unchanged
+        let mut fs = make_fs_with_file("/f.txt", b"short line");
+        let (status, stdout, _) = run(util_fold, &["fold", "/f.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "short line\n");
+    }
+
+    #[test]
+    fn fold_w10() {
+        let mut fs = make_fs_with_file("/f.txt", b"abcdefghijklmno");
+        let (status, stdout, _) = run(util_fold, &["fold", "-w", "10", "/f.txt"], &mut fs);
+        assert_eq!(status, 0);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "abcdefghij");
+        assert_eq!(lines[1], "klmno");
+    }
+
+    #[test]
+    fn fold_break_at_spaces() {
+        let mut fs = make_fs_with_file("/f.txt", b"hello world foo bar baz");
+        let (status, stdout, _) = run(util_fold, &["fold", "-s", "-w", "12", "/f.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // Each line should be at most 12 chars (breaking at spaces)
+        for line in stdout.lines() {
+            assert!(line.len() <= 12, "line too long: {line:?}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // nproc
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nproc_returns_one() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run(util_nproc, &["nproc"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "1\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // expand
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn expand_tabs_default_8() {
+        let mut fs = make_fs_with_file("/f.txt", b"a\tb");
+        let (status, stdout, _) = run(util_expand, &["expand", "/f.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // 'a' is at col 0, tab expands to fill to next tab stop (col 8)
+        assert_eq!(stdout, "a       b\n");
+    }
+
+    #[test]
+    fn expand_tabs_t4() {
+        let mut fs = make_fs_with_file("/f.txt", b"\thello");
+        let (status, stdout, _) = run(util_expand, &["expand", "-t", "4", "/f.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "    hello\n");
+    }
+
+    #[test]
+    fn expand_multiple_tabs() {
+        let mut fs = make_fs_with_file("/f.txt", b"a\tb\tc");
+        let (status, stdout, _) = run(util_expand, &["expand", "-t", "4", "/f.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // 'a' at col 0, tab fills to col 4: "a   ", 'b' at col 4, tab fills to col 8: "b   ", 'c'
+        assert_eq!(stdout, "a   b   c\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // unexpand
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn unexpand_leading_spaces() {
+        // 8 leading spaces should become one tab (default tab stop 8)
+        let mut fs = make_fs_with_file("/f.txt", b"        hello");
+        let (status, stdout, _) = run(util_unexpand, &["unexpand", "/f.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "\thello\n");
+    }
+
+    #[test]
+    fn unexpand_all_flag() {
+        // With -a, spaces throughout the line are converted
+        let mut fs = make_fs_with_file("/f.txt", b"a       b");
+        let (status, stdout, _) = run(util_unexpand, &["unexpand", "-a", "/f.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // 'a' then 7 spaces: col 0='a', cols 1-7 are spaces, col 8 is tab stop
+        // That's 7 spaces (positions 1-7), hitting tab stop at 8
+        assert!(stdout.contains('\t'));
+    }
+
+    #[test]
+    fn unexpand_no_change_when_insufficient_spaces() {
+        // 3 leading spaces (less than 8) should stay as spaces
+        let mut fs = make_fs_with_file("/f.txt", b"   hi");
+        let (status, stdout, _) = run(util_unexpand, &["unexpand", "/f.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "   hi\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // truncate
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn truncate_grow_file() {
+        let mut fs = make_fs_with_file("/f.txt", b"abc");
+        let (status, _, _) = run(util_truncate, &["truncate", "-s", "10", "/f.txt"], &mut fs);
+        assert_eq!(status, 0);
+        let h = fs.open("/f.txt", OpenOptions::read()).unwrap();
+        let data = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(data.len(), 10);
+        assert_eq!(&data[..3], b"abc");
+        assert!(data[3..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn truncate_shrink_file() {
+        let mut fs = make_fs_with_file("/f.txt", b"hello world");
+        let (status, _, _) = run(util_truncate, &["truncate", "-s", "5", "/f.txt"], &mut fs);
+        assert_eq!(status, 0);
+        let h = fs.open("/f.txt", OpenOptions::read()).unwrap();
+        let data = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&data, b"hello");
+    }
+
+    #[test]
+    fn truncate_relative_add() {
+        let mut fs = make_fs_with_file("/f.txt", b"abc");
+        let (status, _, _) = run(
+            util_truncate,
+            &["truncate", "-s", "+5", "/f.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        let h = fs.open("/f.txt", OpenOptions::read()).unwrap();
+        let data = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(data.len(), 8); // 3 + 5
+    }
+
+    #[test]
+    fn truncate_relative_subtract() {
+        let mut fs = make_fs_with_file("/f.txt", b"hello world");
+        let (status, _, _) = run(
+            util_truncate,
+            &["truncate", "-s", "-6", "/f.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        let h = fs.open("/f.txt", OpenOptions::read()).unwrap();
+        let data = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&data, b"hello");
+    }
+
+    // -----------------------------------------------------------------------
+    // factor
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn factor_small_primes() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run(util_factor, &["factor", "7"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "7: 7\n");
+    }
+
+    #[test]
+    fn factor_composite_number() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run(util_factor, &["factor", "12"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "12: 2 2 3\n");
+    }
+
+    #[test]
+    fn factor_one() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run(util_factor, &["factor", "1"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "1: \n");
+    }
+
+    #[test]
+    fn factor_large_number() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run(util_factor, &["factor", "1000003"], &mut fs);
+        assert_eq!(status, 0);
+        // 1000003 is prime
+        assert_eq!(stdout, "1000003: 1000003\n");
+    }
+
+    #[test]
+    fn factor_from_stdin() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run_stdin(util_factor, &["factor"], b"15", &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "15: 3 5\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // cksum
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cksum_known_input() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run_stdin(util_cksum, &["cksum"], b"hello\n", &mut fs);
+        assert_eq!(status, 0);
+        // Verify format: checksum + space + size
+        let parts: Vec<&str> = stdout.split_whitespace().collect();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[1], "6"); // 6 bytes
+        // Verify the checksum parses as a number
+        parts[0].parse::<u32>().unwrap();
+    }
+
+    #[test]
+    fn cksum_file() {
+        let mut fs = make_fs_with_file("/f.txt", b"test data");
+        let (status, stdout, _) = run(util_cksum, &["cksum", "/f.txt"], &mut fs);
+        assert_eq!(status, 0);
+        let parts: Vec<&str> = stdout.split_whitespace().collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[1], "9"); // 9 bytes
+        assert_eq!(parts[2], "/f.txt");
+    }
+
+    #[test]
+    fn cksum_multiple_files() {
+        let mut fs = make_fs_with_file("/a.txt", b"aaa");
+        let h = fs.open("/b.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"bbb").unwrap();
+        fs.close(h);
+        let (status, stdout, _) = run(util_cksum, &["cksum", "/a.txt", "/b.txt"], &mut fs);
+        assert_eq!(status, 0);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("/a.txt"));
+        assert!(lines[1].contains("/b.txt"));
+    }
+
+    #[test]
+    fn cksum_empty_input() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run_stdin(util_cksum, &["cksum"], b"", &mut fs);
+        assert_eq!(status, 0);
+        let parts: Vec<&str> = stdout.split_whitespace().collect();
+        assert_eq!(parts[1], "0");
+    }
+
+    // -----------------------------------------------------------------------
+    // tsort
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tsort_linear_order() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run_stdin(util_tsort, &["tsort"], b"a b b c", &mut fs);
+        assert_eq!(status, 0);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 3);
+        // a must come before b, b must come before c
+        let pos_a = lines.iter().position(|&l| l == "a").unwrap();
+        let pos_b = lines.iter().position(|&l| l == "b").unwrap();
+        let pos_c = lines.iter().position(|&l| l == "c").unwrap();
+        assert!(pos_a < pos_b);
+        assert!(pos_b < pos_c);
+    }
+
+    #[test]
+    fn tsort_cycle_detection() {
+        let mut fs = make_fs();
+        let (status, _, stderr) = run_stdin(util_tsort, &["tsort"], b"a b b a", &mut fs);
+        assert_eq!(status, 1);
+        assert!(stderr.contains("cycle"));
+    }
+
+    #[test]
+    fn tsort_self_loop_ignored() {
+        // Self-edges (a a) are ignored per the implementation
+        let mut fs = make_fs();
+        let (status, stdout, _) = run_stdin(util_tsort, &["tsort"], b"a a", &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(stdout.trim(), "a");
+    }
+
+    // -----------------------------------------------------------------------
+    // install
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn install_d_creates_directory() {
+        let mut fs = make_fs();
+        let (status, _, _) = run(util_install, &["install", "-d", "/a/b/c"], &mut fs);
+        assert_eq!(status, 0);
+        assert!(fs.stat("/a/b/c").unwrap().is_dir);
+    }
+
+    #[test]
+    fn install_copy_file() {
+        let mut fs = make_fs_with_file("/src.txt", b"content");
+        let (status, _, _) = run(
+            util_install,
+            &["install", "/src.txt", "/dst.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        let h = fs.open("/dst.txt", OpenOptions::read()).unwrap();
+        let data = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&data, b"content");
+    }
+
+    #[test]
+    fn install_creates_parent_dirs() {
+        let mut fs = make_fs_with_file("/src.txt", b"data");
+        let (status, _, _) = run(
+            util_install,
+            &["install", "/src.txt", "/new/path/dst.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        assert!(fs.stat("/new/path").unwrap().is_dir);
+        let h = fs.open("/new/path/dst.txt", OpenOptions::read()).unwrap();
+        let data = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&data, b"data");
+    }
+
+    // -----------------------------------------------------------------------
+    // timeout
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn timeout_passes_through_command() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run(
+            util_timeout,
+            &["timeout", "5", "echo", "hello"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "echo hello\n");
+    }
+
+    #[test]
+    fn timeout_missing_command() {
+        let mut fs = make_fs();
+        let (status, _, stderr) = run(util_timeout, &["timeout", "5"], &mut fs);
+        assert_eq!(status, 1);
+        assert!(stderr.contains("missing command"));
+    }
+
+    #[test]
+    fn timeout_missing_operand() {
+        let mut fs = make_fs();
+        let (status, _, stderr) = run(util_timeout, &["timeout"], &mut fs);
+        assert_eq!(status, 1);
+        assert!(stderr.contains("missing operand"));
+    }
+
+    // -----------------------------------------------------------------------
+    // cal
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cal_default_output() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run(util_cal, &["cal"], &mut fs);
+        assert_eq!(status, 0);
+        // Default is January 2026
+        assert!(stdout.contains("January 2026"));
+        assert!(stdout.contains("Su Mo Tu We Th Fr Sa"));
+    }
+
+    #[test]
+    fn cal_specific_month_year() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run(util_cal, &["cal", "3", "2026"], &mut fs);
+        assert_eq!(status, 0);
+        assert!(stdout.contains("March 2026"));
+        assert!(stdout.contains("Su Mo Tu We Th Fr Sa"));
+        // March 2026 starts on Sunday, so 1 should be first
+        assert!(stdout.contains(" 1 "));
+    }
+
+    #[test]
+    fn cal_invalid_month() {
+        let mut fs = make_fs();
+        let (status, _, stderr) = run(util_cal, &["cal", "13", "2026"], &mut fs);
+        assert_eq!(status, 1);
+        assert!(stderr.contains("invalid month"));
+    }
+
+    #[test]
+    fn cal_february_leap_year() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run(util_cal, &["cal", "2", "2024"], &mut fs);
+        assert_eq!(status, 0);
+        assert!(stdout.contains("February 2024"));
+        // 2024 is a leap year, so Feb has 29 days
+        assert!(stdout.contains("29"));
+    }
+}
