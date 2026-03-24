@@ -231,11 +231,18 @@ pub(crate) fn util_gzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     for path in args {
         let full = resolve_path(ctx.cwd, path);
         let data = match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => {
-                let d = ctx.fs.read_file(h).unwrap_or_default();
-                ctx.fs.close(h);
-                d
-            }
+            Ok(h) => match ctx.fs.read_file(h) {
+                Ok(d) => {
+                    ctx.fs.close(h);
+                    d
+                }
+                Err(e) => {
+                    ctx.fs.close(h);
+                    emit_error(ctx.output, "gzip", path, &e);
+                    status = 1;
+                    continue;
+                }
+            },
             Err(e) => {
                 emit_error(ctx.output, "gzip", path, &e);
                 status = 1;
@@ -268,7 +275,10 @@ pub(crate) fn util_gzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     continue;
                 }
                 if !keep {
-                    let _ = ctx.fs.remove_file(&full);
+                    if let Err(e) = ctx.fs.remove_file(&full) {
+                        let msg = format!("gzip: warning: cannot remove '{path}': {e}\n");
+                        ctx.output.stderr(msg.as_bytes());
+                    }
                 }
             }
         } else {
@@ -282,7 +292,10 @@ pub(crate) fn util_gzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     continue;
                 }
                 if !keep {
-                    let _ = ctx.fs.remove_file(&full);
+                    if let Err(e) = ctx.fs.remove_file(&full) {
+                        let msg = format!("gzip: warning: cannot remove '{path}': {e}\n");
+                        ctx.output.stderr(msg.as_bytes());
+                    }
                 }
             }
         }
@@ -464,11 +477,17 @@ fn tar_add_file(
     verbose: bool,
 ) -> i32 {
     let data = match ctx.fs.open(full_path, OpenOptions::read()) {
-        Ok(h) => {
-            let d = ctx.fs.read_file(h).unwrap_or_default();
-            ctx.fs.close(h);
-            d
-        }
+        Ok(h) => match ctx.fs.read_file(h) {
+            Ok(d) => {
+                ctx.fs.close(h);
+                d
+            }
+            Err(e) => {
+                ctx.fs.close(h);
+                emit_error(ctx.output, "tar", name, &e);
+                return 1;
+            }
+        },
         Err(e) => {
             emit_error(ctx.output, "tar", name, &e);
             return 1;
@@ -518,7 +537,9 @@ fn tar_add_dir(
 
     // Recursively add entries
     let Ok(entries) = ctx.fs.read_dir(full_path) else {
-        return 0;
+        let msg = format!("tar: cannot read directory '{name}': I/O error\n");
+        ctx.output.stderr(msg.as_bytes());
+        return 1;
     };
 
     for entry in entries {
@@ -604,11 +625,17 @@ fn tar_extract(
 ) -> i32 {
     let full_archive = resolve_path(ctx.cwd, archive_path);
     let archive_data = match ctx.fs.open(&full_archive, OpenOptions::read()) {
-        Ok(h) => {
-            let d = ctx.fs.read_file(h).unwrap_or_default();
-            ctx.fs.close(h);
-            d
-        }
+        Ok(h) => match ctx.fs.read_file(h) {
+            Ok(d) => {
+                ctx.fs.close(h);
+                d
+            }
+            Err(e) => {
+                ctx.fs.close(h);
+                emit_error(ctx.output, "tar", archive_path, &e);
+                return 1;
+            }
+        },
         Err(e) => {
             emit_error(ctx.output, "tar", archive_path, &e);
             return 1;
@@ -661,14 +688,22 @@ fn tar_extract(
 
         if typeflag == b'5' || name.ends_with('/') {
             // Directory
-            let _ = ctx.fs.create_dir(&full);
+            if ctx.fs.create_dir(&full).is_err() && ctx.fs.stat(&full).is_err() {
+                let msg = format!("tar: cannot create directory '{name}'\n");
+                ctx.output.stderr(msg.as_bytes());
+            }
         } else {
             // Regular file
             // Ensure parent directory exists
             if let Some(slash_pos) = full.rfind('/') {
                 let parent = &full[..slash_pos];
-                if !parent.is_empty() && ctx.fs.stat(parent).is_err() {
-                    let _ = ctx.fs.create_dir(parent);
+                if !parent.is_empty()
+                    && ctx.fs.stat(parent).is_err()
+                    && ctx.fs.create_dir(parent).is_err()
+                    && ctx.fs.stat(parent).is_err()
+                {
+                    let msg = format!("tar: cannot create directory for '{name}'\n");
+                    ctx.output.stderr(msg.as_bytes());
                 }
             }
 
@@ -755,11 +790,17 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     let full_archive = resolve_path(ctx.cwd, archive_path);
     let archive_data = match ctx.fs.open(&full_archive, OpenOptions::read()) {
-        Ok(h) => {
-            let d = ctx.fs.read_file(h).unwrap_or_default();
-            ctx.fs.close(h);
-            d
-        }
+        Ok(h) => match ctx.fs.read_file(h) {
+            Ok(d) => {
+                ctx.fs.close(h);
+                d
+            }
+            Err(e) => {
+                ctx.fs.close(h);
+                emit_error(ctx.output, "unzip", archive_path, &e);
+                return 1;
+            }
+        },
         Err(e) => {
             emit_error(ctx.output, "unzip", archive_path, &e);
             return 1;
@@ -906,11 +947,17 @@ fn u32_le(data: &[u8]) -> u32 {
 fn tar_list(ctx: &mut UtilContext<'_>, archive_path: &str, gzipped: bool) -> i32 {
     let full_archive = resolve_path(ctx.cwd, archive_path);
     let archive_data = match ctx.fs.open(&full_archive, OpenOptions::read()) {
-        Ok(h) => {
-            let d = ctx.fs.read_file(h).unwrap_or_default();
-            ctx.fs.close(h);
-            d
-        }
+        Ok(h) => match ctx.fs.read_file(h) {
+            Ok(d) => {
+                ctx.fs.close(h);
+                d
+            }
+            Err(e) => {
+                ctx.fs.close(h);
+                emit_error(ctx.output, "tar", archive_path, &e);
+                return 1;
+            }
+        },
         Err(e) => {
             emit_error(ctx.output, "tar", archive_path, &e);
             return 1;

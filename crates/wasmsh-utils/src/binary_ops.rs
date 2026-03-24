@@ -77,11 +77,17 @@ pub(crate) fn util_xxd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let data = if !args.is_empty() {
         let full = resolve_path(ctx.cwd, args[0]);
         match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => {
-                let result = ctx.fs.read_file(h).unwrap_or_default();
-                ctx.fs.close(h);
-                result
-            }
+            Ok(h) => match ctx.fs.read_file(h) {
+                Ok(data) => {
+                    ctx.fs.close(h);
+                    data
+                }
+                Err(e) => {
+                    ctx.fs.close(h);
+                    emit_error(ctx.output, "xxd", args[0], &e);
+                    return 1;
+                }
+            },
             Err(e) => {
                 emit_error(ctx.output, "xxd", args[0], &e);
                 return 1;
@@ -249,6 +255,7 @@ fn xxd_reverse(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> i32 {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    const MAX_DD_SIZE: u64 = 64 * 1024 * 1024; // 64 MiB VFS limit
     let mut input_file: Option<&str> = None;
     let mut output_file: Option<&str> = None;
     let mut block_size: u64 = 512;
@@ -292,11 +299,17 @@ pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let input_data = if let Some(path) = input_file {
         let full = resolve_path(ctx.cwd, path);
         match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => {
-                let data = ctx.fs.read_file(h).unwrap_or_default();
-                ctx.fs.close(h);
-                data
-            }
+            Ok(h) => match ctx.fs.read_file(h) {
+                Ok(data) => {
+                    ctx.fs.close(h);
+                    data
+                }
+                Err(e) => {
+                    ctx.fs.close(h);
+                    emit_error(ctx.output, "dd", path, &e);
+                    return 1;
+                }
+            },
             Err(e) => {
                 emit_error(ctx.output, "dd", path, &e);
                 return 1;
@@ -323,8 +336,12 @@ pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut output_data = Vec::new();
 
     // Seek: prepend zero bytes for seek blocks
-    let seek_bytes = (seek_blocks * block_size) as usize;
-    output_data.resize(seek_bytes, 0u8);
+    let seek_bytes = seek_blocks.saturating_mul(block_size);
+    if seek_bytes > MAX_DD_SIZE {
+        ctx.output.stderr(b"dd: seek offset too large\n");
+        return 1;
+    }
+    output_data.resize(seek_bytes as usize, 0u8);
 
     let max_blocks = count.unwrap_or(u64::MAX);
     let mut offset = 0;
@@ -358,7 +375,7 @@ pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     }
 
-    let total_bytes = output_data.len() - seek_bytes;
+    let total_bytes = output_data.len() - seek_bytes as usize;
 
     // Compute output block stats (same logic applied to output side)
     let blocks_out_full = blocks_in_full;
@@ -387,7 +404,7 @@ pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             }
         }
     } else {
-        ctx.output.stdout(&output_data[seek_bytes..]);
+        ctx.output.stdout(&output_data[seek_bytes as usize..]);
     }
 
     // Stats to stderr
@@ -433,11 +450,17 @@ pub(crate) fn util_strings(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let data = if !args.is_empty() {
         let full = resolve_path(ctx.cwd, args[0]);
         match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => {
-                let result = ctx.fs.read_file(h).unwrap_or_default();
-                ctx.fs.close(h);
-                result
-            }
+            Ok(h) => match ctx.fs.read_file(h) {
+                Ok(data) => {
+                    ctx.fs.close(h);
+                    data
+                }
+                Err(e) => {
+                    ctx.fs.close(h);
+                    emit_error(ctx.output, "strings", args[0], &e);
+                    return 1;
+                }
+            },
             Err(e) => {
                 emit_error(ctx.output, "strings", args[0], &e);
                 return 1;
@@ -512,11 +535,17 @@ pub(crate) fn util_split(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let (input_data, prefix) = if !args.is_empty() && args[0] != "-" {
         let full = resolve_path(ctx.cwd, args[0]);
         let data = match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => {
-                let d = ctx.fs.read_file(h).unwrap_or_default();
-                ctx.fs.close(h);
-                d
-            }
+            Ok(h) => match ctx.fs.read_file(h) {
+                Ok(d) => {
+                    ctx.fs.close(h);
+                    d
+                }
+                Err(e) => {
+                    ctx.fs.close(h);
+                    emit_error(ctx.output, "split", args[0], &e);
+                    return 1;
+                }
+            },
             Err(e) => {
                 emit_error(ctx.output, "split", args[0], &e);
                 return 1;
@@ -693,11 +722,18 @@ pub(crate) fn util_file(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
         // Read file content
         let data = match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => {
-                let d = ctx.fs.read_file(h).unwrap_or_default();
-                ctx.fs.close(h);
-                d
-            }
+            Ok(h) => match ctx.fs.read_file(h) {
+                Ok(d) => {
+                    ctx.fs.close(h);
+                    d
+                }
+                Err(e) => {
+                    ctx.fs.close(h);
+                    emit_error(ctx.output, "file", path, &e);
+                    status = 1;
+                    continue;
+                }
+            },
             Err(e) => {
                 emit_error(ctx.output, "file", path, &e);
                 status = 1;
@@ -1156,7 +1192,8 @@ mod tests {
     fn file_plain_text() {
         let mut fs = MemoryFs::new();
         let h = fs.open("/readme.txt", OpenOptions::write()).unwrap();
-        fs.write_file(h, b"Hello world, this is ASCII text.").unwrap();
+        fs.write_file(h, b"Hello world, this is ASCII text.")
+            .unwrap();
         fs.close(h);
 
         let (status, out) = run_util(util_file, &["file", "/readme.txt"], &mut fs, None);

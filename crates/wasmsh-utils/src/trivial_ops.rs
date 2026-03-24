@@ -111,6 +111,40 @@ const KNOWN_COMMANDS: &[&str] = &[
     "install",
     "timeout",
     "cal",
+    // Diff/patch
+    "diff",
+    "patch",
+    // Tree
+    "tree",
+    // Search
+    "rg",
+    "fd",
+    // Awk
+    "awk",
+    // jq/yq
+    "jq",
+    "yq",
+    // Hash utilities
+    "sha1sum",
+    "sha512sum",
+    // Binary utilities
+    "xxd",
+    "dd",
+    "split",
+    "file",
+    // Math
+    "bc",
+    // Archive/compression
+    "tar",
+    "gzip",
+    "gunzip",
+    "zcat",
+    "unzip",
+    // Disk usage
+    "du",
+    "df",
+    // Text (bat)
+    "bat",
     // Common builtins (not in registry but useful to resolve)
     "echo",
     "printf",
@@ -901,6 +935,8 @@ fn unexpand_line(line: &str, tab_width: usize) -> String {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn util_truncate(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    // VFS file size limit: 64 MiB (matches wasmsh-fs per-file cap in SECURITY.md)
+    const MAX_FILE_SIZE: usize = 64 * 1024 * 1024;
     let mut args = &argv[1..];
     let mut size_spec: Option<&str> = None;
 
@@ -951,12 +987,19 @@ pub(crate) fn util_truncate(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
         // Read current contents (or empty if file doesn't exist)
         let current_data = match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => {
-                let data = ctx.fs.read_file(h).unwrap_or_default();
-                ctx.fs.close(h);
-                data
-            }
-            Err(_) => Vec::new(),
+            Ok(h) => match ctx.fs.read_file(h) {
+                Ok(data) => {
+                    ctx.fs.close(h);
+                    data
+                }
+                Err(e) => {
+                    ctx.fs.close(h);
+                    emit_error(ctx.output, "truncate", path, &e);
+                    status = 1;
+                    continue;
+                }
+            },
+            Err(_) => Vec::new(), // File doesn't exist yet — start empty
         };
 
         let new_size = match mode {
@@ -964,6 +1007,13 @@ pub(crate) fn util_truncate(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             '-' => (current_data.len() as u64).saturating_sub(size_val) as usize,
             _ => size_val as usize,
         };
+
+        if new_size > MAX_FILE_SIZE {
+            let msg = format!("truncate: size {new_size} exceeds VFS limit\n");
+            ctx.output.stderr(msg.as_bytes());
+            status = 1;
+            continue;
+        }
 
         let mut new_data = current_data;
         if new_size < new_data.len() {
@@ -1618,7 +1668,11 @@ mod tests {
         let mut fs = make_fs_with_file("/mydir/file.txt", b"data");
         let (status, _, stderr) = run(util_rmdir, &["rmdir", "/mydir"], &mut fs);
         assert_eq!(status, 1);
-        assert!(stderr.contains("not empty") || stderr.contains("Not empty") || stderr.contains("Directory not empty"));
+        assert!(
+            stderr.contains("not empty")
+                || stderr.contains("Not empty")
+                || stderr.contains("Directory not empty")
+        );
     }
 
     #[test]
@@ -1985,11 +2039,7 @@ mod tests {
     #[test]
     fn truncate_relative_add() {
         let mut fs = make_fs_with_file("/f.txt", b"abc");
-        let (status, _, _) = run(
-            util_truncate,
-            &["truncate", "-s", "+5", "/f.txt"],
-            &mut fs,
-        );
+        let (status, _, _) = run(util_truncate, &["truncate", "-s", "+5", "/f.txt"], &mut fs);
         assert_eq!(status, 0);
         let h = fs.open("/f.txt", OpenOptions::read()).unwrap();
         let data = fs.read_file(h).unwrap();
@@ -2000,11 +2050,7 @@ mod tests {
     #[test]
     fn truncate_relative_subtract() {
         let mut fs = make_fs_with_file("/f.txt", b"hello world");
-        let (status, _, _) = run(
-            util_truncate,
-            &["truncate", "-s", "-6", "/f.txt"],
-            &mut fs,
-        );
+        let (status, _, _) = run(util_truncate, &["truncate", "-s", "-6", "/f.txt"], &mut fs);
         assert_eq!(status, 0);
         let h = fs.open("/f.txt", OpenOptions::read()).unwrap();
         let data = fs.read_file(h).unwrap();
@@ -2070,7 +2116,7 @@ mod tests {
         let parts: Vec<&str> = stdout.split_whitespace().collect();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[1], "6"); // 6 bytes
-        // Verify the checksum parses as a number
+                                   // Verify the checksum parses as a number
         parts[0].parse::<u32>().unwrap();
     }
 
@@ -2159,11 +2205,7 @@ mod tests {
     #[test]
     fn install_copy_file() {
         let mut fs = make_fs_with_file("/src.txt", b"content");
-        let (status, _, _) = run(
-            util_install,
-            &["install", "/src.txt", "/dst.txt"],
-            &mut fs,
-        );
+        let (status, _, _) = run(util_install, &["install", "/src.txt", "/dst.txt"], &mut fs);
         assert_eq!(status, 0);
         let h = fs.open("/dst.txt", OpenOptions::read()).unwrap();
         let data = fs.read_file(h).unwrap();
@@ -2194,11 +2236,7 @@ mod tests {
     #[test]
     fn timeout_passes_through_command() {
         let mut fs = make_fs();
-        let (status, stdout, _) = run(
-            util_timeout,
-            &["timeout", "5", "echo", "hello"],
-            &mut fs,
-        );
+        let (status, stdout, _) = run(util_timeout, &["timeout", "5", "echo", "hello"], &mut fs);
         assert_eq!(status, 0);
         assert_eq!(stdout, "echo hello\n");
     }

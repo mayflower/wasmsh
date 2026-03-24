@@ -2,7 +2,7 @@
 
 use wasmsh_fs::{MemoryFs, Vfs};
 
-use crate::helpers::resolve_path;
+use crate::helpers::{emit_error, resolve_path};
 use crate::UtilContext;
 
 // ---------------------------------------------------------------------------
@@ -73,14 +73,19 @@ pub(crate) fn util_du(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     };
 
     let mut total_size: u64 = 0;
+    let mut status = 0;
 
     for target in &targets {
         let full = resolve_path(ctx.cwd, target);
 
         match ctx.fs.stat(&full) {
             Ok(meta) if meta.is_dir => {
-                let size = du_walk(ctx, &full, target, 0, max_depth, summary, all_files, human);
+                let (size, err) =
+                    du_walk(ctx, &full, target, 0, max_depth, summary, all_files, human);
                 total_size += size;
+                if err {
+                    status = 1;
+                }
             }
             Ok(meta) => {
                 let size = meta.size;
@@ -92,6 +97,7 @@ pub(crate) fn util_du(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             Err(e) => {
                 let msg = format!("du: cannot access '{target}': {e}\n");
                 ctx.output.stderr(msg.as_bytes());
+                status = 1;
             }
         }
     }
@@ -102,10 +108,10 @@ pub(crate) fn util_du(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         ctx.output.stdout(line.as_bytes());
     }
 
-    0
+    status
 }
 
-/// Walk directory tree and return total size in bytes. Prints lines as needed.
+/// Walk directory tree and return `(total_size_bytes, had_error)`. Prints lines as needed.
 fn du_walk(
     ctx: &mut UtilContext<'_>,
     full_path: &str,
@@ -115,11 +121,16 @@ fn du_walk(
     summary: bool,
     all_files: bool,
     human: bool,
-) -> u64 {
+) -> (u64, bool) {
     let mut total: u64 = 0;
+    let mut had_error = false;
 
-    let Ok(entries) = ctx.fs.read_dir(full_path) else {
-        return 0;
+    let entries = match ctx.fs.read_dir(full_path) {
+        Ok(e) => e,
+        Err(e) => {
+            emit_error(ctx.output, "du", display_path, &e);
+            return (0, true);
+        }
     };
 
     for entry in &entries {
@@ -131,7 +142,7 @@ fn du_walk(
         };
 
         if entry.is_dir {
-            let sub_size = du_walk(
+            let (sub_size, sub_err) = du_walk(
                 ctx,
                 &child_full,
                 &child_display,
@@ -142,8 +153,18 @@ fn du_walk(
                 human,
             );
             total += sub_size;
+            if sub_err {
+                had_error = true;
+            }
         } else {
-            let size = ctx.fs.stat(&child_full).map(|m| m.size).unwrap_or(0);
+            let size = match ctx.fs.stat(&child_full) {
+                Ok(m) => m.size,
+                Err(e) => {
+                    emit_error(ctx.output, "du", &child_display, &e);
+                    had_error = true;
+                    0
+                }
+            };
             total += size;
 
             if all_files && !summary {
@@ -174,7 +195,7 @@ fn du_walk(
         }
     }
 
-    total
+    (total, had_error)
 }
 
 /// Convert bytes to 1K blocks (matching du default behavior).

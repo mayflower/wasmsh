@@ -418,12 +418,18 @@ pub(crate) fn util_tee(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         } else {
             OpenOptions::write()
         };
-        if let Ok(h) = ctx.fs.open(&full, opts) {
-            if let Err(e) = ctx.fs.write_file(h, &data) {
+        match ctx.fs.open(&full, opts) {
+            Ok(h) => {
+                if let Err(e) = ctx.fs.write_file(h, &data) {
+                    emit_error(ctx.output, "tee", path, &e);
+                    status = 1;
+                }
+                ctx.fs.close(h);
+            }
+            Err(e) => {
                 emit_error(ctx.output, "tee", path, &e);
                 status = 1;
             }
-            ctx.fs.close(h);
         }
     }
     status
@@ -1007,11 +1013,7 @@ mod tests {
     #[test]
     fn bat_line_range() {
         let mut fs = make_fs_with_file("/range.txt", b"one\ntwo\nthree\nfour\nfive\n");
-        let (status, out, _) = run(
-            util_bat,
-            &["bat", "-p", "-r", "2:3", "/range.txt"],
-            &mut fs,
-        );
+        let (status, out, _) = run(util_bat, &["bat", "-p", "-r", "2:3", "/range.txt"], &mut fs);
         assert_eq!(status, 0);
         assert!(out.contains("two"));
         assert!(out.contains("three"));
@@ -1023,11 +1025,7 @@ mod tests {
     #[test]
     fn bat_line_range_open_end() {
         let mut fs = make_fs_with_file("/range2.txt", b"a\nb\nc\nd\ne\n");
-        let (status, out, _) = run(
-            util_bat,
-            &["bat", "-p", "-r", "3:", "/range2.txt"],
-            &mut fs,
-        );
+        let (status, out, _) = run(util_bat, &["bat", "-p", "-r", "3:", "/range2.txt"], &mut fs);
         assert_eq!(status, 0);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 3);
@@ -1039,11 +1037,7 @@ mod tests {
     #[test]
     fn bat_line_range_open_start() {
         let mut fs = make_fs_with_file("/range3.txt", b"alpha\nbeta\ngamma\ndelta\n");
-        let (status, out, _) = run(
-            util_bat,
-            &["bat", "-p", "-r", ":2", "/range3.txt"],
-            &mut fs,
-        );
+        let (status, out, _) = run(util_bat, &["bat", "-p", "-r", ":2", "/range3.txt"], &mut fs);
         assert_eq!(status, 0);
         assert!(out.contains("alpha"));
         assert!(out.contains("beta"));

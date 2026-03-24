@@ -1455,11 +1455,15 @@ mod tests {
         fs.write_file(h, b"foo").unwrap();
         fs.close(h);
 
-        let h = fs.open("/root/sub/test_bar.rs", OpenOptions::write()).unwrap();
+        let h = fs
+            .open("/root/sub/test_bar.rs", OpenOptions::write())
+            .unwrap();
         fs.write_file(h, b"bar").unwrap();
         fs.close(h);
 
-        let h = fs.open("/root/sub/deep/notes.txt", OpenOptions::write()).unwrap();
+        let h = fs
+            .open("/root/sub/deep/notes.txt", OpenOptions::write())
+            .unwrap();
         fs.write_file(h, b"notes").unwrap();
         fs.close(h);
 

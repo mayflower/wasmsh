@@ -780,6 +780,7 @@ fn diff_dirs(
     all_files.sort_unstable();
 
     let mut any_diff = false;
+    let mut status = 0;
 
     for rel in &all_files {
         let full_a = format!("{}/{}", dir_a.trim_end_matches('/'), rel);
@@ -804,12 +805,26 @@ fn diff_dirs(
         }
 
         let old_text = if a_exists {
-            read_text(ctx.fs, &full_a).unwrap_or_default()
+            match read_text(ctx.fs, &full_a) {
+                Ok(text) => text,
+                Err(e) => {
+                    emit_error(ctx.output, "diff", rel, &e);
+                    status = 2;
+                    continue;
+                }
+            }
         } else {
             String::new()
         };
         let new_text = if b_exists {
-            read_text(ctx.fs, &full_b).unwrap_or_default()
+            match read_text(ctx.fs, &full_b) {
+                Ok(text) => text,
+                Err(e) => {
+                    emit_error(ctx.output, "diff", rel, &e);
+                    status = 2;
+                    continue;
+                }
+            }
         } else {
             String::new()
         };
@@ -826,12 +841,24 @@ fn diff_dirs(
         }
     }
 
-    i32::from(any_diff)
+    if status != 0 {
+        status
+    } else {
+        i32::from(any_diff)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // patch utility
 // ---------------------------------------------------------------------------
+
+/// Tag for a line in a patch hunk body, preserving the original interleaving.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PatchOp {
+    Context(String),
+    Remove(String),
+    Add(String),
+}
 
 /// A single hunk parsed from a unified diff.
 struct PatchHunk {
@@ -841,9 +868,8 @@ struct PatchHunk {
     remove: Vec<String>,
     /// Lines to add (without the leading `+`).
     add: Vec<String>,
-    /// Context lines with their offsets relative to `old_start`.
-    /// Each entry is `(offset, line_content)`.
-    context: Vec<(usize, String)>,
+    /// Body lines in their original unified-diff order.
+    body: Vec<PatchOp>,
 }
 
 /// A single file's set of hunks from a unified diff patch.
@@ -880,8 +906,7 @@ fn parse_unified_diff(text: &str) -> Vec<PatchFile> {
 
                 let mut remove = Vec::new();
                 let mut add = Vec::new();
-                let mut context = Vec::new();
-                let mut offset = 0usize;
+                let mut body = Vec::new();
 
                 while i < lines.len() {
                     let line = lines[i];
@@ -890,17 +915,15 @@ fn parse_unified_diff(text: &str) -> Vec<PatchFile> {
                     }
                     if let Some(rest) = line.strip_prefix('-') {
                         remove.push(rest.to_string());
-                        offset += 1;
+                        body.push(PatchOp::Remove(rest.to_string()));
                     } else if let Some(rest) = line.strip_prefix('+') {
                         add.push(rest.to_string());
-                        // additions don't consume old-file lines
+                        body.push(PatchOp::Add(rest.to_string()));
                     } else if let Some(rest) = line.strip_prefix(' ') {
-                        context.push((offset, rest.to_string()));
-                        offset += 1;
+                        body.push(PatchOp::Context(rest.to_string()));
                     } else if line.is_empty() {
                         // Treat empty line as context (empty context line).
-                        context.push((offset, String::new()));
-                        offset += 1;
+                        body.push(PatchOp::Context(String::new()));
                     } else {
                         // Unknown prefix; stop parsing this hunk.
                         break;
@@ -912,7 +935,7 @@ fn parse_unified_diff(text: &str) -> Vec<PatchFile> {
                     old_start,
                     remove,
                     add,
-                    context,
+                    body,
                 });
             }
 
@@ -995,36 +1018,19 @@ fn apply_hunk(lines: &[String], hunk: &PatchHunk, fuzz: usize) -> Result<Vec<Str
 
 /// Try to apply a hunk at a specific 0-based position in the line array.
 fn try_apply_at(lines: &[String], hunk: &PatchHunk, pos: usize) -> Result<Vec<String>, String> {
-    // Verify that the lines to be removed are actually present at `pos`.
-    let remove_count = hunk.remove.len();
-
-    // Also verify context lines.
-    // Build expected sequence: mix of context and remove lines in order.
-    // The hunk context offsets tell us which old-file lines are context.
-    // Simpler approach: reconstruct the expected old-file segment.
+    // Build the expected old-file segment from the body: context + remove lines in order.
     let mut expected_old: Vec<&str> = Vec::new();
-    let context_map: std::collections::HashMap<usize, &str> = hunk
-        .context
-        .iter()
-        .map(|(off, line)| (*off, line.as_str()))
-        .collect();
-
-    // The old-file segment length = remove_count + context_count
-    let old_segment_len = remove_count + hunk.context.len();
-
-    // Rebuild old segment: at each offset, it's either a context line or a remove line.
-    let mut remove_idx = 0;
-    for off in 0..old_segment_len {
-        if let Some(&ctx_line) = context_map.get(&off) {
-            expected_old.push(ctx_line);
-        } else if remove_idx < hunk.remove.len() {
-            expected_old.push(&hunk.remove[remove_idx]);
-            remove_idx += 1;
+    for op in &hunk.body {
+        match op {
+            PatchOp::Context(s) | PatchOp::Remove(s) => expected_old.push(s),
+            PatchOp::Add(_) => {}
         }
     }
 
+    let old_segment_len = expected_old.len();
+
     // Verify the expected old segment against the file.
-    if pos + expected_old.len() > lines.len() {
+    if pos + old_segment_len > lines.len() {
         return Err("hunk extends beyond end of file".into());
     }
 
@@ -1039,91 +1045,16 @@ fn try_apply_at(lines: &[String], hunk: &PatchHunk, pos: usize) -> Result<Vec<St
         }
     }
 
-    // Build the result: lines before the segment + added lines + context lines + lines after.
+    // Build the result: lines before the segment, then the new-file segment
+    // (context + add lines in their original interleaved order), then lines after.
     let mut result = Vec::with_capacity(lines.len() + hunk.add.len());
     result.extend_from_slice(&lines[..pos]);
 
-    // Build new segment: context lines in their positions, with remove lines gone
-    // and add lines inserted.
-    // Insert context lines and add lines in order.
-    let mut ctx_idx = 0;
-    let ctx_sorted: Vec<(usize, &str)> = {
-        let mut v: Vec<(usize, &str)> = hunk
-            .context
-            .iter()
-            .map(|(off, line)| (*off, line.as_str()))
-            .collect();
-        v.sort_by_key(|(off, _)| *off);
-        v
-    };
-
-    // We need to figure out where the additions go relative to context.
-    // In a unified diff, the new-file segment is: context lines (in order) +
-    // additions (where the removals were). The simplest correct approach:
-    // walk through the hunk body in order and emit context + additions.
-    // But we only have remove/add/context separated. We need the original
-    // interleaving.
-    //
-    // Re-parse approach: just emit context lines (sorted by offset) with
-    // additions inserted where removes used to be.
-    // Since removes and context alternate in the old file, and adds replace
-    // removes in the new file, the new segment is:
-    //   for each old offset:
-    //     if it's a context line, emit it
-    //     if it's a remove line, skip it
-    //   then insert all add lines at the position of the first remove
-    //
-    // Actually, the standard approach: adds go where removes were.
-    // Emit the new segment by walking through offsets:
-
-    // Find the offset of the first removal.
-    let mut remove_offsets: Vec<usize> = Vec::new();
-    {
-        let mut rm_i = 0;
-        for off in 0..old_segment_len {
-            if context_map.contains_key(&off) {
-                // context
-            } else {
-                remove_offsets.push(off);
-                rm_i += 1;
-                let _ = rm_i;
-            }
-        }
-    }
-
-    let first_remove_offset = remove_offsets.first().copied();
-    let mut adds_emitted = false;
-
-    for off in 0..old_segment_len {
-        if context_map.contains_key(&off) {
-            // Emit context before adds if we haven't emitted adds yet
-            // and we're past all removes.
-            if !adds_emitted
-                && first_remove_offset.is_some()
-                && Some(off) > remove_offsets.last().copied()
-            {
-                for add_line in &hunk.add {
-                    result.push(add_line.clone());
-                }
-                adds_emitted = true;
-            }
-            result.push(ctx_sorted[ctx_idx].1.to_string());
-            ctx_idx += 1;
-        }
-        // Remove lines are simply skipped.
-        // If this is the last remove offset, emit adds right after.
-        if !adds_emitted && Some(off) == remove_offsets.last().copied() {
-            for add_line in &hunk.add {
-                result.push(add_line.clone());
-            }
-            adds_emitted = true;
-        }
-    }
-
-    // If adds haven't been emitted yet (e.g. pure insertion, no removes).
-    if !adds_emitted {
-        for add_line in &hunk.add {
-            result.push(add_line.clone());
+    // Walk the body in order: emit context and add lines, skip remove lines.
+    for op in &hunk.body {
+        match op {
+            PatchOp::Context(s) | PatchOp::Add(s) => result.push(s.clone()),
+            PatchOp::Remove(_) => {}
         }
     }
 
@@ -1193,6 +1124,13 @@ pub(crate) fn util_patch(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         for pf in &mut patch_files {
             for hunk in &mut pf.hunks {
                 std::mem::swap(&mut hunk.remove, &mut hunk.add);
+                for op in &mut hunk.body {
+                    *op = match op {
+                        PatchOp::Remove(s) => PatchOp::Add(std::mem::take(s)),
+                        PatchOp::Add(s) => PatchOp::Remove(std::mem::take(s)),
+                        PatchOp::Context(s) => PatchOp::Context(std::mem::take(s)),
+                    };
+                }
             }
         }
     }
@@ -1683,7 +1621,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    #[ignore = "patch hunk ordering bug: additions placed at last-remove offset instead of correct position"]
     fn roundtrip_diff_then_patch() {
         let mut fs = make_fs();
         let original = "line1\nline2\nline3\nline4\nline5\n";
