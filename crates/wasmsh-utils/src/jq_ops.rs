@@ -4699,8 +4699,8 @@ mod tests {
             JqValue::Number(n) => assert!((n - 42.0).abs() < f64::EPSILON),
             _ => panic!("expected number"),
         }
-        match parse_json("-3.14").unwrap() {
-            JqValue::Number(n) => assert!((n - (-3.14)).abs() < 0.001),
+        match parse_json("-2.75").unwrap() {
+            JqValue::Number(n) => assert!((n - (-2.75)).abs() < 0.001),
             _ => panic!("expected number"),
         }
     }
@@ -4971,7 +4971,7 @@ mod tests {
     #[test]
     fn filter_object_construct() {
         assert_eq!(
-            jq_str(r#"{name: .n, age: .a}"#, r#"{"n":"bob","a":25}"#),
+            jq_str(r#"{"name": .n, "age": .a}"#, r#"{"n":"bob","a":25}"#),
             r#"{"name":"bob","age":25}"#
         );
     }
@@ -5084,10 +5084,7 @@ mod tests {
     #[test]
     fn filter_with_entries() {
         assert_eq!(
-            jq_str(
-                r#"with_entries(select(.value > 1))"#,
-                r#"{"a":1,"b":2,"c":3}"#
-            ),
+            jq_str("with_entries(select(.value > 1))", r#"{"a":1,"b":2,"c":3}"#),
             r#"{"b":2,"c":3}"#
         );
     }

@@ -114,7 +114,7 @@ jobs:
         run: |
           WASM=target/wasm32-unknown-unknown/dist/wasmsh_browser.wasm
           if [ -f "$WASM" ]; then
-            wasm-opt -Os --enable-bulk-memory "$WASM" -o target/wasmsh-browser-opt.wasm
+            wasm-opt -Os --enable-bulk-memory --enable-mutable-globals --enable-sign-ext --enable-nontrapping-float-to-int "$WASM" -o target/wasmsh-browser-opt.wasm
           else
             echo "No cdylib .wasm file found (rlib only) — skipping wasm-opt"
           fi

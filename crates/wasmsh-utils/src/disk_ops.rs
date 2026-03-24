@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(format_human(500), "500");
         assert_eq!(format_human(1024), "1.0K");
         assert_eq!(format_human(1536), "1.5K");
-        assert_eq!(format_human(1048576), "1.0M");
-        assert_eq!(format_human(1073741824), "1.0G");
+        assert_eq!(format_human(1_048_576), "1.0M");
+        assert_eq!(format_human(1_073_741_824), "1.0G");
     }
 }

@@ -1233,9 +1233,9 @@ mod tests {
         let (status, out) = run_yq(&["yq", "keys"], &mut fs, Some(yaml));
         assert_eq!(status, 0);
         let s = out.stdout_str();
-        assert!(s.contains("a"));
-        assert!(s.contains("b"));
-        assert!(s.contains("c"));
+        assert!(s.contains('a'));
+        assert!(s.contains('b'));
+        assert!(s.contains('c'));
     }
 
     #[test]

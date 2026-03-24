@@ -975,7 +975,7 @@ mod tests {
         assert!(out.contains('\u{252C}'), "expected top corner char");
         assert!(out.contains("File: /code.rs"), "expected file header");
         // Should contain line numbers
-        assert!(out.contains("1"), "expected line number 1");
+        assert!(out.contains('1'), "expected line number 1");
     }
 
     #[test]
@@ -996,9 +996,9 @@ mod tests {
         let (status, out, _) = run(util_bat, &["bat", "--style=numbers", "/nums.txt"], &mut fs);
         assert_eq!(status, 0);
         // Should show line numbers
-        assert!(out.contains("1"));
-        assert!(out.contains("2"));
-        assert!(out.contains("3"));
+        assert!(out.contains('1'));
+        assert!(out.contains('2'));
+        assert!(out.contains('3'));
         // Should NOT show file header
         assert!(!out.contains("File:"));
     }
@@ -1033,9 +1033,9 @@ mod tests {
         assert_eq!(status, 0);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 3);
-        assert!(out.contains("c"));
-        assert!(out.contains("d"));
-        assert!(out.contains("e"));
+        assert!(out.contains('c'));
+        assert!(out.contains('d'));
+        assert!(out.contains('e'));
     }
 
     #[test]
