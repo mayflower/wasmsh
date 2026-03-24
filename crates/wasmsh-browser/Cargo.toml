@@ -47,5 +47,8 @@ wasmsh-protocol = { workspace = true }
 name = "pipeline_bench"
 harness = false
 
+[package.metadata.cargo-machete]
+ignored = ["serde"]  # used only behind cfg(target_arch = "wasm32")
+
 [lints]
 workspace = true

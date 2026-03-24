@@ -127,7 +127,7 @@ build-wasm-release:
 # Build optimized wasm with wasm-opt post-processing
 wasm-dist:
     cargo build --target wasm32-unknown-unknown --profile dist -p wasmsh-browser
-    wasm-opt -Os target/wasm32-unknown-unknown/dist/wasmsh_browser.wasm -o target/wasmsh-browser-opt.wasm
+    wasm-opt -Os --enable-bulk-memory target/wasm32-unknown-unknown/dist/wasmsh_browser.wasm -o target/wasmsh-browser-opt.wasm
     @echo "Original: $(wc -c < target/wasm32-unknown-unknown/dist/wasmsh_browser.wasm) bytes"
     @echo "Optimized: $(wc -c < target/wasmsh-browser-opt.wasm) bytes"
 

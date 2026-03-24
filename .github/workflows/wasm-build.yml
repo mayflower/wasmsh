@@ -47,7 +47,7 @@ jobs:
           for dir in pkg/bundler pkg/web pkg/nodejs; do
             for f in "$dir"/*.wasm; do
               if [ -f "$f" ]; then
-                wasm-opt -Os "$f" -o "$f.opt"
+                wasm-opt -Os --enable-bulk-memory "$f" -o "$f.opt"
                 mv "$f.opt" "$f"
               fi
             done
