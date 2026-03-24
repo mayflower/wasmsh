@@ -346,7 +346,10 @@ fn builtin_printf(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
                     }
                     b'c' => {
                         arg_idx += 1;
-                        arg_str.chars().next().map_or(String::new(), |c| c.to_string())
+                        arg_str
+                            .chars()
+                            .next()
+                            .map_or(String::new(), |c| c.to_string())
                     }
                     b'b' => {
                         arg_idx += 1;
@@ -1065,8 +1068,7 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
                 .filter(|s| !s.is_empty())
                 .collect()
         };
-        ctx.state
-            .init_indexed_array(SmolStr::from(arr_name));
+        ctx.state.init_indexed_array(SmolStr::from(arr_name));
         for (i, field) in fields.iter().enumerate() {
             ctx.state.set_array_element(
                 SmolStr::from(arr_name),

@@ -328,15 +328,13 @@ fn expand_part_depth(part: &WordPart, state: &mut ShellState, out: &mut String, 
                 }
             }
         }
-        WordPart::CommandSubstitution(_) => {
-            // Command substitution is resolved at the runtime level
-            // before expand_word is called. If we get here, the
-            // substitution was not pre-resolved (e.g. in unit tests).
-        }
         WordPart::Arithmetic(expr) => {
             let result = eval_arithmetic(expr, state);
             out.push_str(&result.to_string());
         }
+        // CommandSubstitution is resolved at the runtime level before expand_word is called.
+        // Unknown future variants are silently ignored.
+        _ => {}
     }
 }
 

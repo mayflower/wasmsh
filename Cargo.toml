@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["fuzz"]
 members = [
     "crates/wasmsh-ast",
     "crates/wasmsh-lex",
@@ -22,9 +23,15 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT"
-repository = "https://github.com/user/wasmsh"
+repository = "https://github.com/mayflower/wasmsh"
+description = "Browser-first shell runtime with Bash-compatible syntax"
+keywords = ["shell", "bash", "wasm", "parser", "sandbox"]
+categories = ["command-line-utilities", "wasm", "parser-implementations"]
+homepage = "https://github.com/mayflower/wasmsh"
+documentation = "https://github.com/mayflower/wasmsh"
 
 [workspace.dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 smol_str = "0.3"
 smallvec = "1"
 indexmap = "2"
@@ -101,7 +108,7 @@ codegen-units = 16
 
 [profile.dist]
 inherits = "release"
-opt-level = 3
+opt-level = "s"
 lto = "fat"
 codegen-units = 1
 strip = "symbols"

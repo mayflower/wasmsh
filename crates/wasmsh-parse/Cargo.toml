@@ -5,13 +5,23 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 wasmsh-ast = { workspace = true }
 wasmsh-lex = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 proptest = "1"
+
+[[bench]]
+name = "parse_bench"
+harness = false
 
 [lints]
 workspace = true

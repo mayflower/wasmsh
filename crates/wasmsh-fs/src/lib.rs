@@ -4,6 +4,8 @@
 //! ephemeral in-memory filesystems. No `std::fs` is used — this
 //! is safe for the browser target.
 
+#![warn(missing_docs)]
+
 mod memfs;
 #[cfg(feature = "opfs")]
 mod opfs;
@@ -16,17 +18,24 @@ use thiserror::Error;
 
 /// Errors from VFS operations.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FsError {
+    /// The path does not exist.
     #[error("not found: {0}")]
     NotFound(String),
+    /// The path already exists.
     #[error("already exists: {0}")]
     AlreadyExists(String),
+    /// The path exists but is not a directory.
     #[error("not a directory: {0}")]
     NotADirectory(String),
+    /// The path is a directory where a file was expected.
     #[error("is a directory: {0}")]
     IsADirectory(String),
+    /// The operation is not permitted.
     #[error("permission denied: {0}")]
     PermissionDenied(String),
+    /// A low-level I/O error.
     #[error("io error: {0}")]
     Io(String),
 }
@@ -34,14 +43,18 @@ pub enum FsError {
 /// Metadata for a filesystem entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Metadata {
+    /// True if this entry is a directory.
     pub is_dir: bool,
+    /// Size of the entry in bytes.
     pub size: u64,
 }
 
 /// A directory entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {
+    /// File or directory name (not a full path).
     pub name: String,
+    /// True if this entry is a directory.
     pub is_dir: bool,
 }
 
@@ -50,14 +63,20 @@ pub struct DirEntry {
 // Five bools mirror std::fs::OpenOptions. Builder pattern is a future improvement.
 #[allow(clippy::struct_excessive_bools)]
 pub struct OpenOptions {
+    /// Open for reading.
     pub read: bool,
+    /// Open for writing.
     pub write: bool,
+    /// Append writes to the end of the file.
     pub append: bool,
+    /// Create the file if it does not exist.
     pub create: bool,
+    /// Truncate the file to zero length on open.
     pub truncate: bool,
 }
 
 impl OpenOptions {
+    /// Create options for opening a file for reading only.
     #[must_use]
     pub fn read() -> Self {
         Self {
@@ -68,6 +87,7 @@ impl OpenOptions {
             truncate: false,
         }
     }
+    /// Create options for opening a file for writing, creating or truncating it.
     #[must_use]
     pub fn write() -> Self {
         Self {
@@ -78,6 +98,7 @@ impl OpenOptions {
             truncate: true,
         }
     }
+    /// Create options for opening a file for appending, creating it if absent.
     #[must_use]
     pub fn append() -> Self {
         Self {
@@ -92,20 +113,32 @@ impl OpenOptions {
 
 /// Virtual filesystem trait.
 pub trait Vfs {
+    /// Open a file at `path` with the given options, returning a handle.
     fn open(&mut self, path: &str, opts: OpenOptions) -> Result<FileHandle, FsError>;
+    /// Read the entire contents of an open file.
     fn read_file(&self, handle: FileHandle) -> Result<Vec<u8>, FsError>;
+    /// Write `data` to an open file, replacing its contents.
     fn write_file(&mut self, handle: FileHandle, data: &[u8]) -> Result<(), FsError>;
+    /// Close an open file handle.
     fn close(&mut self, handle: FileHandle);
+    /// Return metadata for the entry at `path`.
     fn stat(&self, path: &str) -> Result<Metadata, FsError>;
+    /// List the entries in a directory.
     fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>, FsError>;
+    /// Create a directory at `path`.
     fn create_dir(&mut self, path: &str) -> Result<(), FsError>;
+    /// Remove the file at `path`.
     fn remove_file(&mut self, path: &str) -> Result<(), FsError>;
+    /// Remove the empty directory at `path`.
     fn remove_dir(&mut self, path: &str) -> Result<(), FsError>;
 }
 
 /// An opaque file handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FileHandle(pub u64);
+pub struct FileHandle(
+    /// The raw numeric handle value.
+    pub u64,
+);
 
 /// Normalize a path: resolve `.`, `..`, and redundant slashes.
 pub fn normalize_path(path: &str) -> String {

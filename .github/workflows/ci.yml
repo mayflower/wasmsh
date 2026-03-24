@@ -102,21 +102,47 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           key: wasm32-build
       - run: rustup target add wasm32-unknown-unknown
-      - name: Build core crates for wasm32
+      - name: Build wasmsh-browser for wasm32 (dist profile)
         run: >
           cargo build
           --target wasm32-unknown-unknown
-          --release
+          --profile dist
           -p wasmsh-browser
-      - name: Check wasm binary size
+      - name: Install binaryen (wasm-opt)
+        run: npm install -g binaryen
+      - name: Run wasm-opt post-processing
         run: |
-          WASM_SIZE=$(stat -c%s target/wasm32-unknown-unknown/release/libwasmsh_browser.rlib 2>/dev/null || echo "0")
-          echo "wasmsh-browser rlib size: ${WASM_SIZE} bytes"
-      - name: Upload wasm artifact
+          wasm-opt -Os \
+            target/wasm32-unknown-unknown/dist/wasmsh_browser.wasm \
+            -o target/wasmsh-browser-opt.wasm
+      - name: Check binary size against budget
+        run: |
+          ORIG=$(wc -c < target/wasm32-unknown-unknown/dist/wasmsh_browser.wasm | tr -d ' ')
+          OPT=$(wc -c < target/wasmsh-browser-opt.wasm | tr -d ' ')
+          echo "Original : ${ORIG} bytes"
+          echo "Optimized: ${OPT} bytes"
+          BUDGET=2097152
+          echo "Budget   : ${BUDGET} bytes (2 MB)"
+          {
+            echo "## Wasm binary size"
+            echo "| Binary | Size (bytes) |"
+            echo "| ------ | ------------ |"
+            echo "| Original (dist profile) | ${ORIG} |"
+            echo "| Optimized (wasm-opt -Os) | ${OPT} |"
+            echo "| Budget | ${BUDGET} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$OPT" -gt "$BUDGET" ]; then
+            echo "ERROR: Optimized binary (${OPT} bytes) exceeds 2 MB budget!"
+            exit 1
+          fi
+          echo "Size check passed."
+      - name: Upload wasm artifacts
         uses: actions/upload-artifact@v4
         with:
           name: wasmsh-wasm32
-          path: target/wasm32-unknown-unknown/release/
+          path: |
+            target/wasm32-unknown-unknown/dist/wasmsh_browser.wasm
+            target/wasmsh-browser-opt.wasm
           retention-days: 7
 
   # ── MSRV ───────────────────────────────────────────────────
@@ -187,16 +213,54 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+  # ── Feature powerset check ─────────────────────────────────
+  feature-check:
+    name: Feature combinations
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: feature-powerset
+      - uses: taiki-e/install-action@cargo-hack
+      - run: cargo hack check --feature-powerset --no-dev-deps --workspace
+
+  # ── Dead dependency detection ──────────────────────────────
+  machete:
+    name: Dead dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: bnjbvr/cargo-machete@main
+
+  # ── Semver compatibility ────────────────────────────────────
+  semver:
+    name: Semver check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+
   # ── All checks gate ────────────────────────────────────────
   ci-pass:
     name: CI passed
     if: always()
-    needs: [fmt, clippy, clippy-wasm, test, wasm-build, msrv, deny, docs]
+    needs: [fmt, clippy, clippy-wasm, test, wasm-build, msrv, deny, docs, feature-check, machete]
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs
         run: |
-          results="${{ needs.fmt.result }} ${{ needs.clippy.result }} ${{ needs.clippy-wasm.result }} ${{ needs.test.result }} ${{ needs.wasm-build.result }} ${{ needs.msrv.result }} ${{ needs.deny.result }} ${{ needs.docs.result }}"
+          results="${{ needs.fmt.result }} ${{ needs.clippy.result }} ${{ needs.clippy-wasm.result }} ${{ needs.test.result }} ${{ needs.wasm-build.result }} ${{ needs.msrv.result }} ${{ needs.deny.result }} ${{ needs.docs.result }} ${{ needs.feature-check.result }} ${{ needs.machete.result }}"
           for r in $results; do
             if [ "$r" != "success" ]; then
               echo "Job failed: $r"

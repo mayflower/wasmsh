@@ -11,8 +11,8 @@ use wasmsh_ast::{
     AndOrList, AndOrOp, ArithCommandNode, ArithForCommand, Assignment, CaseCommand, CaseItem,
     CaseTerminator, Command, CompleteCommand, DoubleBracketCommand, ElifClause, ForCommand,
     FunctionDef, GroupCommand, HereDocBody, IfCommand, Pipeline, Program, Redirection,
-    RedirectionOp, SelectCommand, SimpleCommand, Span, SubshellCommand, UntilCommand,
-    WhileCommand, Word, WordPart,
+    RedirectionOp, SelectCommand, SimpleCommand, Span, SubshellCommand, UntilCommand, WhileCommand,
+    Word, WordPart,
 };
 use wasmsh_lex::{Lexer, Token, TokenKind};
 
@@ -764,10 +764,7 @@ impl<'src> Parser<'src> {
 
             // Parse body: commands until `;;`, `;&`, `;;&`, or `esac`
             let mut body = Vec::new();
-            while self.at_command_start()
-                && !self.is_double_semi()
-                && !self.is_case_fallthrough()
-            {
+            while self.at_command_start() && !self.is_double_semi() && !self.is_case_fallthrough() {
                 body.push(self.parse_complete_command()?);
                 self.skip_newlines()?;
             }

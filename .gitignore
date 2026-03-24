@@ -1,5 +1,4 @@
 /target
-Cargo.lock
 lcov.info
 *.profraw
 *.profdata
@@ -7,3 +6,4 @@ proptest-regressions/
 /startup/
 /.claude/
 CLAUDE.md
+fuzz/target/

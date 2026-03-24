@@ -1,0 +1,38 @@
+[package]
+name = "wasmsh-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+wasmsh-ast = { path = "../crates/wasmsh-ast" }
+wasmsh-lex = { path = "../crates/wasmsh-lex" }
+wasmsh-parse = { path = "../crates/wasmsh-parse" }
+wasmsh-expand = { path = "../crates/wasmsh-expand" }
+wasmsh-state = { path = "../crates/wasmsh-state" }
+wasmsh-browser = { path = "../crates/wasmsh-browser" }
+wasmsh-protocol = { path = "../crates/wasmsh-protocol" }
+
+[[bin]]
+name = "fuzz_lexer"
+path = "fuzz_targets/fuzz_lexer.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_parser"
+path = "fuzz_targets/fuzz_parser.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_expand"
+path = "fuzz_targets/fuzz_expand.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_pipeline"
+path = "fuzz_targets/fuzz_pipeline.rs"
+doc = false

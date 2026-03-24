@@ -39,9 +39,11 @@ fn lower_and_or(and_or: &ast::AndOrList) -> HirAndOr {
 }
 
 fn lower_and_or_op(op: ast::AndOrOp) -> HirAndOrOp {
+    // `AndOrOp` is #[non_exhaustive]; the wildcard handles future variants by
+    // treating them as `And` (conservative fallback).
     match op {
-        ast::AndOrOp::And => HirAndOrOp::And,
         ast::AndOrOp::Or => HirAndOrOp::Or,
+        _ => HirAndOrOp::And,
     }
 }
 
@@ -54,6 +56,8 @@ fn lower_pipeline(pipeline: &ast::Pipeline) -> HirPipeline {
 }
 
 fn lower_command(cmd: &ast::Command) -> HirCommand {
+    // `Command` is #[non_exhaustive]; the wildcard handles future variants.
+    #[allow(unreachable_patterns)]
     match cmd {
         ast::Command::Simple(sc) => lower_simple_command(sc),
         ast::Command::Subshell(sub) => HirCommand::Subshell(HirBlock {
@@ -120,6 +124,11 @@ fn lower_command(cmd: &ast::Command) -> HirCommand {
             body: lower_body(&s.body),
             redirections: s.redirections.iter().map(lower_redirection).collect(),
             span: s.span,
+        }),
+        // `Command` is #[non_exhaustive]; unknown future variants become no-ops.
+        _ => HirCommand::RedirectOnly(HirRedirectOnly {
+            redirections: Vec::new(),
+            span: ast::Span { start: 0, end: 0 },
         }),
     }
 }

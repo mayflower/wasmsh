@@ -6,11 +6,14 @@
 //! ## Protocol version
 //! Current version: `0.1.0`
 
+#![warn(missing_docs)]
+
 /// Protocol version string.
 pub const PROTOCOL_VERSION: &str = "0.1.0";
 
 /// A command sent from the host to the worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HostCommand {
     /// Initialize the shell runtime with optional configuration.
     Init {
@@ -18,21 +21,39 @@ pub enum HostCommand {
         step_budget: u64,
     },
     /// Execute a shell command string.
-    Run { input: String },
+    Run {
+        /// The shell source text to execute.
+        input: String,
+    },
     /// Cancel the currently running execution.
     Cancel,
     /// Mount a virtual filesystem at the given path.
-    Mount { path: String },
+    Mount {
+        /// Absolute path at which to mount the filesystem.
+        path: String,
+    },
     /// Read a file from the virtual filesystem.
-    ReadFile { path: String },
+    ReadFile {
+        /// Absolute path of the file to read.
+        path: String,
+    },
     /// Write data to a file in the virtual filesystem.
-    WriteFile { path: String, data: Vec<u8> },
+    WriteFile {
+        /// Absolute path of the file to write.
+        path: String,
+        /// Raw bytes to write into the file.
+        data: Vec<u8>,
+    },
     /// List directory contents.
-    ListDir { path: String },
+    ListDir {
+        /// Absolute path of the directory to list.
+        path: String,
+    },
 }
 
 /// An event sent from the worker to the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WorkerEvent {
     /// Shell produced stdout output.
     Stdout(Vec<u8>),
@@ -50,10 +71,15 @@ pub enum WorkerEvent {
 
 /// Diagnostic severity level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DiagnosticLevel {
+    /// Informational message.
     Info,
+    /// Non-fatal warning.
     Warning,
+    /// Error-level diagnostic.
     Error,
+    /// Low-level trace output.
     Trace,
 }
 

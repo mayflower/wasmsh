@@ -61,6 +61,12 @@ test-crate crate:
 test-suite-verbose:
     cargo test -p wasmsh-testkit --test suite_runner -- --nocapture
 
+# ── Benchmarks ───────────────────────────────────────────────
+
+# Run benchmarks
+bench:
+    cargo bench --workspace
+
 # ── Coverage ─────────────────────────────────────────────────
 
 # Generate HTML coverage report
@@ -77,6 +83,14 @@ coverage-lcov:
 # Run cargo-deny (licenses, advisories, bans)
 deny:
     cargo deny check 2>/dev/null || echo "Install cargo-deny: cargo install cargo-deny"
+
+# Check for dead dependencies
+machete:
+    cargo machete
+
+# Check all feature flag combinations
+hack:
+    cargo hack check --feature-powerset --no-dev-deps --workspace
 
 # ── Documentation ────────────────────────────────────────────
 
@@ -107,6 +121,27 @@ build-wasm:
 build-wasm-release:
     rustup target add wasm32-unknown-unknown 2>/dev/null || true
     cargo build --target wasm32-unknown-unknown --profile dist -p wasmsh-browser
+
+# ── Wasm Post-processing ──────────────────────────────────────
+
+# Build optimized wasm with wasm-opt post-processing
+wasm-dist:
+    cargo build --target wasm32-unknown-unknown --profile dist -p wasmsh-browser
+    wasm-opt -Os target/wasm32-unknown-unknown/dist/wasmsh_browser.wasm -o target/wasmsh-browser-opt.wasm
+    @echo "Original: $(wc -c < target/wasm32-unknown-unknown/dist/wasmsh_browser.wasm) bytes"
+    @echo "Optimized: $(wc -c < target/wasmsh-browser-opt.wasm) bytes"
+
+# Profile wasm binary size with twiggy
+wasm-size:
+    cargo build --target wasm32-unknown-unknown --profile dist -p wasmsh-browser
+    twiggy top target/wasm32-unknown-unknown/dist/wasmsh_browser.wasm -n 20
+
+# Check wasm binary size against budget (2MB raw, 500KB gzipped)
+wasm-budget:
+    cargo build --target wasm32-unknown-unknown --profile dist -p wasmsh-browser
+    @SIZE=$(wc -c < target/wasm32-unknown-unknown/dist/wasmsh_browser.wasm | tr -d ' '); \
+    echo "Wasm binary size: $SIZE bytes"; \
+    if [ "$SIZE" -gt 2097152 ]; then echo "ERROR: Binary exceeds 2MB budget!" && exit 1; fi
 
 # ── Release ──────────────────────────────────────────────────
 

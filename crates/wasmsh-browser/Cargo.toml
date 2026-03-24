@@ -5,6 +5,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 default = ["browser-core"]
@@ -24,6 +29,14 @@ wasmsh-utils = { workspace = true }
 wasmsh-builtins = { workspace = true }
 smol_str = { workspace = true }
 indexmap = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+wasmsh-protocol = { workspace = true }
+
+[[bench]]
+name = "pipeline_bench"
+harness = false
 
 [lints]
 workspace = true

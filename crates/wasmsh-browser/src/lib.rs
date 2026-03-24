@@ -6,8 +6,8 @@
 
 use indexmap::IndexMap;
 
-use wasmsh_ast::RedirectionOp;
 use wasmsh_ast::CaseTerminator;
+use wasmsh_ast::RedirectionOp;
 use wasmsh_expand::expand_words;
 use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
 use wasmsh_hir::{
@@ -136,9 +136,7 @@ impl WorkerRuntime {
                 self.aliases = IndexMap::new();
                 self.initialized = true;
                 // Set default shopt options (bash defaults)
-                self.vm
-                    .state
-                    .set_var("SHOPT_extglob".into(), "1".into());
+                self.vm.state.set_var("SHOPT_extglob".into(), "1".into());
                 vec![WorkerEvent::Version(PROTOCOL_VERSION.to_string())]
             }
             HostCommand::Run { input } => {
@@ -216,6 +214,12 @@ impl WorkerRuntime {
                 vec![WorkerEvent::Diagnostic(
                     DiagnosticLevel::Warning,
                     "mount not yet implemented".into(),
+                )]
+            }
+            _ => {
+                vec![WorkerEvent::Diagnostic(
+                    DiagnosticLevel::Warning,
+                    "unknown command".into(),
                 )]
             }
         }
@@ -405,8 +409,7 @@ impl WorkerRuntime {
                     self.vm.stdout.truncate(stdout_before);
 
                     // If |& was used, also capture stderr into the pipe
-                    let is_pipe_stderr =
-                        pipeline.pipe_stderr.get(i).copied().unwrap_or(false);
+                    let is_pipe_stderr = pipeline.pipe_stderr.get(i).copied().unwrap_or(false);
                     if is_pipe_stderr {
                         let stage_stderr = self.vm.stderr[stderr_before..].to_vec();
                         self.vm.stderr.truncate(stderr_before);
@@ -679,11 +682,11 @@ impl WorkerRuntime {
                                     self.vm.diagnostics.push(wasmsh_vm::DiagnosticEvent {
                                         level: match level {
                                             DiagnosticLevel::Trace => wasmsh_vm::DiagLevel::Trace,
-                                            DiagnosticLevel::Info => wasmsh_vm::DiagLevel::Info,
                                             DiagnosticLevel::Warning => {
                                                 wasmsh_vm::DiagLevel::Warning
                                             }
                                             DiagnosticLevel::Error => wasmsh_vm::DiagLevel::Error,
+                                            _ => wasmsh_vm::DiagLevel::Info,
                                         },
                                         category: wasmsh_vm::DiagCategory::Runtime,
                                         message: msg,
@@ -718,8 +721,7 @@ impl WorkerRuntime {
                                                 .state
                                                 .source_stack
                                                 .push(smol_str::SmolStr::from(full.as_str()));
-                                            let code =
-                                                String::from_utf8_lossy(&data).to_string();
+                                            let code = String::from_utf8_lossy(&data).to_string();
                                             let sub_events = self.execute_input_inner(&code);
                                             self.vm.state.source_stack.pop();
                                             for e in sub_events {
@@ -731,27 +733,28 @@ impl WorkerRuntime {
                                                         self.vm.stderr.extend_from_slice(&d);
                                                     }
                                                     WorkerEvent::Diagnostic(level, msg) => {
-                                                        self.vm.diagnostics.push(
-                                                            wasmsh_vm::DiagnosticEvent {
-                                                                level: match level {
-                                                                    DiagnosticLevel::Trace => {
-                                                                        wasmsh_vm::DiagLevel::Trace
-                                                                    }
-                                                                    DiagnosticLevel::Info => {
-                                                                        wasmsh_vm::DiagLevel::Info
-                                                                    }
-                                                                    DiagnosticLevel::Warning => {
-                                                                        wasmsh_vm::DiagLevel::Warning
-                                                                    }
-                                                                    DiagnosticLevel::Error => {
-                                                                        wasmsh_vm::DiagLevel::Error
-                                                                    }
-                                                                },
-                                                                category:
-                                                                    wasmsh_vm::DiagCategory::Runtime,
-                                                                message: msg,
+                                                        self.vm
+                                                            .diagnostics
+                                                            .push(wasmsh_vm::DiagnosticEvent {
+                                                            level: match level {
+                                                                DiagnosticLevel::Trace => {
+                                                                    wasmsh_vm::DiagLevel::Trace
+                                                                }
+                                                                DiagnosticLevel::Info => {
+                                                                    wasmsh_vm::DiagLevel::Info
+                                                                }
+                                                                DiagnosticLevel::Warning => {
+                                                                    wasmsh_vm::DiagLevel::Warning
+                                                                }
+                                                                DiagnosticLevel::Error => {
+                                                                    wasmsh_vm::DiagLevel::Error
+                                                                }
+                                                                _ => wasmsh_vm::DiagLevel::Info,
                                                             },
-                                                        );
+                                                            category:
+                                                                wasmsh_vm::DiagCategory::Runtime,
+                                                            message: msg,
+                                                        });
                                                     }
                                                     _ => {}
                                                 }
@@ -759,8 +762,7 @@ impl WorkerRuntime {
                                         }
                                         Err(e) => {
                                             self.fs.close(h);
-                                            let msg =
-                                                format!("source: {path}: read error: {e}\n");
+                                            let msg = format!("source: {path}: read error: {e}\n");
                                             self.vm.stderr.extend_from_slice(msg.as_bytes());
                                             self.vm.state.last_status = 1;
                                         }
@@ -1014,12 +1016,8 @@ impl WorkerRuntime {
                 self.vm.state.env.pop_scope();
             }
             HirCommand::Case(case_cmd) => {
-                let nocasematch = self
-                    .vm
-                    .state
-                    .get_var("SHOPT_nocasematch")
-                    .as_deref()
-                    == Some("1");
+                let nocasematch =
+                    self.vm.state.get_var("SHOPT_nocasematch").as_deref() == Some("1");
                 let value = wasmsh_expand::expand_word(&case_cmd.word, &mut self.vm.state);
                 let mut i = 0;
                 let mut fallthrough = false;
@@ -1030,8 +1028,7 @@ impl WorkerRuntime {
                         true
                     } else {
                         item.patterns.iter().any(|pattern| {
-                            let pat =
-                                wasmsh_expand::expand_word(pattern, &mut self.vm.state);
+                            let pat = wasmsh_expand::expand_word(pattern, &mut self.vm.state);
                             if nocasematch {
                                 glob_match_inner(
                                     pat.to_lowercase().as_bytes(),
@@ -1192,10 +1189,9 @@ impl WorkerRuntime {
                     });
 
                     if let Some(word) = selected {
-                        self.vm.state.set_var(
-                            sel.var_name.clone(),
-                            smol_str::SmolStr::from(word.as_str()),
-                        );
+                        self.vm
+                            .state
+                            .set_var(sel.var_name.clone(), smol_str::SmolStr::from(word.as_str()));
                     } else {
                         self.vm
                             .state
@@ -1206,6 +1202,8 @@ impl WorkerRuntime {
                     self.execute_body(&sel.body);
                 }
             }
+            // Unknown future variants are ignored.
+            _ => {}
         }
     }
 
@@ -1689,7 +1687,9 @@ impl WorkerRuntime {
             }
 
             // Handle declare -n (nameref)
-            let is_nameref = argv[1..].iter().any(|a| a.starts_with('-') && a.contains('n'));
+            let is_nameref = argv[1..]
+                .iter()
+                .any(|a| a.starts_with('-') && a.contains('n'));
             if is_nameref {
                 // For nameref, the value is the TARGET variable name, stored literally
                 // We need to set the var directly (not following existing namerefs)
@@ -1826,12 +1826,7 @@ impl WorkerRuntime {
         }
 
         // Check if the variable has the integer attribute (declare -i)
-        let is_integer = self
-            .vm
-            .state
-            .env
-            .get(name_str)
-            .is_some_and(|v| v.integer);
+        let is_integer = self.vm.state.env.get(name_str).is_some_and(|v| v.integer);
 
         // Plain scalar assignment
         let final_val = if is_integer {
@@ -2040,9 +2035,7 @@ impl WorkerRuntime {
                     let has_dir_prefix = arg.contains('/');
                     let mut matches: Vec<String> = entries
                         .iter()
-                        .filter(|e| {
-                            glob_match_ext(&pattern, &e.name, dotglob, extglob)
-                        })
+                        .filter(|e| glob_match_ext(&pattern, &e.name, dotglob, extglob))
                         .map(|e| {
                             if has_dir_prefix {
                                 let prefix = &arg[..=arg.rfind('/').unwrap()];
@@ -2073,12 +2066,7 @@ impl WorkerRuntime {
     }
 
     /// Expand a globstar (**) pattern against the VFS with recursive directory traversal.
-    fn expand_globstar(
-        &self,
-        pattern: &str,
-        dotglob: bool,
-        extglob: bool,
-    ) -> Vec<String> {
+    fn expand_globstar(&self, pattern: &str, dotglob: bool, extglob: bool) -> Vec<String> {
         // Split pattern into segments by /
         let segments: Vec<&str> = pattern.split('/').collect();
         let base_dir = self.vm.state.cwd.clone();
@@ -2109,7 +2097,15 @@ impl WorkerRuntime {
             // ** matches zero or more directories.
             // First try matching zero directories (skip ** and proceed with next segment).
             if seg_idx + 1 < segments.len() {
-                self.globstar_walk(dir, segments, seg_idx + 1, prefix, dotglob, extglob, matches);
+                self.globstar_walk(
+                    dir,
+                    segments,
+                    seg_idx + 1,
+                    prefix,
+                    dotglob,
+                    extglob,
+                    matches,
+                );
             }
             // Then try matching one or more directories.
             if let Ok(entries) = self.fs.read_dir(dir) {
@@ -2159,12 +2155,7 @@ impl WorkerRuntime {
                         };
                         if is_last {
                             matches.push(child_prefix);
-                        } else if self
-                            .fs
-                            .stat(&child_path)
-                            .map(|m| m.is_dir)
-                            .unwrap_or(false)
-                        {
+                        } else if self.fs.stat(&child_path).map(|m| m.is_dir).unwrap_or(false) {
                             self.globstar_walk(
                                 &child_path,
                                 segments,
@@ -2309,14 +2300,10 @@ impl WorkerRuntime {
                         self.vm.stderr.extend_from_slice(&stdout_data);
                     }
                 }
-                RedirectionOp::DupInput
-                | RedirectionOp::Input
-                | RedirectionOp::HereDoc
-                | RedirectionOp::HereDocStrip
-                | RedirectionOp::HereString
-                | RedirectionOp::ReadWrite => {
-                    // These redirections are handled elsewhere (pre-execution stdin setup, etc.)
-                }
+                // Input redirections are handled elsewhere (pre-execution stdin setup).
+                // The wildcard covers `RedirectionOp`'s future variants (#[non_exhaustive]).
+                #[allow(unreachable_patterns)]
+                _ => {}
             }
         }
     }
@@ -2488,20 +2475,14 @@ fn eval_binary_op(lhs: &str, op: &str, rhs: &str, state: &mut ShellState) -> boo
         "==" | "=" => {
             // RHS is a glob pattern
             if nocasematch {
-                glob_match_inner(
-                    rhs.to_lowercase().as_bytes(),
-                    lhs.to_lowercase().as_bytes(),
-                )
+                glob_match_inner(rhs.to_lowercase().as_bytes(), lhs.to_lowercase().as_bytes())
             } else {
                 glob_match_inner(rhs.as_bytes(), lhs.as_bytes())
             }
         }
         "!=" => {
             if nocasematch {
-                !glob_match_inner(
-                    rhs.to_lowercase().as_bytes(),
-                    lhs.to_lowercase().as_bytes(),
-                )
+                !glob_match_inner(rhs.to_lowercase().as_bytes(), lhs.to_lowercase().as_bytes())
             } else {
                 !glob_match_inner(rhs.as_bytes(), lhs.as_bytes())
             }
@@ -2609,9 +2590,17 @@ fn regex_match_with_captures(text: &str, pattern: &str) -> Option<Vec<String>> {
     if !has_special {
         // Pure literal matching with anchoring
         let matched_range = if anchored_start && anchored_end {
-            if text == core { Some((0, text.len())) } else { None }
+            if text == core {
+                Some((0, text.len()))
+            } else {
+                None
+            }
         } else if anchored_start {
-            if text.starts_with(core) { Some((0, core.len())) } else { None }
+            if text.starts_with(core) {
+                Some((0, core.len()))
+            } else {
+                None
+            }
         } else if anchored_end {
             if text.ends_with(core) {
                 Some((text.len() - core.len(), text.len()))
@@ -2627,7 +2616,11 @@ fn regex_match_with_captures(text: &str, pattern: &str) -> Option<Vec<String>> {
 
     // Use the backtracking matcher with capture support.
     // `captures` stores (start, end) pairs for each parenthesized group.
-    let start_range = if anchored_start { 0..=0 } else { 0..=text.len() };
+    let start_range = if anchored_start {
+        0..=0
+    } else {
+        0..=text.len()
+    };
 
     for start in start_range {
         let mut group_caps: Vec<(usize, usize)> = Vec::new();
@@ -2697,9 +2690,14 @@ fn regex_match_capturing(
                     for end_pos in (ti..=text.len()).rev() {
                         captures.truncate(save);
                         if regex_match_group_repeated(text, ti, end_pos, &alternatives, 1) {
-                            if let Some(final_end) =
-                                regex_match_capturing(text, end_pos, after_quant, 0, must_end, captures)
-                            {
+                            if let Some(final_end) = regex_match_capturing(
+                                text,
+                                end_pos,
+                                after_quant,
+                                0,
+                                must_end,
+                                captures,
+                            ) {
                                 captures.insert(save, (group_start, end_pos));
                                 return Some(final_end);
                             }
@@ -2715,9 +2713,14 @@ fn regex_match_capturing(
                     for end_pos in (ti..=text.len()).rev() {
                         captures.truncate(save);
                         if regex_match_group_repeated(text, ti, end_pos, &alternatives, 0) {
-                            if let Some(final_end) =
-                                regex_match_capturing(text, end_pos, after_quant, 0, must_end, captures)
-                            {
+                            if let Some(final_end) = regex_match_capturing(
+                                text,
+                                end_pos,
+                                after_quant,
+                                0,
+                                must_end,
+                                captures,
+                            ) {
                                 captures.insert(save, (group_start, end_pos));
                                 return Some(final_end);
                             }
@@ -3315,9 +3318,7 @@ fn glob_match_ext(pattern: &str, name: &str, dotglob: bool, extglob: bool) -> bo
 fn has_extglob_pattern(pattern: &str) -> bool {
     let bytes = pattern.as_bytes();
     for i in 0..bytes.len().saturating_sub(1) {
-        if bytes[i + 1] == b'('
-            && matches!(bytes[i], b'?' | b'*' | b'+' | b'@' | b'!')
-        {
+        if bytes[i + 1] == b'(' && matches!(bytes[i], b'?' | b'*' | b'+' | b'@' | b'!') {
             return true;
         }
     }
@@ -5114,9 +5115,8 @@ mod tests {
 
     #[test]
     fn mapfile_basic() {
-        let (events, status) = run_shell(
-            "printf 'a\\nb\\nc\\n' | mapfile arr; echo ${arr[0]} ${arr[1]} ${arr[2]}",
-        );
+        let (events, status) =
+            run_shell("printf 'a\\nb\\nc\\n' | mapfile arr; echo ${arr[0]} ${arr[1]} ${arr[2]}");
         assert_eq!(status, 0);
         let out = get_stdout(&events);
         // Each element includes trailing newline by default
@@ -5136,8 +5136,7 @@ mod tests {
 
     #[test]
     fn mapfile_default_name() {
-        let (events, status) =
-            run_shell("printf 'hello\\nworld\\n' | mapfile; echo ${MAPFILE[0]}");
+        let (events, status) = run_shell("printf 'hello\\nworld\\n' | mapfile; echo ${MAPFILE[0]}");
         assert_eq!(status, 0);
         let out = get_stdout(&events);
         assert!(out.contains("hello"));
@@ -5145,9 +5144,8 @@ mod tests {
 
     #[test]
     fn readarray_is_alias_for_mapfile() {
-        let (events, status) = run_shell(
-            "printf 'a\\nb\\n' | readarray -t arr; echo ${arr[0]} ${arr[1]}",
-        );
+        let (events, status) =
+            run_shell("printf 'a\\nb\\n' | readarray -t arr; echo ${arr[0]} ${arr[1]}");
         assert_eq!(status, 0);
         assert_eq!(get_stdout(&events), "a b\n");
     }
@@ -5196,9 +5194,8 @@ mod tests {
 
     #[test]
     fn case_glob_pattern() {
-        let (events, status) = run_shell(
-            "case hello in\n  h*) echo matched ;;\n  *) echo nope ;;\nesac",
-        );
+        let (events, status) =
+            run_shell("case hello in\n  h*) echo matched ;;\n  *) echo nope ;;\nesac");
         assert_eq!(status, 0);
         assert_eq!(get_stdout(&events), "matched\n");
     }
@@ -5383,8 +5380,7 @@ mod tests {
             data: vec![],
         });
         let events = rt.handle_command(HostCommand::Run {
-            input: "cd /tmp5; shopt -s extglob; for f in colo?(u)r; do echo $f; done | sort"
-                .into(),
+            input: "cd /tmp5; shopt -s extglob; for f in colo?(u)r; do echo $f; done | sort".into(),
         });
         let stdout = get_stdout(&events);
         assert!(stdout.contains("color"), "got: {stdout}");
@@ -5418,5 +5414,4 @@ mod tests {
         assert!(stdout.contains("sub/b.txt"), "got: {stdout}");
         assert!(stdout.contains("sub/deep/c.txt"), "got: {stdout}");
     }
-
 }

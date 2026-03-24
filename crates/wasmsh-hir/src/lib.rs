@@ -36,9 +36,12 @@ pub struct HirAndOr {
     pub rest: Vec<(HirAndOrOp, HirPipeline)>,
 }
 
+/// `&&` or `||` operator in HIR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HirAndOrOp {
+    /// `&&` — run the right side only if the left side succeeded.
     And,
+    /// `||` — run the right side only if the left side failed.
     Or,
 }
 
@@ -53,6 +56,7 @@ pub struct HirPipeline {
 
 /// A normalized command.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum HirCommand {
     /// A command with argv, optional env-var prefixes, and redirections.
     Exec(HirExec),
@@ -172,9 +176,12 @@ pub struct HirIf {
     pub span: Span,
 }
 
+/// A single `elif condition; then body` clause in HIR.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HirElif {
+    /// The condition commands.
     pub condition: Vec<HirCompleteCommand>,
+    /// The body to run when the condition is true.
     pub then_body: Vec<HirCompleteCommand>,
 }
 
