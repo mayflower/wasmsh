@@ -1,0 +1,82 @@
+name: SonarQube
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sonar-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sonarqube:
+    name: SonarQube Scan
+    runs-on: mayflower-k8s-runners
+    env:
+      SONAR_TOKEN_SET: ${{ secrets.SONAR_TOKEN != '' }}
+    steps:
+      - name: Check SonarQube secrets availability
+        id: sonar_secrets
+        run: |
+          if [ "$SONAR_TOKEN_SET" != "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "SonarQube secrets are not configured; skipping scan."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.sonar_secrets.outputs.skip != 'true'
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.sonar_secrets.outputs.skip != 'true'
+        with:
+          components: clippy, llvm-tools
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.sonar_secrets.outputs.skip != 'true'
+
+      - name: Install cargo-llvm-cov
+        if: steps.sonar_secrets.outputs.skip != 'true'
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Run tests with coverage
+        if: steps.sonar_secrets.outputs.skip != 'true'
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov --workspace --lcov --output-path coverage/lcov.info
+        env:
+          RUSTFLAGS: ""
+
+      - name: Generate Clippy report
+        if: steps.sonar_secrets.outputs.skip != 'true'
+        run: |
+          cargo clippy --workspace --all-targets --message-format=json \
+            2> clippy-report.json || true
+
+      - name: Cache SonarQube scanner
+        if: steps.sonar_secrets.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/cache
+          key: sonar-${{ runner.os }}-${{ hashFiles('sonar-project.properties') }}
+          restore-keys: sonar-${{ runner.os }}-
+
+      - name: SonarQube Scan
+        if: steps.sonar_secrets.outputs.skip != 'true'
+        uses: SonarSource/sonarqube-scan-action@v6
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >-
+            -Dsonar.rust.lcov.reportPaths=coverage/lcov.info
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=300
