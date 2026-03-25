@@ -207,13 +207,18 @@ jobs:
           import re, sys, os
           from collections import defaultdict
 
+          workspace = os.getcwd() + "/"
           files = defaultdict(lambda: {"lines": {}})
           current_file = None
           with open("lcov.info") as f:
               for line in f:
                   line = line.strip()
                   if line.startswith("SF:"):
-                      current_file = line[3:]
+                      path = line[3:]
+                      # Strip workspace prefix to produce relative paths
+                      if path.startswith(workspace):
+                          path = path[len(workspace):]
+                      current_file = path
                   elif line.startswith("DA:") and current_file:
                       parts = line[3:].split(",")
                       if len(parts) >= 2:
