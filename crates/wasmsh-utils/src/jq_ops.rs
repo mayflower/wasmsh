@@ -36,18 +36,6 @@ impl JqValue {
         !matches!(self, Self::Null | Self::Bool(false))
     }
 
-    #[allow(dead_code)]
-    fn obj_get(&self, key: &str) -> JqValue {
-        if let Self::Object(pairs) = self {
-            for (k, v) in pairs {
-                if k == key {
-                    return v.clone();
-                }
-            }
-        }
-        Self::Null
-    }
-
     fn length(&self) -> JqValue {
         match self {
             Self::Null => Self::Number(0.0),
@@ -582,17 +570,14 @@ enum ArithOp {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 enum JqObjKey {
     Ident(String),
-    Expr(JqFilter),
     /// `(expr)` — dynamic key
     Dynamic(JqFilter),
 }
 
 #[derive(Clone, Debug)]
 #[allow(clippy::enum_variant_names)]
-#[allow(dead_code)]
 enum JqFilter {
     Identity,
     Field(String),
@@ -621,11 +606,6 @@ enum JqFilter {
         catch: Option<Box<JqFilter>>,
     },
     Alternative(Box<JqFilter>, Box<JqFilter>),
-    Select(Box<JqFilter>),
-    Map(Box<JqFilter>),
-    SortBy(Box<JqFilter>),
-    GroupBy(Box<JqFilter>),
-    UniqueBy(Box<JqFilter>),
     Reduce {
         iter: Box<JqFilter>,
         var: String,
@@ -655,7 +635,6 @@ enum JqFilter {
     ObjectConstruct(Vec<(JqObjKey, Option<JqFilter>)>),
     Variable(String),
     Recurse,
-    StringInterp(Vec<JqFilter>),
     Label(String, Box<JqFilter>),
     Negate(Box<JqFilter>),
     Format(String),
@@ -2046,88 +2025,6 @@ fn apply_filter(
             }
         }
 
-        JqFilter::Select(cond) => {
-            let cond_vals = apply_filter(cond, input, env, depth + 1)?;
-            if cond_vals.first().is_some_and(JqValue::is_truthy) {
-                Ok(vec![input.clone()])
-            } else {
-                Ok(vec![])
-            }
-        }
-
-        JqFilter::Map(inner) => match input {
-            JqValue::Array(arr) => {
-                let mut out = Vec::new();
-                for item in arr {
-                    out.extend(apply_filter(inner, item, env, depth + 1)?);
-                }
-                Ok(vec![JqValue::Array(out)])
-            }
-            _ => Err(format!("cannot map over {}", input.type_name())),
-        },
-
-        JqFilter::SortBy(key) => match input {
-            JqValue::Array(arr) => {
-                let mut items: Vec<(JqValue, JqValue)> = Vec::new();
-                for item in arr {
-                    let kv = apply_filter(key, item, env, depth + 1)?;
-                    let k = kv.into_iter().next().unwrap_or(JqValue::Null);
-                    items.push((k, item.clone()));
-                }
-                items.sort_by(|(a, _), (b, _)| a.compare(b).unwrap_or(std::cmp::Ordering::Equal));
-                Ok(vec![JqValue::Array(
-                    items.into_iter().map(|(_, v)| v).collect(),
-                )])
-            }
-            _ => Err(format!("cannot sort_by {}", input.type_name())),
-        },
-
-        JqFilter::GroupBy(key) => match input {
-            JqValue::Array(arr) => {
-                let mut items: Vec<(JqValue, JqValue)> = Vec::new();
-                for item in arr {
-                    let kv = apply_filter(key, item, env, depth + 1)?;
-                    let k = kv.into_iter().next().unwrap_or(JqValue::Null);
-                    items.push((k, item.clone()));
-                }
-                items.sort_by(|(a, _), (b, _)| a.compare(b).unwrap_or(std::cmp::Ordering::Equal));
-                let mut groups: Vec<JqValue> = Vec::new();
-                let mut current_key: Option<JqValue> = None;
-                let mut current_group: Vec<JqValue> = Vec::new();
-                for (k, v) in items {
-                    if current_key.as_ref().is_none_or(|ck| !ck.equals(&k)) {
-                        if !current_group.is_empty() {
-                            groups.push(JqValue::Array(std::mem::take(&mut current_group)));
-                        }
-                        current_key = Some(k);
-                    }
-                    current_group.push(v);
-                }
-                if !current_group.is_empty() {
-                    groups.push(JqValue::Array(current_group));
-                }
-                Ok(vec![JqValue::Array(groups)])
-            }
-            _ => Err(format!("cannot group_by {}", input.type_name())),
-        },
-
-        JqFilter::UniqueBy(key) => match input {
-            JqValue::Array(arr) => {
-                let mut seen: Vec<JqValue> = Vec::new();
-                let mut out = Vec::new();
-                for item in arr {
-                    let kv = apply_filter(key, item, env, depth + 1)?;
-                    let k = kv.into_iter().next().unwrap_or(JqValue::Null);
-                    if !seen.iter().any(|s| s.equals(&k)) {
-                        seen.push(k);
-                        out.push(item.clone());
-                    }
-                }
-                Ok(vec![JqValue::Array(out)])
-            }
-            _ => Err(format!("cannot unique_by {}", input.type_name())),
-        },
-
         JqFilter::Reduce {
             iter,
             var,
@@ -2211,8 +2108,6 @@ fn apply_filter(
         }
 
         JqFilter::Recurse => Ok(input.recurse_values()),
-
-        JqFilter::StringInterp(_parts) => Ok(vec![input.clone()]),
 
         JqFilter::Label(_name, body) => match apply_filter(body, input, env, depth + 1) {
             Ok(vals) => Ok(vals),
@@ -2375,7 +2270,7 @@ fn build_object(
                     }
                 }
             }
-            JqObjKey::Dynamic(key_filter) | JqObjKey::Expr(key_filter) => {
+            JqObjKey::Dynamic(key_filter) => {
                 let keys = apply_filter(key_filter, input, env, depth + 1)?;
                 let val = if let Some(vf) = val_filter {
                     apply_filter(vf, input, env, depth + 1)?

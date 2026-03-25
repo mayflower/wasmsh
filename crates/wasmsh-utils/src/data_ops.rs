@@ -2,7 +2,7 @@
 
 use wasmsh_fs::{OpenOptions, Vfs};
 
-use crate::helpers::{emit_error, get_input_text, require_args, resolve_path};
+use crate::helpers::{emit_error, get_input_text, hex_encode, require_args, resolve_path};
 use crate::UtilContext;
 
 fn seq_parse(s: &str, output: &mut dyn crate::UtilOutput) -> Option<i64> {
@@ -339,15 +339,6 @@ fn md5_digest(data: &[u8]) -> [u8; 16] {
     result[8..12].copy_from_slice(&c0.to_le_bytes());
     result[12..16].copy_from_slice(&d0.to_le_bytes());
     result
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 pub(crate) fn util_md5sum(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {

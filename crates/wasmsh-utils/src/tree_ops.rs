@@ -2,7 +2,7 @@
 
 use wasmsh_fs::Vfs;
 
-use crate::helpers::{resolve_path, simple_glob_match};
+use crate::helpers::{child_path, resolve_path, simple_glob_match};
 use crate::UtilContext;
 
 /// Display directory contents in a tree-like format.
@@ -244,14 +244,6 @@ fn walk_tree(
         } else {
             *file_count += 1;
         }
-    }
-}
-
-fn child_path(parent: &str, name: &str) -> String {
-    if parent == "/" {
-        format!("/{name}")
-    } else {
-        format!("{parent}/{name}")
     }
 }
 

@@ -4,7 +4,7 @@ use std::fmt::Write;
 
 use wasmsh_fs::{OpenOptions, Vfs};
 
-use crate::helpers::{emit_error, read_text, resolve_path};
+use crate::helpers::{child_path, emit_error, read_text, resolve_path};
 use crate::UtilContext;
 
 // ---------------------------------------------------------------------------
@@ -442,11 +442,7 @@ fn collect_dir_entries(
         let mut entries = entries;
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         for entry in entries {
-            let child_path = if dir == "/" {
-                format!("/{}", entry.name)
-            } else {
-                format!("{}/{}", dir, entry.name)
-            };
+            let cp = child_path(dir, &entry.name);
             let rel = if prefix.is_empty() {
                 entry.name.clone()
             } else {
@@ -454,7 +450,7 @@ fn collect_dir_entries(
             };
             out.push((rel.clone(), entry.is_dir));
             if entry.is_dir {
-                collect_dir_entries(fs, &child_path, &rel, out);
+                collect_dir_entries(fs, &cp, &rel, out);
             }
         }
     }

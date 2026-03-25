@@ -6,34 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use wasmsh_fs::{OpenOptions, Vfs};
 
 use crate::helpers::{
-    copy_file_contents, crc32, emit_error, get_input_text, read_text, resolve_path,
+    copy_file_contents, crc32, emit_error, get_input_text, read_text, resolve_path, XorShift64,
 };
 use crate::UtilContext;
-
-// ---------------------------------------------------------------------------
-// XorShift64 PRNG (shared with shuf)
-// ---------------------------------------------------------------------------
-
-struct XorShift64 {
-    state: u64,
-}
-
-impl XorShift64 {
-    fn new(seed: u64) -> Self {
-        Self {
-            state: if seed == 0 { 0xDEAD_BEEF } else { seed },
-        }
-    }
-
-    fn next(&mut self) -> u64 {
-        let mut x = self.state;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.state = x;
-        x
-    }
-}
 
 /// Global counter for PRNG seeding.
 static SHUF_COUNTER: AtomicU64 = AtomicU64::new(1);

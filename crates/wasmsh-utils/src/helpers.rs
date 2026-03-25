@@ -171,6 +171,48 @@ pub(crate) fn grep_matches(line: &str, pattern: &str, ignore_case: bool) -> bool
 }
 
 /// Simple glob matching: `*` matches any sequence, `?` matches one char.
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+pub(crate) struct XorShift64 {
+    state: u64,
+}
+
+impl XorShift64 {
+    pub(crate) fn new(seed: u64) -> Self {
+        Self {
+            state: if seed == 0 {
+                0xDEAD_BEEF_CAFE_BABE
+            } else {
+                seed
+            },
+        }
+    }
+
+    pub(crate) fn next(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x;
+        x
+    }
+}
+
+pub(crate) fn child_path(parent: &str, name: &str) -> String {
+    if parent == "/" {
+        format!("/{name}")
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
 pub(crate) fn simple_glob_match(pattern: &str, name: &str) -> bool {
     let p = pattern.as_bytes();
     let n = name.as_bytes();

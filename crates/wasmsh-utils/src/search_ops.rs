@@ -2,7 +2,7 @@
 
 use wasmsh_fs::{MemoryFs, Vfs};
 
-use crate::helpers::{read_text, resolve_path, simple_glob_match};
+use crate::helpers::{child_path, read_text, resolve_path, simple_glob_match};
 use crate::UtilContext;
 
 /// Map file type names to extensions.
@@ -284,11 +284,7 @@ fn collect_files(fs: &MemoryFs, dir: &str, opts: &RgOpts, out: &mut Vec<String>)
             continue;
         }
 
-        let child = if dir == "/" {
-            format!("/{}", entry.name)
-        } else {
-            format!("{dir}/{}", entry.name)
-        };
+        let child = child_path(dir, &entry.name);
 
         if entry.is_dir {
             collect_files(fs, &child, opts, out);
@@ -1069,11 +1065,7 @@ fn fd_walk(
             continue;
         }
 
-        let child = if dir == "/" {
-            format!("/{}", entry.name)
-        } else {
-            format!("{dir}/{}", entry.name)
-        };
+        let child = child_path(dir, &entry.name);
 
         out.push((child.clone(), entry.is_dir));
 

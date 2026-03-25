@@ -2,7 +2,7 @@
 
 use wasmsh_fs::{MemoryFs, Vfs};
 
-use crate::helpers::{emit_error, resolve_path};
+use crate::helpers::{child_path, emit_error, resolve_path};
 use crate::UtilContext;
 
 // ---------------------------------------------------------------------------
@@ -227,14 +227,6 @@ fn format_human(bytes: u64) -> String {
     }
 }
 
-fn child_path(parent: &str, name: &str) -> String {
-    if parent == "/" {
-        format!("/{name}")
-    } else {
-        format!("{parent}/{name}")
-    }
-}
-
 // ---------------------------------------------------------------------------
 // df — report filesystem disk space usage
 // ---------------------------------------------------------------------------
@@ -298,11 +290,7 @@ fn vfs_total_size(fs: &MemoryFs, path: &str) -> u64 {
     let mut total: u64 = 0;
     if let Ok(entries) = fs.read_dir(path) {
         for entry in entries {
-            let child = if path == "/" {
-                format!("/{}", entry.name)
-            } else {
-                format!("{path}/{}", entry.name)
-            };
+            let child = child_path(path, &entry.name);
             if entry.is_dir {
                 total += vfs_total_size(fs, &child);
             } else if let Ok(meta) = fs.stat(&child) {

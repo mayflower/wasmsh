@@ -4,7 +4,8 @@
 use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
 
 use crate::helpers::{
-    copy_file_contents, emit_error, require_args, resolve_path, simple_glob_match,
+    child_path, copy_file_contents, emit_error, require_args, resolve_path, simple_glob_match,
+    XorShift64,
 };
 use crate::{UtilContext, UtilOutput};
 
@@ -186,11 +187,7 @@ fn rm_recursive(fs: &mut MemoryFs, path: &str) -> Result<(), ()> {
     // First remove all children
     if let Ok(entries) = fs.read_dir(path) {
         for entry in entries {
-            let child = if path == "/" {
-                format!("/{}", entry.name)
-            } else {
-                format!("{}/{}", path, entry.name)
-            };
+            let child = child_path(path, &entry.name);
             if let Ok(meta) = fs.stat(&child) {
                 if meta.is_dir {
                     rm_recursive(fs, &child)?;
@@ -322,11 +319,7 @@ pub(crate) fn util_find(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     ) {
         if let Ok(entries) = fs.read_dir(path) {
             for entry in entries {
-                let child = if path == "/" {
-                    format!("/{}", entry.name)
-                } else {
-                    format!("{}/{}", path, entry.name)
-                };
+                let child = child_path(path, &entry.name);
                 let name_ok = name_pat.is_none_or(|p| {
                     if p.contains('*') || p.contains('?') {
                         simple_glob_match(p, &entry.name)
@@ -386,33 +379,6 @@ pub(crate) fn util_find(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 pub(crate) fn util_chmod(_ctx: &mut UtilContext<'_>, _argv: &[&str]) -> i32 {
     // VFS has no permission model — chmod is a no-op that succeeds
     0
-}
-
-/// Simple `XorShift64` PRNG for generating random temporary filenames.
-struct XorShift64 {
-    state: u64,
-}
-
-impl XorShift64 {
-    fn new(seed: u64) -> Self {
-        // Ensure non-zero seed
-        Self {
-            state: if seed == 0 {
-                0xDEAD_BEEF_CAFE_BABE
-            } else {
-                seed
-            },
-        }
-    }
-
-    fn next(&mut self) -> u64 {
-        let mut x = self.state;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.state = x;
-        x
-    }
 }
 
 /// Global counter for seeding the PRNG with varying values.
