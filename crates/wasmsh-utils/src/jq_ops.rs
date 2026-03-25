@@ -2735,13 +2735,13 @@ fn dispatch_func(
             let mut out = Vec::new();
             if step > 0.0 {
                 let mut i = start;
-                while i < end {
+                while i < end && out.len() < 10_000_000 {
                     out.push(JqValue::Number(i));
                     i += step;
                 }
             } else if step < 0.0 {
                 let mut i = start;
-                while i > end {
+                while i > end && out.len() < 10_000_000 {
                     out.push(JqValue::Number(i));
                     i += step;
                 }
@@ -4036,6 +4036,9 @@ fn set_path(val: &JqValue, path: &[JqValue], new_val: &JqValue) -> JqValue {
         }
         JqValue::Number(n) => {
             let idx = *n as usize;
+            if idx > 1_000_000 {
+                return val.clone(); // Refuse to allocate huge arrays
+            }
             let mut arr = if let JqValue::Array(a) = val {
                 a.clone()
             } else {

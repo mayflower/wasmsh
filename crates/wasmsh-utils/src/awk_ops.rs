@@ -2172,7 +2172,7 @@ impl AwkInterpreter {
                     self.eval_expr(&args[0]).to_str()
                 };
                 #[allow(clippy::cast_precision_loss)]
-                AwkValue::Num(s.len() as f64)
+                AwkValue::Num(s.chars().count() as f64)
             }
             "substr" => {
                 if args.is_empty() {

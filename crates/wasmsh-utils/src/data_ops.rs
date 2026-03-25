@@ -52,6 +52,10 @@ pub(crate) fn util_seq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             return 1;
         }
     };
+    if step == 0 {
+        ctx.output.stderr(b"seq: zero increment\n");
+        return 1;
+    }
     let mut i = start;
     let mut count = 0usize;
     while (step > 0 && i <= end) || (step < 0 && i >= end) {
@@ -127,22 +131,22 @@ pub(crate) fn util_expr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             return 2;
         };
         let result = match args[1] {
-            "+" => left + right,
-            "-" => left - right,
-            "*" => left * right,
+            "+" => left.wrapping_add(right),
+            "-" => left.wrapping_sub(right),
+            "*" => left.wrapping_mul(right),
             "/" => {
-                if right != 0 {
-                    left / right
-                } else {
-                    0
+                if right == 0 {
+                    ctx.output.stderr(b"expr: division by zero\n");
+                    return 2;
                 }
+                left.wrapping_div(right)
             }
             "%" => {
-                if right != 0 {
-                    left % right
-                } else {
-                    0
+                if right == 0 {
+                    ctx.output.stderr(b"expr: division by zero\n");
+                    return 2;
                 }
+                left.wrapping_rem(right)
             }
             _ => 0,
         };
