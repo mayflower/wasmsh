@@ -40,7 +40,7 @@ wasmsh supports a broad subset of Bash syntax and BusyBox-style utilities:
 
 **Builtins** (35): `echo`, `printf`, `test`/`[`, `[[`, `read`, `cd`, `pwd`, `export`, `unset`, `readonly`, `set`, `shift`, `return`, `exit`, `eval`, `source`/`.`, `trap`, `type`, `command`, `builtin`, `getopts`, `local`, `break`, `continue`, `declare`/`typeset`, `let`, `alias`/`unalias`, `shopt`, `mapfile`/`readarray`, `:`/`true`/`false`
 
-**Utilities** (44): `cat`, `ls`, `mkdir`, `rm`, `touch`, `mv`, `cp`, `ln`, `head`, `tail`, `wc`, `grep`, `sed`, `sort`, `uniq`, `cut`, `tr`, `tee`, `paste`, `rev`, `column`, `xargs`, `seq`, `find`, `stat`, `basename`, `dirname`, `readlink`, `realpath`, `chmod`, `mktemp`, `date`, `sleep`, `env`, `printenv`, `expr`, `id`, `whoami`, `uname`, `hostname`, `yes`, `md5sum`, `sha256sum`, `base64`
+**Utilities** (86): `cat`, `ls`, `mkdir`, `rm`, `touch`, `mv`, `cp`, `ln`, `head`, `tail`, `wc`, `grep`, `sed`, `sort`, `uniq`, `cut`, `tr`, `tee`, `paste`, `rev`, `column`, `bat`, `xargs`, `seq`, `find`, `stat`, `basename`, `dirname`, `readlink`, `realpath`, `chmod`, `mktemp`, `date`, `sleep`, `env`, `printenv`, `expr`, `id`, `whoami`, `uname`, `hostname`, `yes`, `md5sum`, `sha256sum`, `sha1sum`, `sha512sum`, `base64`, `which`, `rmdir`, `tac`, `nl`, `shuf`, `cmp`, `comm`, `fold`, `nproc`, `expand`, `unexpand`, `truncate`, `factor`, `cksum`, `tsort`, `install`, `timeout`, `cal`, `diff`, `patch`, `tree`, `rg`, `fd`, `awk`, `jq`, `yq`, `bc`, `xxd`, `dd`, `strings`, `split`, `file`, `tar`, `gzip`, `gunzip`, `zcat`, `unzip`, `du`, `df`
 
 See [SUPPORTED.md](SUPPORTED.md) for the complete feature matrix.
 
@@ -101,10 +101,11 @@ just deny     # license/advisory check
 
 ## Testing
 
-940 tests across two layers:
+960 tests across two layers:
 
-- **506 Rust unit/integration tests** including property-based fuzzing
-- **434 TOML declarative test cases** covering shell semantics, utility behavior, and real-world production script patterns (CI/CD, log analysis, ETL pipelines, deployment automation, etc.)
+- **506 Rust unit/integration tests** (400 in wasmsh-utils alone) including property-based fuzzing via proptest
+- **454 TOML declarative test cases** covering shell semantics, utility behavior, and 60 real-world production script patterns (CI/CD, log analysis, ETL pipelines, deployment automation, etc.)
+- **Criterion benchmarks** for parser, expansion, and pipeline performance
 
 ## License
 

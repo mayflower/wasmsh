@@ -100,11 +100,11 @@
 
 ---
 
-## Utilities
+## Utilities (86)
 
 All utilities operate on the in-process VFS (no OS calls).
 
-### File utilities
+### File utilities (14)
 
 | Command      | Status | Notes |
 |--------------|--------|-------|
@@ -123,7 +123,7 @@ All utilities operate on the in-process VFS (no OS calls).
 | `chmod`      | Done   | Change file permissions (VFS metadata) |
 | `mktemp`     | Done   | Create a temporary file |
 
-### Text utilities
+### Text utilities (14)
 
 | Command      | Status | Notes |
 |--------------|--------|-------|
@@ -140,8 +140,9 @@ All utilities operate on the in-process VFS (no OS calls).
 | `paste`      | Done   | Merge lines of files |
 | `rev`        | Done   | Reverse characters in each line |
 | `column`     | Done   | Format input into columns |
+| `bat`        | Done   | Syntax-highlighted file viewer |
 
-### Data and string utilities
+### Data and string utilities (9)
 
 | Command      | Status | Notes |
 |--------------|--------|-------|
@@ -151,11 +152,11 @@ All utilities operate on the in-process VFS (no OS calls).
 | `expr`       | Done   | Evaluate expression |
 | `xargs`      | Done   | Build and execute commands from stdin |
 | `yes`        | Done   | Output string repeatedly |
-| `md5sum`     | Done   | Compute MD5 checksums |
-| `sha256sum`  | Done   | Compute SHA-256 checksums |
+| `md5sum`     | Done   | Compute MD5 checksums (clean-room RFC 1321) |
+| `sha256sum`  | Done   | Compute SHA-256 checksums (clean-room FIPS 180-4) |
 | `base64`     | Done   | Encode/decode base64 |
 
-### System and environment utilities
+### System and environment utilities (8)
 
 | Command      | Status | Notes |
 |--------------|--------|-------|
@@ -167,6 +168,92 @@ All utilities operate on the in-process VFS (no OS calls).
 | `hostname`   | Done   | Print hostname (static sandbox value) |
 | `sleep`      | Done   | Delay (no-op in sandbox; returns immediately) |
 | `date`       | Done   | Print date/time |
+
+### Simple utilities (18)
+
+| Command      | Status | Notes |
+|--------------|--------|-------|
+| `which`      | Done   | Locate a command |
+| `rmdir`      | Done   | Remove empty directories |
+| `tac`        | Done   | Reverse lines of file |
+| `nl`         | Done   | Number lines |
+| `shuf`       | Done   | Shuffle lines |
+| `cmp`        | Done   | Compare two files byte by byte |
+| `comm`       | Done   | Compare two sorted files line by line |
+| `fold`       | Done   | Wrap lines to specified width |
+| `nproc`      | Done   | Print number of processing units |
+| `expand`     | Done   | Convert tabs to spaces |
+| `unexpand`   | Done   | Convert spaces to tabs |
+| `truncate`   | Done   | Shrink or extend file size |
+| `factor`     | Done   | Print prime factors |
+| `cksum`      | Done   | Print CRC checksum and byte count |
+| `tsort`      | Done   | Topological sort |
+| `install`    | Done   | Copy files and set attributes |
+| `timeout`    | Done   | Run command with time limit |
+| `cal`        | Done   | Display a calendar |
+
+### Diff and patch (2)
+
+| Command      | Status | Notes |
+|--------------|--------|-------|
+| `diff`       | Done   | Compare files line by line (unified format) |
+| `patch`      | Done   | Apply unified diff patches |
+
+### Directory visualization (1)
+
+| Command      | Status | Notes |
+|--------------|--------|-------|
+| `tree`       | Done   | Recursive directory listing with tree-style output |
+
+### Code search (2)
+
+| Command      | Status | Notes |
+|--------------|--------|-------|
+| `rg`         | Done   | Ripgrep-compatible search with built-in regex engine |
+| `fd`         | Done   | Fast file finder (fd-find compatible) |
+
+### Embedded interpreters (4)
+
+| Command      | Status | Notes |
+|--------------|--------|-------|
+| `awk`        | Done   | Full AWK interpreter: lexer, parser, evaluator; associative arrays, user functions, regex |
+| `jq`         | Done   | JSON processor: handwritten JSON parser, filter language, 90+ built-in functions |
+| `yq`         | Done   | YAML processor: handwritten YAML parser, jq-compatible filter subset |
+| `bc`         | Done   | Calculator: expression parser, variables, control flow, user-defined functions |
+
+### Hash utilities (2)
+
+| Command      | Status | Notes |
+|--------------|--------|-------|
+| `sha1sum`    | Done   | Compute SHA-1 checksums (clean-room RFC 3174) |
+| `sha512sum`  | Done   | Compute SHA-512 checksums (clean-room FIPS 180-4) |
+
+### Binary utilities (5)
+
+| Command      | Status | Notes |
+|--------------|--------|-------|
+| `xxd`        | Done   | Hex dump and reverse |
+| `dd`         | Done   | Copy and convert data |
+| `strings`    | Done   | Print printable strings from binary data |
+| `split`      | Done   | Split file into pieces |
+| `file`       | Done   | Determine file type via magic bytes |
+
+### Archive and compression (5)
+
+| Command      | Status | Notes |
+|--------------|--------|-------|
+| `tar`        | Done   | Create and extract tar archives |
+| `gzip`       | Done   | Compress files (DEFLATE, clean-room CRC-32) |
+| `gunzip`     | Done   | Decompress gzip files |
+| `zcat`       | Done   | Decompress and print to stdout |
+| `unzip`      | Done   | Extract ZIP archives |
+
+### Disk usage (2)
+
+| Command      | Status | Notes |
+|--------------|--------|-------|
+| `du`         | Done   | Estimate file space usage |
+| `df`         | Done   | Report filesystem disk space usage |
 
 ---
 
