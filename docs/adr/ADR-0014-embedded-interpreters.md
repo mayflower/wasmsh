@@ -1,25 +1,21 @@
-# ADR-0014: Embedded Interpreters for Complex Data-Processing Utilities
+# ADR-0014: Eingebettete Interpreter für komplexe Utilities
 
 ## Status
-Accepted
+Angenommen
 
-## Context
-Several essential agent utilities (jq, awk, yq, bc) require their own expression languages, parsers, and evaluators. These cannot be implemented as simple stdin→stdout text transformations. The question is whether to depend on external interpreter libraries or implement clean-room versions.
+## Kontext
+Wichtige Agent-Utilities (jq, awk, yq, bc) benötigen eigene Ausdruckssprachen mit Parser und Evaluator. Alternativen wären externe Crate-Dependencies oder Delegation an den Host.
 
-## Decision
-Complex utilities are implemented as self-contained embedded interpreters within the wasmsh-utils crate:
+## Entscheidung
+Jedes komplexe Utility wird als eigenständiger Interpreter innerhalb `wasmsh-utils` implementiert: Tokenizer → Parser → AST → Evaluator. Kein externer Interpreter, keine GPL-Abhängigkeit.
 
-- **jq** (5,400 lines): Handwritten JSON parser, filter language parser (recursive descent), and tree-walking evaluator with 90+ built-in functions
-- **awk** (3,950 lines): Handwritten lexer, recursive-descent parser, and interpreter with associative arrays, user-defined functions, and regex engine
-- **yq** (1,300 lines): Handwritten YAML parser with indentation tracking, jq-compatible filter subset
-- **bc** (1,085 lines): Handwritten expression parser and evaluator with variables, control flow, and user-defined functions
+- **jq**: JSON-Parser, Filter-Sprache, 90+ Built-in-Funktionen
+- **awk**: Lexer, rekursiver Abstieg, assoziative Arrays, User-Funktionen, eigene Regex-Engine
+- **yq**: YAML-Parser mit Einrückungsverfolgung, jq-kompatibler Filter-Subset
+- **bc**: Ausdrucksparser mit Variablen, Kontrollfluss, User-Funktionen
 
-Each interpreter follows the same architecture: tokenizer → parser → AST → evaluator, matching the shell's own pipeline pattern.
-
-## Consequences
-- **Clean-room guarantee maintained**: No external interpreter dependencies, no GPL code
-- **Full control over safety**: Each interpreter has iteration limits (awk: 1M, jq: depth 1000) and allocation guards
-- **Self-contained regex**: awk and rg each contain their own regex engine supporting `.`, `*`, `+`, `?`, `^`, `$`, `[...]`, `\d`, `\w`, `\s`
-- **Maintenance burden**: ~12,000 lines of interpreter code to maintain
-- **No std dependency**: All interpreters operate on VFS abstractions, not filesystem calls
-- **Consistent error model**: All interpreters emit errors via the UtilOutput stderr channel and return appropriate exit codes
+## Konsequenzen
+- Clean-Room-Garantie bleibt erhalten (keine externen Interpreter-Deps)
+- Sicherheit durch Iterationslimits (awk: 1M, jq: Tiefe 1000) und Allokationsschutz
+- ~12.000 Zeilen Interpreter-Code als Wartungslast
+- Eigene Regex-Engines in awk und rg (kein regex-Crate)

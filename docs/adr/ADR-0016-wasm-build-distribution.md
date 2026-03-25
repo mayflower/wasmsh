@@ -1,37 +1,29 @@
-# ADR-0016: WASM Build and Distribution Pipeline
+# ADR-0016: WASM-Build und Distributionspipeline
 
 ## Status
-Accepted
+Angenommen
 
-## Context
-wasmsh targets browser environments via wasm32-unknown-unknown. The compiled WASM binary needs to be usable from JavaScript/TypeScript bundlers (webpack, vite), ES modules (browser `<script type="module">`), and Node.js (CommonJS). A standardized build and distribution pipeline is needed.
+## Kontext
+wasmsh zielt auf Browser-Umgebungen via wasm32-unknown-unknown. Das kompilierte WASM muss aus JS-Bundlern (webpack, vite), ES-Modulen (Browser) und Node.js (CommonJS) nutzbar sein.
 
-## Decision
-Use wasm-pack to build three targets from the wasmsh-browser crate:
+## Entscheidung
+wasm-pack baut drei Targets aus dem wasmsh-browser-Crate:
 
-| Target | Format | Use Case |
-|--------|--------|----------|
-| `bundler` | ES module + .wasm | webpack, vite, Rollup |
-| `web` | ES module + .wasm | Browser `<script type="module">` |
-| `nodejs` | CommonJS + .wasm | Node.js, testing, Python bridge |
+- **bundler** (ES-Modul + .wasm) — webpack, vite, Rollup
+- **web** (ES-Modul + .wasm) — Browser `<script type="module">`
+- **nodejs** (CommonJS + .wasm) — Node.js, Testing, Python-Bridge
 
-The wasmsh-browser crate uses `crate-type = ["cdylib", "rlib"]`:
-- `cdylib` produces the .wasm binary via wasm-bindgen
-- `rlib` allows other Rust crates to depend on it
+Crate-Type ist `["cdylib", "rlib"]`: `cdylib` erzeugt die .wasm-Binary via wasm-bindgen, `rlib` ermöglicht Rust-interne Abhängigkeit.
 
-### Build optimization
-wasm-opt post-processes all .wasm files with `-Os` and feature flags:
-`--enable-bulk-memory --enable-mutable-globals --enable-sign-ext --enable-nontrapping-float-to-int`
+wasm-opt optimiert alle .wasm-Dateien mit `-Os` und aktiviert die von Rust 1.94+ benötigten Features (bulk-memory, mutable-globals, sign-ext, nontrapping-float-to-int).
 
 ### Distribution
-- **GitHub Releases**: Tagged pushes (`v*`) trigger the Build WASM workflow which creates a GitHub Release with bundler/web/nodejs tarballs
-- **GitHub Actions artifacts**: Every push to main uploads ephemeral artifacts (90-day retention)
-- **npm**: Future (not yet published)
-- **crates.io**: Future (workspace deps have `version = "0.1.0"` ready)
+- **GitHub Releases**: Tag-Push (`v*`) erzeugt Release mit bundler/web/nodejs-Tarballs
+- **GitHub Actions Artifacts**: Jeder Push auf main lädt ephemere Artefakte hoch (90 Tage)
+- **npm / crates.io**: Vorbereitet, noch nicht veröffentlicht
 
-## Consequences
-- Three build targets cover all JavaScript ecosystem use cases
-- wasm-bindgen generates TypeScript type definitions automatically
-- u64 parameters map to BigInt in JavaScript (e.g., step_budget)
-- serde JSON serialization bridges the protocol types (WorkerEvent, HostCommand) between Rust and JS
-- Binary size tracked via CI size-budget check (2 MB limit)
+## Konsequenzen
+- Drei Build-Targets decken das gesamte JS-Ökosystem ab
+- wasm-bindgen generiert TypeScript-Typdefinitionen automatisch
+- u64-Parameter werden zu BigInt in JavaScript (z.B. step_budget)
+- Binary-Größe wird per CI-Budget (2 MB) überwacht

@@ -1,27 +1,20 @@
-# ADR-0015: Clean-Room Hash and Checksum Implementations
+# ADR-0015: Clean-Room-Hash-Implementierungen
 
 ## Status
-Accepted
+Angenommen
 
-## Context
-Standard shell utilities (md5sum, sha1sum, sha256sum, sha512sum, cksum, gzip) require cryptographic hash and checksum algorithms. In a browser WASM sandbox, we cannot link to system libcrypto or OpenSSL. External Rust crate dependencies (sha2, md5) would add to binary size and are not strictly necessary for correctness.
+## Kontext
+Utilities wie md5sum, sha1sum, sha256sum, sha512sum und cksum/gzip benötigen kryptografische Hash-Algorithmen. Im Browser-WASM gibt es kein libcrypto. Externe Crates (sha2, md5) würden die Binary vergrößern.
 
-## Decision
-All hash algorithms are implemented from scratch following their respective specifications:
+## Entscheidung
+Alle Hash-Algorithmen werden von Hand nach RFC/FIPS-Spezifikation implementiert — kein externes Crypto-Crate:
 
-| Algorithm | Spec | Output | Implementation |
-|-----------|------|--------|----------------|
-| MD5 | RFC 1321 | 128-bit | `data_ops.rs` |
-| SHA-1 | RFC 3174 | 160-bit | `hash_ops.rs` |
-| SHA-256 | FIPS 180-4 | 256-bit | `data_ops.rs` |
-| SHA-512 | FIPS 180-4 | 512-bit | `hash_ops.rs` |
-| CRC-32 | ISO 3309 | 32-bit | `helpers.rs` (shared) |
+- MD5 (RFC 1321), SHA-1 (RFC 3174), SHA-256/SHA-512 (FIPS 180-4), CRC-32 (ISO 3309)
+- CRC-32-Tabelle wird zur Compile-Zeit generiert (`const fn`) und von cksum und gzip geteilt
+- Verifiziert gegen NIST-Referenzvektoren (Leerstring, „abc")
 
-CRC-32 uses a compile-time lookup table (`const fn build_crc32_table`) shared between cksum and gzip/gunzip.
-
-## Consequences
-- **Zero external crypto dependencies** for the utils crate
-- **Verified against known test vectors**: NIST reference values for empty string and "abc"
-- **Clean-room provenance**: Written from RFC/FIPS specifications, not derived from existing implementations
-- **Not constant-time**: These implementations are not side-channel resistant (acceptable for a sandbox utility, not for security-critical use)
-- **Binary size benefit**: No additional WASM payload from crypto crate dependencies
+## Konsequenzen
+- Null externe Crypto-Dependencies für wasmsh-utils
+- Clean-Room-Provenance: geschrieben nach Spezifikation, nicht abgeleitet
+- Nicht konstant-zeitig (für Sandbox akzeptabel, nicht für sicherheitskritische Anwendung)
+- Weniger WASM-Payload durch fehlende Crate-Dependencies
