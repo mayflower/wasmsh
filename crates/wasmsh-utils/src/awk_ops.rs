@@ -1785,6 +1785,8 @@ struct AwkInterpreter {
     arrays: HashMap<String, HashMap<String, AwkValue>>,
     /// Output buffer
     output_buf: Vec<u8>,
+    /// Stderr buffer for warnings
+    stderr_buf: Vec<u8>,
     /// Functions defined in the program
     functions: HashMap<String, AwkFunction>,
     /// Random state for `rand()/srand()`
@@ -1813,6 +1815,7 @@ impl AwkInterpreter {
             vars,
             arrays: HashMap::new(),
             output_buf: Vec::new(),
+            stderr_buf: Vec::new(),
             functions: HashMap::new(),
             rand_state: 0x1234_5678_9abc_def0,
             exit_code: 0,
@@ -2176,19 +2179,20 @@ impl AwkInterpreter {
                     return AwkValue::Str(String::new());
                 }
                 let s = self.eval_expr(&args[0]).to_str();
+                let chars: Vec<char> = s.chars().collect();
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let start = (self
                     .eval_expr(args.get(1).unwrap_or(&Expr::Num(1.0)))
                     .to_num() as isize)
                     .max(1) as usize;
-                let start_idx = (start - 1).min(s.len());
+                let start_idx = (start - 1).min(chars.len());
                 if args.len() >= 3 {
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     let len = self.eval_expr(&args[2]).to_num().max(0.0) as usize;
-                    let end = (start_idx + len).min(s.len());
-                    AwkValue::Str(s[start_idx..end].to_string())
+                    let end = (start_idx + len).min(chars.len());
+                    AwkValue::Str(chars[start_idx..end].iter().collect())
                 } else {
-                    AwkValue::Str(s[start_idx..].to_string())
+                    AwkValue::Str(chars[start_idx..].iter().collect())
                 }
             }
             "index" => {
@@ -2625,9 +2629,8 @@ impl AwkInterpreter {
                     's' => {
                         let mut s = arg.to_str();
                         if let Some(prec) = precision {
-                            if s.len() > prec {
-                                s.truncate(prec);
-                            }
+                            let truncated: String = s.chars().take(prec).collect();
+                            s = truncated;
                         }
                         pad_string(&s, width, left_align, ' ')
                     }
@@ -2745,7 +2748,9 @@ impl AwkInterpreter {
                     }
                     iteration += 1;
                     if iteration > 1_000_000 {
-                        break; // Safety limit
+                        self.stderr_buf
+                            .extend_from_slice(b"awk: loop iteration limit (1000000) reached\n");
+                        break;
                     }
                 }
                 ControlFlow::None
@@ -2763,6 +2768,8 @@ impl AwkInterpreter {
                     }
                     iteration += 1;
                     if iteration > 1_000_000 {
+                        self.stderr_buf
+                            .extend_from_slice(b"awk: loop iteration limit (1000000) reached\n");
                         break;
                     }
                 }
@@ -2792,6 +2799,8 @@ impl AwkInterpreter {
                     }
                     iteration += 1;
                     if iteration > 1_000_000 {
+                        self.stderr_buf
+                            .extend_from_slice(b"awk: loop iteration limit (1000000) reached\n");
                         break;
                     }
                 }
@@ -2911,33 +2920,7 @@ impl AwkInterpreter {
             let records: Vec<&str> = if rs == "\n" {
                 content.lines().collect()
             } else if rs.is_empty() {
-                // Empty RS means paragraph mode: split on blank lines
-                let mut recs = Vec::new();
-                let mut current = String::new();
-                for line in content.lines() {
-                    if line.is_empty() {
-                        if !current.is_empty() {
-                            // Remove trailing newline
-                            if current.ends_with('\n') {
-                                current.pop();
-                            }
-                            recs.push(current.clone());
-                            current.clear();
-                        }
-                    } else {
-                        if !current.is_empty() {
-                            current.push('\n');
-                        }
-                        current.push_str(line);
-                    }
-                }
-                if !current.is_empty() {
-                    recs.push(current);
-                }
-                // We need to return &str but we own these strings, so store them
-                // Actually, let's just handle this differently
-                let _ = recs; // drop
-                              // Fallback to simple line-based for now
+                // TODO: paragraph mode (RS="") — currently falls back to line-based
                 content.lines().collect()
             } else if rs.len() == 1 {
                 content.split(rs.chars().next().unwrap()).collect()
@@ -3278,6 +3261,9 @@ pub(crate) fn util_awk(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     // Flush output
     ctx.output.stdout(&interp.output_buf);
+    if !interp.stderr_buf.is_empty() {
+        ctx.output.stderr(&interp.stderr_buf);
+    }
 
     exit_code
 }

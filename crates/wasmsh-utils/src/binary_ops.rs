@@ -285,6 +285,10 @@ pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                 return 1;
             };
             block_size = v;
+            if block_size > MAX_DD_SIZE {
+                ctx.output.stderr(b"dd: block size too large\n");
+                return 1;
+            }
         } else if let Some(val) = arg.strip_prefix("count=") {
             count = val.parse().ok();
         } else if let Some(val) = arg.strip_prefix("skip=") {
@@ -344,7 +348,11 @@ pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     };
 
     // Skip input blocks
-    let skip_bytes = skip_blocks * block_size;
+    let skip_bytes = skip_blocks.saturating_mul(block_size);
+    if skip_bytes > MAX_DD_SIZE {
+        ctx.output.stderr(b"dd: skip offset too large\n");
+        return 1;
+    }
     let input_data = if skip_bytes as usize >= input_data.len() {
         &[]
     } else {
@@ -671,13 +679,18 @@ pub(crate) fn util_split(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 }
 
 /// Generate alphabetic suffix: 0 -> "aa", 1 -> "ab", ..., 25 -> "az", 26 -> "ba", ...
+/// Extends to 3-letter suffixes for n >= 676.
 fn suffix_alpha(n: usize) -> String {
-    let first = (n / 26) as u8 + b'a';
-    let second = (n % 26) as u8 + b'a';
-    let mut s = String::with_capacity(2);
-    s.push(first as char);
-    s.push(second as char);
-    s
+    if n < 26 * 26 {
+        let first = (n / 26) as u8 + b'a';
+        let second = (n % 26) as u8 + b'a';
+        format!("{}{}", first as char, second as char)
+    } else {
+        let a = ((n / (26 * 26)) % 26) as u8 + b'a';
+        let b = ((n / 26) % 26) as u8 + b'a';
+        let c = (n % 26) as u8 + b'a';
+        format!("{}{}{}", a as char, b as char, c as char)
+    }
 }
 
 // ---------------------------------------------------------------------------

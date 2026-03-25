@@ -5,6 +5,8 @@ use wasmsh_fs::{OpenOptions, Vfs};
 use crate::helpers::{emit_error, get_input_text, hex_encode, require_args, resolve_path};
 use crate::UtilContext;
 
+const SEQ_MAX_ITERATIONS: usize = 10_000_000;
+
 fn seq_parse(s: &str, output: &mut dyn crate::UtilOutput) -> Option<i64> {
     if let Ok(v) = s.parse::<i64>() {
         Some(v)
@@ -51,10 +53,15 @@ pub(crate) fn util_seq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     };
     let mut i = start;
+    let mut count = 0usize;
     while (step > 0 && i <= end) || (step < 0 && i >= end) {
         let s = format!("{i}\n");
         ctx.output.stdout(s.as_bytes());
         i += step;
+        count += 1;
+        if count >= SEQ_MAX_ITERATIONS {
+            break;
+        }
     }
     0
 }

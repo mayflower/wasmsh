@@ -822,12 +822,13 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         if name_start + name_len > data.len() {
             break;
         }
-        let name = String::from_utf8_lossy(&data[name_start..name_start + name_len]).to_string();
+        let raw_name =
+            String::from_utf8_lossy(&data[name_start..name_start + name_len]).to_string();
 
         let data_start = name_start + name_len + extra_len;
 
         if list_only {
-            let line = format!("{uncompressed_size:>9}  {name}\n");
+            let line = format!("{uncompressed_size:>9}  {raw_name}\n");
             ctx.output.stdout(line.as_bytes());
             total_files += 1;
             total_size += uncompressed_size as u64;
@@ -835,10 +836,25 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             continue;
         }
 
+        // Sanitize entry name: strip leading '/' and all '..' components to prevent zip-slip
+        let sanitized: String = raw_name
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|c| *c != "..")
+            .collect::<Vec<_>>()
+            .join("/");
+        let name = sanitized;
+
         let is_directory = name.ends_with('/');
 
         if is_directory {
             let full = resolve_path(&base_dir, &name);
+            if !full.starts_with(&base_dir) {
+                let msg = format!("unzip: skipping '{raw_name}': path traversal detected\n");
+                ctx.output.stderr(msg.as_bytes());
+                pos = data_start + compressed_size;
+                continue;
+            }
             let _ = ctx.fs.create_dir(&full);
             if !quiet {
                 let msg = format!("   creating: {name}\n");
@@ -850,6 +866,12 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             let file_data = &data[data_start..end];
 
             let full = resolve_path(&base_dir, &name);
+            if !full.starts_with(&base_dir) {
+                let msg = format!("unzip: skipping '{raw_name}': path traversal detected\n");
+                ctx.output.stderr(msg.as_bytes());
+                pos = data_start + compressed_size;
+                continue;
+            }
 
             // Ensure parent directory exists
             if let Some(slash_pos) = full.rfind('/') {

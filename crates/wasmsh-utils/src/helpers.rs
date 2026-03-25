@@ -59,8 +59,16 @@ pub(crate) fn copy_file_contents(fs: &mut MemoryFs, src: &str, dst: &str) -> Res
 
 pub(crate) fn read_text(fs: &mut MemoryFs, path: &str) -> Result<String, FsError> {
     let h = fs.open(path, OpenOptions::read())?;
-    let data = fs.read_file(h)?;
-    fs.close(h);
+    let data = match fs.read_file(h) {
+        Ok(d) => {
+            fs.close(h);
+            d
+        }
+        Err(e) => {
+            fs.close(h);
+            return Err(e);
+        }
+    };
     String::from_utf8(data).map_err(|_| FsError::Io("invalid utf-8".into()))
 }
 
@@ -170,7 +178,7 @@ pub(crate) fn grep_matches(line: &str, pattern: &str, ignore_case: bool) -> bool
     }
 }
 
-/// Simple glob matching: `*` matches any sequence, `?` matches one char.
+/// Encode bytes as lowercase hexadecimal string.
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -213,6 +221,7 @@ pub(crate) fn child_path(parent: &str, name: &str) -> String {
     }
 }
 
+/// Simple glob matching: `*` matches any sequence, `?` matches one char.
 pub(crate) fn simple_glob_match(pattern: &str, name: &str) -> bool {
     let p = pattern.as_bytes();
     let n = name.as_bytes();

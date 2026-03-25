@@ -383,6 +383,10 @@ pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         ctx.output.stdout(result.as_bytes());
         return 0;
     }
+    if args.len() < 2 {
+        ctx.output.stderr(b"tr: missing operand\n");
+        return 1;
+    }
     let from = args[0];
     let to = args[1];
     let from_chars: Vec<char> = from.chars().collect();

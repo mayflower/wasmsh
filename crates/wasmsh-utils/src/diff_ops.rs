@@ -273,12 +273,12 @@ fn format_normal(hunks: &[Hunk<'_>]) -> String {
         // Determine the change type marker.
         let old_range = if old_change_count == 0 {
             // For insertions after a line, use the line number before.
-            format!("{}", old_change_start.saturating_sub(1).max(0))
+            format!("{}", old_change_start.saturating_sub(1))
         } else {
             normal_range(old_change_start, old_change_count)
         };
         let new_range = if new_change_count == 0 {
-            format!("{}", new_change_start.saturating_sub(1).max(0))
+            format!("{}", new_change_start.saturating_sub(1))
         } else {
             normal_range(new_change_start, new_change_count)
         };
