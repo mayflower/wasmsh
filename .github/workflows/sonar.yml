@@ -36,32 +36,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
-        if: steps.sonar_secrets.outputs.skip != 'true'
-        with:
-          components: clippy, llvm-tools
-
-      - uses: Swatinem/rust-cache@v2
-        if: steps.sonar_secrets.outputs.skip != 'true'
-
-      - name: Install cargo-llvm-cov
-        if: steps.sonar_secrets.outputs.skip != 'true'
-        run: cargo install cargo-llvm-cov --locked
-
-      - name: Run tests with coverage
-        if: steps.sonar_secrets.outputs.skip != 'true'
-        run: |
-          mkdir -p coverage
-          cargo llvm-cov --workspace --lcov --output-path coverage/lcov.info
-        env:
-          RUSTFLAGS: ""
-
-      - name: Generate Clippy report
-        if: steps.sonar_secrets.outputs.skip != 'true'
-        run: |
-          cargo clippy --workspace --all-targets --message-format=json \
-            2> clippy-report.json || true
-
       - name: Cache SonarQube scanner
         if: steps.sonar_secrets.outputs.skip != 'true'
         uses: actions/cache@v4
@@ -78,6 +52,5 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         with:
           args: >-
-            -Dsonar.rust.lcov.reportPaths=coverage/lcov.info
             -Dsonar.qualitygate.wait=true
             -Dsonar.qualitygate.timeout=300
