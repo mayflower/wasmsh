@@ -1,0 +1,16 @@
+[test]
+name = "rw53-bc-math-calculations"
+tags = ["real-world", "math", "multi-tool"]
+tier = "P2"
+requires = ["bc", "echo", "pipeline"]
+
+[input]
+script = """
+echo "scale=2; 355/113" | bc
+echo "2^10" | bc
+echo "obase=16; 255" | bc
+"""
+
+[expect]
+status = 0
+stdout = "3.14\n1024\nFF\n"

@@ -1,0 +1,17 @@
+[test]
+name = "rw46-awk-log-analysis"
+tags = ["real-world", "monitoring", "multi-tool"]
+tier = "P2"
+requires = ["awk", "sort", "pipeline"]
+
+[setup]
+files = { "/tmp/log.txt" = "200 /api/users 45\n404 /api/missing 12\n200 /api/data 89\n500 /api/error 200\n200 /api/users 50\n", "/tmp/count.awk" = "{count[$1]++} END {for (k in count) print k, count[k]}" }
+
+[input]
+script = """
+awk -f /tmp/count.awk /tmp/log.txt | sort
+"""
+
+[expect]
+status = 0
+stdout = "200 3\n404 1\n500 1\n"

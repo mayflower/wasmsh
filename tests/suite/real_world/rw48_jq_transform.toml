@@ -1,0 +1,23 @@
+[test]
+name = "rw48-jq-array-transform"
+tags = ["real-world", "data", "multi-tool"]
+tier = "P2"
+requires = ["jq", "echo", "pipeline"]
+
+[setup]
+files = { "/tmp/data.json" = "[{\"name\":\"alice\",\"score\":92},{\"name\":\"bob\",\"score\":78}]" }
+
+[input]
+script = '''
+jq '[.[] | select(.score > 80)]' /tmp/data.json
+'''
+
+[expect]
+status = 0
+stdout = """[
+  {
+    "name": "alice",
+    "score": 92
+  }
+]
+"""

@@ -195,6 +195,27 @@ pub fn implemented_features() -> HashSet<&'static str> {
     f.insert("rev");
     f.insert("column");
 
+    // Advanced utilities
+    f.insert("awk");
+    f.insert("jq");
+    f.insert("diff");
+    f.insert("patch");
+    f.insert("rg");
+    f.insert("tree");
+    f.insert("xxd");
+    f.insert("dd");
+    f.insert("strings");
+    f.insert("split");
+    f.insert("bc");
+    f.insert("tar");
+    f.insert("gzip");
+    f.insert("gunzip");
+    f.insert("du");
+    f.insert("fd");
+    f.insert("file");
+    f.insert("comm");
+    f.insert("yq");
+
     f
 }
 

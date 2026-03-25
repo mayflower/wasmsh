@@ -1,0 +1,16 @@
+[test]
+name = "rw50-tree-project-structure"
+tags = ["real-world", "devtools", "multi-tool"]
+tier = "P2"
+requires = ["tree", "mkdir", "touch"]
+
+[input]
+script = """
+mkdir -p /project/src/components /project/src/utils /project/tests
+touch /project/src/main.ts /project/src/components/App.tsx /project/src/utils/helpers.ts /project/tests/app.test.ts
+tree /project
+"""
+
+[expect]
+status = 0
+stdout_contains = ["src", "components", "App.tsx", "utils", "helpers.ts", "tests", "app.test.ts", "main.ts"]

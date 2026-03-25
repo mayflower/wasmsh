@@ -1,0 +1,19 @@
+[test]
+name = "rw43-diff-patch-roundtrip"
+tags = ["real-world", "vcs", "multi-tool"]
+tier = "P2"
+requires = ["diff", "patch", "echo", "cp", "cat", "redirection"]
+
+[setup]
+files = { "/tmp/orig.txt" = "line1\nline2\nline3\n", "/tmp/new.txt" = "line1\nmodified\nline3\nline4\n" }
+
+[input]
+script = """
+diff -u /tmp/orig.txt /tmp/new.txt > /tmp/patch.diff || true
+patch -i /tmp/patch.diff 2>/dev/null
+cat /tmp/orig.txt
+"""
+
+[expect]
+status = 0
+stdout_contains = ["modified", "line4"]

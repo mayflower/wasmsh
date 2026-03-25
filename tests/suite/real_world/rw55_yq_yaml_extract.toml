@@ -1,0 +1,14 @@
+[test]
+name = "rw55-yq-yaml-extract"
+tags = ["real-world", "config", "multi-tool"]
+tier = "P2"
+requires = ["yq", "printf", "pipeline"]
+
+[input]
+script = """
+printf "name: myapp\nversion: 1.0\nservices:\n  api:\n    port: 8080\n  db:\n    port: 5432\n" | yq '.services.api.port'
+"""
+
+[expect]
+status = 0
+stdout = "8080\n"

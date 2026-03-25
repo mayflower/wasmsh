@@ -1,0 +1,17 @@
+[test]
+name = "rw60-jq-filter-chain"
+tags = ["real-world", "data", "multi-tool"]
+tier = "P2"
+requires = ["jq", "echo", "pipeline"]
+
+[setup]
+files = { "/tmp/items.json" = "{\"items\":[{\"name\":\"a\",\"val\":1},{\"name\":\"b\",\"val\":5},{\"name\":\"c\",\"val\":3}]}" }
+
+[input]
+script = '''
+jq '.items | sort_by(.val) | reverse | .[0].name' /tmp/items.json
+'''
+
+[expect]
+status = 0
+stdout = "\"b\"\n"

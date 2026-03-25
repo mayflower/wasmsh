@@ -1,0 +1,17 @@
+[test]
+name = "rw41-jq-pipeline-extract-format"
+tags = ["real-world", "data", "multi-tool"]
+tier = "P2"
+requires = ["jq", "awk", "pipeline", "echo", "redirection"]
+
+[setup]
+files = { "/tmp/users.json" = "{\"users\":[{\"name\":\"alice\",\"age\":30},{\"name\":\"bob\",\"age\":25}]}" }
+
+[input]
+script = """
+jq -r '.users[].name' /tmp/users.json | awk '{print "user: " $1}'
+"""
+
+[expect]
+status = 0
+stdout = "user: alice\nuser: bob\n"

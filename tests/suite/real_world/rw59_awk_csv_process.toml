@@ -1,0 +1,17 @@
+[test]
+name = "rw59-awk-csv-processing"
+tags = ["real-world", "data", "multi-tool"]
+tier = "P2"
+requires = ["awk", "pipeline", "redirection"]
+
+[setup]
+files = { "/tmp/grades.csv" = "name,score,grade\nalice,95,A\nbob,82,B\ncharlie,91,A\ndiana,78,C\n", "/tmp/extract.awk" = "NR > 1 { print $1, $2 }" }
+
+[input]
+script = """
+awk -F, -f /tmp/extract.awk /tmp/grades.csv
+"""
+
+[expect]
+status = 0
+stdout = "alice 95\nbob 82\ncharlie 91\ndiana 78\n"

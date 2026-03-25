@@ -1,0 +1,18 @@
+[test]
+name = "rw54-multi-stage-data-pipeline"
+tags = ["real-world", "data", "multi-tool"]
+tier = "P2"
+requires = ["seq", "awk", "sort", "head", "pipeline"]
+
+[setup]
+files = { "/tmp/sum.awk" = "{sum+=$1} END {print sum}", "/tmp/join.awk" = "NR>1{printf \",\"} {printf \"%s\", $0} END{printf \"\\n\"}" }
+
+[input]
+script = """
+seq 1 100 | awk -f /tmp/sum.awk
+seq 1 20 | sort -rn | head -5 | awk -f /tmp/join.awk
+"""
+
+[expect]
+status = 0
+stdout = "5050\n20,19,18,17,16\n"

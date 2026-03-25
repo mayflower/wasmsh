@@ -1,0 +1,17 @@
+[test]
+name = "rw47-find-grep-pipeline"
+tags = ["real-world", "devtools", "multi-tool"]
+tier = "P2"
+requires = ["rg", "sort", "pipeline"]
+
+[setup]
+files = { "/code/src/main.rs" = "use std::io;\n", "/code/src/lib.rs" = "use std::fs;\n", "/code/tests/test.rs" = "use std::io;\n" }
+
+[input]
+script = """
+rg -l "std::io" /code | sort
+"""
+
+[expect]
+status = 0
+stdout = "/code/src/main.rs\n/code/tests/test.rs\n"

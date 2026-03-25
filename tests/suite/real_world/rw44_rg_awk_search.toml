@@ -1,0 +1,17 @@
+[test]
+name = "rw44-rg-awk-code-search"
+tags = ["real-world", "devtools", "multi-tool"]
+tier = "P2"
+requires = ["rg", "awk", "mkdir", "echo", "pipeline", "redirection"]
+
+[setup]
+files = { "/project/src/main.rs" = "fn main() { println!(\"hello\"); }\n// TODO: fix this\n", "/project/src/lib.rs" = "fn helper() { /* TODO: refactor */ }\n" }
+
+[input]
+script = """
+rg -n "TODO" /project/src | sort | awk -F: '{print $1 " line " $2}'
+"""
+
+[expect]
+status = 0
+stdout_contains = ["line"]

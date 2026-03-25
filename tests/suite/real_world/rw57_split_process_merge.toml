@@ -1,0 +1,18 @@
+[test]
+name = "rw57-split-process-merge"
+tags = ["real-world", "data", "multi-tool"]
+tier = "P2"
+requires = ["split", "cat", "wc", "redirection"]
+
+[setup]
+files = { "/tmp/numbers.txt" = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n" }
+
+[input]
+script = """
+split -l 5 /tmp/numbers.txt /tmp/part_
+cat /tmp/part_aa /tmp/part_ab | wc
+"""
+
+[expect]
+status = 0
+stdout_contains = ["10"]

@@ -1,0 +1,14 @@
+[test]
+name = "rw56-frequency-analysis-pipeline"
+tags = ["real-world", "data", "multi-tool"]
+tier = "P2"
+requires = ["sort", "uniq", "printf", "head", "pipeline"]
+
+[input]
+script = """
+printf "apple\nbanana\napple\napple\nbanana\ncherry\n" | sort | uniq -c | sort -rn
+"""
+
+[expect]
+status = 0
+stdout_contains = ["3 apple", "2 banana", "1 cherry"]

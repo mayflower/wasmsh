@@ -1,0 +1,17 @@
+[test]
+name = "rw52-file-type-detection"
+tags = ["real-world", "binary", "multi-tool"]
+tier = "P2"
+requires = ["file", "echo", "printf", "redirection"]
+
+[input]
+script = """
+echo '{"key":"value"}' > /tmp/data.json
+echo '<html><body>hi</body></html>' > /tmp/page.html
+printf '#!/bin/bash\necho hello\n' > /tmp/script.sh
+file /tmp/data.json /tmp/page.html /tmp/script.sh
+"""
+
+[expect]
+status = 0
+stdout_contains = ["JSON", "HTML", "script text executable"]

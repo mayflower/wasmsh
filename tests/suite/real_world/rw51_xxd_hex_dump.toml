@@ -1,0 +1,17 @@
+[test]
+name = "rw51-xxd-hex-dump-and-plain"
+tags = ["real-world", "binary", "multi-tool"]
+tier = "P2"
+requires = ["xxd", "echo", "head", "pipeline", "redirection"]
+
+[input]
+script = """
+echo -n "Hello World" > /tmp/bin.dat
+xxd /tmp/bin.dat | head -1
+echo -n "Jello World" > /tmp/bin2.dat
+xxd -p /tmp/bin2.dat
+"""
+
+[expect]
+status = 0
+stdout_contains = ["4865 6c6c 6f20 576f 726c 64", "4a656c6c6f20576f726c64"]

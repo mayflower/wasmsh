@@ -1,0 +1,18 @@
+[test]
+name = "rw42-du-sort-top-directories"
+tags = ["real-world", "disk", "multi-tool"]
+tier = "P2"
+requires = ["mkdir", "du", "sort", "seq", "pipeline", "redirection"]
+
+[input]
+script = """
+mkdir -p /data/big /data/small /data/medium
+seq 1 5000 > /data/big/file
+seq 1 100 > /data/medium/file
+echo x > /data/small/file
+du -s /data/big /data/medium /data/small | sort -rn
+"""
+
+[expect]
+status = 0
+stdout_contains = ["/data/big", "/data/medium", "/data/small"]

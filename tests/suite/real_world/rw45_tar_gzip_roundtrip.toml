@@ -1,0 +1,23 @@
+[test]
+name = "rw45-tar-gzip-roundtrip"
+tags = ["real-world", "archive", "multi-tool"]
+tier = "P2"
+requires = ["tar", "gzip", "gunzip", "mkdir", "echo", "cat"]
+
+[input]
+script = """
+mkdir -p /src/pkg
+echo "hello" > /src/pkg/readme.txt
+echo "world" > /src/pkg/data.txt
+tar -cf /tmp/pkg.tar -C /src pkg
+gzip /tmp/pkg.tar
+mkdir /dst
+gunzip /tmp/pkg.tar.gz
+tar -xf /tmp/pkg.tar -C /dst
+cat /dst/pkg/readme.txt
+cat /dst/pkg/data.txt
+"""
+
+[expect]
+status = 0
+stdout = "hello\nworld\n"

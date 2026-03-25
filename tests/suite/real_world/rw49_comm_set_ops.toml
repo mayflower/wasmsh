@@ -1,0 +1,21 @@
+[test]
+name = "rw49-comm-set-operations"
+tags = ["real-world", "data", "multi-tool"]
+tier = "P2"
+requires = ["comm", "sort", "printf", "echo", "pipeline", "redirection"]
+
+[input]
+script = """
+printf "alpha\nbeta\ngamma\ndelta\n" | sort > /tmp/set_a.txt
+printf "beta\ndelta\nepsilon\nzeta\n" | sort > /tmp/set_b.txt
+echo "=== Only in A ==="
+comm -23 /tmp/set_a.txt /tmp/set_b.txt
+echo "=== Only in B ==="
+comm -13 /tmp/set_a.txt /tmp/set_b.txt
+echo "=== In both ==="
+comm -12 /tmp/set_a.txt /tmp/set_b.txt
+"""
+
+[expect]
+status = 0
+stdout = "=== Only in A ===\nalpha\ngamma\n=== Only in B ===\nepsilon\nzeta\n=== In both ===\nbeta\ndelta\n"

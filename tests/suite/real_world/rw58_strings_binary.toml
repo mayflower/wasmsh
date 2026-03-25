@@ -1,0 +1,15 @@
+[test]
+name = "rw58-strings-from-binary"
+tags = ["real-world", "binary", "multi-tool"]
+tier = "P2"
+requires = ["strings", "echo", "cat", "redirection", "echo-escape"]
+
+[input]
+script = '''
+echo -n -e 'MAGIC\0\001\002Hello World\0\003\004wasmsh rocks\0' > /tmp/binary.dat
+strings /tmp/binary.dat
+'''
+
+[expect]
+status = 0
+stdout_contains = ["MAGIC", "Hello World", "wasmsh rocks"]
