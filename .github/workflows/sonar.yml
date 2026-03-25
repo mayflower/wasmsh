@@ -1,14 +1,15 @@
 name: SonarQube
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: sonar-${{ github.ref }}
@@ -18,6 +19,9 @@ jobs:
   sonarqube:
     name: SonarQube Scan
     runs-on: mayflower-k8s-runners
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     env:
       SONAR_TOKEN_SET: ${{ secrets.SONAR_TOKEN != '' }}
     steps:
@@ -36,6 +40,31 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Download coverage from CI workflow
+        if: steps.sonar_secrets.outputs.skip != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Check coverage availability
+        if: steps.sonar_secrets.outputs.skip != 'true'
+        id: coverage
+        run: |
+          if [ -f "coverage/sonar-coverage.xml" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "SonarQube coverage XML found"
+          elif [ -f "coverage/lcov.info" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "lcov report found (will use as fallback)"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "No coverage report found; scanning without coverage"
+          fi
+
       - name: Cache SonarQube scanner
         if: steps.sonar_secrets.outputs.skip != 'true'
         uses: actions/cache@v4
@@ -52,5 +81,6 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         with:
           args: >-
+            ${{ steps.coverage.outputs.available == 'true' && '-Dsonar.coverageReportPaths=coverage/sonar-coverage.xml' || '' }}
             -Dsonar.qualitygate.wait=true
             -Dsonar.qualitygate.timeout=300

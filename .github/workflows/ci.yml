@@ -201,11 +201,46 @@ jobs:
         with:
           files: lcov.info
           fail_ci_if_error: false
+      - name: Convert lcov to SonarQube generic coverage XML
+        run: |
+          python3 << 'PYEOF'
+          import re, sys, os
+          from collections import defaultdict
+
+          files = defaultdict(lambda: {"lines": {}})
+          current_file = None
+          with open("lcov.info") as f:
+              for line in f:
+                  line = line.strip()
+                  if line.startswith("SF:"):
+                      current_file = line[3:]
+                  elif line.startswith("DA:") and current_file:
+                      parts = line[3:].split(",")
+                      if len(parts) >= 2:
+                          lineno, hits = int(parts[0]), int(parts[1])
+                          files[current_file]["lines"][lineno] = hits
+                  elif line == "end_of_record":
+                      current_file = None
+
+          with open("sonar-coverage.xml", "w") as out:
+              out.write('<coverage version="1">\n')
+              for filepath in sorted(files):
+                  out.write(f'  <file path="{filepath}">\n')
+                  for lineno in sorted(files[filepath]["lines"]):
+                      hits = files[filepath]["lines"][lineno]
+                      covered = "true" if hits > 0 else "false"
+                      out.write(f'    <lineToCover lineNumber="{lineno}" covered="{covered}"/>\n')
+                  out.write('  </file>\n')
+              out.write('</coverage>\n')
+          print(f"Converted {len(files)} files to sonar-coverage.xml")
+          PYEOF
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
-          path: lcov.info
+          path: |
+            lcov.info
+            sonar-coverage.xml
           retention-days: 14
 
   # ── Documentation build ────────────────────────────────────
