@@ -1,19 +1,19 @@
-# ADR-0009: Kooperative Budgets und Cancellation
+# ADR-0009: Cooperative Budgets and Cancellation
 
 ## Status
-Angenommen
+Accepted
 
-## Kontext
-Ein agentischer Sandbox-Service braucht Laufzeitgrenzen und Unterbrechbarkeit.
+## Context
+An agentic sandbox service requires runtime limits and interruptibility.
 
-## Entscheidung
-Die VM erhält:
-- step budget
-- memory budget hooks
-- cancellation token
-- event sink für progress/trace
+## Decision
+The VM receives:
+- Step budget
+- Memory budget hooks
+- Cancellation token
+- Event sink for progress/trace
 
-## Konsequenzen
-- kontrollierbare Laufzeit
-- sichere Einbettung in Services
-- etwas mehr VM-Komplexität
+## Consequences
+- Controllable runtime
+- Safe embedding in services
+- Slightly more VM complexity

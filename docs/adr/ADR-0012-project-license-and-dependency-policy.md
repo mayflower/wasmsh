@@ -1,15 +1,15 @@
-# ADR-0012: Projektlizenz = MIT OR Apache-2.0, dependency policy = permissiv first
+# ADR-0012: Project License = MIT OR Apache-2.0, Dependency Policy = Permissive First
 
 ## Status
-Angenommen
+Accepted
 
-## Kontext
-wasmsh soll breit nutzbar, kommerziell integrierbar und Rust-ökosystemfreundlich sein.
+## Context
+wasmsh should be broadly usable, commercially integrable, and friendly to the Rust ecosystem.
 
-## Entscheidung
-Projektlizenz für Code: `MIT OR Apache-2.0`.
+## Decision
+Project license for code: `MIT OR Apache-2.0`.
 
-## Konsequenzen
-- gute Adoptionschance
-- leichte Integration in viele Produkte
-- GPL-Abhängigkeiten bleiben aus dem Kern fern
+## Consequences
+- Good adoption potential
+- Easy integration into many products
+- GPL dependencies are kept out of the core

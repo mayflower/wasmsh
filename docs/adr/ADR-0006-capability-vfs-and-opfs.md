@@ -1,15 +1,15 @@
-# ADR-0006: Capability-basiertes VFS mit OPFS-Backend
+# ADR-0006: Capability-Based VFS with OPFS Backend
 
 ## Status
-Angenommen
+Accepted
 
-## Kontext
-Im Browser gibt es kein normales POSIX-Dateisystem. Gleichzeitig braucht wasmsh ein virtuelles, sandbox-fähiges FS.
+## Context
+There is no normal POSIX filesystem in the browser. At the same time, wasmsh needs a virtual, sandbox-capable FS.
 
-## Entscheidung
-wasmsh verwendet ein eigenes VFS-Interface mit `MemoryFs`, `OverlayFs` und optional `OpfsFs`.
+## Decision
+wasmsh uses its own VFS interface with `MemoryFs`, `OverlayFs`, and optionally `OpfsFs`.
 
-## Konsequenzen
-- deterministisches FS-Verhalten
-- isolierbare Sessions
-- gute Grundlage für Sandboxing und Snapshots
+## Consequences
+- Deterministic FS behavior
+- Isolatable sessions
+- Good foundation for sandboxing and snapshots

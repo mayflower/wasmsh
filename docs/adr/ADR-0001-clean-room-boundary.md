@@ -1,16 +1,16 @@
-# ADR-0001: Clean-Room-Kompatibilität statt Codeübernahme
+# ADR-0001: Clean-Room Compatibility Instead of Code Adoption
 
 ## Status
-Angenommen
+Accepted
 
-## Kontext
-wasmsh will hohe Shell-Kompatibilität erreichen, darf dafür aber keinen BusyBox- oder Bash-Code in den Kern übernehmen.
+## Context
+wasmsh aims for high shell compatibility but must not adopt any BusyBox or Bash code into the core.
 
-## Entscheidung
-Das Projekt verfolgt **Verhaltenskompatibilität** als Ziel, aber **keine Quellcode-, Hilfetext-, Tabellen- oder Testsuite-Übernahme** aus BusyBox/Bash.
+## Decision
+The project pursues **behavioral compatibility** as a goal, but **no adoption of source code, help text, tables, or test suites** from BusyBox/Bash.
 
-## Konsequenzen
-- wir implementieren Parser, Expansionen und Runtime selbst
-- wir nutzen POSIX als normative Baseline
-- Bash/BusyBox dienen höchstens als Black-Box-Referenz
-- Provenance muss pro größerem PR dokumentiert werden
+## Consequences
+- We implement parser, expansions, and runtime ourselves
+- We use POSIX as the normative baseline
+- Bash/BusyBox serve only as black-box references at most
+- Provenance must be documented per major PR

@@ -1,20 +1,20 @@
-# ADR-0015: Clean-Room-Hash-Implementierungen
+# ADR-0015: Clean-Room Hash Implementations
 
 ## Status
-Angenommen
+Accepted
 
-## Kontext
-Utilities wie md5sum, sha1sum, sha256sum, sha512sum und cksum/gzip benötigen kryptografische Hash-Algorithmen. Im Browser-WASM gibt es kein libcrypto. Externe Crates (sha2, md5) würden die Binary vergrößern.
+## Context
+Utilities like md5sum, sha1sum, sha256sum, sha512sum, and cksum/gzip require cryptographic hash algorithms. There is no libcrypto in browser WASM. External crates (sha2, md5) would increase the binary size.
 
-## Entscheidung
-Alle Hash-Algorithmen werden von Hand nach RFC/FIPS-Spezifikation implementiert — kein externes Crypto-Crate:
+## Decision
+All hash algorithms are implemented by hand according to RFC/FIPS specifications -- no external crypto crate:
 
 - MD5 (RFC 1321), SHA-1 (RFC 3174), SHA-256/SHA-512 (FIPS 180-4), CRC-32 (ISO 3309)
-- CRC-32-Tabelle wird zur Compile-Zeit generiert (`const fn`) und von cksum und gzip geteilt
-- Verifiziert gegen NIST-Referenzvektoren (Leerstring, „abc")
+- CRC-32 table is generated at compile time (`const fn`) and shared by cksum and gzip
+- Verified against NIST reference vectors (empty string, "abc")
 
-## Konsequenzen
-- Null externe Crypto-Dependencies für wasmsh-utils
-- Clean-Room-Provenance: geschrieben nach Spezifikation, nicht abgeleitet
-- Nicht konstant-zeitig (für Sandbox akzeptabel, nicht für sicherheitskritische Anwendung)
-- Weniger WASM-Payload durch fehlende Crate-Dependencies
+## Consequences
+- Zero external crypto dependencies for wasmsh-utils
+- Clean-room provenance: written from specification, not derived
+- Not constant-time (acceptable for sandbox, not for security-critical applications)
+- Less WASM payload due to absent crate dependencies

@@ -1,15 +1,15 @@
-# ADR-0010: POSIX-baseline plus explizite Bash-Erweiterungen
+# ADR-0010: POSIX Baseline Plus Explicit Bash Extensions
 
 ## Status
-Angenommen
+Accepted
 
-## Kontext
-“Bash-kompatibel” ist ohne Präzisierung zu vage.
+## Context
+"Bash-compatible" is too vague without further specification.
 
-## Entscheidung
-Normative Baseline ist POSIX Shell Command Language. Darüber hinaus werden Bash-Erweiterungen explizit pro Profil und Feature-Flag aufgenommen.
+## Decision
+The normative baseline is the POSIX Shell Command Language. Beyond that, Bash extensions are adopted explicitly per profile and feature flag.
 
-## Konsequenzen
-- klarere Roadmap
-- weniger implizite Kompatibilitätsversprechen
-- bessere Test- und Doku-Struktur
+## Consequences
+- Clearer roadmap
+- Fewer implicit compatibility promises
+- Better test and documentation structure

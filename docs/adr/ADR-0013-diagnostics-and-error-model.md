@@ -1,15 +1,15 @@
-# ADR-0013: Eigener Diagnose- und Fehlermodell-Stack
+# ADR-0013: Custom Diagnostics and Error Model Stack
 
 ## Status
-Angenommen
+Accepted
 
-## Kontext
-Shells scheitern oft an schwer lesbaren Parser- und Runtime-Fehlern.
+## Context
+Shells often fail with hard-to-read parser and runtime errors.
 
-## Entscheidung
-Spans, Diagnosecodes, strukturierte Fehler und benutzerfreundliche Meldungen sind first-class.
+## Decision
+Spans, diagnostic codes, structured errors, and user-friendly messages are first-class.
 
-## Konsequenzen
-- bessere DX und UI-Integration
-- höherer Initialaufwand
-- später bessere Editor- und Agentenintegration
+## Consequences
+- Better DX and UI integration
+- Higher initial effort
+- Better editor and agent integration later

@@ -1,18 +1,18 @@
-# ADR-0003: Handgeschriebener Parser
+# ADR-0003: Handwritten Parser
 
 ## Status
-Angenommen
+Accepted
 
-## Kontext
-Shell-Syntax ist kontextsensitiv und koppelt Tokenisierung, Quoting, Here-Docs und Expansion eng.
+## Context
+Shell syntax is context-sensitive and tightly couples tokenization, quoting, here-docs, and expansion.
 
-## Entscheidung
-wasmsh verwendet:
-- einen handgeschriebenen stateful lexer
-- einen handgeschriebenen recursive-descent parser
-- separate Subparser für `${}`, `$(( ))`, `[[ ]]` und Patterns
+## Decision
+wasmsh uses:
+- A handwritten stateful lexer
+- A handwritten recursive-descent parser
+- Separate subparsers for `${}`, `$(( ))`, `[[ ]]`, and patterns
 
-## Konsequenzen
-- bessere Kontrolle über Shell-Eckenfälle
-- höherer Initialaufwand
-- dafür klarere Fehlerdiagnosen und bessere Browser-Tauglichkeit
+## Consequences
+- Better control over shell edge cases
+- Higher initial effort
+- Clearer error diagnostics and better browser suitability in return

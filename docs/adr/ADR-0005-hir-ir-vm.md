@@ -1,16 +1,16 @@
-# ADR-0005: HIR/IR/VM statt direkter AST-Interpretation
+# ADR-0005: HIR/IR/VM Instead of Direct AST Interpretation
 
 ## Status
-Angenommen
+Accepted
 
-## Kontext
-AST-Direktausführung vermischt Syntax mit Laufzeitsemantik und erschwert Limits, Tracing und Optimierung.
+## Context
+Direct AST execution mixes syntax with runtime semantics and makes limits, tracing, and optimization harder.
 
-## Entscheidung
+## Decision
 Pipeline:
 `AST -> HIR -> IR -> VM`
 
-## Konsequenzen
-- besseres Budgeting und Cancellation
-- klarere Builtin-/Utility-Grenzen
-- mehr Architekturaufwand, aber bessere Skalierbarkeit
+## Consequences
+- Better budgeting and cancellation
+- Clearer builtin/utility boundaries
+- More architectural effort, but better scalability

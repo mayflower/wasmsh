@@ -1,40 +1,40 @@
-# ADR-0011: Originäre Tests plus Differential Oracles
+# ADR-0011: Original Tests Plus Differential Oracles
 
 ## Status
-Angenommen (aktualisiert 2026-03)
+Accepted (updated 2026-03)
 
-## Kontext
-Kompatibilität muss messbar sein, ohne GPL-Testkorpora ins Repo zu ziehen.
+## Context
+Compatibility must be measurable without pulling GPL test corpora into the repository.
 
-## Entscheidung
-Das Repo enthält nur originäre Tests. Zusätzlich kann lokal/CI ein optionaler Differential-Harness gegen installierte Referenzshells laufen.
+## Decision
+The repository contains only original tests. Additionally, an optional differential harness can run locally/in CI against installed reference shells.
 
-## Aktueller Stand
+## Current State
 
-960 Tests insgesamt: 506 Unit-Tests + 454 TOML-Integrationstests.
+960 tests total: 506 unit tests + 454 TOML integration tests.
 
-### Unit-Tests (506)
-- **wasmsh-utils**: 400 Unit-Tests decken alle 86 Utilities ab
-- **wasmsh-parse**: Parser-Tests inkl. Property-based Fuzzing (proptest)
-- **wasmsh-lex**, **wasmsh-expand**, **wasmsh-vm**, etc.: Crate-spezifische Tests
+### Unit Tests (506)
+- **wasmsh-utils**: 400 unit tests covering all 86 utilities
+- **wasmsh-parse**: Parser tests including property-based fuzzing (proptest)
+- **wasmsh-lex**, **wasmsh-expand**, **wasmsh-vm**, etc.: Crate-specific tests
 
-### TOML-Integrationstests (454)
-- Deklarative `[[test]]`-Tabellen in TOML-Dateien
-- Shell-Semantik, Utility-Verhalten, Redirections, Expansions
-- **60 Real-World-Integrationstests** (rw01–rw60): Multi-Tool-Pipelines aus der Praxis (CI/CD, Log-Analyse, ETL-Pipelines, Deployment-Automatisierung, Schema-Validierung, Crontab-Management, etc.)
+### TOML Integration Tests (454)
+- Declarative `[[test]]` tables in TOML files
+- Shell semantics, utility behavior, redirections, expansions
+- **60 real-world integration tests** (rw01-rw60): Multi-tool pipelines from practice (CI/CD, log analysis, ETL pipelines, deployment automation, schema validation, crontab management, etc.)
 
-### Property-based Fuzzing
+### Property-Based Fuzzing
 - `proptest` in `wasmsh-parse/tests/property_tests.rs`
-- Lexer und Parser paniken nie bei beliebiger Eingabe
-- Fuzz-Generatoren erzeugen syntaktisch strukturierte und rein zufällige Eingaben
+- Lexer and parser never panic on arbitrary input
+- Fuzz generators produce both syntactically structured and purely random inputs
 
 ### Benchmarks
-- **Criterion-Benchmarks** für Parser (`wasmsh-parse/benches/parse_bench.rs`), Expansion (`wasmsh-expand/benches/expand_bench.rs`) und Pipeline-Ausführung (`wasmsh-browser/benches/pipeline_bench.rs`)
-- Regressionserkennung über CI (optional)
+- **Criterion benchmarks** for parser (`wasmsh-parse/benches/parse_bench.rs`), expansion (`wasmsh-expand/benches/expand_bench.rs`), and pipeline execution (`wasmsh-browser/benches/pipeline_bench.rs`)
+- Regression detection via CI (optional)
 
-## Konsequenzen
-- Saubere Provenance — kein Test ist aus GPL-Projekten kopiert
-- Mehr Aufwand für Testdesign
-- Trotzdem hohe Praxisnähe durch Real-World-Szenarien
-- Property-Tests sichern Robustheit gegen beliebige Eingaben
-- Benchmarks ermöglichen Performance-Tracking über Releases
+## Consequences
+- Clean provenance -- no test is copied from GPL projects
+- More effort for test design
+- Still high practical relevance through real-world scenarios
+- Property tests ensure robustness against arbitrary inputs
+- Benchmarks enable performance tracking across releases

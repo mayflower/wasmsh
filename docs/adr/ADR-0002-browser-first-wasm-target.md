@@ -1,16 +1,16 @@
-# ADR-0002: Browser-first auf wasm32-unknown-unknown
+# ADR-0002: Browser-First on wasm32-unknown-unknown
 
 ## Status
-Angenommen
+Accepted
 
-## Kontext
-wasmsh muss im Browser laufen. `wasm32-unknown-unknown` ist das minimale Rust-WebAssembly-Ziel ohne standardisierte Host-Imports.
+## Context
+wasmsh must run in the browser. `wasm32-unknown-unknown` is the minimal Rust WebAssembly target without standardized host imports.
 
-## Entscheidung
-Der Primär-Target ist `wasm32-unknown-unknown`. Browserintegration erfolgt über `wasm-bindgen`/`web-sys` und einen Web Worker.
+## Decision
+The primary target is `wasm32-unknown-unknown`. Browser integration is done via `wasm-bindgen`/`web-sys` and a Web Worker.
 
-## Konsequenzen
-- kein Vertrauen auf `std::fs`
-- kein Prozessmodell des Hosts
-- keine implizite Thread-Nutzung
-- Plattformzugriffe ausschließlich über explizite Adapter
+## Consequences
+- No reliance on `std::fs`
+- No host process model
+- No implicit thread usage
+- Platform access exclusively through explicit adapters

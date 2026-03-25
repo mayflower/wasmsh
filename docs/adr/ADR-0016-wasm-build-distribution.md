@@ -1,29 +1,29 @@
-# ADR-0016: WASM-Build und Distributionspipeline
+# ADR-0016: WASM Build and Distribution Pipeline
 
 ## Status
-Angenommen
+Accepted
 
-## Kontext
-wasmsh zielt auf Browser-Umgebungen via wasm32-unknown-unknown. Das kompilierte WASM muss aus JS-Bundlern (webpack, vite), ES-Modulen (Browser) und Node.js (CommonJS) nutzbar sein.
+## Context
+wasmsh targets browser environments via wasm32-unknown-unknown. The compiled WASM must be usable from JS bundlers (webpack, vite), ES modules (browser), and Node.js (CommonJS).
 
-## Entscheidung
-wasm-pack baut drei Targets aus dem wasmsh-browser-Crate:
+## Decision
+wasm-pack builds three targets from the wasmsh-browser crate:
 
-- **bundler** (ES-Modul + .wasm) — webpack, vite, Rollup
-- **web** (ES-Modul + .wasm) — Browser `<script type="module">`
-- **nodejs** (CommonJS + .wasm) — Node.js, Testing, Python-Bridge
+- **bundler** (ES module + .wasm) -- webpack, vite, Rollup
+- **web** (ES module + .wasm) -- browser `<script type="module">`
+- **nodejs** (CommonJS + .wasm) -- Node.js, testing, Python bridge
 
-Crate-Type ist `["cdylib", "rlib"]`: `cdylib` erzeugt die .wasm-Binary via wasm-bindgen, `rlib` ermöglicht Rust-interne Abhängigkeit.
+Crate type is `["cdylib", "rlib"]`: `cdylib` produces the .wasm binary via wasm-bindgen, `rlib` enables Rust-internal dependency.
 
-wasm-opt optimiert alle .wasm-Dateien mit `-Os` und aktiviert die von Rust 1.94+ benötigten Features (bulk-memory, mutable-globals, sign-ext, nontrapping-float-to-int).
+wasm-opt optimizes all .wasm files with `-Os` and enables the features required by Rust 1.94+ (bulk-memory, mutable-globals, sign-ext, nontrapping-float-to-int).
 
 ### Distribution
-- **GitHub Releases**: Tag-Push (`v*`) erzeugt Release mit bundler/web/nodejs-Tarballs
-- **GitHub Actions Artifacts**: Jeder Push auf main lädt ephemere Artefakte hoch (90 Tage)
-- **npm / crates.io**: Vorbereitet, noch nicht veröffentlicht
+- **GitHub Releases**: Tag push (`v*`) creates a release with bundler/web/nodejs tarballs
+- **GitHub Actions Artifacts**: Every push to main uploads ephemeral artifacts (90 days)
+- **npm / crates.io**: Prepared, not yet published
 
-## Konsequenzen
-- Drei Build-Targets decken das gesamte JS-Ökosystem ab
-- wasm-bindgen generiert TypeScript-Typdefinitionen automatisch
-- u64-Parameter werden zu BigInt in JavaScript (z.B. step_budget)
-- Binary-Größe wird per CI-Budget (2 MB) überwacht
+## Consequences
+- Three build targets cover the entire JS ecosystem
+- wasm-bindgen automatically generates TypeScript type definitions
+- u64 parameters become BigInt in JavaScript (e.g., step_budget)
+- Binary size is monitored via CI budget (2 MB)

@@ -1,19 +1,19 @@
-# ADR-0007: Command-Modell = Builtin / Function / Utility / Virtual External
+# ADR-0007: Command Model = Builtin / Function / Utility / Virtual External
 
 ## Status
-Angenommen
+Accepted
 
-## Kontext
-Im Browser können Shell-Kommandos nicht auf ein klassisches fork/exec-Modell bauen.
+## Context
+In the browser, shell commands cannot rely on a classic fork/exec model.
 
-## Entscheidung
-Jedes Kommando wird beim Resolve in eine von vier Klassen einsortiert:
+## Decision
+Each command is classified into one of four categories during resolution:
 - Builtin
 - Shell Function
 - Bundled Utility
-- Virtual External (nur Host-Profil)
+- Virtual External (host profile only)
 
-## Konsequenzen
-- Browserprofil bleibt realistisch
-- Shell-State bleibt korrekt mutierbar
-- Utilities können separat entwickelt werden
+## Consequences
+- Browser profile remains realistic
+- Shell state remains correctly mutable
+- Utilities can be developed separately

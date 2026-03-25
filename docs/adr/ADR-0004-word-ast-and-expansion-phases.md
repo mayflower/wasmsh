@@ -1,15 +1,15 @@
-# ADR-0004: Strukturierte Word-ASTs und späte Expansion
+# ADR-0004: Structured Word ASTs and Late Expansion
 
 ## Status
-Angenommen
+Accepted
 
-## Kontext
-Shell-Wörter dürfen nicht zu früh in Strings kollabieren, sonst gehen Quoting- und Expansionseigenschaften verloren.
+## Context
+Shell words must not collapse into strings prematurely, otherwise quoting and expansion properties are lost.
 
-## Entscheidung
-Wörter werden als strukturierte `WordPart`-Bäume modelliert. Expansion erfolgt in klar getrennten Phasen erst nach dem Parsing.
+## Decision
+Words are modeled as structured `WordPart` trees. Expansion occurs in clearly separated phases only after parsing.
 
-## Konsequenzen
-- korrektes Verhalten für Quotes, Field Splitting und Globs
-- mehr interne Typen
-- bessere Testbarkeit
+## Consequences
+- Correct behavior for quotes, field splitting, and globs
+- More internal types
+- Better testability
