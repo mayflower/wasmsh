@@ -3909,4 +3909,699 @@ mod tests {
         assert_eq!(status, 0);
         assert_eq!(out, "hello [world]\n");
     }
+
+    // ------------------------------------------------------------------
+    // -f flag: read program from file
+    // ------------------------------------------------------------------
+
+    fn run_awk_with_prog_file(
+        prog_path: &str,
+        prog_content: &str,
+        input_path: Option<(&str, &str)>,
+        stdin: &str,
+    ) -> (i32, String, String) {
+        let mut fs = MemoryFs::new();
+        // Write program file
+        let h = fs.open(prog_path, OpenOptions::write()).unwrap();
+        fs.write_file(h, prog_content.as_bytes()).unwrap();
+        fs.close(h);
+        // Optionally write an input file
+        let mut argv: Vec<&str> = vec!["awk", "-f", prog_path];
+        if let Some((path, content)) = input_path {
+            let h = fs.open(path, OpenOptions::write()).unwrap();
+            fs.write_file(h, content.as_bytes()).unwrap();
+            fs.close(h);
+            argv.push(path);
+        }
+        let mut output = VecOutput::default();
+        let stdin_data = stdin.as_bytes();
+        let status = {
+            let mut ctx = UtilContext {
+                fs: &mut fs,
+                output: &mut output,
+                cwd: "/",
+                stdin: if stdin.is_empty() && input_path.is_some() {
+                    None
+                } else {
+                    Some(stdin_data)
+                },
+                state: None,
+            };
+            util_awk(&mut ctx, &argv)
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        (status, stdout, stderr)
+    }
+
+    #[test]
+    fn test_f_flag_basic() {
+        let (status, out, _) =
+            run_awk_with_prog_file("/prog.awk", "{ print $1 }", None, "hello world\nfoo bar\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "hello\nfoo\n");
+    }
+
+    #[test]
+    fn test_f_flag_with_input_file() {
+        let (status, out, _) = run_awk_with_prog_file(
+            "/prog.awk",
+            "{ print NR, $0 }",
+            Some(("/data.txt", "alpha\nbeta\n")),
+            "",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "1 alpha\n2 beta\n");
+    }
+
+    #[test]
+    fn test_f_flag_begin_end() {
+        let (status, out, _) = run_awk_with_prog_file(
+            "/prog.awk",
+            "BEGIN { print \"start\" } { print } END { print \"done\" }",
+            None,
+            "middle\n",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "start\nmiddle\ndone\n");
+    }
+
+    #[test]
+    fn test_f_flag_missing_file() {
+        let (status, _, err) = run_awk_with_args(&["awk", "-f", "/nonexistent.awk"], "hello\n");
+        assert_ne!(status, 0);
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn test_f_flag_requires_argument() {
+        let (status, _, err) = run_awk_with_args(&["awk", "-f"], "");
+        assert_ne!(status, 0);
+        assert!(err.contains("-f requires"));
+    }
+
+    // ------------------------------------------------------------------
+    // Error paths
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_malformed_program_unclosed_brace() {
+        let (status, _, err) = run_awk("{ print", "hello\n");
+        assert_eq!(status, 2);
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn test_unknown_option() {
+        let (status, _, err) = run_awk_with_args(&["awk", "-Z", "{ print }"], "hello\n");
+        assert_ne!(status, 0);
+        assert!(err.contains("unknown option"));
+    }
+
+    #[test]
+    fn test_v_requires_argument() {
+        let (status, _, err) = run_awk_with_args(&["awk", "-v"], "");
+        assert_ne!(status, 0);
+        assert!(err.contains("-v requires"));
+    }
+
+    #[test]
+    fn test_v_invalid_argument() {
+        let (status, _, err) = run_awk_with_args(&["awk", "-v", "badarg", "{ print }"], "");
+        assert_ne!(status, 0);
+        assert!(err.contains("invalid -v"));
+    }
+
+    // ------------------------------------------------------------------
+    // printf format specifiers
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_printf_zero_padded_int() {
+        let (status, out, _) = run_awk("BEGIN { printf \"%05d\\n\", 42 }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "00042\n");
+    }
+
+    #[test]
+    fn test_printf_wide_float() {
+        let (status, out, _) = run_awk("BEGIN { printf \"%8.2f\\n\", 3.14159 }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "    3.14\n");
+    }
+
+    #[test]
+    fn test_printf_left_aligned_string() {
+        let (status, out, _) = run_awk("BEGIN { printf \"%-20s|\\n\", \"hello\" }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "hello               |\n");
+    }
+
+    #[test]
+    fn test_printf_octal() {
+        let (status, out, _) = run_awk("BEGIN { printf \"%o\\n\", 8 }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "10\n");
+    }
+
+    #[test]
+    fn test_printf_hex_lower() {
+        let (status, out, _) = run_awk("BEGIN { printf \"%x\\n\", 255 }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "ff\n");
+    }
+
+    #[test]
+    fn test_printf_hex_upper() {
+        let (status, out, _) = run_awk("BEGIN { printf \"%X\\n\", 255 }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "FF\n");
+    }
+
+    #[test]
+    fn test_printf_char() {
+        let (status, out, _) = run_awk("BEGIN { printf \"%c\\n\", \"A\" }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "A\n");
+    }
+
+    #[test]
+    fn test_printf_percent_literal() {
+        let (status, out, _) = run_awk("BEGIN { printf \"50%%\\n\" }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "50%\n");
+    }
+
+    #[test]
+    fn test_printf_multiple_specifiers() {
+        let (status, out, _) = run_awk(
+            "BEGIN { printf \"%s is %d years old\\n\", \"Alice\", 30 }",
+            "",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "Alice is 30 years old\n");
+    }
+
+    #[test]
+    fn test_printf_scientific() {
+        let (status, out, _) = run_awk("BEGIN { printf \"%e\\n\", 1234.5 }", "");
+        assert_eq!(status, 0);
+        // Should contain scientific notation
+        assert!(out.contains('e'));
+    }
+
+    // ------------------------------------------------------------------
+    // User-defined functions
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_user_function_add() {
+        let (status, out, _) = run_awk(
+            "function add(a, b) { return a + b } BEGIN { print add(3, 4) }",
+            "",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "7\n");
+    }
+
+    #[test]
+    fn test_user_function_recursive_factorial() {
+        let (status, out, _) = run_awk(
+            "function fact(n) { if (n <= 1) return 1; return n * fact(n - 1) } BEGIN { print fact(5) }",
+            "",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "120\n");
+    }
+
+    #[test]
+    fn test_user_function_with_locals() {
+        let (status, out, _) = run_awk(
+            "function greet(name) { return \"hello \" name } BEGIN { print greet(\"world\") }",
+            "",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "hello world\n");
+    }
+
+    // ------------------------------------------------------------------
+    // RS/ORS/OFS changes
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_ofs_comma_separated() {
+        let (status, out, _) = run_awk(
+            "BEGIN { OFS = \",\" } { print $1, $2 }",
+            "hello world\nfoo bar\n",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "hello,world\nfoo,bar\n");
+    }
+
+    #[test]
+    fn test_ors_custom() {
+        let (status, out, _) = run_awk("BEGIN { ORS = \"---\" } { print $0 }", "a\nb\nc\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "a---b---c---");
+    }
+
+    #[test]
+    fn test_ofs_tab() {
+        let (status, out, _) = run_awk(
+            "BEGIN { OFS = \"\\t\" } { print $1, $2, $3 }",
+            "a b c\nx y z\n",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "a\tb\tc\nx\ty\tz\n");
+    }
+
+    // ------------------------------------------------------------------
+    // Delete array element
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_delete_array_element_multiple() {
+        let (status, out, _) = run_awk(
+            "BEGIN { a[1]=\"x\"; a[2]=\"y\"; a[3]=\"z\"; delete a[2]; for (k in a) print k, a[k] }",
+            "",
+        );
+        assert_eq!(status, 0);
+        assert!(out.contains("1 x"));
+        assert!(out.contains("3 z"));
+        assert!(!out.contains("2 y"));
+    }
+
+    #[test]
+    fn test_delete_nonexistent_key() {
+        let (status, out, _) = run_awk(
+            "BEGIN { a[1]=\"x\"; delete a[99]; for (k in a) print k, a[k] }",
+            "",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "1 x\n");
+    }
+
+    // ------------------------------------------------------------------
+    // Range patterns
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_range_pattern() {
+        let (status, out, _) = run_awk(
+            "/start/,/end/ { print }",
+            "before\nstart here\nmiddle\nend here\nafter\n",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "start here\nmiddle\nend here\n");
+    }
+
+    #[test]
+    fn test_range_pattern_multiple_ranges() {
+        let (status, out, _) = run_awk(
+            "/BEGIN/,/END/ { print }",
+            "skip\nBEGIN\nfirst\nEND\nskip\nBEGIN\nsecond\nEND\nskip\n",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "BEGIN\nfirst\nEND\nBEGIN\nsecond\nEND\n");
+    }
+
+    // ------------------------------------------------------------------
+    // FILENAME variable
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_filename_variable() {
+        let (status, out, _) =
+            run_awk_with_file("{ print FILENAME }", "/mydata.txt", "line1\nline2\n");
+        assert_eq!(status, 0);
+        assert!(out.contains("/mydata.txt"));
+    }
+
+    // ------------------------------------------------------------------
+    // Multi-file processing
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_multi_file_processing() {
+        let mut fs = MemoryFs::new();
+        let h1 = fs.open("/file1.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h1, b"a\nb\n").unwrap();
+        fs.close(h1);
+        let h2 = fs.open("/file2.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h2, b"c\nd\n").unwrap();
+        fs.close(h2);
+        let mut output = VecOutput::default();
+        let status = {
+            let mut ctx = UtilContext {
+                fs: &mut fs,
+                output: &mut output,
+                cwd: "/",
+                stdin: None,
+                state: None,
+            };
+            let argv = vec!["awk", "{ print FILENAME, $0 }", "/file1.txt", "/file2.txt"];
+            util_awk(&mut ctx, &argv)
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        assert_eq!(status, 0);
+        assert!(stdout.contains("/file1.txt a"));
+        assert!(stdout.contains("/file1.txt b"));
+        assert!(stdout.contains("/file2.txt c"));
+        assert!(stdout.contains("/file2.txt d"));
+    }
+
+    // ------------------------------------------------------------------
+    // next statement (additional test)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_next_in_begin_pattern() {
+        let (status, out, _) = run_awk("NR == 2 { next } { print NR, $0 }", "one\ntwo\nthree\n");
+        assert_eq!(status, 0);
+        assert!(out.contains("1 one"));
+        assert!(!out.contains("2 two"));
+        assert!(out.contains("3 three"));
+    }
+
+    // ------------------------------------------------------------------
+    // Ternary operator
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_ternary_in_print() {
+        let (status, out, _) = run_awk("{ print ($1 > 0 ? \"pos\" : \"neg\") }", "5\n-3\n0\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "pos\nneg\nneg\n");
+    }
+
+    #[test]
+    fn test_ternary_nested() {
+        let (status, out, _) = run_awk(
+            "{ print ($1 > 10 ? \"big\" : ($1 > 0 ? \"small\" : \"zero\")) }",
+            "20\n5\n0\n",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "big\nsmall\nzero\n");
+    }
+
+    // ------------------------------------------------------------------
+    // String concatenation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_string_concat_explicit() {
+        let (status, out, _) = run_awk("BEGIN { a = \"hello\" \" \" \"world\"; print a }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "hello world\n");
+    }
+
+    #[test]
+    fn test_string_concat_with_vars() {
+        let (status, out, _) = run_awk("BEGIN { a = \"foo\"; b = \"bar\"; print a b }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "foobar\n");
+    }
+
+    // ------------------------------------------------------------------
+    // match() function returning RSTART/RLENGTH
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_match_function_rstart_rlength() {
+        let (status, out, _) = run_awk(
+            "{ match($0, /[0-9]+/); print RSTART, RLENGTH }",
+            "abc123def\n",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "4 3\n");
+    }
+
+    #[test]
+    fn test_match_function_no_match() {
+        let (status, out, _) =
+            run_awk("{ match($0, /[0-9]+/); print RSTART, RLENGTH }", "abcdef\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "0 -1\n");
+    }
+
+    #[test]
+    fn test_match_function_at_start() {
+        let (status, out, _) = run_awk(
+            "{ match($0, /^[a-z]+/); print RSTART, RLENGTH }",
+            "hello123\n",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "1 5\n");
+    }
+
+    // ------------------------------------------------------------------
+    // -v variable assignment
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_v_option_numeric() {
+        let (status, out, _) =
+            run_awk_with_args(&["awk", "-v", "n=42", "BEGIN { print n + 8 }"], "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "50\n");
+    }
+
+    #[test]
+    fn test_v_option_multiple() {
+        let (status, out, _) = run_awk_with_args(
+            &[
+                "awk",
+                "-v",
+                "a=hello",
+                "-v",
+                "b=world",
+                "BEGIN { print a, b }",
+            ],
+            "",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "hello world\n");
+    }
+
+    // ------------------------------------------------------------------
+    // Regex field separator
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_field_separator_comma() {
+        let (status, out, _) = run_awk_with_args(&["awk", "-F,", "{ print $2 }"], "a,b,c\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "b\n");
+    }
+
+    #[test]
+    fn test_field_separator_tab() {
+        let (status, out, _) =
+            run_awk_with_args(&["awk", "-F", "\t", "{ print $1 }"], "hello\tworld\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "hello\n");
+    }
+
+    // ------------------------------------------------------------------
+    // Miscellaneous additional coverage
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_sin_cos_functions() {
+        let (status, out, _) = run_awk("BEGIN { printf \"%.4f\\n\", sin(0) }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "0.0000\n");
+    }
+
+    #[test]
+    fn test_log_exp_functions() {
+        let (status, out, _) = run_awk("BEGIN { printf \"%.0f\\n\", exp(0) }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "1\n");
+    }
+
+    #[test]
+    fn test_substr_no_length() {
+        let (status, out, _) = run_awk("{ print substr($0, 3) }", "abcdef\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "cdef\n");
+    }
+
+    #[test]
+    fn test_nf_assignment_extends_fields() {
+        let (status, out, _) = run_awk("{ $4 = \"d\"; print }", "a b c\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "a b c d\n");
+    }
+
+    #[test]
+    fn test_print_multiple_with_comma() {
+        let (status, out, _) = run_awk("{ print $1, $2, $3 }", "alpha beta gamma\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "alpha beta gamma\n");
+    }
+
+    #[test]
+    fn test_string_ne_comparison() {
+        let (status, out, _) = run_awk("$1 != \"skip\" { print }", "keep\nskip\nalso keep\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "keep\nalso keep\n");
+    }
+
+    #[test]
+    fn test_numeric_string_coercion() {
+        let (status, out, _) = run_awk("{ print $1 + 0 }", "42abc\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "42\n");
+    }
+
+    #[test]
+    fn test_empty_pattern_prints_all() {
+        let (status, out, _) = run_awk("{ print }", "a\nb\nc\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "a\nb\nc\n");
+    }
+
+    #[test]
+    fn test_printf_no_trailing_newline() {
+        let (status, out, _) = run_awk("{ printf \"%s \", $0 }", "a\nb\nc\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "a b c ");
+    }
+
+    #[test]
+    fn test_comparison_le_ge() {
+        let (status, out, _) = run_awk("$1 >= 3 && $1 <= 5 { print }", "2\n3\n4\n5\n6\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "3\n4\n5\n");
+    }
+
+    #[test]
+    fn test_negative_field_index() {
+        // $0 is the whole line; negative/zero field should not crash
+        let (status, _out, _) = run_awk("{ print $0 }", "hello\n");
+        assert_eq!(status, 0);
+    }
+
+    #[test]
+    fn test_gsub_returns_count() {
+        let (status, out, _) = run_awk("{ n = gsub(/o/, \"0\"); print n, $0 }", "foooo\n");
+        assert_eq!(status, 0);
+        assert!(out.contains('4'));
+        assert!(out.contains("f0000"));
+    }
+
+    #[test]
+    fn test_split_custom_separator() {
+        let (status, out, _) = run_awk(
+            "{ n = split($0, a, \",\"); for (i = 1; i <= n; i++) print a[i] }",
+            "one,two,three\n",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn test_sprintf_hex() {
+        let (status, out, _) = run_awk("BEGIN { s = sprintf(\"%x\", 255); print s }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "ff\n");
+    }
+
+    #[test]
+    fn test_sprintf_octal() {
+        let (status, out, _) = run_awk("BEGIN { s = sprintf(\"%o\", 255); print s }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "377\n");
+    }
+
+    #[test]
+    fn test_compound_assign_caret() {
+        let (status, out, _) = run_awk("BEGIN { x = 2; x ^= 3; print x }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "8\n");
+    }
+
+    #[test]
+    fn test_pre_decrement() {
+        let (status, out, _) = run_awk("BEGIN { x = 5; print --x }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "4\n");
+    }
+
+    #[test]
+    fn test_post_decrement() {
+        let (status, out, _) = run_awk("BEGIN { x = 5; print x-- }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "5\n");
+    }
+
+    #[test]
+    fn test_regex_optional() {
+        let (status, out, _) = run_awk("/ab?c/ { print }", "ac\nabc\nabbc\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "ac\nabc\n");
+    }
+
+    #[test]
+    fn test_regex_anchored_start() {
+        let (status, out, _) = run_awk("/^hello/ { print }", "hello world\nworld hello\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "hello world\n");
+    }
+
+    #[test]
+    fn test_regex_anchored_end() {
+        let (status, out, _) = run_awk("/world$/ { print }", "hello world\nworld hello\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "hello world\n");
+    }
+
+    #[test]
+    fn test_multiline_program() {
+        let prog = r"
+BEGIN { count = 0 }
+/error/ { count++ }
+END { print count }
+";
+        let (status, out, _) = run_awk(prog, "ok\nerror one\nok\nerror two\nerror three\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "3\n");
+    }
+
+    #[test]
+    fn test_array_with_compound_key() {
+        // Simulate multi-dimensional with compound key
+        let (status, out, _) = run_awk("BEGIN { a[\"x,y\"] = 42; print a[\"x,y\"] }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "42\n");
+    }
+
+    #[test]
+    fn test_fs_set_in_begin() {
+        let (status, out, _) = run_awk("BEGIN { FS = \":\" } { print $2 }", "a:b:c\nd:e:f\n");
+        assert_eq!(status, 0);
+        assert_eq!(out, "b\ne\n");
+    }
+
+    #[test]
+    fn test_printf_g_format() {
+        let (status, out, _) = run_awk("BEGIN { printf \"%g\\n\", 0.00123 }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "0.00123\n");
+    }
+
+    #[test]
+    fn test_printf_plus_flag() {
+        let (status, out, _) = run_awk("BEGIN { printf \"%+d\\n\", 42 }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "+42\n");
+    }
+
+    #[test]
+    fn test_printf_space_flag() {
+        let (status, out, _) = run_awk("BEGIN { printf \"% d\\n\", 42 }", "");
+        assert_eq!(status, 0);
+        assert_eq!(out, " 42\n");
+    }
 }

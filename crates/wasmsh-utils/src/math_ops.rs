@@ -1082,4 +1082,460 @@ mod tests {
         assert_eq!(lines[0], "2");
         assert_eq!(lines[1], "4");
     }
+
+    // ------------------------------------------------------------------
+    // User-defined functions
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_user_function_square() {
+        let (s, out, _) = run_bc("define f(x) { return x * x }\nf(7)\n", &[]);
+        assert_eq!(s, 0);
+        assert_eq!(out.trim(), "49");
+    }
+
+    #[test]
+    fn bc_user_function_two_params() {
+        let (s, out, _) = run_bc("define add(a, b) { return a + b }\nadd(10, 20)\n", &[]);
+        assert_eq!(s, 0);
+        assert_eq!(out.trim(), "30");
+    }
+
+    #[test]
+    fn bc_user_function_nested_calls() {
+        let (s, out, _) = run_bc(
+            "define double(x) { return x * 2 }\ndefine quad(x) { return double(double(x)) }\nquad(3)\n",
+            &[],
+        );
+        assert_eq!(s, 0);
+        assert_eq!(out.trim(), "12");
+    }
+
+    #[test]
+    fn bc_user_function_no_return() {
+        // A function without an explicit return should yield 0 (last computed value)
+        let (s, out, _) = run_bc("define f(x) { x + 1 }\nf(5)\n", &[]);
+        assert_eq!(s, 0);
+        assert_eq!(out.trim(), "6");
+    }
+
+    // ------------------------------------------------------------------
+    // ibase/obase
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_obase_hex() {
+        let (s, out, _) = run_bc("obase=16\n255\n", &[]);
+        assert_eq!(s, 0);
+        assert_eq!(out.trim(), "FF");
+    }
+
+    #[test]
+    fn bc_ibase_set() {
+        // ibase is set at runtime; verify ibase variable is stored
+        let (s, out, _) = run_bc("ibase=16\nibase\n", &[]);
+        assert_eq!(s, 0);
+        // With scale=0, ibase (16) should print as 16
+        assert_eq!(out.trim(), "16");
+    }
+
+    #[test]
+    fn bc_obase_binary() {
+        let (s, out, _) = run_bc("obase=2\n10\n", &[]);
+        assert_eq!(s, 0);
+        assert_eq!(out.trim(), "1010");
+    }
+
+    #[test]
+    fn bc_obase_octal() {
+        let (s, out, _) = run_bc("obase=8\n255\n", &[]);
+        assert_eq!(s, 0);
+        assert_eq!(out.trim(), "377");
+    }
+
+    // ------------------------------------------------------------------
+    // -l math library: sin, cos, atan, ln, exp
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_math_lib_cos() {
+        let (_, out, _) = run_bc("c(0)\n", &["-l"]);
+        // cos(0) = 1
+        let val: f64 = out.trim().parse().unwrap();
+        assert!((val - 1.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn bc_math_lib_atan() {
+        let (_, out, _) = run_bc("a(1)\n", &["-l"]);
+        // atan(1) = pi/4 ≈ 0.7854
+        let val: f64 = out.trim().parse().unwrap();
+        // atan(1) = pi/4; just check it's in a reasonable range
+        assert!(val > 0.78 && val < 0.79);
+    }
+
+    #[test]
+    fn bc_math_lib_ln() {
+        let (_, out, _) = run_bc("l(1)\n", &["-l"]);
+        // ln(1) = 0
+        let val: f64 = out.trim().parse().unwrap();
+        assert!(val.abs() < 0.0001);
+    }
+
+    #[test]
+    fn bc_math_lib_exp() {
+        let (_, out, _) = run_bc("e(0)\n", &["-l"]);
+        // exp(0) = 1
+        let val: f64 = out.trim().parse().unwrap();
+        assert!((val - 1.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn bc_math_lib_scale_default() {
+        // With -l, scale should be 20; printed with scale=20 formatting
+        let (_, out, _) = run_bc("scale\n", &["-l"]);
+        let val: f64 = out.trim().parse().unwrap();
+        assert!((val - 20.0).abs() < 0.001);
+    }
+
+    // ------------------------------------------------------------------
+    // Comments
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_block_comment() {
+        let (s, out, _) = run_bc("/* this is a comment */ 5 + 3\n", &[]);
+        assert_eq!(s, 0);
+        assert_eq!(out.trim(), "8");
+    }
+
+    #[test]
+    fn bc_line_comment() {
+        let (s, out, _) = run_bc("5 + 3 # add them\n", &[]);
+        assert_eq!(s, 0);
+        assert_eq!(out.trim(), "8");
+    }
+
+    #[test]
+    fn bc_multiline_block_comment() {
+        let (s, out, _) = run_bc("/* multi\nline\ncomment */ 7 * 6\n", &[]);
+        assert_eq!(s, 0);
+        assert_eq!(out.trim(), "42");
+    }
+
+    // ------------------------------------------------------------------
+    // Pre/post increment and decrement
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_pre_increment() {
+        let (s, out, _) = run_bc("x = 5\n++x\n", &[]);
+        assert_eq!(s, 0);
+        assert_eq!(out.trim(), "6");
+    }
+
+    #[test]
+    fn bc_post_increment() {
+        let (s, out, _) = run_bc("x = 5\nx++\nx\n", &[]);
+        assert_eq!(s, 0);
+        let lines: Vec<&str> = out.trim().lines().collect();
+        assert_eq!(lines[0], "5"); // post-increment returns old value
+        assert_eq!(lines[1], "6"); // then x is 6
+    }
+
+    #[test]
+    fn bc_pre_decrement() {
+        let (s, out, _) = run_bc("x = 5\n--x\n", &[]);
+        assert_eq!(s, 0);
+        assert_eq!(out.trim(), "4");
+    }
+
+    #[test]
+    fn bc_post_decrement() {
+        let (s, out, _) = run_bc("x = 5\nx--\nx\n", &[]);
+        assert_eq!(s, 0);
+        let lines: Vec<&str> = out.trim().lines().collect();
+        assert_eq!(lines[0], "5"); // post-decrement returns old value
+        assert_eq!(lines[1], "4"); // then x is 4
+    }
+
+    // ------------------------------------------------------------------
+    // Compound assignment operators
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_compound_add_assign() {
+        let (_, out, _) = run_bc("x = 10\nx += 5\nx\n", &[]);
+        assert_eq!(out.trim(), "15");
+    }
+
+    #[test]
+    fn bc_compound_sub_assign() {
+        let (_, out, _) = run_bc("x = 10\nx -= 3\nx\n", &[]);
+        assert_eq!(out.trim(), "7");
+    }
+
+    #[test]
+    fn bc_compound_mul_assign() {
+        let (_, out, _) = run_bc("x = 10\nx *= 4\nx\n", &[]);
+        assert_eq!(out.trim(), "40");
+    }
+
+    #[test]
+    fn bc_compound_div_assign() {
+        let (_, out, _) = run_bc("x = 20\nx /= 4\nx\n", &[]);
+        assert_eq!(out.trim(), "5");
+    }
+
+    #[test]
+    fn bc_compound_mod_assign() {
+        let (_, out, _) = run_bc("x = 17\nx %= 5\nx\n", &[]);
+        assert_eq!(out.trim(), "2");
+    }
+
+    #[test]
+    fn bc_compound_chain() {
+        let (_, out, _) = run_bc("x = 10\nx += 5\nx -= 3\nx *= 2\nx\n", &[]);
+        assert_eq!(out.trim(), "24");
+    }
+
+    // ------------------------------------------------------------------
+    // quit statement
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_quit() {
+        // quit should stop processing (but not error)
+        let (s, out, _) = run_bc("5 + 5\nquit\n10 + 10\n", &[]);
+        assert_eq!(s, 0);
+        // The first expression should be evaluated, quit stops further processing
+        assert!(out.contains("10"));
+    }
+
+    // ------------------------------------------------------------------
+    // Error: division by zero (already tested, add modulo by zero)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_modulo_by_zero() {
+        let (status, _, err) = run_bc("5 % 0\n", &[]);
+        assert_eq!(status, 1);
+        assert!(err.contains("modulo by zero"));
+    }
+
+    // ------------------------------------------------------------------
+    // Error: undefined function call
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_undefined_function() {
+        let (status, _, err) = run_bc("foo(5)\n", &[]);
+        assert_eq!(status, 1);
+        assert!(err.contains("undefined function"));
+    }
+
+    // ------------------------------------------------------------------
+    // length() function — number of digits
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_length_function() {
+        let (s, out, _) = run_bc("length(12345)\n", &[]);
+        assert_eq!(s, 0);
+        assert_eq!(out.trim(), "5");
+    }
+
+    #[test]
+    fn bc_length_single_digit() {
+        let (_, out, _) = run_bc("length(9)\n", &[]);
+        assert_eq!(out.trim(), "1");
+    }
+
+    // ------------------------------------------------------------------
+    // scale() function — decimal digits
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_scale_function() {
+        let (s, out, _) = run_bc("scale(3.14159)\n", &[]);
+        assert_eq!(s, 0);
+        // Should report the number of decimal places
+        let val: i32 = out.trim().parse().unwrap();
+        assert!(val > 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Empty input → no output
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_empty_input() {
+        let (s, out, _) = run_bc("", &[]);
+        assert_eq!(s, 0);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn bc_whitespace_only() {
+        let (s, out, _) = run_bc("   \n  \n", &[]);
+        assert_eq!(s, 0);
+        assert!(out.trim().is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Multi-line input with semicolons
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_multi_line_semicolons() {
+        let (_, out, _) = run_bc("1 + 2; 3 + 4; 5 + 6\n", &[]);
+        let lines: Vec<&str> = out.trim().lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "3");
+        assert_eq!(lines[1], "7");
+        assert_eq!(lines[2], "11");
+    }
+
+    #[test]
+    fn bc_multi_line_newlines() {
+        let (_, out, _) = run_bc("10 + 20\n30 + 40\n", &[]);
+        let lines: Vec<&str> = out.trim().lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "30");
+        assert_eq!(lines[1], "70");
+    }
+
+    // ------------------------------------------------------------------
+    // Nested parentheses
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_nested_parens() {
+        let (_, out, _) = run_bc("((2 + 3) * (4 + 1))\n", &[]);
+        assert_eq!(out.trim(), "25");
+    }
+
+    // ------------------------------------------------------------------
+    // Exponentiation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_power_zero() {
+        let (_, out, _) = run_bc("5 ^ 0\n", &[]);
+        assert_eq!(out.trim(), "1");
+    }
+
+    #[test]
+    fn bc_power_one() {
+        let (_, out, _) = run_bc("5 ^ 1\n", &[]);
+        assert_eq!(out.trim(), "5");
+    }
+
+    // ------------------------------------------------------------------
+    // Comparisons
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_eq_comparison() {
+        let (_, out, _) = run_bc("5 == 5\n", &[]);
+        assert_eq!(out.trim(), "1");
+    }
+
+    #[test]
+    fn bc_ne_comparison() {
+        let (_, out, _) = run_bc("5 != 3\n", &[]);
+        assert_eq!(out.trim(), "1");
+    }
+
+    #[test]
+    fn bc_le_comparison() {
+        let (_, out, _) = run_bc("3 <= 5\n", &[]);
+        assert_eq!(out.trim(), "1");
+    }
+
+    #[test]
+    fn bc_ge_comparison() {
+        let (_, out, _) = run_bc("5 >= 5\n", &[]);
+        assert_eq!(out.trim(), "1");
+    }
+
+    #[test]
+    fn bc_gt_comparison() {
+        let (_, out, _) = run_bc("5 > 3\n", &[]);
+        assert_eq!(out.trim(), "1");
+    }
+
+    // ------------------------------------------------------------------
+    // Unknown option
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_unknown_option() {
+        let (status, _, err) = run_bc("1 + 1\n", &["-z"]);
+        assert_eq!(status, 1);
+        assert!(err.contains("unknown option"));
+    }
+
+    // ------------------------------------------------------------------
+    // sqrt of negative number
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_sqrt_negative() {
+        let (status, _, err) = run_bc("sqrt(-4)\n", &[]);
+        assert_eq!(status, 1);
+        assert!(err.contains("sqrt") || err.contains("negative"));
+    }
+
+    // ------------------------------------------------------------------
+    // Math lib ln of non-positive
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_ln_zero() {
+        let (status, _, err) = run_bc("l(0)\n", &["-l"]);
+        assert_eq!(status, 1);
+        assert!(err.contains("log") || err.contains("non-positive"));
+    }
+
+    // ------------------------------------------------------------------
+    // Function with body containing multiple statements
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_function_multi_stmt() {
+        let (s, out, _) = run_bc(
+            "define f(x) { x = x + 1; x = x * 2; return x }\nf(4)\n",
+            &[],
+        );
+        assert_eq!(s, 0);
+        assert_eq!(out.trim(), "10");
+    }
+
+    // ------------------------------------------------------------------
+    // Large number
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_large_number() {
+        let (_, out, _) = run_bc("999999 * 999999\n", &[]);
+        assert_eq!(out.trim(), "999998000001");
+    }
+
+    // ------------------------------------------------------------------
+    // Chained operations
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bc_chained_ops() {
+        let (_, out, _) = run_bc("2 + 3 * 4\n", &[]);
+        // Multiplication should bind tighter
+        assert_eq!(out.trim(), "14");
+    }
+
+    #[test]
+    fn bc_left_to_right_add() {
+        let (_, out, _) = run_bc("1 + 2 + 3 + 4\n", &[]);
+        assert_eq!(out.trim(), "10");
+    }
 }

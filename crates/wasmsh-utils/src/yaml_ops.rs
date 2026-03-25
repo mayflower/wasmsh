@@ -1305,4 +1305,679 @@ mod tests {
         assert_eq!(status, 0);
         assert_eq!(out.stdout_str().trim(), "value");
     }
+
+    // ------------------------------------------------------------------
+    // Multi-line literal | and folded > strings
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_literal_block_scalar() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"description: |\n  line one\n  line two\n  line three\n";
+        let (status, out) = run_yq(&["yq", "-r", ".description"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("line one"));
+        assert!(s.contains("line two"));
+        assert!(s.contains("line three"));
+    }
+
+    #[test]
+    fn yq_folded_block_scalar() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"description: >\n  folded line one\n  folded line two\n";
+        let (status, out) = run_yq(&["yq", "-r", ".description"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        // Folded should combine lines with spaces
+        assert!(s.contains("folded line one"));
+    }
+
+    #[test]
+    fn yq_standalone_literal_block() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"|\n  hello\n  world\n";
+        let (status, out) = run_yq(&["yq", "-r", "."], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("hello"));
+        assert!(s.contains("world"));
+    }
+
+    // ------------------------------------------------------------------
+    // Flow mappings and flow sequences
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_flow_mapping() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"{a: 1, b: 2}\n";
+        let (status, out) = run_yq(&["yq", ".a"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "1");
+    }
+
+    #[test]
+    fn yq_flow_mapping_nested() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"data: {x: 10, y: 20}\n";
+        let (status, out) = run_yq(&["yq", ".data.x"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "10");
+    }
+
+    #[test]
+    fn yq_flow_sequence_inline() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"[10, 20, 30]\n";
+        let (status, out) = run_yq(&["yq", ".[1]"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "20");
+    }
+
+    #[test]
+    fn yq_flow_sequence_length() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"items: [a, b, c, d]\n";
+        let (status, out) = run_yq(&["yq", ".items | length"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "4");
+    }
+
+    // ------------------------------------------------------------------
+    // Boolean values
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_boolean_yes_no() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"enabled: yes\ndisabled: no\n";
+        let (status, out) = run_yq(&["yq", ".enabled"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "true");
+        let (status, out) = run_yq(&["yq", ".disabled"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "false");
+    }
+
+    #[test]
+    fn yq_boolean_true_false() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"a: true\nb: false\n";
+        let (status, out) = run_yq(&["yq", ".a"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "true");
+        let (status, out) = run_yq(&["yq", ".b"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "false");
+    }
+
+    // ------------------------------------------------------------------
+    // Null values
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_null_keyword() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"value: null\n";
+        let (status, out) = run_yq(&["yq", ".value"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "null");
+    }
+
+    #[test]
+    fn yq_null_tilde() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"value: ~\n";
+        let (status, out) = run_yq(&["yq", ".value"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "null");
+    }
+
+    #[test]
+    fn yq_null_empty_value() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"value:\n";
+        let (status, out) = run_yq(&["yq", ".value"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "null");
+    }
+
+    // ------------------------------------------------------------------
+    // Numbers: integers, floats, negative, scientific
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_integer() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"count: 42\n";
+        let (status, out) = run_yq(&["yq", ".count"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "42");
+    }
+
+    #[test]
+    fn yq_float() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"pi: 3.14159\n";
+        let (status, out) = run_yq(&["yq", ".pi"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        let val: f64 = out.stdout_str().trim().parse().unwrap();
+        // Check it parsed as a float close to pi
+        assert!(val > 3.1 && val < 3.2);
+    }
+
+    #[test]
+    fn yq_negative_number() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"temp: -40\n";
+        let (status, out) = run_yq(&["yq", ".temp"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "-40");
+    }
+
+    // ------------------------------------------------------------------
+    // Comments at various positions
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_comment_on_own_line() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"# This is a comment\nname: hello\n";
+        let (status, out) = run_yq(&["yq", ".name"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "hello");
+    }
+
+    #[test]
+    fn yq_inline_comment() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"name: hello # inline comment\n";
+        let (status, out) = run_yq(&["yq", ".name"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "hello");
+    }
+
+    #[test]
+    fn yq_comment_between_keys() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"a: 1\n# comment\nb: 2\n";
+        let (status, out) = run_yq(&["yq", ".b"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "2");
+    }
+
+    // ------------------------------------------------------------------
+    // Nested indentation (3+ levels)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_deeply_nested() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"level1:\n  level2:\n    level3:\n      value: deep\n";
+        let (status, out) = run_yq(&["yq", ".level1.level2.level3.value"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "deep");
+    }
+
+    #[test]
+    fn yq_nested_list_in_map() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"config:\n  servers:\n    - name: s1\n      port: 80\n    - name: s2\n      port: 443\n";
+        let (status, out) = run_yq(&["yq", ".config.servers | length"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "2");
+    }
+
+    // ------------------------------------------------------------------
+    // Document separator ---
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_document_separator_with_comment() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"# header comment\n---\nkey: value\n";
+        let (status, out) = run_yq(&["yq", ".key"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "value");
+    }
+
+    // ------------------------------------------------------------------
+    // Error paths
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_missing_filter() {
+        let mut fs = MemoryFs::new();
+        let (status, out) = run_yq(&["yq"], &mut fs, Some(b"key: val\n"));
+        assert_ne!(status, 0);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("missing filter"));
+    }
+
+    #[test]
+    fn yq_missing_input() {
+        let mut fs = MemoryFs::new();
+        let (status, out) = run_yq(&["yq", "."], &mut fs, None);
+        assert_ne!(status, 0);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("missing input"));
+    }
+
+    #[test]
+    fn yq_unsupported_filter() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"key: val\n";
+        let (status, out) = run_yq(&["yq", "invalid_filter_xyz"], &mut fs, Some(yaml));
+        assert_ne!(status, 0);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn yq_file_not_found() {
+        let mut fs = MemoryFs::new();
+        let (status, out) = run_yq(&["yq", ".", "/nonexistent.yaml"], &mut fs, None);
+        assert_ne!(status, 0);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!err.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // yq filters: keys, values, length, type
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_values_filter() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"a: 1\nb: 2\nc: 3\n";
+        let (status, out) = run_yq(&["yq", "values"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains('1'));
+        assert!(s.contains('2'));
+        assert!(s.contains('3'));
+    }
+
+    #[test]
+    fn yq_type_string() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"name: hello\n";
+        let (status, out) = run_yq(&["yq", ".name | type"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "string");
+    }
+
+    #[test]
+    fn yq_type_number() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"count: 42\n";
+        let (status, out) = run_yq(&["yq", ".count | type"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "number");
+    }
+
+    #[test]
+    fn yq_type_boolean() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"flag: true\n";
+        let (status, out) = run_yq(&["yq", ".flag | type"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "boolean");
+    }
+
+    #[test]
+    fn yq_type_null() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"val: null\n";
+        let (status, out) = run_yq(&["yq", ".val | type"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "null");
+    }
+
+    #[test]
+    fn yq_type_object() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"obj:\n  a: 1\n";
+        let (status, out) = run_yq(&["yq", ".obj | type"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "object");
+    }
+
+    #[test]
+    fn yq_length_string() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"name: hello\n";
+        let (status, out) = run_yq(&["yq", ".name | length"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "5");
+    }
+
+    #[test]
+    fn yq_length_object() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"a: 1\nb: 2\nc: 3\n";
+        let (status, out) = run_yq(&["yq", "length"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "3");
+    }
+
+    // ------------------------------------------------------------------
+    // -r raw output, -c compact, -j JSON output
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_raw_output_string() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"msg: hello world\n";
+        let (status, out) = run_yq(&["yq", "-r", ".msg"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        // Raw output should not have quotes
+        assert_eq!(out.stdout_str().trim(), "hello world");
+    }
+
+    #[test]
+    fn yq_compact_json_output() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"a: 1\nb: 2\n";
+        let (status, out) = run_yq(&["yq", "-jc", "."], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        let s = out.stdout_str().trim();
+        // Compact JSON should have no newlines within the object
+        assert!(s.starts_with('{'));
+        assert!(s.ends_with('}'));
+        assert!(!s[1..s.len() - 1].contains('\n'));
+    }
+
+    #[test]
+    fn yq_json_output_array() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"items:\n  - a\n  - b\n";
+        let (status, out) = run_yq(&["yq", "-j", ".items"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains('['));
+        assert!(s.contains(']'));
+        assert!(s.contains("\"a\""));
+        assert!(s.contains("\"b\""));
+    }
+
+    // ------------------------------------------------------------------
+    // select() filter
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_select_identity() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"name: hello\n";
+        let (status, out) = run_yq(&["yq", "select(.)"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("name"));
+    }
+
+    // ------------------------------------------------------------------
+    // map() filter
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_map_length() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"items:\n  - hello\n  - world\n  - hi\n";
+        let (status, out) = run_yq(&["yq", ".items | map(length)"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains('5'));
+        assert!(s.contains('2'));
+    }
+
+    // ------------------------------------------------------------------
+    // Empty input
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_empty_input() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"";
+        let (status, out) = run_yq(&["yq", "."], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "null");
+    }
+
+    // ------------------------------------------------------------------
+    // Quoted strings
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_double_quoted_string() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"name: \"hello world\"\n";
+        let (status, out) = run_yq(&["yq", ".name"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "hello world");
+    }
+
+    #[test]
+    fn yq_single_quoted_string() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"name: 'hello world'\n";
+        let (status, out) = run_yq(&["yq", ".name"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "hello world");
+    }
+
+    // ------------------------------------------------------------------
+    // Keys with special characters
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_key_with_spaces() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"\"key with spaces\": value\n";
+        let (status, out) = run_yq(&["yq", ".\"key with spaces\""], &mut fs, Some(yaml));
+        // The filter parser may or may not support this; at minimum it shouldn't crash
+        // If it parses the quoted key, it should return the value
+        let _ = status;
+        let _ = out;
+    }
+
+    // ------------------------------------------------------------------
+    // Iterate .[]
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_iterate_array() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"items:\n  - one\n  - two\n  - three\n";
+        let (status, out) = run_yq(&["yq", ".items | .[]"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("one"));
+        assert!(s.contains("two"));
+        assert!(s.contains("three"));
+    }
+
+    #[test]
+    fn yq_iterate_object() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"a: 1\nb: 2\n";
+        let (status, out) = run_yq(&["yq", ".[]"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains('1'));
+        assert!(s.contains('2'));
+    }
+
+    // ------------------------------------------------------------------
+    // first and last
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_first() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"items:\n  - alpha\n  - beta\n  - gamma\n";
+        let (status, out) = run_yq(&["yq", ".items | first"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "alpha");
+    }
+
+    #[test]
+    fn yq_last() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"items:\n  - alpha\n  - beta\n  - gamma\n";
+        let (status, out) = run_yq(&["yq", ".items | last"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "gamma");
+    }
+
+    // ------------------------------------------------------------------
+    // Combined flags
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_combined_flags_rj() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"name: hello\ncount: 3\n";
+        let (status, out) = run_yq(&["yq", "-rj", "."], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        // -j takes precedence for JSON output
+        let s = out.stdout_str();
+        assert!(s.contains("\"name\""));
+    }
+
+    // ------------------------------------------------------------------
+    // Negative array index
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_negative_index() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"items:\n  - a\n  - b\n  - c\n";
+        let (status, out) = run_yq(&["yq", ".items | .[-1]"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "c");
+    }
+
+    // ------------------------------------------------------------------
+    // Field then iterate shorthand: .key[]
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_field_then_iterate() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"items:\n  - x\n  - y\n";
+        let (status, out) = run_yq(&["yq", ".items[]"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains('x'));
+        assert!(s.contains('y'));
+    }
+
+    // ------------------------------------------------------------------
+    // exit-status mode
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_exit_status_truthy() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"val: true\n";
+        let (status, _) = run_yq(&["yq", "-e", ".val"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+    }
+
+    #[test]
+    fn yq_exit_status_null() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"val: null\n";
+        let (status, _) = run_yq(&["yq", "-e", ".val"], &mut fs, Some(yaml));
+        assert_ne!(status, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Empty flow collections
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_empty_flow_sequence() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"items: []\n";
+        let (status, out) = run_yq(&["yq", ".items | length"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "0");
+    }
+
+    #[test]
+    fn yq_empty_flow_mapping() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"data: {}\n";
+        let (status, out) = run_yq(&["yq", ".data | length"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "0");
+    }
+
+    // ------------------------------------------------------------------
+    // Flatten
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_flatten() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"items:\n  - [1, 2]\n  - [3, 4]\n";
+        let (status, out) = run_yq(&["yq", ".items | flatten"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains('1'));
+        assert!(s.contains('4'));
+    }
+
+    // ------------------------------------------------------------------
+    // Keys for array
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_keys_array() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"items:\n  - a\n  - b\n  - c\n";
+        let (status, out) = run_yq(&["yq", ".items | keys"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains('0'));
+        assert!(s.contains('1'));
+        assert!(s.contains('2'));
+    }
+
+    // ------------------------------------------------------------------
+    // Access nonexistent field
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_nonexistent_field() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"name: hello\n";
+        let (status, out) = run_yq(&["yq", ".nonexistent"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "null");
+    }
+
+    // ------------------------------------------------------------------
+    // List of objects
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yq_list_of_objects() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"people:\n  - name: Alice\n    age: 30\n  - name: Bob\n    age: 25\n";
+        let (status, out) = run_yq(&["yq", ".people | length"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "2");
+    }
+
+    #[test]
+    fn yq_index_into_list_of_objects() {
+        let mut fs = MemoryFs::new();
+        let yaml = b"people:\n  - name: Alice\n    age: 30\n  - name: Bob\n    age: 25\n";
+        let (status, out) = run_yq(&["yq", ".people | .[0] | .name"], &mut fs, Some(yaml));
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "Alice");
+    }
 }

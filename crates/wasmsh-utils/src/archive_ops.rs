@@ -1322,4 +1322,321 @@ mod tests {
         let decompressed = gzip_decompress(&compressed).unwrap();
         assert_eq!(data, decompressed);
     }
+
+    // -------------------------------------------------------------------
+    // tar -tf  list contents
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn tar_tf_lists_multiple_files() {
+        let mut fs = MemoryFs::new();
+        fs.create_dir("/src").unwrap();
+        let h = fs.open("/src/one.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"one").unwrap();
+        fs.close(h);
+        let h = fs.open("/src/two.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"two").unwrap();
+        fs.close(h);
+
+        let (_, _) = run_util(util_tar, &["tar", "-cf", "/list.tar", "src"], &mut fs, "/");
+        let (status, out) = run_util(util_tar, &["tar", "-tf", "/list.tar"], &mut fs, "/");
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("one.txt"), "expected one.txt in listing: {s}");
+        assert!(s.contains("two.txt"), "expected two.txt in listing: {s}");
+    }
+
+    // -------------------------------------------------------------------
+    // tar -v  verbose output
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn tar_verbose_create() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/v.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"verbose").unwrap();
+        fs.close(h);
+
+        let (status, out) = run_util(util_tar, &["tar", "-cvf", "/v.tar", "v.txt"], &mut fs, "/");
+        assert_eq!(status, 0);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("v.txt"),
+            "expected verbose file name on stderr: {err}"
+        );
+    }
+
+    #[test]
+    fn tar_verbose_extract() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/v.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"data").unwrap();
+        fs.close(h);
+        let (_, _) = run_util(util_tar, &["tar", "-cf", "/v.tar", "v.txt"], &mut fs, "/");
+        let _ = fs.remove_file("/v.txt");
+        let (status, out) = run_util(util_tar, &["tar", "-xvf", "/v.tar"], &mut fs, "/");
+        assert_eq!(status, 0);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("v.txt"), "expected verbose on extract: {err}");
+    }
+
+    // -------------------------------------------------------------------
+    // tar -C /dir  change directory
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn tar_change_dir_create() {
+        let mut fs = MemoryFs::new();
+        fs.create_dir("/mydir").unwrap();
+        let h = fs.open("/mydir/f.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"content").unwrap();
+        fs.close(h);
+
+        let (status, _) = run_util(
+            util_tar,
+            &["tar", "-cf", "/out.tar", "-C", "/mydir", "f.txt"],
+            &mut fs,
+            "/",
+        );
+        assert_eq!(status, 0);
+
+        // Extract to /dest
+        fs.create_dir("/dest").unwrap();
+        let (status, _) = run_util(
+            util_tar,
+            &["tar", "-xf", "/out.tar", "-C", "/dest"],
+            &mut fs,
+            "/",
+        );
+        assert_eq!(status, 0);
+        let h = fs.open("/dest/f.txt", OpenOptions::read()).unwrap();
+        let d = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&d, b"content");
+    }
+
+    // -------------------------------------------------------------------
+    // tar with nested directories
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn tar_nested_directories() {
+        let mut fs = MemoryFs::new();
+        fs.create_dir("/nest").unwrap();
+        fs.create_dir("/nest/sub").unwrap();
+        let h = fs.open("/nest/sub/deep.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"deep content").unwrap();
+        fs.close(h);
+
+        let (status, _) = run_util(
+            util_tar,
+            &["tar", "-cf", "/nested.tar", "nest"],
+            &mut fs,
+            "/",
+        );
+        assert_eq!(status, 0);
+
+        let _ = fs.remove_file("/nest/sub/deep.txt");
+        let _ = fs.remove_dir("/nest/sub");
+        let _ = fs.remove_dir("/nest");
+
+        let (status, _) = run_util(util_tar, &["tar", "-xf", "/nested.tar"], &mut fs, "/");
+        assert_eq!(status, 0);
+        let h = fs.open("/nest/sub/deep.txt", OpenOptions::read()).unwrap();
+        let d = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&d, b"deep content");
+    }
+
+    // -------------------------------------------------------------------
+    // gzip -k  keep original
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn gzip_keep_flag() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/kept.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"keep me").unwrap();
+        fs.close(h);
+
+        let (status, _) = run_util(util_gzip, &["gzip", "-k", "/kept.txt"], &mut fs, "/");
+        assert_eq!(status, 0);
+        assert!(fs.stat("/kept.txt").is_ok(), "original should be kept");
+        assert!(fs.stat("/kept.txt.gz").is_ok(), "compressed should exist");
+
+        // Verify roundtrip
+        let (status, _) = run_util(util_gunzip, &["gunzip", "-k", "/kept.txt.gz"], &mut fs, "/");
+        assert_eq!(status, 0);
+        let h = fs.open("/kept.txt", OpenOptions::read()).unwrap();
+        let d = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&d, b"keep me");
+    }
+
+    // -------------------------------------------------------------------
+    // gzip -c  write to stdout
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn gzip_to_stdout() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/stdout.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"stdout data").unwrap();
+        fs.close(h);
+
+        let (status, out) = run_util(util_gzip, &["gzip", "-c", "/stdout.txt"], &mut fs, "/");
+        assert_eq!(status, 0);
+        // Output should be gzip format (magic bytes)
+        assert!(out.stdout.len() > 2);
+        assert_eq!(out.stdout[0], 0x1F);
+        assert_eq!(out.stdout[1], 0x8B);
+        // Original file should still exist (since output went to stdout)
+        assert!(fs.stat("/stdout.txt").is_ok());
+    }
+
+    // -------------------------------------------------------------------
+    // gunzip error on invalid data
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn gunzip_invalid_data() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/bad.gz", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"not gzip data at all").unwrap();
+        fs.close(h);
+
+        let (status, out) = run_util(util_gunzip, &["gunzip", "/bad.gz"], &mut fs, "/");
+        assert_eq!(status, 1);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!err.is_empty(), "expected error on stderr");
+    }
+
+    // -------------------------------------------------------------------
+    // zcat (decompress to stdout)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn zcat_decompresses_to_stdout() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/zc.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"zcat content").unwrap();
+        fs.close(h);
+
+        let (_, _) = run_util(util_gzip, &["gzip", "-k", "/zc.txt"], &mut fs, "/");
+        let (status, out) = run_util(util_zcat, &["zcat", "/zc.txt.gz"], &mut fs, "/");
+        assert_eq!(status, 0);
+        assert_eq!(&out.stdout, b"zcat content");
+        // Compressed file should still exist
+        assert!(fs.stat("/zc.txt.gz").is_ok());
+    }
+
+    // -------------------------------------------------------------------
+    // unzip -o  overwrite
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn unzip_overwrite() {
+        let mut fs = MemoryFs::new();
+        // Pre-create file with old content
+        let h = fs.open("/ow.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"old content").unwrap();
+        fs.close(h);
+
+        // Create zip with new content
+        let zip_data = make_stored_zip("ow.txt", b"new content");
+        let h = fs.open("/ow.zip", OpenOptions::write()).unwrap();
+        fs.write_file(h, &zip_data).unwrap();
+        fs.close(h);
+
+        // Without -o, should skip the file
+        let (status, out) = run_unzip(&["unzip", "/ow.zip"], &mut fs);
+        assert_eq!(status, 0);
+        let h = fs.open("/ow.txt", OpenOptions::read()).unwrap();
+        let d = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&d, b"old content"); // not overwritten
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("already exists"));
+
+        // With -o, should overwrite
+        let (status, _) = run_unzip(&["unzip", "-o", "/ow.zip"], &mut fs);
+        assert_eq!(status, 0);
+        let h = fs.open("/ow.txt", OpenOptions::read()).unwrap();
+        let d = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&d, b"new content");
+    }
+
+    // -------------------------------------------------------------------
+    // unzip with path traversal attempt (should be blocked)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn unzip_path_traversal_blocked() {
+        let mut fs = MemoryFs::new();
+        // Create a zip entry with path traversal
+        let zip_data = make_stored_zip("../../etc/passwd", b"evil");
+        let h = fs.open("/evil.zip", OpenOptions::write()).unwrap();
+        fs.write_file(h, &zip_data).unwrap();
+        fs.close(h);
+
+        // Extract to /safe dir
+        fs.create_dir("/safe").unwrap();
+        let (status, _) = run_unzip(&["unzip", "/evil.zip", "-d", "/safe"], &mut fs);
+        // The '..' components should be stripped, not escape /safe
+        // Verify the file does NOT exist outside /safe
+        assert_eq!(status, 0);
+        assert!(
+            fs.stat("/etc/passwd").is_err(),
+            "path traversal should be blocked"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // unzip with directory entries
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn unzip_directory_entries() {
+        let mut fs = MemoryFs::new();
+        // Create zip with a directory entry (name ends with /)
+        let zip_data = make_stored_zip("mydir/", b"");
+        let h = fs.open("/dirs.zip", OpenOptions::write()).unwrap();
+        fs.write_file(h, &zip_data).unwrap();
+        fs.close(h);
+
+        let (status, out) = run_unzip(&["unzip", "/dirs.zip"], &mut fs);
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("creating"), "expected 'creating:' message: {s}");
+        assert!(fs.stat("/mydir").is_ok());
+    }
+
+    // -------------------------------------------------------------------
+    // Corrupt tar header handling
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn tar_corrupt_header() {
+        let mut fs = MemoryFs::new();
+        // Create garbage data that looks like a tar header but has invalid size
+        let mut corrupt = vec![0u8; 512];
+        corrupt[0..5].copy_from_slice(b"test\0"); // name
+                                                  // Leave size field as zeros (valid, 0 size)
+                                                  // But make it look like a non-zero header by setting some bytes
+        corrupt[100..108].copy_from_slice(b"0000644\0"); // mode
+        corrupt[156] = b'0'; // typeflag: regular file
+                             // Checksum field is wrong, but our implementation doesn't validate it
+                             // Put invalid octal in size field
+        corrupt[124..136].copy_from_slice(b"zzzzzzzzzzz\0");
+
+        let h = fs.open("/corrupt.tar", OpenOptions::write()).unwrap();
+        fs.write_file(h, &corrupt).unwrap();
+        fs.close(h);
+
+        let (status, out) = run_util(util_tar, &["tar", "-tf", "/corrupt.tar"], &mut fs, "/");
+        assert_eq!(status, 1);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!err.is_empty(), "expected error for corrupt tar");
+    }
 }

@@ -2265,4 +2265,252 @@ mod tests {
         // 2024 is a leap year, so Feb has 29 days
         assert!(stdout.contains("29"));
     }
+
+    // -------------------------------------------------------------------
+    // which -a  show all matches
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn which_a_known() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run(util_which, &["which", "-a", "cat"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "/usr/bin/cat\n");
+    }
+
+    #[test]
+    fn which_a_unknown() {
+        let mut fs = make_fs();
+        let (status, _, stderr) = run(util_which, &["which", "-a", "no_such_cmd"], &mut fs);
+        assert_eq!(status, 1);
+        assert!(stderr.contains("no no_such_cmd"));
+    }
+
+    // -------------------------------------------------------------------
+    // rmdir non-empty dir -> error
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn rmdir_non_empty_error_message() {
+        let mut fs = make_fs_with_file("/occupied/child.txt", b"data");
+        let (status, _, stderr) = run(util_rmdir, &["rmdir", "/occupied"], &mut fs);
+        assert_eq!(status, 1);
+        assert!(
+            stderr.contains("not empty")
+                || stderr.contains("Not empty")
+                || stderr.contains("Directory not empty"),
+            "expected non-empty error, got: {stderr}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // shuf -n 3  limit output
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn shuf_n_3_limits_output() {
+        let mut fs = make_fs_with_file("/big.txt", b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+        let (status, stdout, _) = run(util_shuf, &["shuf", "-n", "3", "/big.txt"], &mut fs);
+        assert_eq!(status, 0);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 3);
+    }
+
+    // -------------------------------------------------------------------
+    // cmp -l  verbose diff
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn cmp_verbose_all_diffs() {
+        let mut fs = make_fs_with_file("/ca.txt", b"abc");
+        let h = fs.open("/cb.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"axc").unwrap();
+        fs.close(h);
+        let (status, stdout, _) = run(util_cmp, &["cmp", "-l", "/ca.txt", "/cb.txt"], &mut fs);
+        assert_eq!(status, 1);
+        // -l mode shows all byte differences with byte positions and values
+        assert!(stdout.contains('2'), "expected byte position 2: {stdout}");
+    }
+
+    // -------------------------------------------------------------------
+    // comm with tab-separated output verification
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn comm_tab_columns() {
+        let mut fs = make_fs_with_file("/c1.txt", b"a\nb\nc");
+        let h = fs.open("/c2.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"b\nd").unwrap();
+        fs.close(h);
+        let (status, stdout, _) = run(util_comm, &["comm", "/c1.txt", "/c2.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // Column 1 (only in file1): a, c — no tab prefix
+        // Column 2 (only in file2): d — one tab prefix
+        // Column 3 (both): b — two tab prefix
+        assert!(stdout.contains("a\n"), "col1 no prefix for a");
+        assert!(stdout.contains("\t\tb\n"), "col3 two tabs for b");
+        assert!(stdout.contains("c\n"), "col1 no prefix for c");
+        assert!(stdout.contains("\td\n"), "col2 one tab for d");
+    }
+
+    // -------------------------------------------------------------------
+    // expand  multi-tab input
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn expand_multi_tab_input() {
+        let mut fs = make_fs_with_file("/mt.txt", b"\t\thello");
+        let (status, stdout, _) = run(util_expand, &["expand", "/mt.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // Two tabs at tab width 8: col 0 -> tab to col 8, col 8 -> tab to col 16
+        assert_eq!(stdout, "                hello\n");
+    }
+
+    // -------------------------------------------------------------------
+    // unexpand -a  all spaces
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn unexpand_all_spaces() {
+        let mut fs = make_fs_with_file("/ua.txt", b"a       b       c");
+        let (status, stdout, _) = run(util_unexpand, &["unexpand", "-a", "/ua.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // With -a, runs of spaces that reach a tab stop should become tabs
+        assert!(
+            stdout.contains('\t'),
+            "expected at least one tab, got: {stdout:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // truncate -s -10  shrink relative
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn truncate_shrink_relative() {
+        let mut fs = make_fs_with_file("/tr.txt", b"0123456789abcdef");
+        let (status, _, _) = run(
+            util_truncate,
+            &["truncate", "-s", "-10", "/tr.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        let h = fs.open("/tr.txt", OpenOptions::read()).unwrap();
+        let data = fs.read_file(h).unwrap();
+        fs.close(h);
+        // 16 - 10 = 6 bytes remaining
+        assert_eq!(data.len(), 6);
+        assert_eq!(&data, b"012345");
+    }
+
+    // -------------------------------------------------------------------
+    // factor  large composite (e.g., 12345678)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn factor_large_composite() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run(util_factor, &["factor", "12345678"], &mut fs);
+        assert_eq!(status, 0);
+        // 12345678 = 2 * 3^2 * 47 * 14593
+        assert!(stdout.starts_with("12345678:"));
+        // Verify the product of factors equals the original
+        let parts: Vec<&str> = stdout.split_whitespace().collect();
+        let product: u64 = parts[1..]
+            .iter()
+            .map(|s| s.parse::<u64>().unwrap())
+            .product();
+        assert_eq!(product, 12_345_678);
+    }
+
+    // -------------------------------------------------------------------
+    // cksum  with file argument
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn cksum_with_file_arg() {
+        let mut fs = make_fs_with_file("/ck.txt", b"checksum me");
+        let (status, stdout, _) = run(util_cksum, &["cksum", "/ck.txt"], &mut fs);
+        assert_eq!(status, 0);
+        let parts: Vec<&str> = stdout.split_whitespace().collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[1], "11"); // 11 bytes
+        assert_eq!(parts[2], "/ck.txt");
+        // Checksum should be a valid number
+        parts[0].parse::<u32>().unwrap();
+    }
+
+    // -------------------------------------------------------------------
+    // tsort  with cycle -> error
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn tsort_cycle_error() {
+        let mut fs = make_fs();
+        // a -> b, b -> c, c -> a forms a cycle
+        let (status, _, stderr) = run_stdin(util_tsort, &["tsort"], b"a b b c c a", &mut fs);
+        assert_eq!(status, 1);
+        assert!(stderr.contains("cycle"), "expected cycle error: {stderr}");
+    }
+
+    // -------------------------------------------------------------------
+    // install -d  nested directories
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn install_d_nested_directories() {
+        let mut fs = make_fs();
+        let (status, _, _) = run(util_install, &["install", "-d", "/x/y/z"], &mut fs);
+        assert_eq!(status, 0);
+        assert!(fs.stat("/x").unwrap().is_dir);
+        assert!(fs.stat("/x/y").unwrap().is_dir);
+        assert!(fs.stat("/x/y/z").unwrap().is_dir);
+    }
+
+    // -------------------------------------------------------------------
+    // cal 2 2024  specific month
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn cal_feb_2024() {
+        let mut fs = make_fs();
+        let (status, stdout, _) = run(util_cal, &["cal", "2", "2024"], &mut fs);
+        assert_eq!(status, 0);
+        assert!(stdout.contains("February 2024"));
+        assert!(stdout.contains("Su Mo Tu We Th Fr Sa"));
+        // Feb 2024 has 29 days (leap year)
+        assert!(stdout.contains("29"));
+        // Feb 1, 2024 is a Thursday (column 5, 0-indexed col 4)
+        // Check that "1" appears after "Th"
+        let lines: Vec<&str> = stdout.lines().collect();
+        // Third line should be the first week
+        let first_week = lines[2];
+        assert!(
+            first_week.contains(" 1"),
+            "Feb 1 should appear: {first_week}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // fold -s -w 20  break at spaces
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn fold_break_at_spaces_w20() {
+        let mut fs = make_fs_with_file("/fw.txt", b"the quick brown fox jumps over the lazy dog");
+        let (status, stdout, _) = run(util_fold, &["fold", "-s", "-w", "20", "/fw.txt"], &mut fs);
+        assert_eq!(status, 0);
+        for line in stdout.lines() {
+            assert!(
+                line.len() <= 20,
+                "line too long ({}): {:?}",
+                line.len(),
+                line
+            );
+        }
+        // All words should still be present
+        let combined: String = stdout.lines().collect::<Vec<_>>().join(" ");
+        assert!(combined.contains("quick"));
+        assert!(combined.contains("lazy"));
+    }
 }

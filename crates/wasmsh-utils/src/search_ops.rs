@@ -1606,4 +1606,248 @@ mod tests {
         assert!(!type_to_extensions("txt").is_empty());
         assert!(type_to_extensions("unknown").is_empty());
     }
+
+    // -------------------------------------------------------------------
+    // rg -A 2 -B 1  context lines around match
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn rg_after_and_before_context() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/ctx.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"line1\nline2\nTARGET\nline4\nline5\nline6\n")
+            .unwrap();
+        fs.close(h);
+
+        let (status, out, _) = run_rg(
+            &["rg", "-A", "2", "-B", "1", "TARGET", "/ctx.txt"],
+            &mut fs,
+            "/",
+        );
+        assert_eq!(status, 0);
+        assert!(out.contains("line2"), "expected before context: {out}");
+        assert!(out.contains("TARGET"));
+        assert!(out.contains("line4"), "expected after context: {out}");
+        assert!(out.contains("line5"), "expected 2nd after context: {out}");
+    }
+
+    // -------------------------------------------------------------------
+    // rg -C 2  combined context
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn rg_combined_context() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/cc.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"a\nb\nc\nMATCH\ne\nf\ng\n").unwrap();
+        fs.close(h);
+
+        let (status, out, _) = run_rg(&["rg", "-C", "2", "MATCH", "/cc.txt"], &mut fs, "/");
+        assert_eq!(status, 0);
+        assert!(out.contains('b'), "expected 2 lines before: {out}");
+        assert!(out.contains('c'), "expected 1 line before: {out}");
+        assert!(out.contains("MATCH"));
+        assert!(out.contains('e'), "expected 1 line after: {out}");
+        assert!(out.contains('f'), "expected 2 lines after: {out}");
+    }
+
+    // -------------------------------------------------------------------
+    // rg --no-heading  flat output
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn rg_no_heading_flat() {
+        let mut fs = MemoryFs::new();
+        fs.create_dir("/flat").unwrap();
+        let h = fs.open("/flat/a.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"hello\n").unwrap();
+        fs.close(h);
+        let h = fs.open("/flat/b.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"hello\n").unwrap();
+        fs.close(h);
+
+        let (status, out, _) = run_rg(&["rg", "--no-heading", "hello", "/flat"], &mut fs, "/");
+        assert_eq!(status, 0);
+        // Every line should be prefixed with filename
+        for line in out.lines() {
+            assert!(line.contains("/flat/"), "expected file prefix, got: {line}");
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // rg -m 1  max count per file
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn rg_max_count_1() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/mc.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"hit1\nhit2\nhit3\n").unwrap();
+        fs.close(h);
+
+        let (status, out, _) = run_rg(&["rg", "-m", "1", "hit", "/mc.txt"], &mut fs, "/");
+        assert_eq!(status, 0);
+        let hit_lines: Vec<&str> = out.lines().filter(|l| l.contains("hit")).collect();
+        assert_eq!(hit_lines.len(), 1, "expected exactly 1 match, got: {out}");
+    }
+
+    // -------------------------------------------------------------------
+    // rg -w  word regexp
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn rg_word_regexp_no_partial() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/wr.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"cat\ncatch\nthe cat sat\ncatalog\n")
+            .unwrap();
+        fs.close(h);
+
+        let (status, out, _) = run_rg(&["rg", "-w", "cat", "/wr.txt"], &mut fs, "/");
+        assert_eq!(status, 0);
+        assert!(out.contains("cat"));
+        assert!(out.contains("the cat sat"));
+        // "catch" and "catalog" should NOT match as whole words
+        let lines: Vec<&str> = out
+            .lines()
+            .filter(|l| l.contains("catch") || l.contains("catalog"))
+            .collect();
+        assert!(lines.is_empty(), "partial matches found: {out}");
+    }
+
+    // -------------------------------------------------------------------
+    // rg with regex: \d+, [A-Z], foo.*bar
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn rg_regex_digit_plus() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/nums.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"abc\n42\nno digits\n100x\n").unwrap();
+        fs.close(h);
+
+        let (status, out, _) = run_rg(&["rg", "\\d+", "/nums.txt"], &mut fs, "/");
+        assert_eq!(status, 0);
+        assert!(out.contains("42"));
+        assert!(out.contains("100x"));
+        // "no digits" should not match
+        assert!(!out.lines().any(|l| l.contains("no digits")));
+    }
+
+    #[test]
+    fn rg_regex_uppercase_class() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/upper.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"hello\nWorld\nGOOD\nlower\n").unwrap();
+        fs.close(h);
+
+        let (status, out, _) = run_rg(&["rg", "[A-Z]", "/upper.txt"], &mut fs, "/");
+        assert_eq!(status, 0);
+        assert!(out.contains("World"));
+        assert!(out.contains("GOOD"));
+        // "hello" and "lower" have no uppercase letters
+        let bad_lines: Vec<&str> = out
+            .lines()
+            .filter(|l| l.contains("hello") || l.contains("lower"))
+            .collect();
+        assert!(bad_lines.is_empty(), "unexpected lowercase matches: {out}");
+    }
+
+    #[test]
+    fn rg_regex_foo_dot_star_bar() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/rx.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"foobar\nfoo__bar\nfoo 123 bar\nbaz\n")
+            .unwrap();
+        fs.close(h);
+
+        let (status, out, _) = run_rg(&["rg", "foo.*bar", "/rx.txt"], &mut fs, "/");
+        assert_eq!(status, 0);
+        assert!(out.contains("foobar"));
+        assert!(out.contains("foo__bar"));
+        assert!(out.contains("foo 123 bar"));
+        assert!(!out.lines().any(|l| l.contains("baz")));
+    }
+
+    // -------------------------------------------------------------------
+    // fd -t d  directories only
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn fd_type_dir_only() {
+        let mut fs = make_fd_fs();
+        let (status, out, _) = run_fd(&["fd", "-t", "d"], &mut fs, "/root");
+        assert_eq!(status, 0);
+        assert!(out.contains("sub"));
+        assert!(!out.contains("hello.rs"));
+    }
+
+    // -------------------------------------------------------------------
+    // fd -d 1  max depth
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn fd_max_depth_1_excludes_deep() {
+        let mut fs = make_fd_fs();
+        let (status, out, _) = run_fd(&["fd", "-d", "1"], &mut fs, "/root");
+        assert_eq!(status, 0);
+        assert!(out.contains("hello.rs"));
+        assert!(!out.contains("deep"));
+        assert!(!out.contains("notes.txt"));
+    }
+
+    // -------------------------------------------------------------------
+    // fd --exec  print command
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn fd_exec_flag() {
+        let mut fs = make_fd_fs();
+        let (status, out, _) = run_fd(&["fd", "-e", "rs", "--exec", "echo"], &mut fs, "/root");
+        assert_eq!(status, 0);
+        // With --exec echo, lines should show "echo <path>"
+        for line in out.lines() {
+            assert!(
+                line.starts_with("echo "),
+                "expected 'echo ' prefix, got: {line}"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // fd -a  absolute paths
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn fd_absolute_paths_flag() {
+        let mut fs = make_fd_fs();
+        let (status, out, _) = run_fd(&["fd", "-a", "hello"], &mut fs, "/root");
+        assert_eq!(status, 0);
+        for line in out.lines() {
+            assert!(line.starts_with('/'), "expected absolute path: {line}");
+        }
+        assert!(out.contains("hello.rs"));
+    }
+
+    // -------------------------------------------------------------------
+    // fd combined flags
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn fd_combined_type_and_extension() {
+        let mut fs = make_fd_fs();
+        let (status, out, _) = run_fd(&["fd", "-t", "f", "-e", "txt"], &mut fs, "/root");
+        assert_eq!(status, 0);
+        assert!(out.contains("test_foo.txt"));
+        assert!(out.contains("notes.txt"));
+        assert!(!out.contains("hello.rs"));
+        // Directories should not appear as standalone entries (they may appear in paths)
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.trim() == "sub" || l.trim() == "sub/deep"),
+            "directory entries should not appear as matches: {out}"
+        );
+    }
 }

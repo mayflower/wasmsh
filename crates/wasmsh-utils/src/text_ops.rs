@@ -1077,4 +1077,234 @@ mod tests {
         // -A should convert tab to visible representation
         assert!(out.contains("\\t"), "expected \\t for tab, got: {out}");
     }
+
+    // -------------------------------------------------------------------
+    // bat --style=numbers  just line numbers
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn bat_style_numbers_only() {
+        let mut fs = make_fs_with_file("/sn.txt", b"alpha\nbeta\n");
+        let (status, out, _) = run(util_bat, &["bat", "--style=numbers", "/sn.txt"], &mut fs);
+        assert_eq!(status, 0);
+        // Line numbers should be present
+        assert!(out.contains('1'));
+        assert!(out.contains('2'));
+        // Header/footer should NOT be present
+        assert!(!out.contains("File:"));
+    }
+
+    // -------------------------------------------------------------------
+    // bat --style=header  just header
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn bat_style_header_only() {
+        let mut fs = make_fs_with_file("/sh.txt", b"content\n");
+        let (status, out, _) = run(util_bat, &["bat", "--style=header", "/sh.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert!(out.contains("File: /sh.txt"), "expected file header: {out}");
+        assert!(out.contains("content"));
+    }
+
+    // -------------------------------------------------------------------
+    // bat -r 2:4  specific line range
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn bat_range_2_to_4() {
+        let mut fs = make_fs_with_file("/r24.txt", b"line1\nline2\nline3\nline4\nline5\n");
+        let (status, out, _) = run(util_bat, &["bat", "-p", "-r", "2:4", "/r24.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert!(!out.contains("line1"));
+        assert!(out.contains("line2"));
+        assert!(out.contains("line3"));
+        assert!(out.contains("line4"));
+        assert!(!out.contains("line5"));
+    }
+
+    // -------------------------------------------------------------------
+    // bat -A  show-all non-printable
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn bat_show_all_non_printable() {
+        let mut fs = make_fs_with_file("/np.txt", b"a\tb\rc\x01d\n");
+        let (status, out, _) = run(util_bat, &["bat", "-A", "-p", "/np.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert!(out.contains("\\t"), "expected \\t: {out}");
+        assert!(out.contains("\\r"), "expected \\r: {out}");
+        assert!(out.contains("\\x01"), "expected \\x01: {out}");
+    }
+
+    // -------------------------------------------------------------------
+    // grep -n  line numbers
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn grep_line_numbers() {
+        let mut fs = make_fs_with_file("/gn.txt", b"aaa\nbbb\nccc\nbbb\n");
+        let (status, out, _) = run(util_grep, &["grep", "-n", "bbb", "/gn.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert!(out.contains("2:bbb"), "expected 2:bbb in: {out}");
+        assert!(out.contains("4:bbb"), "expected 4:bbb in: {out}");
+    }
+
+    // -------------------------------------------------------------------
+    // grep -v  invert match
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn grep_invert_match() {
+        let mut fs = make_fs_with_file("/gv.txt", b"alpha\nbeta\ngamma\n");
+        let (status, out, _) = run(util_grep, &["grep", "-v", "beta", "/gv.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert!(out.contains("alpha"));
+        assert!(out.contains("gamma"));
+        assert!(!out.contains("beta"));
+    }
+
+    // -------------------------------------------------------------------
+    // grep -c  count only
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn grep_count_only() {
+        let mut fs = make_fs_with_file("/gc.txt", b"a\nb\na\nc\na\n");
+        let (status, out, _) = run(util_grep, &["grep", "-c", "a", "/gc.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(out.trim(), "3");
+    }
+
+    // -------------------------------------------------------------------
+    // grep -i  case insensitive
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn grep_case_insensitive() {
+        let mut fs = make_fs_with_file("/gi.txt", b"Hello\nhello\nHELLO\nworld\n");
+        let (status, out, _) = run(util_grep, &["grep", "-i", "hello", "/gi.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert!(out.contains("Hello"));
+        assert!(out.contains("hello"));
+        assert!(out.contains("HELLO"));
+        assert!(!out.contains("world"));
+    }
+
+    // -------------------------------------------------------------------
+    // tee  to multiple files
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn tee_multiple_files() {
+        let mut fs = make_fs();
+        let (status, out, _) = run_stdin(
+            util_tee,
+            &["tee", "/f1.txt", "/f2.txt"],
+            b"tee data",
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        // stdout should echo the input
+        assert_eq!(out, "tee data");
+        // Both files should be written
+        let h = fs.open("/f1.txt", OpenOptions::read()).unwrap();
+        let d1 = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&d1, b"tee data");
+
+        let h = fs.open("/f2.txt", OpenOptions::read()).unwrap();
+        let d2 = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&d2, b"tee data");
+    }
+
+    // -------------------------------------------------------------------
+    // tee -a  append mode
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn tee_append_mode() {
+        let mut fs = make_fs_with_file("/app.txt", b"old ");
+        let (status, _, _) = run_stdin(util_tee, &["tee", "-a", "/app.txt"], b"new", &mut fs);
+        assert_eq!(status, 0);
+        let h = fs.open("/app.txt", OpenOptions::read()).unwrap();
+        let d = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&d, b"old new");
+    }
+
+    // -------------------------------------------------------------------
+    // sed 's/old/new/g'  global replace
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn sed_global_replace() {
+        let mut fs = make_fs_with_file("/sg.txt", b"old old old\nold new old\n");
+        let (status, out, _) = run(util_sed, &["sed", "s/old/new/g", "/sg.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(out, "new new new\nnew new new\n");
+    }
+
+    // -------------------------------------------------------------------
+    // sed non-global replace (first only)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn sed_first_only_replace() {
+        let mut fs = make_fs_with_file("/sf.txt", b"aXbXc\n");
+        let (status, out, _) = run(util_sed, &["sed", "s/X/Y/", "/sf.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(out, "aYbXc\n");
+    }
+
+    // -------------------------------------------------------------------
+    // cut -d: -f1  with custom delimiter
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn cut_custom_delimiter() {
+        let mut fs = make_fs_with_file("/cd.txt", b"user:x:1000:1000\nroot:x:0:0\n");
+        let (status, out, _) = run(util_cut, &["cut", "-d", ":", "-f", "1", "/cd.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(out, "user\nroot\n");
+    }
+
+    // -------------------------------------------------------------------
+    // tr 'a-z' 'A-Z'  range translation
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn tr_lowercase_to_uppercase() {
+        let mut fs = make_fs();
+        let (status, out, _) = run_stdin(
+            util_tr,
+            &[
+                "tr",
+                "abcdefghijklmnopqrstuvwxyz",
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            ],
+            b"hello world",
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "HELLO WORLD");
+    }
+
+    // -------------------------------------------------------------------
+    // column -t  tabular format
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn column_tabular() {
+        let mut fs = make_fs_with_file("/ct.txt", b"aa bb cc\nd eee f\n");
+        let (status, out, _) = run(util_column, &["column", "-t", "/ct.txt"], &mut fs);
+        assert_eq!(status, 0);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // Columns should be aligned (second column starts at same position)
+        let col2_pos_0 = lines[0].find("bb").unwrap();
+        let col2_pos_1 = lines[1].find("eee").unwrap();
+        assert_eq!(col2_pos_0, col2_pos_1, "columns not aligned: {lines:?}");
+    }
 }

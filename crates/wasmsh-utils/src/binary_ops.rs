@@ -1346,4 +1346,401 @@ mod tests {
         assert_eq!(parse_size("1G"), Some(1024 * 1024 * 1024));
         assert_eq!(parse_size("abc"), None);
     }
+
+    // -------------------------------------------------------------------
+    // xxd -i  C include format
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn xxd_c_include_from_file() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/data.bin", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"\x01\x02\x03").unwrap();
+        fs.close(h);
+        let (status, out) = run_util(util_xxd, &["xxd", "-i", "/data.bin"], &mut fs, None);
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(
+            s.contains("unsigned char"),
+            "expected C array header, got: {s}"
+        );
+        assert!(s.contains("0x01"));
+        assert!(s.contains("0x02"));
+        assert!(s.contains("0x03"));
+        assert!(s.contains("_len = 3"));
+    }
+
+    // -------------------------------------------------------------------
+    // xxd -r  reverse hex dump
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn xxd_reverse_plain_hex() {
+        let mut fs = MemoryFs::new();
+        // Feed plain hex (no offsets) through -r
+        let hex_input = b"48656c6c6f";
+        let (status, out) = run_util(util_xxd, &["xxd", "-r"], &mut fs, Some(hex_input));
+        assert_eq!(status, 0);
+        assert_eq!(&out.stdout, b"Hello");
+    }
+
+    // -------------------------------------------------------------------
+    // xxd -l 5  limit bytes
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn xxd_limit_5_bytes() {
+        let mut fs = MemoryFs::new();
+        let (status, out) = run_util(
+            util_xxd,
+            &["xxd", "-l", "5"],
+            &mut fs,
+            Some(b"Hello World!"),
+        );
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        // Only the first 5 bytes should appear
+        assert!(s.contains("Hello"));
+        assert!(!s.contains("World"));
+    }
+
+    // -------------------------------------------------------------------
+    // xxd -s 3  skip offset
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn xxd_skip_3_bytes() {
+        let mut fs = MemoryFs::new();
+        let (status, out) = run_util(
+            util_xxd,
+            &["xxd", "-s", "3", "-p"],
+            &mut fs,
+            Some(b"ABCDef"),
+        );
+        assert_eq!(status, 0);
+        let s = out.stdout_str().trim().to_string();
+        // Skipping 3 bytes ("ABC"), remaining is "Def" = 44 65 66
+        assert_eq!(s, "446566");
+    }
+
+    // -------------------------------------------------------------------
+    // dd conv=lcase
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn dd_conv_lcase() {
+        let mut fs = MemoryFs::new();
+        let (status, out) = run_util(
+            util_dd,
+            &["dd", "conv=lcase"],
+            &mut fs,
+            Some(b"HELLO World"),
+        );
+        assert_eq!(status, 0);
+        assert_eq!(&out.stdout, b"hello world");
+    }
+
+    // -------------------------------------------------------------------
+    // dd conv=ucase (already tested partially, cover from file)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn dd_conv_ucase_from_file() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/input.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"lower case text").unwrap();
+        fs.close(h);
+        let (status, out) = run_util(
+            util_dd,
+            &["dd", "if=/input.txt", "conv=ucase"],
+            &mut fs,
+            None,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(&out.stdout, b"LOWER CASE TEXT");
+    }
+
+    // -------------------------------------------------------------------
+    // dd count=2 bs=5 with specific block handling
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn dd_count_with_bs() {
+        let mut fs = MemoryFs::new();
+        // 20 bytes input, bs=5, count=2 => read 10 bytes
+        let (status, out) = run_util(
+            util_dd,
+            &["dd", "bs=5", "count=2"],
+            &mut fs,
+            Some(b"abcdefghijklmnopqrst"),
+        );
+        assert_eq!(status, 0);
+        assert_eq!(&out.stdout, b"abcdefghij");
+    }
+
+    // -------------------------------------------------------------------
+    // dd stderr stats output
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn dd_stderr_stats() {
+        let mut fs = MemoryFs::new();
+        let (status, out) = run_util(util_dd, &["dd", "bs=1", "count=3"], &mut fs, Some(b"abcde"));
+        assert_eq!(status, 0);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("records in"), "expected records in: {err}");
+        assert!(err.contains("records out"), "expected records out: {err}");
+        assert!(
+            err.contains("bytes transferred"),
+            "expected bytes transferred: {err}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // strings -n 8 with longer minimum
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn strings_min_len_8() {
+        let mut fs = MemoryFs::new();
+        let mut data = Vec::new();
+        data.extend_from_slice(b"\x00short\x00");
+        data.extend_from_slice(b"\x00longstring\x00");
+        data.extend_from_slice(b"\x00tiny\x00");
+        let (status, out) = run_util(util_strings, &["strings", "-n", "8"], &mut fs, Some(&data));
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("longstring"), "expected longstring: {s}");
+        assert!(!s.contains("short"), "should not contain short: {s}");
+        assert!(!s.contains("tiny"), "should not contain tiny: {s}");
+    }
+
+    // -------------------------------------------------------------------
+    // split -b 10 by bytes
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn split_by_10_bytes() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/data.bin", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"0123456789abcdefghij12345").unwrap();
+        fs.close(h);
+        let (status, _) = run_util(
+            util_split,
+            &["split", "-b", "10", "/data.bin", "p"],
+            &mut fs,
+            None,
+        );
+        assert_eq!(status, 0);
+        let h = fs.open("/paa", OpenOptions::read()).unwrap();
+        let d = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&d, b"0123456789");
+
+        let h = fs.open("/pab", OpenOptions::read()).unwrap();
+        let d = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&d, b"abcdefghij");
+
+        let h = fs.open("/pac", OpenOptions::read()).unwrap();
+        let d = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&d, b"12345");
+    }
+
+    // -------------------------------------------------------------------
+    // split -n 3 into N chunks
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn split_into_3_chunks() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/data.bin", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"123456789").unwrap(); // 9 bytes / 3 = 3 each
+        fs.close(h);
+        let (status, _) = run_util(
+            util_split,
+            &["split", "-n", "3", "/data.bin", "c"],
+            &mut fs,
+            None,
+        );
+        assert_eq!(status, 0);
+        let h = fs.open("/caa", OpenOptions::read()).unwrap();
+        let d = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&d, b"123");
+
+        let h = fs.open("/cab", OpenOptions::read()).unwrap();
+        let d = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&d, b"456");
+
+        let h = fs.open("/cac", OpenOptions::read()).unwrap();
+        let d = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&d, b"789");
+    }
+
+    // -------------------------------------------------------------------
+    // split -d numeric suffixes
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn split_numeric_suffixes() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/input.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"line1\nline2\nline3\n").unwrap();
+        fs.close(h);
+        let (status, _) = run_util(
+            util_split,
+            &["split", "-l", "1", "-d", "/input.txt", "n"],
+            &mut fs,
+            None,
+        );
+        assert_eq!(status, 0);
+        assert!(fs.stat("/n00").is_ok(), "n00 should exist");
+        assert!(fs.stat("/n01").is_ok(), "n01 should exist");
+        assert!(fs.stat("/n02").is_ok(), "n02 should exist");
+    }
+
+    // -------------------------------------------------------------------
+    // file -i MIME types for more formats
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn file_mime_png() {
+        let mut fs = MemoryFs::new();
+        let mut png = vec![0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&[0; 20]);
+        let h = fs.open("/img.png", OpenOptions::write()).unwrap();
+        fs.write_file(h, &png).unwrap();
+        fs.close(h);
+        let (status, out) = run_util(util_file, &["file", "-i", "/img.png"], &mut fs, None);
+        assert_eq!(status, 0);
+        assert!(out.stdout_str().contains("image/png"));
+    }
+
+    #[test]
+    fn file_mime_gzip() {
+        let mut fs = MemoryFs::new();
+        let mut gz = vec![0x1Fu8, 0x8B, 0x08, 0x00];
+        gz.extend_from_slice(&[0; 20]);
+        let h = fs.open("/arc.gz", OpenOptions::write()).unwrap();
+        fs.write_file(h, &gz).unwrap();
+        fs.close(h);
+        let (status, out) = run_util(util_file, &["file", "-i", "/arc.gz"], &mut fs, None);
+        assert_eq!(status, 0);
+        assert!(out.stdout_str().contains("application/gzip"));
+    }
+
+    #[test]
+    fn file_mime_json() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/data.json", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"{\"a\":1}").unwrap();
+        fs.close(h);
+        let (status, out) = run_util(util_file, &["file", "-i", "/data.json"], &mut fs, None);
+        assert_eq!(status, 0);
+        assert!(out.stdout_str().contains("application/json"));
+    }
+
+    // -------------------------------------------------------------------
+    // file with wasm magic \x00asm
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn file_wasm_magic() {
+        let mut fs = MemoryFs::new();
+        let mut wasm = vec![0x00u8, b'a', b's', b'm'];
+        wasm.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]); // version
+        let h = fs.open("/module.wasm", OpenOptions::write()).unwrap();
+        fs.write_file(h, &wasm).unwrap();
+        fs.close(h);
+        let (status, out) = run_util(util_file, &["file", "/module.wasm"], &mut fs, None);
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(
+            s.contains("WebAssembly") || s.contains("wasm"),
+            "expected wasm detection, got: {s}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // file with ELF magic \x7fELF
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn file_elf_magic() {
+        let mut fs = MemoryFs::new();
+        let mut elf = vec![0x7Fu8, b'E', b'L', b'F'];
+        elf.extend_from_slice(&[0; 20]);
+        let h = fs.open("/binary.elf", OpenOptions::write()).unwrap();
+        fs.write_file(h, &elf).unwrap();
+        fs.close(h);
+        let (status, out) = run_util(util_file, &["file", "/binary.elf"], &mut fs, None);
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("ELF"), "expected ELF detection, got: {s}");
+    }
+
+    // -------------------------------------------------------------------
+    // file with PDF magic %PDF
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn file_pdf_magic() {
+        let mut fs = MemoryFs::new();
+        let mut pdf = b"%PDF-1.4 ".to_vec();
+        pdf.extend_from_slice(&[0; 20]);
+        let h = fs.open("/doc.pdf", OpenOptions::write()).unwrap();
+        fs.write_file(h, &pdf).unwrap();
+        fs.close(h);
+        let (status, out) = run_util(util_file, &["file", "/doc.pdf"], &mut fs, None);
+        assert_eq!(status, 0);
+        let s = out.stdout_str();
+        assert!(s.contains("PDF"), "expected PDF detection, got: {s}");
+    }
+
+    // -------------------------------------------------------------------
+    // file -i  MIME for wasm and ELF
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn file_mime_wasm() {
+        let mut fs = MemoryFs::new();
+        let mut wasm = vec![0x00u8, b'a', b's', b'm'];
+        wasm.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
+        let h = fs.open("/mod.wasm", OpenOptions::write()).unwrap();
+        fs.write_file(h, &wasm).unwrap();
+        fs.close(h);
+        let (status, out) = run_util(util_file, &["file", "-i", "/mod.wasm"], &mut fs, None);
+        assert_eq!(status, 0);
+        assert!(out.stdout_str().contains("application/wasm"));
+    }
+
+    #[test]
+    fn file_mime_elf() {
+        let mut fs = MemoryFs::new();
+        let mut elf = vec![0x7Fu8, b'E', b'L', b'F'];
+        elf.extend_from_slice(&[0; 20]);
+        let h = fs.open("/bin.elf", OpenOptions::write()).unwrap();
+        fs.write_file(h, &elf).unwrap();
+        fs.close(h);
+        let (status, out) = run_util(util_file, &["file", "-i", "/bin.elf"], &mut fs, None);
+        assert_eq!(status, 0);
+        assert!(out.stdout_str().contains("application/x-executable"));
+    }
+
+    #[test]
+    fn file_mime_pdf() {
+        let mut fs = MemoryFs::new();
+        let mut pdf = b"%PDF-1.7 ".to_vec();
+        pdf.extend_from_slice(&[0; 20]);
+        let h = fs.open("/doc.pdf", OpenOptions::write()).unwrap();
+        fs.write_file(h, &pdf).unwrap();
+        fs.close(h);
+        let (status, out) = run_util(util_file, &["file", "-i", "/doc.pdf"], &mut fs, None);
+        assert_eq!(status, 0);
+        assert!(out.stdout_str().contains("application/pdf"));
+    }
 }

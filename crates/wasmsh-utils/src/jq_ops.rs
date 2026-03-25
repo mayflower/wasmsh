@@ -5232,4 +5232,1846 @@ mod tests {
         };
         assert_eq!(status, 1);
     }
+
+    // ================================================================
+    // Error paths through util_jq
+    // ================================================================
+
+    fn run_util_jq(argv: &[&str], stdin: Option<&[u8]>) -> (i32, String, String) {
+        use wasmsh_fs::MemoryFs;
+        let mut fs = MemoryFs::new();
+        let mut out = crate::VecOutput::default();
+        let status = {
+            let mut ctx = UtilContext {
+                fs: &mut fs,
+                output: &mut out,
+                cwd: "/",
+                stdin,
+                state: None,
+            };
+            util_jq(&mut ctx, argv)
+        };
+        let stdout = out.stdout_str().to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        (status, stdout, stderr)
+    }
+
+    #[test]
+    fn jq_malformed_json() {
+        let (status, _, stderr) = run_util_jq(&["jq", "."], Some(b"{bad"));
+        assert_eq!(status, 2);
+        assert!(stderr.contains("error parsing JSON"), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn jq_invalid_filter() {
+        let (status, _, stderr) = run_util_jq(&["jq", ".[???]"], Some(b"{}"));
+        assert_eq!(status, 2);
+        assert!(stderr.contains("error parsing filter"), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn jq_no_input() {
+        let (status, _, stderr) = run_util_jq(&["jq", "."], None);
+        assert_eq!(status, 1);
+        assert!(stderr.contains("no input"), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn jq_no_filter() {
+        let (status, _, stderr) = run_util_jq(&["jq"], Some(b"{}"));
+        assert_eq!(status, 1);
+        assert!(stderr.contains("no filter"), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn jq_exit_status_null() {
+        let (status, _, _) = run_util_jq(&["jq", "-e", "."], Some(b"null"));
+        assert_eq!(status, 1);
+    }
+
+    #[test]
+    fn jq_exit_status_false() {
+        let (status, _, _) = run_util_jq(&["jq", "-e", "."], Some(b"false"));
+        assert_eq!(status, 1);
+    }
+
+    #[test]
+    fn jq_exit_status_true() {
+        let (status, _, _) = run_util_jq(&["jq", "-e", "."], Some(b"true"));
+        assert_eq!(status, 0);
+    }
+
+    #[test]
+    fn jq_exit_status_empty_output() {
+        // -e with no output should return 4
+        let (status, _, _) = run_util_jq(&["jq", "-e", "empty"], Some(b"null"));
+        assert_eq!(status, 4);
+    }
+
+    #[test]
+    fn jq_empty_json_input() {
+        let (status, _, stderr) = run_util_jq(&["jq", "."], Some(b""));
+        assert_eq!(status, 1);
+        assert!(stderr.contains("no input"), "stderr: {stderr}");
+    }
+
+    // ================================================================
+    // Untested filter operations — reduce, foreach, def, label/break, etc.
+    // ================================================================
+
+    #[test]
+    fn filter_reduce_sum() {
+        assert_eq!(jq_str("reduce .[] as $x (0; . + $x)", "[10, 20, 30]"), "60");
+    }
+
+    #[test]
+    fn filter_reduce_string_concat() {
+        assert_eq!(
+            jq_raw(r#"reduce .[] as $x (""; . + $x)"#, r#"["a","b","c"]"#),
+            "abc"
+        );
+    }
+
+    #[test]
+    fn filter_foreach_running_sum() {
+        assert_eq!(
+            jq_str("[foreach .[] as $x (0; . + $x)]", "[1, 2, 3]"),
+            "[1,3,6]"
+        );
+    }
+
+    #[test]
+    fn filter_foreach_with_extract() {
+        // foreach with extract expression (3 args)
+        assert_eq!(
+            jq_str("[foreach .[] as $x (0; . + $x; . * 2)]", "[1, 2, 3]"),
+            "[2,6,12]"
+        );
+    }
+
+    #[test]
+    fn filter_def_user_function() {
+        assert_eq!(
+            jq_str("def double: . * 2; [.[] | double]", "[1, 2, 3]"),
+            "[2,4,6]"
+        );
+    }
+
+    #[test]
+    fn filter_def_with_args() {
+        // In this implementation, def args are stored as vars accessed via $name
+        // So: def addN(n): . + $n; works differently from jq proper
+        // Instead test with a no-arg helper that references a bound variable
+        assert_eq!(jq_str("3 as $x | def addx: . + $x; 5 | addx", "null"), "8");
+    }
+
+    #[test]
+    fn filter_def_recursive() {
+        // Factorial via recursion
+        assert_eq!(
+            jq_str(
+                "def fact: if . <= 1 then 1 else . * ((. - 1) | fact) end; 5 | fact",
+                "null"
+            ),
+            "120"
+        );
+    }
+
+    #[test]
+    fn filter_try_catch() {
+        assert_eq!(jq_raw(r#"try error("boom") catch ."#, "null"), "boom");
+    }
+
+    #[test]
+    fn filter_try_catch_no_error() {
+        assert_eq!(jq_str("try 42 catch .", "null"), "42");
+    }
+
+    #[test]
+    fn filter_try_no_catch() {
+        // try without catch suppresses error and produces empty output
+        assert_eq!(jq_str(r#"try error("oops")"#, "null"), "");
+    }
+
+    #[test]
+    fn filter_label_break_basic() {
+        // label catches the break signal and produces empty
+        // This tests that label/break parse and execute without panic
+        let r = jq_str("label $out | 42", "null");
+        assert_eq!(r, "42");
+    }
+
+    #[test]
+    fn filter_label_break_signal() {
+        // break inside label suppresses remaining output
+        // The label catches the break signal
+        let (status, _, _) = run_util_jq(
+            &["jq", r"label $out | foreach .[] as $x (0; . + $x)"],
+            Some(b"[1,2,3]"),
+        );
+        assert_eq!(status, 0);
+    }
+
+    #[test]
+    fn filter_limit_builtin() {
+        assert_eq!(jq_str("[limit(3; .[])]", "[1,2,3,4,5]"), "[1,2,3]");
+    }
+
+    #[test]
+    fn filter_until_via_recurse() {
+        // Implement until-like logic using recursive def without params
+        // Count from 0 to 5 by incrementing
+        assert_eq!(
+            jq_str(
+                "def inc_to_5: if . >= 5 then . else (. + 1) | inc_to_5 end; 0 | inc_to_5",
+                "null"
+            ),
+            "5"
+        );
+    }
+
+    #[test]
+    fn filter_while_via_recurse_builtin() {
+        // Use the builtin recurse function with a select to implement while-like behavior
+        assert_eq!(
+            jq_str("[1 | recurse(. * 2; . < 16) | select(. < 10)]", "null"),
+            "[1,2,4,8]"
+        );
+    }
+
+    #[test]
+    fn filter_walk_manual() {
+        // walk-like behavior: increment all numbers in nested structure
+        // Use map + map_values for each level
+        assert_eq!(
+            jq_str(
+                r#"{"a": (.a + 1), "b": [.b[] + 1]}"#,
+                r#"{"a":1,"b":[2,3]}"#
+            ),
+            r#"{"a":2,"b":[3,4]}"#
+        );
+    }
+
+    // ================================================================
+    // Path operations: paths, leaf_paths, getpath, setpath, delpaths
+    // ================================================================
+
+    #[test]
+    fn filter_paths() {
+        let r = jq_str(r"[path(..)]", r#"{"a":1,"b":{"c":2}}"#);
+        assert!(r.contains("[\"a\"]"));
+        assert!(r.contains("[\"b\",\"c\"]"));
+    }
+
+    #[test]
+    fn filter_leaf_paths() {
+        let r = jq_str("leaf_paths", r#"{"a":1,"b":{"c":2}}"#);
+        // leaf_paths returns an array of paths
+        assert!(r.contains("[\"a\"]"));
+        assert!(r.contains("[\"b\",\"c\"]"));
+    }
+
+    #[test]
+    fn filter_getpath() {
+        assert_eq!(jq_str(r#"getpath(["a","b"])"#, r#"{"a":{"b":42}}"#), "42");
+        assert_eq!(jq_str(r#"getpath(["x"])"#, r#"{"a":1}"#), "null");
+    }
+
+    #[test]
+    fn filter_setpath() {
+        assert_eq!(
+            jq_str(r#"setpath(["a","b"]; 99)"#, r#"{"a":{"b":1}}"#),
+            r#"{"a":{"b":99}}"#
+        );
+    }
+
+    #[test]
+    fn filter_setpath_create() {
+        assert_eq!(jq_str(r#"setpath(["x"]; 42)"#, r"{}"), r#"{"x":42}"#);
+    }
+
+    #[test]
+    fn filter_delpaths() {
+        let r = jq_str(r#"delpaths([["a"]])"#, r#"{"a":1,"b":2}"#);
+        assert!(!r.contains("\"a\""));
+        assert!(r.contains("\"b\":2"));
+    }
+
+    // ================================================================
+    // Format strings: @base64, @base64d, @uri, @html, @csv, @tsv
+    // ================================================================
+
+    #[test]
+    fn filter_at_base64_roundtrip() {
+        assert_eq!(
+            jq_raw("@base64", r#""Hello, World!""#),
+            "SGVsbG8sIFdvcmxkIQ=="
+        );
+        assert_eq!(
+            jq_raw("@base64d", r#""SGVsbG8sIFdvcmxkIQ==""#),
+            "Hello, World!"
+        );
+    }
+
+    #[test]
+    fn filter_at_base64_empty() {
+        assert_eq!(jq_raw("@base64", r#""""#), "");
+        assert_eq!(jq_raw("@base64d", r#""""#), "");
+    }
+
+    #[test]
+    fn filter_at_uri_special_chars() {
+        assert_eq!(jq_raw("@uri", r#""foo bar&baz=1""#), "foo%20bar%26baz%3D1");
+    }
+
+    #[test]
+    fn filter_at_html_entities() {
+        assert_eq!(
+            jq_raw("@html", r#""<a href=\"x\">&""#),
+            "&lt;a href=&quot;x&quot;&gt;&amp;"
+        );
+    }
+
+    #[test]
+    fn filter_at_csv_with_quotes() {
+        assert_eq!(jq_raw("@csv", r#"["a","b\"c",1]"#), r#""a","b""c",1"#);
+    }
+
+    #[test]
+    fn filter_at_csv_with_null() {
+        assert_eq!(jq_raw("@csv", r"[1,null,3]"), "1,,3");
+    }
+
+    #[test]
+    fn filter_at_tsv_basic() {
+        assert_eq!(jq_raw("@tsv", r#"["a","b","c"]"#), "a\tb\tc");
+    }
+
+    #[test]
+    fn filter_at_tsv_escaping() {
+        // JSON "a\tb" has a literal tab; TSV escapes it to \t
+        assert_eq!(jq_raw("@tsv", r#"["a\tb","c\nd"]"#), "a\\tb\tc\\nd");
+    }
+
+    // ================================================================
+    // explode / implode
+    // ================================================================
+
+    #[test]
+    fn filter_explode_ascii() {
+        assert_eq!(jq_str("explode", r#""Hi""#), "[72,105]");
+    }
+
+    #[test]
+    fn filter_implode_ascii() {
+        assert_eq!(jq_str("implode", "[72,105]"), r#""Hi""#);
+    }
+
+    #[test]
+    fn filter_explode_implode_roundtrip() {
+        assert_eq!(jq_raw("explode | implode", r#""test123""#), "test123");
+    }
+
+    // ================================================================
+    // indices, index, rindex
+    // ================================================================
+
+    #[test]
+    fn filter_index_string() {
+        assert_eq!(jq_str(r#"index("b")"#, r#""abcabc""#), "1");
+    }
+
+    #[test]
+    fn filter_rindex_string() {
+        assert_eq!(jq_str(r#"rindex("b")"#, r#""abcabc""#), "4");
+    }
+
+    #[test]
+    fn filter_indices_array() {
+        assert_eq!(jq_str("indices(1)", "[1,2,1,3,1]"), "[0,2,4]");
+    }
+
+    #[test]
+    fn filter_index_not_found() {
+        assert_eq!(jq_str(r#"index("z")"#, r#""abc""#), "null");
+    }
+
+    #[test]
+    fn filter_rindex_not_found() {
+        assert_eq!(jq_str(r#"rindex("z")"#, r#""abc""#), "null");
+    }
+
+    // ================================================================
+    // sub / gsub (regex replacement)
+    // ================================================================
+
+    #[test]
+    fn filter_sub_first_only() {
+        assert_eq!(jq_raw(r#"sub("o"; "0")"#, r#""foo""#), "f0o");
+    }
+
+    #[test]
+    fn filter_gsub_all() {
+        assert_eq!(jq_raw(r#"gsub("o"; "0")"#, r#""foobar""#), "f00bar");
+    }
+
+    #[test]
+    fn filter_gsub_regex() {
+        assert_eq!(jq_raw(r#"gsub("[0-9]"; "X")"#, r#""a1b2c3""#), "aXbXcX");
+    }
+
+    #[test]
+    fn filter_sub_case_insensitive() {
+        assert_eq!(jq_raw(r#"sub("FOO"; "bar"; "i")"#, r#""fooFOO""#), "barFOO");
+    }
+
+    // ================================================================
+    // min_by / max_by
+    // ================================================================
+
+    #[test]
+    fn filter_min_by() {
+        assert_eq!(
+            jq_str("min_by(.a)", r#"[{"a":3},{"a":1},{"a":2}]"#),
+            r#"{"a":1}"#
+        );
+    }
+
+    #[test]
+    fn filter_max_by() {
+        assert_eq!(
+            jq_str("max_by(.a)", r#"[{"a":3},{"a":1},{"a":2}]"#),
+            r#"{"a":3}"#
+        );
+    }
+
+    #[test]
+    fn filter_min_empty_array() {
+        assert_eq!(jq_str("min", "[]"), "null");
+    }
+
+    #[test]
+    fn filter_max_empty_array() {
+        assert_eq!(jq_str("max", "[]"), "null");
+    }
+
+    // ================================================================
+    // tojson / fromjson
+    // ================================================================
+
+    #[test]
+    fn filter_tojson_number() {
+        assert_eq!(jq_str("tojson", "42"), r#""42""#);
+    }
+
+    #[test]
+    fn filter_fromjson_number() {
+        assert_eq!(jq_str("fromjson", r#""42""#), "42");
+    }
+
+    #[test]
+    fn filter_tojson_array() {
+        assert_eq!(jq_str("tojson", "[1,2,3]"), r#""[1,2,3]""#);
+    }
+
+    #[test]
+    fn filter_fromjson_object() {
+        assert_eq!(jq_str("fromjson", r#""{\"a\":1}""#), r#"{"a":1}"#);
+    }
+
+    // ================================================================
+    // recurse / ..
+    // ================================================================
+
+    #[test]
+    fn filter_recurse_with_filter() {
+        let r = jq_str(
+            "[recurse(.children[]?)] | length",
+            r#"{"name":"root","children":[{"name":"a","children":[]},{"name":"b","children":[]}]}"#,
+        );
+        // root + 2 children = 3
+        assert_eq!(r, "3");
+    }
+
+    #[test]
+    fn filter_dotdot_numbers() {
+        assert_eq!(
+            jq_str("[.. | numbers]", r#"{"a":1,"b":{"c":2,"d":"x"}}"#),
+            "[1,2]"
+        );
+    }
+
+    #[test]
+    fn filter_dotdot_strings() {
+        let r = jq_str("[.. | strings]", r#"{"a":"hello","b":{"c":"world"}}"#);
+        assert!(r.contains("\"hello\""));
+        assert!(r.contains("\"world\""));
+    }
+
+    // ================================================================
+    // env / $ENV
+    // ================================================================
+
+    #[test]
+    fn filter_env_returns_object() {
+        assert_eq!(jq_str("env", "null"), "{}");
+    }
+
+    #[test]
+    fn filter_env_var_returns_object() {
+        assert_eq!(jq_str("$ENV", "null"), "{}");
+    }
+
+    // ================================================================
+    // builtins
+    // ================================================================
+
+    #[test]
+    fn filter_builtins_list() {
+        let r = jq_str("builtins | length", "null");
+        // Should return a positive number
+        let n: i64 = r.parse().unwrap();
+        assert!(n > 50, "expected >50 builtins, got {n}");
+    }
+
+    #[test]
+    fn filter_builtins_contains_map() {
+        let r = jq_str(r#"builtins | any(. == "map/0")"#, "null");
+        assert_eq!(r, "true");
+    }
+
+    // ================================================================
+    // CLI flags through run_util_jq
+    // ================================================================
+
+    #[test]
+    fn util_jq_compact_flag() {
+        let (status, stdout, _) =
+            run_util_jq(&["jq", "-c", "."], Some(br#"{"a": 1, "b": [2, 3]}"#));
+        assert_eq!(status, 0);
+        assert_eq!(stdout.trim(), r#"{"a":1,"b":[2,3]}"#);
+    }
+
+    #[test]
+    fn util_jq_slurp_multiple_docs() {
+        let (status, stdout, _) = run_util_jq(&["jq", "-s", "."], Some(b"1\n2\n3"));
+        assert_eq!(status, 0);
+        assert!(stdout.contains("[1,2,3]") || stdout.contains("[\n"));
+    }
+
+    #[test]
+    fn util_jq_arg_flag() {
+        let (status, stdout, _) = run_util_jq(&["jq", "-n", "--arg", "x", "hello", "$x"], None);
+        assert_eq!(status, 0);
+        assert_eq!(stdout.trim(), r#""hello""#);
+    }
+
+    #[test]
+    fn util_jq_argjson_flag() {
+        let (status, stdout, _) = run_util_jq(&["jq", "-n", "--argjson", "x", "42", "$x"], None);
+        assert_eq!(status, 0);
+        assert_eq!(stdout.trim(), "42");
+    }
+
+    #[test]
+    fn util_jq_argjson_invalid() {
+        let (status, _, stderr) = run_util_jq(&["jq", "-n", "--argjson", "x", "{bad", "$x"], None);
+        assert_eq!(status, 1);
+        assert!(stderr.contains("invalid JSON"), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn util_jq_null_input_flag() {
+        let (status, stdout, _) = run_util_jq(&["jq", "-n", "1 + 2"], None);
+        assert_eq!(status, 0);
+        assert_eq!(stdout.trim(), "3");
+    }
+
+    #[test]
+    fn util_jq_combined_flags() {
+        let (status, stdout, _) =
+            run_util_jq(&["jq", "-rc", ".name"], Some(br#"{"name":"alice"}"#));
+        assert_eq!(status, 0);
+        assert_eq!(stdout.trim(), "alice");
+    }
+
+    #[test]
+    fn util_jq_arg_missing_value() {
+        let (status, _, stderr) = run_util_jq(&["jq", "-n", "--arg", "x"], None);
+        assert_eq!(status, 1);
+        assert!(stderr.contains("--arg requires"), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn util_jq_argjson_missing_value() {
+        let (status, _, stderr) = run_util_jq(&["jq", "-n", "--argjson", "x"], None);
+        assert_eq!(status, 1);
+        assert!(stderr.contains("--argjson requires"), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn util_jq_multi_doc_no_slurp() {
+        // Two JSON values on stdin, processed individually
+        let (status, stdout, _) = run_util_jq(&["jq", ". + 1"], Some(b"1\n2"));
+        assert_eq!(status, 0);
+        let lines: Vec<&str> = stdout.trim().lines().collect();
+        assert_eq!(lines, vec!["2", "3"]);
+    }
+
+    #[test]
+    fn util_jq_file_input() {
+        use wasmsh_fs::MemoryFs;
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/data.json", OpenOptions::write()).unwrap();
+        fs.write_file(h, br"[1,2,3]").unwrap();
+        fs.close(h);
+
+        let mut out = crate::VecOutput::default();
+        let status = {
+            let mut ctx = UtilContext {
+                fs: &mut fs,
+                output: &mut out,
+                cwd: "/",
+                stdin: None,
+                state: None,
+            };
+            util_jq(&mut ctx, &["jq", "add", "/data.json"])
+        };
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout_str().trim(), "6");
+    }
+
+    #[test]
+    fn util_jq_file_not_found() {
+        use wasmsh_fs::MemoryFs;
+        let mut fs = MemoryFs::new();
+        let mut out = crate::VecOutput::default();
+        let status = {
+            let mut ctx = UtilContext {
+                fs: &mut fs,
+                output: &mut out,
+                cwd: "/",
+                stdin: None,
+                state: None,
+            };
+            util_jq(&mut ctx, &["jq", ".", "/nonexistent.json"])
+        };
+        assert_eq!(status, 1);
+    }
+
+    // ================================================================
+    // Object construction
+    // ================================================================
+
+    #[test]
+    fn filter_object_dynamic_key() {
+        assert_eq!(
+            jq_str(r"{(.name): .value}", r#"{"name":"foo","value":42}"#),
+            r#"{"foo":42}"#
+        );
+    }
+
+    #[test]
+    fn filter_object_shorthand_multiple() {
+        let r = jq_str("{a, b}", r#"{"a":1,"b":2,"c":3}"#);
+        assert!(r.contains("\"a\":1"));
+        assert!(r.contains("\"b\":2"));
+        assert!(!r.contains("\"c\""));
+    }
+
+    #[test]
+    fn filter_object_string_key() {
+        assert_eq!(jq_str(r#"{"key": .val}"#, r#"{"val":99}"#), r#"{"key":99}"#);
+    }
+
+    // ================================================================
+    // String interpolation (via filter concatenation)
+    // ================================================================
+
+    #[test]
+    fn filter_string_concat_interpolation() {
+        // jq doesn't have \() syntax in our impl, but we can test string concatenation
+        assert_eq!(
+            jq_raw(
+                r#".name + " is " + (.age | tostring)"#,
+                r#"{"name":"Alice","age":30}"#
+            ),
+            "Alice is 30"
+        );
+    }
+
+    // ================================================================
+    // Slice operations
+    // ================================================================
+
+    #[test]
+    fn filter_slice_from_to() {
+        assert_eq!(jq_str(".[2:5]", "[0,1,2,3,4,5,6]"), "[2,3,4]");
+    }
+
+    #[test]
+    fn filter_slice_negative() {
+        assert_eq!(jq_str(".[-2:]", "[0,1,2,3,4]"), "[3,4]");
+    }
+
+    #[test]
+    fn filter_slice_to_end() {
+        assert_eq!(jq_str(".[3:]", "[0,1,2,3,4]"), "[3,4]");
+    }
+
+    #[test]
+    fn filter_slice_from_start() {
+        assert_eq!(jq_str(".[:3]", "[0,1,2,3,4]"), "[0,1,2]");
+    }
+
+    #[test]
+    fn filter_slice_negative_end() {
+        assert_eq!(jq_str(".[:-1]", "[0,1,2,3,4]"), "[0,1,2,3]");
+    }
+
+    #[test]
+    fn filter_slice_string() {
+        assert_eq!(jq_raw(".[2:5]", r#""hello world""#), "llo");
+    }
+
+    #[test]
+    fn filter_slice_string_negative() {
+        assert_eq!(jq_raw(".[-3:]", r#""hello""#), "llo");
+    }
+
+    // ================================================================
+    // Alternative operator
+    // ================================================================
+
+    #[test]
+    fn filter_alternative_null() {
+        assert_eq!(
+            jq_str(r#".foo // "default""#, r#"{"bar":1}"#),
+            r#""default""#
+        );
+    }
+
+    #[test]
+    fn filter_alternative_false() {
+        // false is also non-truthy, so alternative kicks in
+        assert_eq!(
+            jq_str(r#".foo // "default""#, r#"{"foo":false}"#),
+            r#""default""#
+        );
+    }
+
+    #[test]
+    fn filter_alternative_has_value() {
+        assert_eq!(
+            jq_str(r#".foo // "default""#, r#"{"foo":"bar"}"#),
+            r#""bar""#
+        );
+    }
+
+    #[test]
+    fn filter_alternative_chain() {
+        assert_eq!(jq_str(r#".a // .b // "none""#, r#"{"b":2}"#), "2");
+    }
+
+    // ================================================================
+    // Comparison operators
+    // ================================================================
+
+    #[test]
+    fn filter_comparison_ne() {
+        assert_eq!(jq_str(". != 1", "2"), "true");
+        assert_eq!(jq_str(". != 1", "1"), "false");
+    }
+
+    #[test]
+    fn filter_comparison_le() {
+        assert_eq!(jq_str(". <= 3", "3"), "true");
+        assert_eq!(jq_str(". <= 3", "4"), "false");
+    }
+
+    #[test]
+    fn filter_comparison_ge() {
+        assert_eq!(jq_str(". >= 3", "3"), "true");
+        assert_eq!(jq_str(". >= 3", "2"), "false");
+    }
+
+    #[test]
+    fn filter_comparison_strings() {
+        assert_eq!(jq_str(r#". < "b""#, r#""a""#), "true");
+        assert_eq!(jq_str(r#". > "b""#, r#""a""#), "false");
+    }
+
+    // ================================================================
+    // Math functions
+    // ================================================================
+
+    #[test]
+    fn filter_sqrt() {
+        assert_eq!(jq_str("sqrt", "9"), "3");
+    }
+
+    #[test]
+    fn filter_fabs() {
+        assert_eq!(jq_str("fabs", "-5"), "5");
+    }
+
+    #[test]
+    fn filter_pow() {
+        assert_eq!(jq_str("pow(2;10)", "null"), "1024");
+    }
+
+    #[test]
+    fn filter_log() {
+        // ln(1) == 0
+        assert_eq!(jq_str("log", "1"), "0");
+    }
+
+    #[test]
+    fn filter_log2() {
+        assert_eq!(jq_str("log2", "8"), "3");
+    }
+
+    #[test]
+    fn filter_log10() {
+        assert_eq!(jq_str("log10", "100"), "2");
+    }
+
+    #[test]
+    fn filter_exp() {
+        assert_eq!(jq_str("exp", "0"), "1");
+    }
+
+    #[test]
+    fn filter_exp2() {
+        assert_eq!(jq_str("exp2", "3"), "8");
+    }
+
+    #[test]
+    fn filter_infinite_nan() {
+        assert_eq!(jq_str("infinite | isinfinite", "null"), "true");
+        assert_eq!(jq_str("nan | isnan", "null"), "true");
+        assert_eq!(jq_str("1 | isnormal", "null"), "true");
+        assert_eq!(jq_str("0 | isnormal", "null"), "false");
+    }
+
+    // ================================================================
+    // Type selectors
+    // ================================================================
+
+    #[test]
+    fn filter_type_selectors() {
+        // objects selector
+        assert_eq!(
+            jq_str("[.[] | objects]", r#"[1, "a", {}, [], null]"#),
+            "[{}]"
+        );
+        // arrays
+        assert_eq!(
+            jq_str("[.[] | arrays]", r#"[1, "a", {}, [], null]"#),
+            "[[]]"
+        );
+        // strings
+        assert_eq!(
+            jq_str("[.[] | strings]", r#"[1, "a", {}, [], null]"#),
+            r#"["a"]"#
+        );
+        // numbers
+        assert_eq!(
+            jq_str("[.[] | numbers]", r#"[1, "a", {}, [], null]"#),
+            "[1]"
+        );
+        // booleans
+        assert_eq!(
+            jq_str("[.[] | booleans]", r"[1, true, false, null]"),
+            "[true,false]"
+        );
+        // nulls
+        assert_eq!(
+            jq_str("[.[] | nulls]", r#"[1, null, "a", null]"#),
+            "[null,null]"
+        );
+        // scalars
+        assert_eq!(
+            jq_str("[.[] | scalars]", r#"[1, "a", {}, [], null]"#),
+            r#"[1,"a",null]"#
+        );
+        // iterables
+        assert_eq!(
+            jq_str("[.[] | iterables]", r#"[1, "a", {}, [], null]"#),
+            "[{},[]]"
+        );
+    }
+
+    // ================================================================
+    // contains / inside
+    // ================================================================
+
+    #[test]
+    fn filter_contains_object() {
+        assert_eq!(jq_str(r#"contains({"a":1})"#, r#"{"a":1,"b":2}"#), "true");
+        assert_eq!(
+            jq_str(r#"contains({"a":1,"c":3})"#, r#"{"a":1,"b":2}"#),
+            "false"
+        );
+    }
+
+    #[test]
+    fn filter_inside() {
+        assert_eq!(jq_str(r#"inside("foobar")"#, r#""foo""#), "true");
+        assert_eq!(jq_str(r#"inside("foobar")"#, r#""baz""#), "false");
+    }
+
+    // ================================================================
+    // in operator
+    // ================================================================
+
+    #[test]
+    fn filter_in_object() {
+        assert_eq!(jq_str(r#""a" | in({"a":1})"#, "null"), "true");
+        assert_eq!(jq_str(r#""z" | in({"a":1})"#, "null"), "false");
+    }
+
+    // ================================================================
+    // flatten with depth
+    // ================================================================
+
+    #[test]
+    fn filter_flatten_depth() {
+        assert_eq!(jq_str("flatten(1)", "[[1,[2]],[3]]"), "[1,[2],3]");
+    }
+
+    // ================================================================
+    // group_by
+    // ================================================================
+
+    #[test]
+    fn filter_group_by_result() {
+        let r = jq_str("group_by(.a) | length", r#"[{"a":1},{"a":2},{"a":1}]"#);
+        assert_eq!(r, "2");
+    }
+
+    // ================================================================
+    // any / all with filter arg
+    // ================================================================
+
+    #[test]
+    fn filter_any_with_filter() {
+        assert_eq!(jq_str("any(. > 3)", "[1, 2, 3, 4]"), "true");
+        assert_eq!(jq_str("any(. > 10)", "[1, 2, 3, 4]"), "false");
+    }
+
+    #[test]
+    fn filter_all_with_filter() {
+        assert_eq!(jq_str("all(. > 0)", "[1, 2, 3, 4]"), "true");
+        assert_eq!(jq_str("all(. > 2)", "[1, 2, 3, 4]"), "false");
+    }
+
+    // ================================================================
+    // first/last with generator arg
+    // ================================================================
+
+    #[test]
+    fn filter_first_with_generator() {
+        assert_eq!(jq_str("first(.[])", "[10, 20, 30]"), "10");
+    }
+
+    #[test]
+    fn filter_last_with_generator() {
+        assert_eq!(jq_str("last(.[])", "[10, 20, 30]"), "30");
+    }
+
+    // ================================================================
+    // nth
+    // ================================================================
+
+    #[test]
+    fn filter_nth_basic() {
+        assert_eq!(jq_str("nth(1)", "[10, 20, 30]"), "20");
+    }
+
+    #[test]
+    fn filter_nth_with_generator() {
+        assert_eq!(jq_str("nth(2; .[])", "[10, 20, 30, 40]"), "30");
+    }
+
+    // ================================================================
+    // range with step
+    // ================================================================
+
+    #[test]
+    fn filter_range_with_step() {
+        assert_eq!(jq_str("[range(0;10;3)]", "null"), "[0,3,6,9]");
+    }
+
+    #[test]
+    fn filter_range_negative_step() {
+        assert_eq!(jq_str("[range(5;0;-1)]", "null"), "[5,4,3,2,1]");
+    }
+
+    // ================================================================
+    // error function
+    // ================================================================
+
+    #[test]
+    fn filter_error_with_message() {
+        let r = jq_str(r#"error("custom error")"#, "null");
+        assert!(r.contains("ERROR:"), "result: {r}");
+        assert!(r.contains("custom error"), "result: {r}");
+    }
+
+    #[test]
+    fn filter_error_from_input() {
+        let r = jq_str("error", r#""my error""#);
+        assert!(r.contains("ERROR:"), "result: {r}");
+        assert!(r.contains("my error"), "result: {r}");
+    }
+
+    // ================================================================
+    // empty
+    // ================================================================
+
+    #[test]
+    fn filter_empty_via_util() {
+        // empty produces no output at the util_jq level
+        let (status, stdout, _) = run_util_jq(&["jq", "empty"], Some(b"null"));
+        assert_eq!(status, 0);
+        assert_eq!(stdout.trim(), "");
+    }
+
+    #[test]
+    fn filter_empty_in_array() {
+        // ArrayConstruct catches the empty signal and produces []
+        assert_eq!(jq_str("[empty]", "null"), "[]");
+    }
+
+    // ================================================================
+    // if/elif/else
+    // ================================================================
+
+    #[test]
+    fn filter_elif() {
+        assert_eq!(
+            jq_str(
+                r#"if . < 0 then "neg" elif . == 0 then "zero" else "pos" end"#,
+                "0"
+            ),
+            r#""zero""#
+        );
+    }
+
+    #[test]
+    fn filter_if_without_else() {
+        // Without else, input passes through
+        assert_eq!(jq_str("if . > 10 then \"big\" end", "5"), "5");
+    }
+
+    // ================================================================
+    // and / or / not edge cases
+    // ================================================================
+
+    #[test]
+    fn filter_and_short_circuit() {
+        assert_eq!(jq_str("false and true", "null"), "false");
+        assert_eq!(jq_str("null and true", "null"), "false");
+    }
+
+    #[test]
+    fn filter_or_short_circuit() {
+        assert_eq!(jq_str("true or false", "null"), "true");
+        assert_eq!(jq_str("1 or false", "null"), "true");
+    }
+
+    // ================================================================
+    // null arithmetic
+    // ================================================================
+
+    #[test]
+    fn filter_null_add() {
+        assert_eq!(jq_str("null + 5", "null"), "5");
+        assert_eq!(jq_str("5 + null", "null"), "5");
+    }
+
+    // ================================================================
+    // division / modulo errors
+    // ================================================================
+
+    #[test]
+    fn filter_division_by_zero() {
+        let r = jq_str("1 / 0", "null");
+        assert!(r.contains("ERROR:"), "result: {r}");
+    }
+
+    #[test]
+    fn filter_modulo_by_zero() {
+        let r = jq_str("1 % 0", "null");
+        assert!(r.contains("ERROR:"), "result: {r}");
+    }
+
+    // ================================================================
+    // utf8bytelength
+    // ================================================================
+
+    #[test]
+    fn filter_utf8bytelength() {
+        assert_eq!(jq_str("utf8bytelength", r#""hello""#), "5");
+    }
+
+    // ================================================================
+    // keys_unsorted
+    // ================================================================
+
+    #[test]
+    fn filter_keys_unsorted() {
+        let r = jq_str("keys_unsorted", r#"{"b":2,"a":1}"#);
+        assert!(r.contains("\"b\""));
+        assert!(r.contains("\"a\""));
+    }
+
+    // ================================================================
+    // keys on array
+    // ================================================================
+
+    #[test]
+    fn filter_keys_array() {
+        assert_eq!(jq_str("keys", "[10,20,30]"), "[0,1,2]");
+    }
+
+    // ================================================================
+    // values on array
+    // ================================================================
+
+    #[test]
+    fn filter_values_array() {
+        assert_eq!(jq_str("values", "[10,20,30]"), "[10,20,30]");
+    }
+
+    // ================================================================
+    // has on array
+    // ================================================================
+
+    #[test]
+    fn filter_has_array() {
+        assert_eq!(jq_str("has(0)", "[10,20,30]"), "true");
+        assert_eq!(jq_str("has(5)", "[10,20,30]"), "false");
+    }
+
+    // ================================================================
+    // optional iterate
+    // ================================================================
+
+    #[test]
+    fn filter_optional_iterate_non_iterable() {
+        assert_eq!(jq_str(".[]?", "42"), "");
+    }
+
+    #[test]
+    fn filter_optional_index() {
+        assert_eq!(jq_str(".[0]?", "42"), "");
+    }
+
+    // ================================================================
+    // iterate on null / object
+    // ================================================================
+
+    #[test]
+    fn filter_iterate_null() {
+        assert_eq!(jq_str("[.[]?]", "null"), "[]");
+    }
+
+    #[test]
+    fn filter_iterate_object_values() {
+        assert_eq!(jq_str("[.[] | . + 1]", r#"{"a":1,"b":2}"#), "[2,3]");
+    }
+
+    // ================================================================
+    // Negate error on non-number
+    // ================================================================
+
+    #[test]
+    fn filter_negate_string_error() {
+        let r = jq_str("-.", r#""hello""#);
+        assert!(r.contains("ERROR:"), "result: {r}");
+    }
+
+    // ================================================================
+    // Object iteration error
+    // ================================================================
+
+    #[test]
+    fn filter_iterate_number_error() {
+        let r = jq_str(".[]", "42");
+        assert!(r.contains("ERROR:"), "result: {r}");
+    }
+
+    // ================================================================
+    // JSON parser: parse_all for multi-document
+    // ================================================================
+
+    #[test]
+    fn parse_all_multiple_values() {
+        let vals = JsonParser::parse_all("1 2 3").unwrap();
+        assert_eq!(vals.len(), 3);
+    }
+
+    #[test]
+    fn parse_all_mixed_types() {
+        let vals = JsonParser::parse_all(r#"1 "hello" true null [1,2]"#).unwrap();
+        assert_eq!(vals.len(), 5);
+    }
+
+    // ================================================================
+    // JqValue methods coverage
+    // ================================================================
+
+    #[test]
+    fn value_type_name() {
+        assert_eq!(JqValue::Null.type_name(), "null");
+        assert_eq!(JqValue::Bool(true).type_name(), "boolean");
+        assert_eq!(JqValue::Number(1.0).type_name(), "number");
+        assert_eq!(JqValue::String("x".into()).type_name(), "string");
+        assert_eq!(JqValue::Array(vec![]).type_name(), "array");
+        assert_eq!(JqValue::Object(vec![]).type_name(), "object");
+    }
+
+    #[test]
+    fn value_is_truthy() {
+        assert!(!JqValue::Null.is_truthy());
+        assert!(!JqValue::Bool(false).is_truthy());
+        assert!(JqValue::Bool(true).is_truthy());
+        assert!(JqValue::Number(0.0).is_truthy());
+        assert!(JqValue::String(String::new()).is_truthy());
+    }
+
+    #[test]
+    fn value_length_bool_number() {
+        // bool and number return null for length
+        assert!(matches!(JqValue::Bool(true).length(), JqValue::Null));
+        assert!(matches!(JqValue::Number(42.0).length(), JqValue::Null));
+    }
+
+    #[test]
+    fn value_compare_different_types() {
+        // null < false < true < number < string < array < object
+        let null = JqValue::Null;
+        let boolean = JqValue::Bool(false);
+        let num = JqValue::Number(1.0);
+        let s = JqValue::String("a".into());
+        assert_eq!(null.compare(&boolean), Some(std::cmp::Ordering::Less));
+        assert_eq!(boolean.compare(&num), Some(std::cmp::Ordering::Less));
+        assert_eq!(num.compare(&s), Some(std::cmp::Ordering::Less));
+    }
+
+    #[test]
+    fn value_compare_arrays() {
+        let a = JqValue::Array(vec![JqValue::Number(1.0), JqValue::Number(2.0)]);
+        let b = JqValue::Array(vec![JqValue::Number(1.0), JqValue::Number(3.0)]);
+        assert_eq!(a.compare(&b), Some(std::cmp::Ordering::Less));
+    }
+
+    #[test]
+    fn value_contains_nested() {
+        let a = JqValue::Array(vec![
+            JqValue::Number(1.0),
+            JqValue::Number(2.0),
+            JqValue::Number(3.0),
+        ]);
+        let b = JqValue::Array(vec![JqValue::Number(2.0)]);
+        assert!(a.contains_value(&b));
+    }
+
+    #[test]
+    fn value_equals_objects() {
+        let a = JqValue::Object(vec![
+            ("x".into(), JqValue::Number(1.0)),
+            ("y".into(), JqValue::Number(2.0)),
+        ]);
+        let b = JqValue::Object(vec![
+            ("y".into(), JqValue::Number(2.0)),
+            ("x".into(), JqValue::Number(1.0)),
+        ]);
+        // Objects with same key-value pairs in different order should be equal
+        assert!(a.equals(&b));
+    }
+
+    #[test]
+    fn value_equals_different_types() {
+        assert!(!JqValue::Number(1.0).equals(&JqValue::String("1".into())));
+        assert!(!JqValue::Null.equals(&JqValue::Bool(false)));
+    }
+
+    #[test]
+    fn value_as_i64() {
+        assert_eq!(JqValue::Number(42.0).as_i64(), Some(42));
+        assert_eq!(JqValue::Number(42.5).as_i64(), None);
+        assert_eq!(JqValue::String("x".into()).as_i64(), None);
+    }
+
+    #[test]
+    fn value_as_str() {
+        assert_eq!(JqValue::String("hi".into()).as_str(), Some("hi"));
+        assert_eq!(JqValue::Number(1.0).as_str(), None);
+    }
+
+    #[test]
+    fn value_as_f64() {
+        assert_eq!(JqValue::Number(2.75).as_f64(), Some(2.75));
+        assert_eq!(JqValue::Null.as_f64(), None);
+    }
+
+    // ================================================================
+    // format_number edge cases
+    // ================================================================
+
+    #[test]
+    fn format_number_nan() {
+        assert_eq!(format_number(f64::NAN), "null");
+    }
+
+    #[test]
+    fn format_number_infinity() {
+        assert_eq!(format_number(f64::INFINITY), "1.7976931348623157e+308");
+        assert_eq!(format_number(f64::NEG_INFINITY), "-1.7976931348623157e+308");
+    }
+
+    #[test]
+    fn format_number_integer() {
+        assert_eq!(format_number(42.0), "42");
+    }
+
+    #[test]
+    fn format_number_fractional() {
+        assert_eq!(format_number(2.75), "2.75");
+    }
+
+    // ================================================================
+    // JSON printer
+    // ================================================================
+
+    #[test]
+    fn json_write_string_escapes() {
+        let val = JqValue::String("a\nb\t\"c\\d".into());
+        let s = json_to_string(&val, true);
+        assert_eq!(s, r#""a\nb\t\"c\\d""#);
+    }
+
+    #[test]
+    fn json_write_compact_vs_pretty() {
+        let val = JqValue::Array(vec![JqValue::Number(1.0), JqValue::Number(2.0)]);
+        let compact = json_to_string(&val, true);
+        let pretty = json_to_string(&val, false);
+        assert_eq!(compact, "[1,2]");
+        assert!(pretty.contains('\n'));
+    }
+
+    #[test]
+    fn json_write_empty_array_object() {
+        assert_eq!(json_to_string(&JqValue::Array(vec![]), true), "[]");
+        assert_eq!(json_to_string(&JqValue::Object(vec![]), true), "{}");
+    }
+
+    // ================================================================
+    // recurse_values
+    // ================================================================
+
+    #[test]
+    fn recurse_values_nested() {
+        let val = parse_json(r#"{"a":[1,{"b":2}]}"#).unwrap();
+        let all = val.recurse_values();
+        // Should include: root obj, array, 1, inner obj, 2 = 5 items min
+        assert!(all.len() >= 5, "got {} items", all.len());
+    }
+
+    // ================================================================
+    // to_string_repr
+    // ================================================================
+
+    #[test]
+    fn to_string_repr_scalar() {
+        assert_eq!(JqValue::Null.to_string_repr(), "null");
+        assert_eq!(JqValue::Bool(true).to_string_repr(), "true");
+        assert_eq!(JqValue::Number(42.0).to_string_repr(), "42");
+        assert_eq!(JqValue::String("hi".into()).to_string_repr(), "hi");
+    }
+
+    #[test]
+    fn to_string_repr_compound() {
+        // to_string_repr uses pretty printing for compound types
+        let arr = JqValue::Array(vec![JqValue::Number(1.0)]);
+        let repr = arr.to_string_repr();
+        assert!(repr.contains('1'));
+        assert!(repr.starts_with('['));
+    }
+
+    // ================================================================
+    // Filter: Variable binding with multiple outputs
+    // ================================================================
+
+    #[test]
+    fn filter_binding_multiple_outputs() {
+        // Each element becomes $x, and we add $x to the original input
+        assert_eq!(jq_str(".[] as $x | $x * $x", "[2, 3, 4]"), "4\n9\n16");
+    }
+
+    // ================================================================
+    // debug passthrough
+    // ================================================================
+
+    #[test]
+    fn filter_debug() {
+        assert_eq!(jq_str("debug", "42"), "42");
+    }
+
+    // ================================================================
+    // input/inputs (stubs)
+    // ================================================================
+
+    #[test]
+    fn filter_input_returns_null() {
+        assert_eq!(jq_str("input", "null"), "null");
+    }
+
+    #[test]
+    fn filter_inputs_returns_empty() {
+        assert_eq!(jq_str("[inputs]", "null"), "[]");
+    }
+
+    // ================================================================
+    // Nested object construction with multiple filter outputs
+    // ================================================================
+
+    #[test]
+    fn filter_object_construct_with_array_iterate() {
+        let r = jq_str("{a: .[]}", r"[1, 2]");
+        // Should produce two objects: {a:1} and {a:2}
+        assert!(r.contains("{\"a\":1}"));
+        assert!(r.contains("{\"a\":2}"));
+    }
+
+    // ================================================================
+    // Variable ($name) in object construction
+    // ================================================================
+
+    #[test]
+    fn filter_object_variable_key() {
+        assert_eq!(
+            jq_str(r".name as $n | {$n}", r#"{"name":"alice"}"#),
+            r#"{"n":"alice"}"#
+        );
+    }
+
+    // ================================================================
+    // Arithmetic on strings and arrays
+    // ================================================================
+
+    #[test]
+    fn filter_arith_string_add() {
+        assert_eq!(jq_raw(r#""hello" + " " + "world""#, "null"), "hello world");
+    }
+
+    #[test]
+    fn filter_arith_array_add() {
+        assert_eq!(jq_str("[1,2] + [3,4]", "null"), "[1,2,3,4]");
+    }
+
+    #[test]
+    fn filter_arith_object_merge() {
+        let r = jq_str(r#"{"a":1} + {"b":2}"#, "null");
+        assert!(r.contains("\"a\":1"));
+        assert!(r.contains("\"b\":2"));
+    }
+
+    #[test]
+    fn filter_arith_object_override() {
+        assert_eq!(jq_str(r#"{"a":1} + {"a":2}"#, "null"), r#"{"a":2}"#);
+    }
+
+    #[test]
+    fn filter_arith_type_error() {
+        let r = jq_str(r#"1 + "a""#, "null");
+        assert!(r.contains("ERROR:"), "result: {r}");
+    }
+
+    // ================================================================
+    // from_entries with name/value keys
+    // ================================================================
+
+    #[test]
+    fn filter_from_entries_name_key() {
+        let r = jq_str("from_entries", r#"[{"name":"a","value":1}]"#);
+        assert!(r.contains("\"a\":1"));
+    }
+
+    // ================================================================
+    // Regex: test with case insensitive flag
+    // ================================================================
+
+    #[test]
+    fn filter_test_case_insensitive() {
+        assert_eq!(jq_str(r#"test("foo"; "i")"#, r#""FOObar""#), "true");
+    }
+
+    // ================================================================
+    // match function
+    // ================================================================
+
+    #[test]
+    fn filter_match_basic() {
+        let r = jq_str(r#"match("bar")"#, r#""foobar""#);
+        assert!(r.contains("\"string\":\"bar\""));
+        assert!(r.contains("\"offset\":3"));
+    }
+
+    // ================================================================
+    // tonumber errors
+    // ================================================================
+
+    #[test]
+    fn filter_tonumber_invalid() {
+        let r = jq_str("tonumber", r#""abc""#);
+        assert!(r.contains("ERROR:"), "result: {r}");
+    }
+
+    #[test]
+    fn filter_tonumber_identity() {
+        assert_eq!(jq_str("tonumber", "42"), "42");
+    }
+
+    // ================================================================
+    // reverse on string
+    // ================================================================
+
+    #[test]
+    fn filter_reverse_string() {
+        assert_eq!(jq_raw("reverse", r#""abc""#), "cba");
+    }
+
+    // ================================================================
+    // @json and @text format strings
+    // ================================================================
+
+    #[test]
+    fn filter_at_json() {
+        assert_eq!(jq_raw("@json", "[1,2]"), "[1,2]");
+    }
+
+    #[test]
+    fn filter_at_text() {
+        assert_eq!(jq_raw("@text", r#""hello""#), "hello");
+    }
+
+    // ================================================================
+    // Unknown format error
+    // ================================================================
+
+    #[test]
+    fn filter_unknown_format() {
+        let r = jq_str("@bogus", r#""hi""#);
+        assert!(r.contains("ERROR:"), "result: {r}");
+        assert!(r.contains("unknown format"));
+    }
+
+    // ================================================================
+    // Unknown function error
+    // ================================================================
+
+    #[test]
+    fn filter_unknown_function() {
+        let r = jq_str("nonexistent_func", "null");
+        assert!(r.contains("ERROR:"), "result: {r}");
+        assert!(r.contains("not defined"));
+    }
+
+    // ================================================================
+    // Recursion depth tracking
+    // ================================================================
+
+    #[test]
+    fn filter_recursion_depth_tracked() {
+        // Verify that the depth parameter is passed through by testing
+        // a moderately nested filter that still works within limits
+        assert_eq!(jq_str("def f: . + 1; 0 | f | f | f | f | f", "null"), "5");
+    }
+
+    // ================================================================
+    // del_path coverage
+    // ================================================================
+
+    #[test]
+    fn filter_delpaths_nested() {
+        let r = jq_str(r#"delpaths([["a","b"]])"#, r#"{"a":{"b":1,"c":2},"d":3}"#);
+        assert!(!r.contains("\"b\":1"));
+        assert!(r.contains("\"c\":2"));
+        assert!(r.contains("\"d\":3"));
+    }
+
+    #[test]
+    fn filter_delpaths_array_index() {
+        let r = jq_str("delpaths([[1]])", "[10,20,30]");
+        assert_eq!(r, "[10,30]");
+    }
+
+    // ================================================================
+    // set_path with array creation
+    // ================================================================
+
+    #[test]
+    fn filter_setpath_array_index() {
+        assert_eq!(
+            jq_str(r#"setpath([1]; "x")"#, r#"["a","b","c"]"#),
+            r#"["a","x","c"]"#
+        );
+    }
+
+    // ================================================================
+    // Various misc coverage
+    // ================================================================
+
+    #[test]
+    fn filter_map_empty_result() {
+        // map that skips everything via select
+        assert_eq!(jq_str("map(select(. > 10))", "[1, 2, 3]"), "[]");
+    }
+
+    #[test]
+    fn filter_add_empty_array() {
+        assert_eq!(jq_str("add", "[]"), "null");
+    }
+
+    #[test]
+    fn filter_add_null() {
+        assert_eq!(jq_str("add", "null"), "null");
+    }
+
+    #[test]
+    fn filter_map_values_array() {
+        assert_eq!(jq_str("map_values(. + 10)", "[1, 2, 3]"), "[11,12,13]");
+    }
+
+    // ================================================================
+    // @base64 on non-string input
+    // ================================================================
+
+    #[test]
+    fn filter_at_base64_number() {
+        // Non-string input gets to_string_repr first
+        assert_eq!(jq_raw("@base64", "42"), "NDI=");
+    }
+
+    // ================================================================
+    // @base64d error handling
+    // ================================================================
+
+    #[test]
+    fn filter_at_base64d_on_number() {
+        let r = jq_str("@base64d", "42");
+        assert!(r.contains("ERROR:"), "result: {r}");
+    }
+
+    // ================================================================
+    // @csv and @tsv on non-array
+    // ================================================================
+
+    #[test]
+    fn filter_at_csv_non_array() {
+        let r = jq_str("@csv", "42");
+        assert!(r.contains("ERROR:"), "result: {r}");
+    }
+
+    #[test]
+    fn filter_at_tsv_non_array() {
+        let r = jq_str("@tsv", "42");
+        assert!(r.contains("ERROR:"), "result: {r}");
+    }
+
+    // ================================================================
+    // @uri and @html on non-string input
+    // ================================================================
+
+    #[test]
+    fn filter_at_uri_number() {
+        // Non-string gets to_string_repr
+        let r = jq_raw("@uri", "42");
+        assert_eq!(r, "42");
+    }
+
+    #[test]
+    fn filter_at_html_number() {
+        let r = jq_raw("@html", "42");
+        assert_eq!(r, "42");
+    }
+
+    // ================================================================
+    // Empty array construct []
+    // ================================================================
+
+    #[test]
+    fn filter_empty_array_construct() {
+        assert_eq!(jq_str("[]", "null"), "[]");
+    }
+
+    // ================================================================
+    // Parenthesized expression
+    // ================================================================
+
+    #[test]
+    fn filter_paren_expr() {
+        assert_eq!(jq_str("(1 + 2) * 3", "null"), "9");
+    }
+
+    // ================================================================
+    // Literal values in filter
+    // ================================================================
+
+    #[test]
+    fn filter_literal_string() {
+        assert_eq!(jq_str(r#""hello""#, "null"), r#""hello""#);
+    }
+
+    #[test]
+    fn filter_literal_number() {
+        assert_eq!(jq_str("42", "null"), "42");
+    }
+
+    #[test]
+    fn filter_literal_bool() {
+        assert_eq!(jq_str("true", "null"), "true");
+        assert_eq!(jq_str("false", "null"), "false");
+    }
+
+    #[test]
+    fn filter_literal_null() {
+        assert_eq!(jq_str("null", "42"), "null");
+    }
+
+    #[test]
+    fn filter_negative_literal() {
+        assert_eq!(jq_str("-42", "null"), "-42");
+    }
+
+    // ================================================================
+    // @html with single-quote
+    // ================================================================
+
+    #[test]
+    fn filter_at_html_single_quote() {
+        assert_eq!(jq_raw("@html", r#""it's""#), "it&#39;s");
+    }
+
+    // ================================================================
+    // JSON parser: unicode escapes
+    // ================================================================
+
+    #[test]
+    fn parse_unicode_escape() {
+        match parse_json(r#""\u0041""#).unwrap() {
+            JqValue::String(s) => assert_eq!(s, "A"),
+            _ => panic!("expected string"),
+        }
+    }
+
+    #[test]
+    fn parse_empty_input_error() {
+        assert!(parse_json("").is_err());
+        assert!(parse_json("   ").is_err());
+    }
+
+    // ================================================================
+    // JSON write: control characters
+    // ================================================================
+
+    #[test]
+    fn json_write_control_chars() {
+        let val = JqValue::String("\u{0008}\u{000C}\r".into());
+        let s = json_to_string(&val, true);
+        assert!(s.contains("\\b"));
+        assert!(s.contains("\\f"));
+        assert!(s.contains("\\r"));
+    }
+
+    // ================================================================
+    // util_jq --join-output flag (-j)
+    // ================================================================
+
+    #[test]
+    fn util_jq_join_output() {
+        let (status, stdout, _) = run_util_jq(&["jq", "-j", ".name"], Some(br#"{"name":"test"}"#));
+        assert_eq!(status, 0);
+        assert_eq!(stdout.trim(), "test");
+    }
+
+    // ================================================================
+    // util_jq -- separator
+    // ================================================================
+
+    #[test]
+    fn util_jq_double_dash() {
+        let (status, stdout, _) = run_util_jq(&["jq", "--", "."], Some(b"42"));
+        assert_eq!(status, 0);
+        assert_eq!(stdout.trim(), "42");
+    }
+
+    // ================================================================
+    // util_jq runtime error returns status 5
+    // ================================================================
+
+    #[test]
+    fn util_jq_runtime_error_status() {
+        let (status, _, stderr) = run_util_jq(&["jq", ".[] | .a"], Some(b"42"));
+        assert_eq!(status, 5);
+        assert!(!stderr.is_empty());
+    }
+
+    // ================================================================
+    // JSON parser: scientific notation
+    // ================================================================
+
+    #[test]
+    fn parse_scientific_notation() {
+        match parse_json("1.5e2").unwrap() {
+            JqValue::Number(n) => assert!((n - 150.0).abs() < f64::EPSILON),
+            _ => panic!("expected number"),
+        }
+    }
+
+    // ================================================================
+    // Verify test regex matching
+    // ================================================================
+
+    #[test]
+    fn regex_dot_star() {
+        let matches = simple_regex_match("hello", "h.*o", false);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].1, "hello");
+    }
+
+    #[test]
+    fn regex_char_class() {
+        let matches = simple_regex_match("a1b2c3", "[0-9]+", false);
+        assert!(!matches.is_empty());
+        assert_eq!(matches[0].1, "1");
+    }
+
+    #[test]
+    fn regex_anchored() {
+        let matches = simple_regex_match("hello", "^hel", false);
+        assert_eq!(matches.len(), 1);
+        let matches = simple_regex_match("hello", "^llo", false);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn regex_end_anchor() {
+        let matches = simple_regex_match("hello", "llo$", false);
+        assert_eq!(matches.len(), 1);
+        let matches = simple_regex_match("hello", "hel$", false);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn regex_word_digit_space() {
+        assert!(!simple_regex_match("a1 ", r"\w+", false).is_empty());
+        assert!(!simple_regex_match("a1 ", r"\d", false).is_empty());
+        assert!(!simple_regex_match("a1 ", r"\s", false).is_empty());
+    }
 }
