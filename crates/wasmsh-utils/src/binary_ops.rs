@@ -2,7 +2,9 @@
 
 use wasmsh_fs::{OpenOptions, Vfs};
 
-use crate::helpers::{emit_error, resolve_path};
+use crate::helpers::{
+    emit_error, read_file_bytes, read_input_bytes, resolve_path, write_file_bytes,
+};
 use crate::UtilContext;
 
 fn parse_size(s: &str) -> Option<u64> {
@@ -81,29 +83,9 @@ pub(crate) fn util_xxd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     }
 
     // Get input data
-    let data = if !args.is_empty() {
-        let full = resolve_path(ctx.cwd, args[0]);
-        match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => match ctx.fs.read_file(h) {
-                Ok(data) => {
-                    ctx.fs.close(h);
-                    data
-                }
-                Err(e) => {
-                    ctx.fs.close(h);
-                    emit_error(ctx.output, "xxd", args[0], &e);
-                    return 1;
-                }
-            },
-            Err(e) => {
-                emit_error(ctx.output, "xxd", args[0], &e);
-                return 1;
-            }
-        }
-    } else if let Some(d) = ctx.stdin {
-        d.to_vec()
-    } else {
-        Vec::new()
+    let data = match read_input_bytes(ctx, args, "xxd") {
+        Ok(d) => d,
+        Err(status) => return status,
     };
 
     // Apply skip and limit
@@ -323,23 +305,9 @@ pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     // Read input
     let input_data = if let Some(path) = input_file {
-        let full = resolve_path(ctx.cwd, path);
-        match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => match ctx.fs.read_file(h) {
-                Ok(data) => {
-                    ctx.fs.close(h);
-                    data
-                }
-                Err(e) => {
-                    ctx.fs.close(h);
-                    emit_error(ctx.output, "dd", path, &e);
-                    return 1;
-                }
-            },
-            Err(e) => {
-                emit_error(ctx.output, "dd", path, &e);
-                return 1;
-            }
+        match read_file_bytes(ctx, path, "dd") {
+            Ok(d) => d,
+            Err(status) => return status,
         }
     } else if let Some(d) = ctx.stdin {
         d.to_vec()
@@ -487,29 +455,9 @@ pub(crate) fn util_strings(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     }
 
     // Get input data (binary)
-    let data = if !args.is_empty() {
-        let full = resolve_path(ctx.cwd, args[0]);
-        match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => match ctx.fs.read_file(h) {
-                Ok(data) => {
-                    ctx.fs.close(h);
-                    data
-                }
-                Err(e) => {
-                    ctx.fs.close(h);
-                    emit_error(ctx.output, "strings", args[0], &e);
-                    return 1;
-                }
-            },
-            Err(e) => {
-                emit_error(ctx.output, "strings", args[0], &e);
-                return 1;
-            }
-        }
-    } else if let Some(d) = ctx.stdin {
-        d.to_vec()
-    } else {
-        Vec::new()
+    let data = match read_input_bytes(ctx, args, "strings") {
+        Ok(d) => d,
+        Err(status) => return status,
     };
 
     let mut current = String::new();
@@ -573,23 +521,9 @@ pub(crate) fn util_split(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     // Remaining: [FILE [PREFIX]]
     let (input_data, prefix) = if !args.is_empty() && args[0] != "-" {
-        let full = resolve_path(ctx.cwd, args[0]);
-        let data = match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => match ctx.fs.read_file(h) {
-                Ok(d) => {
-                    ctx.fs.close(h);
-                    d
-                }
-                Err(e) => {
-                    ctx.fs.close(h);
-                    emit_error(ctx.output, "split", args[0], &e);
-                    return 1;
-                }
-            },
-            Err(e) => {
-                emit_error(ctx.output, "split", args[0], &e);
-                return 1;
-            }
+        let data = match read_file_bytes(ctx, args[0], "split") {
+            Ok(d) => d,
+            Err(status) => return status,
         };
         let p = if args.len() > 1 { args[1] } else { "x" };
         (data, p)
@@ -659,19 +593,8 @@ pub(crate) fn util_split(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         };
         let name = format!("{prefix}{suffix}");
         let full = resolve_path(ctx.cwd, &name);
-        match ctx.fs.open(&full, OpenOptions::write()) {
-            Ok(h) => {
-                if let Err(e) = ctx.fs.write_file(h, piece) {
-                    ctx.fs.close(h);
-                    emit_error(ctx.output, "split", &name, &e);
-                    return 1;
-                }
-                ctx.fs.close(h);
-            }
-            Err(e) => {
-                emit_error(ctx.output, "split", &name, &e);
-                return 1;
-            }
+        if write_file_bytes(ctx, "split", &full, piece) != 0 {
+            return 1;
         }
     }
 
@@ -766,24 +689,9 @@ pub(crate) fn util_file(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
 
         // Read file content
-        let data = match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => match ctx.fs.read_file(h) {
-                Ok(d) => {
-                    ctx.fs.close(h);
-                    d
-                }
-                Err(e) => {
-                    ctx.fs.close(h);
-                    emit_error(ctx.output, "file", path, &e);
-                    status = 1;
-                    continue;
-                }
-            },
-            Err(e) => {
-                emit_error(ctx.output, "file", path, &e);
-                status = 1;
-                continue;
-            }
+        let Ok(data) = read_file_bytes(ctx, path, "file") else {
+            status = 1;
+            continue;
         };
 
         let desc = if mime_type {

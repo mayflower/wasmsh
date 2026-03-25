@@ -221,6 +221,134 @@ pub(crate) fn child_path(parent: &str, name: &str) -> String {
     }
 }
 
+/// Generic hashsum utility: read files (or stdin), hash, format "HASH  path\n".
+///
+/// Deduplicates the identical boilerplate shared by md5sum, sha1sum, sha256sum, sha512sum.
+pub(crate) fn hashsum_util(
+    ctx: &mut UtilContext<'_>,
+    argv: &[&str],
+    cmd_name: &str,
+    hash_fn: fn(&[u8]) -> String,
+) -> i32 {
+    let file_args = &argv[1..];
+    if file_args.is_empty() {
+        let data = ctx.stdin.map(<[u8]>::to_vec).unwrap_or_default();
+        let hash = hash_fn(&data);
+        let line = format!("{hash}  -\n");
+        ctx.output.stdout(line.as_bytes());
+        return 0;
+    }
+    let mut status = 0;
+    for path in file_args {
+        match read_file_bytes(ctx, path, cmd_name) {
+            Ok(data) => {
+                let hash = hash_fn(&data);
+                let line = format!("{hash}  {path}\n");
+                ctx.output.stdout(line.as_bytes());
+            }
+            Err(s) => status = s,
+        }
+    }
+    status
+}
+
+/// Read a file from the VFS by path, returning its bytes.
+///
+/// Handles open/read/close and error emission. Returns `Err(1)` on failure.
+pub(crate) fn read_file_bytes(
+    ctx: &mut UtilContext<'_>,
+    path: &str,
+    cmd: &str,
+) -> Result<Vec<u8>, i32> {
+    let full = resolve_path(ctx.cwd, path);
+    match ctx.fs.open(&full, OpenOptions::read()) {
+        Ok(h) => match ctx.fs.read_file(h) {
+            Ok(data) => {
+                ctx.fs.close(h);
+                Ok(data)
+            }
+            Err(e) => {
+                ctx.fs.close(h);
+                emit_error(ctx.output, cmd, path, &e);
+                Err(1)
+            }
+        },
+        Err(e) => {
+            emit_error(ctx.output, cmd, path, &e);
+            Err(1)
+        }
+    }
+}
+
+/// Read a file from the VFS by an already-resolved absolute path.
+///
+/// Like [`read_file_bytes`] but skips path resolution (caller already has the full path).
+pub(crate) fn read_file_bytes_abs(
+    ctx: &mut UtilContext<'_>,
+    full_path: &str,
+    display_name: &str,
+    cmd: &str,
+) -> Result<Vec<u8>, i32> {
+    match ctx.fs.open(full_path, OpenOptions::read()) {
+        Ok(h) => match ctx.fs.read_file(h) {
+            Ok(data) => {
+                ctx.fs.close(h);
+                Ok(data)
+            }
+            Err(e) => {
+                ctx.fs.close(h);
+                emit_error(ctx.output, cmd, display_name, &e);
+                Err(1)
+            }
+        },
+        Err(e) => {
+            emit_error(ctx.output, cmd, display_name, &e);
+            Err(1)
+        }
+    }
+}
+
+/// Helper: write data to a VFS path, emitting errors on failure.
+pub(crate) fn write_file_bytes(
+    ctx: &mut UtilContext<'_>,
+    cmd: &str,
+    path: &str,
+    data: &[u8],
+) -> i32 {
+    match ctx.fs.open(path, OpenOptions::write()) {
+        Ok(h) => {
+            if let Err(e) = ctx.fs.write_file(h, data) {
+                ctx.fs.close(h);
+                emit_error(ctx.output, cmd, path, &e);
+                return 1;
+            }
+            ctx.fs.close(h);
+            0
+        }
+        Err(e) => {
+            emit_error(ctx.output, cmd, path, &e);
+            1
+        }
+    }
+}
+
+/// Read data from a file arg or stdin, returning bytes.
+///
+/// Convenience for utilities that accept either a file path or piped stdin.
+pub(crate) fn read_input_bytes(
+    ctx: &mut UtilContext<'_>,
+    file_args: &[&str],
+    cmd: &str,
+) -> Result<Vec<u8>, i32> {
+    if !file_args.is_empty() {
+        read_file_bytes(ctx, file_args[0], cmd)
+    } else if let Some(d) = ctx.stdin {
+        Ok(d.to_vec())
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 /// Simple glob matching: `*` matches any sequence, `?` matches one char.
 pub(crate) fn simple_glob_match(pattern: &str, name: &str) -> bool {
     let p = pattern.as_bytes();

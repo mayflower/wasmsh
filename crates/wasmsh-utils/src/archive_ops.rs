@@ -1,8 +1,10 @@
 //! Archive utilities: tar, gzip, gunzip, zcat.
 
-use wasmsh_fs::{OpenOptions, Vfs};
+use wasmsh_fs::Vfs;
 
-use crate::helpers::{crc32, emit_error, resolve_path};
+use crate::helpers::{
+    crc32, emit_error, read_file_bytes, read_file_bytes_abs, resolve_path, write_file_bytes,
+};
 use crate::UtilContext;
 
 // ---------------------------------------------------------------------------
@@ -199,24 +201,9 @@ pub(crate) fn util_gzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut status = 0;
     for path in args {
         let full = resolve_path(ctx.cwd, path);
-        let data = match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => match ctx.fs.read_file(h) {
-                Ok(d) => {
-                    ctx.fs.close(h);
-                    d
-                }
-                Err(e) => {
-                    ctx.fs.close(h);
-                    emit_error(ctx.output, "gzip", path, &e);
-                    status = 1;
-                    continue;
-                }
-            },
-            Err(e) => {
-                emit_error(ctx.output, "gzip", path, &e);
-                status = 1;
-                continue;
-            }
+        let Ok(data) = read_file_bytes(ctx, path, "gzip") else {
+            status = 1;
+            continue;
         };
 
         if decompress {
@@ -287,23 +274,9 @@ pub(crate) fn util_zcat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     util_gzip(ctx, &new_argv)
 }
 
-/// Helper: write data to a VFS path.
+/// Helper: write data to a VFS path. Delegates to the shared helper in helpers.rs.
 fn write_file(ctx: &mut UtilContext<'_>, cmd: &str, path: &str, data: &[u8]) -> i32 {
-    match ctx.fs.open(path, OpenOptions::write()) {
-        Ok(h) => {
-            if let Err(e) = ctx.fs.write_file(h, data) {
-                ctx.fs.close(h);
-                emit_error(ctx.output, cmd, path, &e);
-                return 1;
-            }
-            ctx.fs.close(h);
-            0
-        }
-        Err(e) => {
-            emit_error(ctx.output, cmd, path, &e);
-            1
-        }
-    }
+    write_file_bytes(ctx, cmd, path, data)
 }
 
 // ---------------------------------------------------------------------------
@@ -445,22 +418,9 @@ fn tar_add_file(
     name: &str,
     verbose: bool,
 ) -> i32 {
-    let data = match ctx.fs.open(full_path, OpenOptions::read()) {
-        Ok(h) => match ctx.fs.read_file(h) {
-            Ok(d) => {
-                ctx.fs.close(h);
-                d
-            }
-            Err(e) => {
-                ctx.fs.close(h);
-                emit_error(ctx.output, "tar", name, &e);
-                return 1;
-            }
-        },
-        Err(e) => {
-            emit_error(ctx.output, "tar", name, &e);
-            return 1;
-        }
+    let data = match read_file_bytes_abs(ctx, full_path, name, "tar") {
+        Ok(d) => d,
+        Err(status) => return status,
     };
 
     if verbose {
@@ -592,23 +552,9 @@ fn tar_extract(
     gzipped: bool,
     verbose: bool,
 ) -> i32 {
-    let full_archive = resolve_path(ctx.cwd, archive_path);
-    let archive_data = match ctx.fs.open(&full_archive, OpenOptions::read()) {
-        Ok(h) => match ctx.fs.read_file(h) {
-            Ok(d) => {
-                ctx.fs.close(h);
-                d
-            }
-            Err(e) => {
-                ctx.fs.close(h);
-                emit_error(ctx.output, "tar", archive_path, &e);
-                return 1;
-            }
-        },
-        Err(e) => {
-            emit_error(ctx.output, "tar", archive_path, &e);
-            return 1;
-        }
+    let archive_data = match read_file_bytes(ctx, archive_path, "tar") {
+        Ok(d) => d,
+        Err(status) => return status,
     };
 
     let tar_data = if gzipped {
@@ -761,23 +707,9 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         dest_dir = Some(rest[1].to_string());
     }
 
-    let full_archive = resolve_path(ctx.cwd, archive_path);
-    let archive_data = match ctx.fs.open(&full_archive, OpenOptions::read()) {
-        Ok(h) => match ctx.fs.read_file(h) {
-            Ok(d) => {
-                ctx.fs.close(h);
-                d
-            }
-            Err(e) => {
-                ctx.fs.close(h);
-                emit_error(ctx.output, "unzip", archive_path, &e);
-                return 1;
-            }
-        },
-        Err(e) => {
-            emit_error(ctx.output, "unzip", archive_path, &e);
-            return 1;
-        }
+    let archive_data = match read_file_bytes(ctx, archive_path, "unzip") {
+        Ok(d) => d,
+        Err(status) => return status,
     };
 
     let base_dir = if let Some(ref d) = dest_dir {
@@ -945,23 +877,9 @@ fn u32_le(data: &[u8]) -> u32 {
 }
 
 fn tar_list(ctx: &mut UtilContext<'_>, archive_path: &str, gzipped: bool) -> i32 {
-    let full_archive = resolve_path(ctx.cwd, archive_path);
-    let archive_data = match ctx.fs.open(&full_archive, OpenOptions::read()) {
-        Ok(h) => match ctx.fs.read_file(h) {
-            Ok(d) => {
-                ctx.fs.close(h);
-                d
-            }
-            Err(e) => {
-                ctx.fs.close(h);
-                emit_error(ctx.output, "tar", archive_path, &e);
-                return 1;
-            }
-        },
-        Err(e) => {
-            emit_error(ctx.output, "tar", archive_path, &e);
-            return 1;
-        }
+    let archive_data = match read_file_bytes(ctx, archive_path, "tar") {
+        Ok(d) => d,
+        Err(status) => return status,
     };
 
     let tar_data = if gzipped {

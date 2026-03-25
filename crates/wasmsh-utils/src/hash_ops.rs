@@ -1,8 +1,6 @@
 //! Hash utilities: sha1sum, sha512sum.
 
-use wasmsh_fs::{OpenOptions, Vfs};
-
-use crate::helpers::{emit_error, hex_encode, resolve_path};
+use crate::helpers::{hashsum_util, hex_encode};
 use crate::UtilContext;
 
 // ---------------------------------------------------------------------------
@@ -81,43 +79,7 @@ fn sha1_digest(data: &[u8]) -> [u8; 20] {
 }
 
 pub(crate) fn util_sha1sum(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let file_args = &argv[1..];
-    if file_args.is_empty() {
-        let data = if let Some(d) = ctx.stdin {
-            d.to_vec()
-        } else {
-            Vec::new()
-        };
-        let digest = sha1_digest(&data);
-        let line = format!("{}  -\n", hex_encode(&digest));
-        ctx.output.stdout(line.as_bytes());
-        return 0;
-    }
-    let mut status = 0;
-    for path in file_args {
-        let full = resolve_path(ctx.cwd, path);
-        match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => {
-                match ctx.fs.read_file(h) {
-                    Ok(data) => {
-                        let digest = sha1_digest(&data);
-                        let line = format!("{}  {path}\n", hex_encode(&digest));
-                        ctx.output.stdout(line.as_bytes());
-                    }
-                    Err(e) => {
-                        emit_error(ctx.output, "sha1sum", path, &e);
-                        status = 1;
-                    }
-                }
-                ctx.fs.close(h);
-            }
-            Err(e) => {
-                emit_error(ctx.output, "sha1sum", path, &e);
-                status = 1;
-            }
-        }
-    }
-    status
+    hashsum_util(ctx, argv, "sha1sum", |data| hex_encode(&sha1_digest(data)))
 }
 
 // ---------------------------------------------------------------------------
@@ -298,43 +260,9 @@ fn sha512_digest(data: &[u8]) -> [u8; 64] {
 }
 
 pub(crate) fn util_sha512sum(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let file_args = &argv[1..];
-    if file_args.is_empty() {
-        let data = if let Some(d) = ctx.stdin {
-            d.to_vec()
-        } else {
-            Vec::new()
-        };
-        let digest = sha512_digest(&data);
-        let line = format!("{}  -\n", hex_encode(&digest));
-        ctx.output.stdout(line.as_bytes());
-        return 0;
-    }
-    let mut status = 0;
-    for path in file_args {
-        let full = resolve_path(ctx.cwd, path);
-        match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => {
-                match ctx.fs.read_file(h) {
-                    Ok(data) => {
-                        let digest = sha512_digest(&data);
-                        let line = format!("{}  {path}\n", hex_encode(&digest));
-                        ctx.output.stdout(line.as_bytes());
-                    }
-                    Err(e) => {
-                        emit_error(ctx.output, "sha512sum", path, &e);
-                        status = 1;
-                    }
-                }
-                ctx.fs.close(h);
-            }
-            Err(e) => {
-                emit_error(ctx.output, "sha512sum", path, &e);
-                status = 1;
-            }
-        }
-    }
-    status
+    hashsum_util(ctx, argv, "sha512sum", |data| {
+        hex_encode(&sha512_digest(data))
+    })
 }
 
 #[cfg(test)]
