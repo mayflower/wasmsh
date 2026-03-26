@@ -27,138 +27,178 @@ fn type_to_extensions(type_name: &str) -> &[&str] {
     }
 }
 
-/// A simplified ripgrep implementation for the VFS.
-pub(crate) fn util_rg(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
-    let mut show_line_numbers = true;
-    let mut ignore_case = false;
-    let mut files_only = false;
-    let mut count_only = false;
-    let mut word_regexp = false;
-    let mut invert_match = false;
-    let mut glob_patterns: Vec<String> = Vec::new();
-    let mut type_filters: Vec<String> = Vec::new();
-    let mut after_context: usize = 0;
-    let mut before_context: usize = 0;
-    let mut fixed_strings = false;
-    let mut no_heading = false;
-    let mut search_hidden = false;
-    let mut max_count: Option<usize> = None;
+/// Mutable state accumulated while parsing rg flags.
+#[allow(clippy::struct_excessive_bools)]
+struct RgFlagState {
+    show_line_numbers: bool,
+    ignore_case: bool,
+    files_only: bool,
+    count_only: bool,
+    word_regexp: bool,
+    invert_match: bool,
+    glob_patterns: Vec<String>,
+    type_filters: Vec<String>,
+    after_context: usize,
+    before_context: usize,
+    fixed_strings: bool,
+    no_heading: bool,
+    search_hidden: bool,
+    max_count: Option<usize>,
+}
 
-    // Parse flags
-    while let Some(arg) = args.first() {
-        if *arg == "--" {
-            args = &args[1..];
-            break;
-        }
-        match *arg {
-            "-n" => {
-                show_line_numbers = true;
-                args = &args[1..];
-            }
-            "-i" | "--ignore-case" => {
-                ignore_case = true;
-                args = &args[1..];
-            }
-            "-l" | "--files-with-matches" => {
-                files_only = true;
-                args = &args[1..];
-            }
-            "-c" | "--count" => {
-                count_only = true;
-                args = &args[1..];
-            }
-            "-w" | "--word-regexp" => {
-                word_regexp = true;
-                args = &args[1..];
-            }
-            "-v" | "--invert-match" => {
-                invert_match = true;
-                args = &args[1..];
-            }
-            "-g" | "--glob" if args.len() > 1 => {
-                glob_patterns.push(args[1].to_string());
-                args = &args[2..];
-            }
-            "-t" | "--type" if args.len() > 1 => {
-                type_filters.push(args[1].to_string());
-                args = &args[2..];
-            }
-            "-A" if args.len() > 1 => {
-                after_context = args[1].parse().unwrap_or(0);
-                args = &args[2..];
-            }
-            "-B" if args.len() > 1 => {
-                before_context = args[1].parse().unwrap_or(0);
-                args = &args[2..];
-            }
-            "-C" if args.len() > 1 => {
-                let c = args[1].parse().unwrap_or(0);
-                before_context = c;
-                after_context = c;
-                args = &args[2..];
-            }
-            "-r" | "--recursive" => {
-                // Recursive is the default, accept silently
-                args = &args[1..];
-            }
-            "-F" | "--fixed-strings" => {
-                fixed_strings = true;
-                args = &args[1..];
-            }
-            "--no-heading" => {
-                no_heading = true;
-                args = &args[1..];
-            }
-            "--hidden" => {
-                search_hidden = true;
-                args = &args[1..];
-            }
-            "-m" | "--max-count" if args.len() > 1 => {
-                max_count = args[1].parse().ok();
-                args = &args[2..];
-            }
-            _ if arg.starts_with("--glob=") => {
-                glob_patterns.push(arg["--glob=".len()..].to_string());
-                args = &args[1..];
-            }
-            _ if arg.starts_with("--type=") => {
-                type_filters.push(arg["--type=".len()..].to_string());
-                args = &args[1..];
-            }
-            _ if arg.starts_with("--max-count=") => {
-                max_count = arg["--max-count=".len()..].parse().ok();
-                args = &args[1..];
-            }
-            // Handle combined short flags like -in, -il, etc.
-            _ if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 1 => {
-                let flags = &arg[1..];
-                let mut recognized = true;
-                for ch in flags.chars() {
-                    match ch {
-                        'n' => show_line_numbers = true,
-                        'i' => ignore_case = true,
-                        'l' => files_only = true,
-                        'c' => count_only = true,
-                        'w' => word_regexp = true,
-                        'v' => invert_match = true,
-                        'F' => fixed_strings = true,
-                        'r' => {} // recursive is default
-                        _ => {
-                            recognized = false;
-                            break;
-                        }
-                    }
-                }
-                if recognized {
-                    args = &args[1..];
-                } else {
-                    break;
-                }
-            }
-            _ => break,
+impl Default for RgFlagState {
+    fn default() -> Self {
+        Self {
+            show_line_numbers: true,
+            ignore_case: false,
+            files_only: false,
+            count_only: false,
+            word_regexp: false,
+            invert_match: false,
+            glob_patterns: Vec::new(),
+            type_filters: Vec::new(),
+            after_context: 0,
+            before_context: 0,
+            fixed_strings: false,
+            no_heading: false,
+            search_hidden: false,
+            max_count: None,
         }
     }
+}
+
+/// Parse one rg flag. Returns the number of argv slots consumed, or 0 to stop.
+fn parse_rg_single_flag(arg: &str, args: &[&str], st: &mut RgFlagState) -> usize {
+    match arg {
+        "-n" => {
+            st.show_line_numbers = true;
+            1
+        }
+        "-i" | "--ignore-case" => {
+            st.ignore_case = true;
+            1
+        }
+        "-l" | "--files-with-matches" => {
+            st.files_only = true;
+            1
+        }
+        "-c" | "--count" => {
+            st.count_only = true;
+            1
+        }
+        "-w" | "--word-regexp" => {
+            st.word_regexp = true;
+            1
+        }
+        "-v" | "--invert-match" => {
+            st.invert_match = true;
+            1
+        }
+        "-g" | "--glob" if args.len() > 1 => {
+            st.glob_patterns.push(args[1].to_string());
+            2
+        }
+        "-t" | "--type" if args.len() > 1 => {
+            st.type_filters.push(args[1].to_string());
+            2
+        }
+        "-A" if args.len() > 1 => {
+            st.after_context = args[1].parse().unwrap_or(0);
+            2
+        }
+        "-B" if args.len() > 1 => {
+            st.before_context = args[1].parse().unwrap_or(0);
+            2
+        }
+        "-C" if args.len() > 1 => {
+            let c = args[1].parse().unwrap_or(0);
+            st.before_context = c;
+            st.after_context = c;
+            2
+        }
+        "-r" | "--recursive" => 1, // recursive is the default
+        "-F" | "--fixed-strings" => {
+            st.fixed_strings = true;
+            1
+        }
+        "--no-heading" => {
+            st.no_heading = true;
+            1
+        }
+        "--hidden" => {
+            st.search_hidden = true;
+            1
+        }
+        "-m" | "--max-count" if args.len() > 1 => {
+            st.max_count = args[1].parse().ok();
+            2
+        }
+        _ => parse_rg_long_equals_or_bundled(arg, st),
+    }
+}
+
+/// Handle `--glob=VAL`, `--type=VAL`, `--max-count=VAL`, and bundled short flags.
+fn parse_rg_long_equals_or_bundled(arg: &str, st: &mut RgFlagState) -> usize {
+    if let Some(val) = arg.strip_prefix("--glob=") {
+        st.glob_patterns.push(val.to_string());
+        return 1;
+    }
+    if let Some(val) = arg.strip_prefix("--type=") {
+        st.type_filters.push(val.to_string());
+        return 1;
+    }
+    if let Some(val) = arg.strip_prefix("--max-count=") {
+        st.max_count = val.parse().ok();
+        return 1;
+    }
+    if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 1 {
+        return usize::from(parse_rg_bundled_flags(&arg[1..], st));
+    }
+    0
+}
+
+/// Apply each character in a bundled short-flag group (e.g. `-inl`).
+fn parse_rg_bundled_flags(flags: &str, st: &mut RgFlagState) -> bool {
+    for ch in flags.chars() {
+        match ch {
+            'n' => st.show_line_numbers = true,
+            'i' => st.ignore_case = true,
+            'l' => st.files_only = true,
+            'c' => st.count_only = true,
+            'w' => st.word_regexp = true,
+            'v' => st.invert_match = true,
+            'F' => st.fixed_strings = true,
+            'r' => {} // recursive is default
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Parse the full rg argv, returning the flags, pattern index and consumed count.
+fn parse_rg_args(argv: &[&str]) -> (RgFlagState, usize) {
+    let mut st = RgFlagState::default();
+    let mut pos = 1; // skip argv[0]
+
+    while pos < argv.len() {
+        if argv[pos] == "--" {
+            pos += 1;
+            break;
+        }
+        let advance = parse_rg_single_flag(argv[pos], &argv[pos..], &mut st);
+        if advance == 0 {
+            break;
+        }
+        pos += advance;
+    }
+
+    (st, pos)
+}
+
+/// A simplified ripgrep implementation for the VFS.
+pub(crate) fn util_rg(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (st, pos) = parse_rg_args(argv);
+    let args = &argv[pos..];
 
     if args.is_empty() {
         ctx.output.stderr(b"rg: missing pattern\n");
@@ -172,63 +212,77 @@ pub(crate) fn util_rg(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         vec!["."]
     };
 
-    // Build the matcher
-    let matcher = build_matcher(pattern, ignore_case, word_regexp, fixed_strings);
+    let matcher = build_matcher(pattern, st.ignore_case, st.word_regexp, st.fixed_strings);
 
     let opts = RgOpts {
-        show_line_numbers,
-        files_only,
-        count_only,
-        invert_match,
-        glob_patterns,
-        type_filters,
-        after_context,
-        before_context,
-        no_heading,
-        search_hidden,
-        max_count,
+        show_line_numbers: st.show_line_numbers,
+        files_only: st.files_only,
+        count_only: st.count_only,
+        invert_match: st.invert_match,
+        glob_patterns: st.glob_patterns,
+        type_filters: st.type_filters,
+        after_context: st.after_context,
+        before_context: st.before_context,
+        no_heading: st.no_heading,
+        search_hidden: st.search_hidden,
+        max_count: st.max_count,
     };
 
     let mut found_any = false;
     let mut first_file = true;
 
     for search_path in &search_paths {
-        let full = resolve_path(ctx.cwd, search_path);
-        match ctx.fs.stat(&full) {
-            Ok(meta) if meta.is_dir => {
-                let mut files = Vec::new();
-                collect_files(ctx.fs, &full, &opts, &mut files);
-                files.sort();
-                for file_path in &files {
-                    let matched = search_file(
-                        ctx,
-                        file_path,
-                        &display_path(file_path, &full, search_path),
-                        &matcher,
-                        &opts,
-                        &mut first_file,
-                    );
-                    if matched {
-                        found_any = true;
-                    }
-                }
-            }
-            Ok(_) => {
-                // Single file
-                let matched =
-                    search_file(ctx, &full, search_path, &matcher, &opts, &mut first_file);
-                if matched {
-                    found_any = true;
-                }
-            }
-            Err(e) => {
-                let msg = format!("rg: {search_path}: {e}\n");
-                ctx.output.stderr(msg.as_bytes());
-            }
+        let matched = rg_search_path(ctx, search_path, &matcher, &opts, &mut first_file);
+        if matched {
+            found_any = true;
         }
     }
 
     i32::from(!found_any)
+}
+
+/// Search a single path argument (file or directory) for rg matches.
+fn rg_search_path(
+    ctx: &mut UtilContext<'_>,
+    search_path: &str,
+    matcher: &Matcher,
+    opts: &RgOpts,
+    first_file: &mut bool,
+) -> bool {
+    let full = resolve_path(ctx.cwd, search_path);
+    match ctx.fs.stat(&full) {
+        Ok(meta) if meta.is_dir => {
+            rg_search_dir(ctx, &full, search_path, matcher, opts, first_file)
+        }
+        Ok(_) => search_file(ctx, &full, search_path, matcher, opts, first_file),
+        Err(e) => {
+            let msg = format!("rg: {search_path}: {e}\n");
+            ctx.output.stderr(msg.as_bytes());
+            false
+        }
+    }
+}
+
+/// Search all files in a directory recursively.
+fn rg_search_dir(
+    ctx: &mut UtilContext<'_>,
+    full: &str,
+    search_path: &str,
+    matcher: &Matcher,
+    opts: &RgOpts,
+    first_file: &mut bool,
+) -> bool {
+    let mut files = Vec::new();
+    collect_files(ctx.fs, full, opts, &mut files);
+    files.sort();
+    let mut found = false;
+    for file_path in &files {
+        let display = display_path(file_path, full, search_path);
+        if search_file(ctx, file_path, &display, matcher, opts, first_file) {
+            found = true;
+        }
+    }
+    found
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -296,41 +350,19 @@ fn collect_files(fs: &MemoryFs, dir: &str, opts: &RgOpts, out: &mut Vec<String>)
 
 /// Check if a filename matches glob and type filters.
 fn file_matches_filters(name: &str, opts: &RgOpts) -> bool {
-    // Type filter
-    if !opts.type_filters.is_empty() {
-        let mut type_match = false;
-        for type_name in &opts.type_filters {
-            let exts = type_to_extensions(type_name);
-            for ext in exts {
-                if name.ends_with(ext) {
-                    type_match = true;
-                    break;
-                }
-            }
-            if type_match {
-                break;
-            }
-        }
-        if !type_match {
-            return false;
-        }
-    }
+    let type_ok = opts.type_filters.is_empty()
+        || opts
+            .type_filters
+            .iter()
+            .any(|t| type_to_extensions(t).iter().any(|ext| name.ends_with(ext)));
 
-    // Glob filter
-    if !opts.glob_patterns.is_empty() {
-        let mut glob_match = false;
-        for pat in &opts.glob_patterns {
-            if simple_glob_match(pat, name) {
-                glob_match = true;
-                break;
-            }
-        }
-        if !glob_match {
-            return false;
-        }
-    }
+    let glob_ok = opts.glob_patterns.is_empty()
+        || opts
+            .glob_patterns
+            .iter()
+            .any(|p| simple_glob_match(p, name));
 
-    true
+    type_ok && glob_ok
 }
 
 /// Search a single file and emit results. Returns true if any match was found.
@@ -347,111 +379,158 @@ fn search_file(
     };
 
     let lines: Vec<&str> = content.lines().collect();
-    let mut match_count: usize = 0;
-
-    // Find which lines match
-    let mut match_flags = vec![false; lines.len()];
-    for (i, line) in lines.iter().enumerate() {
-        let matched = matcher.is_match(line);
-        let matched = if opts.invert_match { !matched } else { matched };
-        if matched {
-            if let Some(max) = opts.max_count {
-                if match_count >= max {
-                    break;
-                }
-            }
-            match_flags[i] = true;
-            match_count += 1;
-        }
-    }
+    let (match_flags, match_count) = compute_match_flags(&lines, matcher, opts);
 
     if match_count == 0 {
         return false;
     }
 
-    // files-with-matches mode: just print filename
     if opts.files_only {
         let line = format!("{display}\n");
         ctx.output.stdout(line.as_bytes());
         return true;
     }
 
-    // count mode: print count
     if opts.count_only {
         let line = format!("{display}:{match_count}\n");
         ctx.output.stdout(line.as_bytes());
         return true;
     }
 
-    // Compute which lines to display (including context)
-    let mut display_flags = vec![false; lines.len()];
+    let display_flags = compute_display_flags(&match_flags, opts, lines.len());
+
+    if opts.no_heading {
+        emit_no_heading(ctx, &lines, &match_flags, &display_flags, display, opts);
+    } else {
+        emit_heading(
+            ctx,
+            &lines,
+            &match_flags,
+            &display_flags,
+            display,
+            opts,
+            first_file,
+        );
+    }
+
+    true
+}
+
+/// Determine which lines match the pattern, respecting invert and max-count.
+fn compute_match_flags(lines: &[&str], matcher: &Matcher, opts: &RgOpts) -> (Vec<bool>, usize) {
+    let mut flags = vec![false; lines.len()];
+    let mut count: usize = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let hit = matcher.is_match(line) != opts.invert_match;
+        if hit {
+            if opts.max_count.is_some_and(|max| count >= max) {
+                break;
+            }
+            flags[i] = true;
+            count += 1;
+        }
+    }
+    (flags, count)
+}
+
+/// Expand match flags to include before/after context lines.
+fn compute_display_flags(match_flags: &[bool], opts: &RgOpts, len: usize) -> Vec<bool> {
+    let mut display = vec![false; len];
     for (i, &is_match) in match_flags.iter().enumerate() {
         if is_match {
             let start = i.saturating_sub(opts.before_context);
-            let end = (i + opts.after_context + 1).min(lines.len());
-            for flag in display_flags.iter_mut().take(end).skip(start) {
+            let end = (i + opts.after_context + 1).min(len);
+            for flag in display.iter_mut().take(end).skip(start) {
                 *flag = true;
             }
         }
     }
+    display
+}
 
-    // Emit output
-    if opts.no_heading {
-        // No heading: prefix every line with filename
-        let mut prev_displayed = false;
-        for (i, line) in lines.iter().enumerate() {
-            if !display_flags[i] {
-                prev_displayed = false;
-                continue;
-            }
-            // Insert separator between non-contiguous groups
-            if !prev_displayed && i > 0 && display_flags.iter().take(i).any(|&f| f) {
-                ctx.output.stdout(b"--\n");
-            }
-            let prefix = if opts.show_line_numbers {
-                let sep = if match_flags[i] { ':' } else { '-' };
-                format!("{display}{sep}{}{sep}", i + 1)
-            } else {
-                let sep = if match_flags[i] { ':' } else { '-' };
-                format!("{display}{sep}")
-            };
-            let out = format!("{prefix}{line}\n");
-            ctx.output.stdout(out.as_bytes());
-            prev_displayed = true;
-        }
-    } else {
-        // Heading mode: group by file
-        if !*first_file {
-            ctx.output.stdout(b"\n");
-        }
-        *first_file = false;
+/// Returns true when this is a non-contiguous group boundary (needs `--` separator).
+fn is_group_gap(display_flags: &[bool], i: usize, prev_displayed: bool) -> bool {
+    !prev_displayed && i > 0 && display_flags.iter().take(i).any(|&f| f)
+}
 
-        let heading = format!("{display}\n");
-        ctx.output.stdout(heading.as_bytes());
-
-        let mut prev_displayed = false;
-        for (i, line) in lines.iter().enumerate() {
-            if !display_flags[i] {
-                prev_displayed = false;
-                continue;
-            }
-            // Insert separator between non-contiguous groups
-            if !prev_displayed && i > 0 && display_flags.iter().take(i).any(|&f| f) {
-                ctx.output.stdout(b"--\n");
-            }
-            if opts.show_line_numbers {
-                let sep = if match_flags[i] { ':' } else { '-' };
-                let out = format!("{}{sep}{line}\n", i + 1);
-                ctx.output.stdout(out.as_bytes());
-            } else {
-                ctx.output.stdout(line.as_bytes());
-                ctx.output.stdout(b"\n");
-            }
-            prev_displayed = true;
+/// Emit output lines in no-heading mode (every line prefixed with filename).
+fn emit_no_heading(
+    ctx: &mut UtilContext<'_>,
+    lines: &[&str],
+    match_flags: &[bool],
+    display_flags: &[bool],
+    display: &str,
+    opts: &RgOpts,
+) {
+    let mut prev_displayed = false;
+    for (i, line) in lines.iter().enumerate() {
+        if !display_flags[i] {
+            prev_displayed = false;
+            continue;
         }
+        if is_group_gap(display_flags, i, prev_displayed) {
+            ctx.output.stdout(b"--\n");
+        }
+        let sep = if match_flags[i] { ':' } else { '-' };
+        let prefix = if opts.show_line_numbers {
+            format!("{display}{sep}{}{sep}", i + 1)
+        } else {
+            format!("{display}{sep}")
+        };
+        let out = format!("{prefix}{line}\n");
+        ctx.output.stdout(out.as_bytes());
+        prev_displayed = true;
     }
+}
 
-    true
+/// Emit output lines in heading mode (file header, then lines).
+fn emit_heading(
+    ctx: &mut UtilContext<'_>,
+    lines: &[&str],
+    match_flags: &[bool],
+    display_flags: &[bool],
+    display: &str,
+    opts: &RgOpts,
+    first_file: &mut bool,
+) {
+    if !*first_file {
+        ctx.output.stdout(b"\n");
+    }
+    *first_file = false;
+
+    let heading = format!("{display}\n");
+    ctx.output.stdout(heading.as_bytes());
+
+    let mut prev_displayed = false;
+    for (i, line) in lines.iter().enumerate() {
+        if !display_flags[i] {
+            prev_displayed = false;
+            continue;
+        }
+        if is_group_gap(display_flags, i, prev_displayed) {
+            ctx.output.stdout(b"--\n");
+        }
+        emit_heading_line(ctx, line, i, match_flags[i], opts);
+        prev_displayed = true;
+    }
+}
+
+/// Emit a single line in heading mode.
+fn emit_heading_line(
+    ctx: &mut UtilContext<'_>,
+    line: &str,
+    idx: usize,
+    is_match: bool,
+    opts: &RgOpts,
+) {
+    if opts.show_line_numbers {
+        let sep = if is_match { ':' } else { '-' };
+        let out = format!("{}{sep}{line}\n", idx + 1);
+        ctx.output.stdout(out.as_bytes());
+    } else {
+        ctx.output.stdout(line.as_bytes());
+        ctx.output.stdout(b"\n");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -509,26 +588,14 @@ impl Matcher {
         };
 
         match &self.kind {
-            MatcherKind::Literal(needle) => {
-                if self.word_regexp {
-                    word_match_literal(&haystack, needle)
-                } else {
-                    haystack.contains(needle.as_str())
-                }
+            MatcherKind::Literal(needle) if self.word_regexp => {
+                word_match_literal(&haystack, needle)
             }
-            MatcherKind::Regex(tokens) => {
-                if self.word_regexp {
-                    // For word regexp with regex, check each word
-                    for word in split_words(&haystack) {
-                        if regex_full_match(tokens, word) {
-                            return true;
-                        }
-                    }
-                    false
-                } else {
-                    regex_search(tokens, &haystack)
-                }
-            }
+            MatcherKind::Literal(needle) => haystack.contains(needle.as_str()),
+            MatcherKind::Regex(tokens) if self.word_regexp => split_words(&haystack)
+                .iter()
+                .any(|w| regex_full_match(tokens, w)),
+            MatcherKind::Regex(tokens) => regex_search(tokens, &haystack),
         }
     }
 }
@@ -572,78 +639,93 @@ fn parse_regex(pattern: &str) -> Vec<RegexToken> {
     let mut i = 0;
 
     while i < chars.len() {
-        let token = match chars[i] {
-            '\\' if i + 1 < chars.len() => {
-                i += 1;
-                match chars[i] {
-                    'd' => RegexToken::Digit,
-                    'w' => RegexToken::WordChar,
-                    's' => RegexToken::Space,
-                    'b' => RegexToken::WordBoundary,
-                    c => RegexToken::Literal(c),
-                }
-            }
-            '.' => RegexToken::AnyChar,
-            '^' => RegexToken::StartAnchor,
-            '$' => RegexToken::EndAnchor,
-            '[' => {
-                i += 1;
-                let negated = i < chars.len() && chars[i] == '^';
-                if negated {
-                    i += 1;
-                }
-                let mut class_chars = Vec::new();
-                while i < chars.len() && chars[i] != ']' {
-                    if i + 2 < chars.len() && chars[i + 1] == '-' && chars[i + 2] != ']' {
-                        // Character range like a-z
-                        let start = chars[i];
-                        let end = chars[i + 2];
-                        for c in start..=end {
-                            class_chars.push(c);
-                        }
-                        i += 3;
-                    } else {
-                        class_chars.push(chars[i]);
-                        i += 1;
-                    }
-                }
-                // i now points to ']' or end
-                RegexToken::CharClass {
-                    chars: class_chars,
-                    negated,
-                }
-            }
-            c => RegexToken::Literal(c),
-        };
-
+        let (token, next) = parse_regex_atom(&chars, i);
+        i = next;
         i += 1;
-
-        // Check for quantifiers
-        if i < chars.len() {
-            match chars[i] {
-                '*' => {
-                    tokens.push(RegexToken::Star(Box::new(token)));
-                    i += 1;
-                    continue;
-                }
-                '+' => {
-                    tokens.push(RegexToken::Plus(Box::new(token)));
-                    i += 1;
-                    continue;
-                }
-                '?' => {
-                    tokens.push(RegexToken::Optional(Box::new(token)));
-                    i += 1;
-                    continue;
-                }
-                _ => {}
-            }
-        }
-
-        tokens.push(token);
+        let wrapped = apply_quantifier(&chars, token, &mut i);
+        tokens.push(wrapped);
     }
 
     tokens
+}
+
+/// Parse a single regex atom starting at position `i`. Returns the token and
+/// the position of the last character consumed (before the final `+1` step).
+fn parse_regex_atom(chars: &[char], mut i: usize) -> (RegexToken, usize) {
+    let token = match chars[i] {
+        '\\' if i + 1 < chars.len() => {
+            i += 1;
+            match chars[i] {
+                'd' => RegexToken::Digit,
+                'w' => RegexToken::WordChar,
+                's' => RegexToken::Space,
+                'b' => RegexToken::WordBoundary,
+                c => RegexToken::Literal(c),
+            }
+        }
+        '.' => RegexToken::AnyChar,
+        '^' => RegexToken::StartAnchor,
+        '$' => RegexToken::EndAnchor,
+        '[' => {
+            let (tok, end) = parse_char_class(chars, i);
+            i = end;
+            tok
+        }
+        c => RegexToken::Literal(c),
+    };
+    (token, i)
+}
+
+/// Parse a `[...]` character class starting at position `i` (the `[`).
+/// Returns the token and the position of the closing `]` (or end).
+fn parse_char_class(chars: &[char], start: usize) -> (RegexToken, usize) {
+    let mut i = start + 1;
+    let negated = i < chars.len() && chars[i] == '^';
+    if negated {
+        i += 1;
+    }
+    let mut class_chars = Vec::new();
+    while i < chars.len() && chars[i] != ']' {
+        if i + 2 < chars.len() && chars[i + 1] == '-' && chars[i + 2] != ']' {
+            for c in chars[i]..=chars[i + 2] {
+                class_chars.push(c);
+            }
+            i += 3;
+        } else {
+            class_chars.push(chars[i]);
+            i += 1;
+        }
+    }
+    (
+        RegexToken::CharClass {
+            chars: class_chars,
+            negated,
+        },
+        i,
+    )
+}
+
+/// If the next character is a quantifier (`*`, `+`, `?`), wrap the token
+/// and advance `i`. Otherwise return the token unchanged.
+fn apply_quantifier(chars: &[char], token: RegexToken, i: &mut usize) -> RegexToken {
+    if *i < chars.len() {
+        match chars[*i] {
+            '*' => {
+                *i += 1;
+                return RegexToken::Star(Box::new(token));
+            }
+            '+' => {
+                *i += 1;
+                return RegexToken::Plus(Box::new(token));
+            }
+            '?' => {
+                *i += 1;
+                return RegexToken::Optional(Box::new(token));
+            }
+            _ => {}
+        }
+    }
+    token
 }
 
 /// Check if a single token matches a character.
@@ -669,89 +751,75 @@ fn token_matches_char(token: &RegexToken, ch: char) -> bool {
 /// Try to match the regex tokens starting at position `start` in the haystack.
 /// Returns true if a match is found starting at `start`.
 fn regex_match_at(tokens: &[RegexToken], haystack: &[char], start: usize) -> bool {
-    // Recursive backtracking matcher
-    fn try_match(tokens: &[RegexToken], ti: usize, hay: &[char], hi: usize) -> bool {
-        if ti >= tokens.len() {
-            return true;
-        }
+    try_match(tokens, 0, haystack, start)
+}
 
-        let token = &tokens[ti];
+/// Check whether `token` is a zero-width assertion and, if so, whether the
+/// assertion holds at position `hi`. Returns `Some(true)` if the assertion
+/// holds, `Some(false)` if it does not, and `None` if the token is not a
+/// zero-width assertion.
+fn try_zero_width_assertion(token: &RegexToken, hay: &[char], hi: usize) -> Option<bool> {
+    match token {
+        RegexToken::StartAnchor => Some(hi == 0),
+        RegexToken::EndAnchor => Some(hi == hay.len()),
+        RegexToken::WordBoundary => Some(is_word_boundary(hay, hi)),
+        _ => None,
+    }
+}
 
-        match token {
-            RegexToken::StartAnchor => {
-                if hi == 0 {
-                    try_match(tokens, ti + 1, hay, hi)
-                } else {
-                    false
-                }
-            }
-            RegexToken::EndAnchor => {
-                if hi == hay.len() {
-                    try_match(tokens, ti + 1, hay, hi)
-                } else {
-                    false
-                }
-            }
-            RegexToken::WordBoundary => {
-                let at_boundary = is_word_boundary(hay, hi);
-                if at_boundary {
-                    try_match(tokens, ti + 1, hay, hi)
-                } else {
-                    false
-                }
-            }
-            RegexToken::Star(inner) => {
-                // Try matching zero occurrences first, then greedily
-                // Greedy: try max first, then back off
-                let mut count = 0;
-                while hi + count < hay.len() && token_matches_char(inner, hay[hi + count]) {
-                    count += 1;
-                }
-                // Try from max to zero
-                for c in (0..=count).rev() {
-                    if try_match(tokens, ti + 1, hay, hi + c) {
-                        return true;
-                    }
-                }
-                false
-            }
-            RegexToken::Plus(inner) => {
-                let mut count = 0;
-                while hi + count < hay.len() && token_matches_char(inner, hay[hi + count]) {
-                    count += 1;
-                }
-                if count == 0 {
-                    return false;
-                }
-                for c in (1..=count).rev() {
-                    if try_match(tokens, ti + 1, hay, hi + c) {
-                        return true;
-                    }
-                }
-                false
-            }
-            RegexToken::Optional(inner) => {
-                // Try with the character first
-                if hi < hay.len()
-                    && token_matches_char(inner, hay[hi])
-                    && try_match(tokens, ti + 1, hay, hi + 1)
-                {
-                    return true;
-                }
-                // Try without
-                try_match(tokens, ti + 1, hay, hi)
-            }
-            _ => {
-                if hi < hay.len() && token_matches_char(token, hay[hi]) {
-                    try_match(tokens, ti + 1, hay, hi + 1)
-                } else {
-                    false
-                }
-            }
-        }
+/// Recursive backtracking regex matcher.
+fn try_match(tokens: &[RegexToken], ti: usize, hay: &[char], hi: usize) -> bool {
+    if ti >= tokens.len() {
+        return true;
     }
 
-    try_match(tokens, 0, haystack, start)
+    // Check zero-width assertions (anchors and boundaries) first.
+    if let Some(rest_ok) = try_zero_width_assertion(&tokens[ti], hay, hi) {
+        return rest_ok && try_match(tokens, ti + 1, hay, hi);
+    }
+
+    match &tokens[ti] {
+        RegexToken::Star(inner) => try_match_greedy(tokens, ti, hay, hi, inner, 0),
+        RegexToken::Plus(inner) => try_match_greedy(tokens, ti, hay, hi, inner, 1),
+        RegexToken::Optional(inner) => try_match_optional(tokens, ti, hay, hi, inner),
+        other => {
+            hi < hay.len()
+                && token_matches_char(other, hay[hi])
+                && try_match(tokens, ti + 1, hay, hi + 1)
+        }
+    }
+}
+
+/// Handle greedy repetition (`*` with `min_count=0`, `+` with `min_count=1`).
+fn try_match_greedy(
+    tokens: &[RegexToken],
+    ti: usize,
+    hay: &[char],
+    hi: usize,
+    inner: &RegexToken,
+    min_count: usize,
+) -> bool {
+    let mut count = 0;
+    while hi + count < hay.len() && token_matches_char(inner, hay[hi + count]) {
+        count += 1;
+    }
+    (min_count..=count)
+        .rev()
+        .any(|c| try_match(tokens, ti + 1, hay, hi + c))
+}
+
+/// Handle `?` — try with the character first, then without.
+fn try_match_optional(
+    tokens: &[RegexToken],
+    ti: usize,
+    hay: &[char],
+    hi: usize,
+    inner: &RegexToken,
+) -> bool {
+    let with = hi < hay.len()
+        && token_matches_char(inner, hay[hi])
+        && try_match(tokens, ti + 1, hay, hi + 1);
+    with || try_match(tokens, ti + 1, hay, hi)
 }
 
 /// Check if position `pos` is a word boundary in the character array.
@@ -1035,33 +1103,43 @@ pub(crate) fn util_fd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     );
     results.sort();
 
-    let mut count = 0;
-    for (path, is_dir) in &results {
-        let name = path.rsplit('/').next().unwrap_or(path);
-        if !fd_entry_matches(name, *is_dir, &fd_args, pattern) {
-            continue;
-        }
-
-        let display = fd_format_path(path, &search_root, fd_args.absolute_path);
-        if let Some(ref cmd) = fd_args.exec_cmd {
-            let line = format!("{cmd} {display}\n");
-            ctx.output.stdout(line.as_bytes());
-        } else {
-            let line = format!("{display}\n");
-            ctx.output.stdout(line.as_bytes());
-        }
-
-        count += 1;
-        if fd_args.stop_after_first {
-            break;
-        }
-    }
+    let count = fd_emit_results(ctx, &results, &fd_args, pattern, &search_root);
 
     if count == 0 && pattern.is_some() {
         return 1;
     }
 
     0
+}
+
+/// Emit matching fd results and return the number of matches printed.
+fn fd_emit_results(
+    ctx: &mut UtilContext<'_>,
+    results: &[(String, bool)],
+    fd_args: &FdArgs,
+    pattern: Option<&str>,
+    search_root: &str,
+) -> usize {
+    let mut count = 0;
+    for (path, is_dir) in results {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        if !fd_entry_matches(name, *is_dir, fd_args, pattern) {
+            continue;
+        }
+
+        let display = fd_format_path(path, search_root, fd_args.absolute_path);
+        let line = match fd_args.exec_cmd {
+            Some(ref cmd) => format!("{cmd} {display}\n"),
+            None => format!("{display}\n"),
+        };
+        ctx.output.stdout(line.as_bytes());
+
+        count += 1;
+        if fd_args.stop_after_first {
+            break;
+        }
+    }
+    count
 }
 
 /// Recursively walk the VFS collecting paths.
@@ -1073,10 +1151,8 @@ fn fd_walk(
     show_hidden: bool,
     out: &mut Vec<(String, bool)>,
 ) {
-    if let Some(max) = max_depth {
-        if depth >= max {
-            return;
-        }
+    if max_depth.is_some_and(|max| depth >= max) {
+        return;
     }
 
     let Ok(entries) = fs.read_dir(dir) else {
