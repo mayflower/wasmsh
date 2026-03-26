@@ -243,68 +243,146 @@ fn xxd_reverse(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> i32 {
 // dd — data copy/convert
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    const MAX_DD_SIZE: u64 = 64 * 1024 * 1024; // 64 MiB VFS limit
-    let mut input_file: Option<&str> = None;
-    let mut output_file: Option<&str> = None;
-    let mut block_size: u64 = 512;
-    let mut count: Option<u64> = None;
-    let mut skip_blocks: u64 = 0;
-    let mut seek_blocks: u64 = 0;
-    let mut conv_ucase = false;
-    let mut conv_lcase = false;
-    let mut conv_notrunc = false;
+const MAX_DD_SIZE: u64 = 64 * 1024 * 1024; // 64 MiB VFS limit
+
+struct DdArgs<'a> {
+    input_file: Option<&'a str>,
+    output_file: Option<&'a str>,
+    block_size: u64,
+    count: Option<u64>,
+    skip_blocks: u64,
+    seek_blocks: u64,
+    conv_ucase: bool,
+    conv_lcase: bool,
+    conv_notrunc: bool,
+}
+
+fn parse_dd_args<'a>(ctx: &mut UtilContext<'_>, argv: &'a [&'a str]) -> Result<DdArgs<'a>, i32> {
+    let mut args = DdArgs {
+        input_file: None,
+        output_file: None,
+        block_size: 512,
+        count: None,
+        skip_blocks: 0,
+        seek_blocks: 0,
+        conv_ucase: false,
+        conv_lcase: false,
+        conv_notrunc: false,
+    };
 
     for arg in &argv[1..] {
         if let Some(val) = arg.strip_prefix("if=") {
-            input_file = Some(val);
+            args.input_file = Some(val);
         } else if let Some(val) = arg.strip_prefix("of=") {
-            output_file = Some(val);
+            args.output_file = Some(val);
         } else if let Some(val) = arg.strip_prefix("bs=") {
             let Some(v) = parse_size(val) else {
                 let msg = format!("dd: invalid number: '{val}'\n");
                 ctx.output.stderr(msg.as_bytes());
-                return 1;
+                return Err(1);
             };
-            block_size = v;
-            if block_size > MAX_DD_SIZE {
+            if v > MAX_DD_SIZE {
                 ctx.output.stderr(b"dd: block size too large\n");
-                return 1;
+                return Err(1);
             }
+            args.block_size = v;
         } else if let Some(val) = arg.strip_prefix("count=") {
-            count = val.parse().ok();
+            args.count = val.parse().ok();
         } else if let Some(val) = arg.strip_prefix("skip=") {
-            let Ok(v) = val.parse::<u64>() else {
+            args.skip_blocks = val.parse::<u64>().map_err(|_| {
                 let msg = format!("dd: invalid number: '{val}'\n");
                 ctx.output.stderr(msg.as_bytes());
-                return 1;
-            };
-            skip_blocks = v;
+                1
+            })?;
         } else if let Some(val) = arg.strip_prefix("seek=") {
-            let Ok(v) = val.parse::<u64>() else {
+            args.seek_blocks = val.parse::<u64>().map_err(|_| {
                 let msg = format!("dd: invalid number: '{val}'\n");
                 ctx.output.stderr(msg.as_bytes());
-                return 1;
-            };
-            seek_blocks = v;
+                1
+            })?;
         } else if let Some(val) = arg.strip_prefix("conv=") {
             for opt in val.split(',') {
                 match opt {
-                    "ucase" => conv_ucase = true,
-                    "lcase" => conv_lcase = true,
-                    "notrunc" => conv_notrunc = true,
+                    "ucase" => args.conv_ucase = true,
+                    "lcase" => args.conv_lcase = true,
+                    "notrunc" => args.conv_notrunc = true,
                     _ => {
                         let msg = format!("dd: unknown conv option '{opt}'\n");
                         ctx.output.stderr(msg.as_bytes());
-                        return 1;
+                        return Err(1);
                     }
                 }
             }
         }
     }
+    Ok(args)
+}
 
-    // Read input
-    let input_data = if let Some(path) = input_file {
+fn dd_copy(input_data: &[u8], args: &DdArgs<'_>) -> Result<(Vec<u8>, u64, u64), &'static str> {
+    let bs = args.block_size as usize;
+
+    let skip_bytes = args.skip_blocks.saturating_mul(args.block_size);
+    if skip_bytes > MAX_DD_SIZE {
+        return Err("dd: skip offset too large\n");
+    }
+    let input = if skip_bytes as usize >= input_data.len() {
+        &[]
+    } else {
+        &input_data[skip_bytes as usize..]
+    };
+
+    let seek_bytes = args.seek_blocks.saturating_mul(args.block_size);
+    if seek_bytes > MAX_DD_SIZE {
+        return Err("dd: seek offset too large\n");
+    }
+
+    let mut output = vec![0u8; seek_bytes as usize];
+
+    let mut blocks_full = 0u64;
+    let mut blocks_partial = 0u64;
+    let max_blocks = args.count.unwrap_or(u64::MAX);
+    let mut offset = 0;
+    let mut block_count = 0u64;
+
+    while offset < input.len() && block_count < max_blocks {
+        let end = (offset + bs).min(input.len());
+        let chunk = &input[offset..end];
+        if chunk.len() == bs {
+            blocks_full += 1;
+        } else {
+            blocks_partial += 1;
+        }
+        output.extend_from_slice(chunk);
+        offset += bs;
+        block_count += 1;
+    }
+
+    // Apply conversions
+    if args.conv_ucase {
+        for b in &mut output {
+            if b.is_ascii_lowercase() {
+                *b = b.to_ascii_uppercase();
+            }
+        }
+    }
+    if args.conv_lcase {
+        for b in &mut output {
+            if b.is_ascii_uppercase() {
+                *b = b.to_ascii_lowercase();
+            }
+        }
+    }
+
+    Ok((output, blocks_full, blocks_partial))
+}
+
+pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let args = match parse_dd_args(ctx, argv) {
+        Ok(a) => a,
+        Err(status) => return status,
+    };
+
+    let input_data = if let Some(path) = args.input_file {
         match read_file_bytes(ctx, path, "dd") {
             Ok(d) => d,
             Err(status) => return status,
@@ -315,74 +393,21 @@ pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         Vec::new()
     };
 
-    // Skip input blocks
-    let skip_bytes = skip_blocks.saturating_mul(block_size);
-    if skip_bytes > MAX_DD_SIZE {
-        ctx.output.stderr(b"dd: skip offset too large\n");
-        return 1;
-    }
-    let input_data = if skip_bytes as usize >= input_data.len() {
-        &[]
-    } else {
-        &input_data[skip_bytes as usize..]
+    let (output_data, blocks_full, blocks_partial) = match dd_copy(&input_data, &args) {
+        Ok(v) => v,
+        Err(msg) => {
+            ctx.output.stderr(msg.as_bytes());
+            return 1;
+        }
     };
 
-    // Read blocks
-    let bs = block_size as usize;
-    let mut blocks_in_full = 0u64;
-    let mut blocks_in_partial = 0u64;
-    let mut output_data = Vec::new();
-
-    // Seek: prepend zero bytes for seek blocks
-    let seek_bytes = seek_blocks.saturating_mul(block_size);
-    if seek_bytes > MAX_DD_SIZE {
-        ctx.output.stderr(b"dd: seek offset too large\n");
-        return 1;
-    }
-    output_data.resize(seek_bytes as usize, 0u8);
-
-    let max_blocks = count.unwrap_or(u64::MAX);
-    let mut offset = 0;
-    let mut block_count = 0u64;
-    while offset < input_data.len() && block_count < max_blocks {
-        let end = (offset + bs).min(input_data.len());
-        let chunk = &input_data[offset..end];
-        if chunk.len() == bs {
-            blocks_in_full += 1;
-        } else {
-            blocks_in_partial += 1;
-        }
-        output_data.extend_from_slice(chunk);
-        offset += bs;
-        block_count += 1;
-    }
-
-    // Apply conversions
-    if conv_ucase {
-        for b in &mut output_data {
-            if b.is_ascii_lowercase() {
-                *b = b.to_ascii_uppercase();
-            }
-        }
-    }
-    if conv_lcase {
-        for b in &mut output_data {
-            if b.is_ascii_uppercase() {
-                *b = b.to_ascii_lowercase();
-            }
-        }
-    }
-
-    let total_bytes = output_data.len() - seek_bytes as usize;
-
-    // Compute output block stats (same logic applied to output side)
-    let blocks_out_full = blocks_in_full;
-    let blocks_out_partial = blocks_in_partial;
+    let seek_bytes = args.seek_blocks.saturating_mul(args.block_size) as usize;
+    let total_bytes = output_data.len() - seek_bytes;
 
     // Write output
-    if let Some(path) = output_file {
+    if let Some(path) = args.output_file {
         let full = resolve_path(ctx.cwd, path);
-        let opts = if conv_notrunc {
+        let opts = if args.conv_notrunc {
             OpenOptions::append()
         } else {
             OpenOptions::write()
@@ -402,13 +427,12 @@ pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             }
         }
     } else {
-        ctx.output.stdout(&output_data[seek_bytes as usize..]);
+        ctx.output.stdout(&output_data[seek_bytes..]);
     }
 
-    // Stats to stderr
     let stats = format!(
-        "{blocks_in_full}+{blocks_in_partial} records in\n\
-         {blocks_out_full}+{blocks_out_partial} records out\n\
+        "{blocks_full}+{blocks_partial} records in\n\
+         {blocks_full}+{blocks_partial} records out\n\
          {total_bytes} bytes transferred\n"
     );
     ctx.output.stderr(stats.as_bytes());
@@ -485,41 +509,118 @@ pub(crate) fn util_strings(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 // split — split file into pieces
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_split(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+struct SplitArgs<'a> {
+    lines: Option<usize>,
+    byte_size: Option<u64>,
+    chunks: Option<usize>,
+    numeric_suffix: bool,
+    file_args_start: usize,
+    _phantom: std::marker::PhantomData<&'a str>,
+}
+
+fn parse_split_args<'a>(
+    ctx: &mut UtilContext<'_>,
+    argv: &'a [&'a str],
+) -> Result<SplitArgs<'a>, i32> {
     let mut args = &argv[1..];
-    let mut lines: Option<usize> = None;
-    let mut byte_size: Option<u64> = None;
-    let mut chunks: Option<usize> = None;
-    let mut numeric_suffix = false;
+    let mut result = SplitArgs {
+        lines: None,
+        byte_size: None,
+        chunks: None,
+        numeric_suffix: false,
+        file_args_start: 0,
+        _phantom: std::marker::PhantomData,
+    };
+    let mut consumed = 1;
 
     while let Some(arg) = args.first() {
         match *arg {
             "-l" if args.len() > 1 => {
-                lines = args[1].parse().ok();
+                result.lines = args[1].parse().ok();
                 args = &args[2..];
+                consumed += 2;
             }
             "-b" if args.len() > 1 => {
-                byte_size = parse_size(args[1]);
+                result.byte_size = parse_size(args[1]);
                 args = &args[2..];
+                consumed += 2;
             }
             "-n" if args.len() > 1 => {
-                chunks = args[1].parse().ok();
+                result.chunks = args[1].parse().ok();
                 args = &args[2..];
+                consumed += 2;
             }
             "-d" => {
-                numeric_suffix = true;
+                result.numeric_suffix = true;
                 args = &args[1..];
+                consumed += 1;
             }
             _ if arg.starts_with('-') && arg.len() > 1 => {
                 let msg = format!("split: unknown option '{arg}'\n");
                 ctx.output.stderr(msg.as_bytes());
-                return 1;
+                return Err(1);
             }
             _ => break,
         }
     }
+    result.file_args_start = consumed;
+    Ok(result)
+}
 
-    // Remaining: [FILE [PREFIX]]
+fn split_into_pieces(
+    ctx: &mut UtilContext<'_>,
+    input_data: &[u8],
+    args: &SplitArgs<'_>,
+) -> Result<Vec<Vec<u8>>, i32> {
+    if let Some(n) = args.chunks {
+        if n == 0 {
+            ctx.output.stderr(b"split: invalid number of chunks\n");
+            return Err(1);
+        }
+        let chunk_size = input_data.len().div_ceil(n);
+        return Ok(input_data
+            .chunks(chunk_size.max(1))
+            .map(<[u8]>::to_vec)
+            .collect());
+    }
+    if let Some(bs) = args.byte_size {
+        let bs = bs as usize;
+        if bs == 0 {
+            ctx.output.stderr(b"split: invalid byte size\n");
+            return Err(1);
+        }
+        return Ok(input_data.chunks(bs).map(<[u8]>::to_vec).collect());
+    }
+    // Split by lines
+    let line_count = args.lines.unwrap_or(1000);
+    if line_count == 0 {
+        ctx.output.stderr(b"split: invalid line count\n");
+        return Err(1);
+    }
+    let text = String::from_utf8_lossy(input_data);
+    let all_lines: Vec<&str> = text.lines().collect();
+    Ok(all_lines
+        .chunks(line_count)
+        .map(|chunk| {
+            let mut buf = String::new();
+            for (i, line) in chunk.iter().enumerate() {
+                buf.push_str(line);
+                if i + 1 < chunk.len() || text.ends_with('\n') {
+                    buf.push('\n');
+                }
+            }
+            buf.into_bytes()
+        })
+        .collect())
+}
+
+pub(crate) fn util_split(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let split_args = match parse_split_args(ctx, argv) {
+        Ok(a) => a,
+        Err(status) => return status,
+    };
+    let args = &argv[split_args.file_args_start..];
+
     let (input_data, prefix) = if !args.is_empty() && args[0] != "-" {
         let data = match read_file_bytes(ctx, args[0], "split") {
             Ok(d) => d,
@@ -541,52 +642,13 @@ pub(crate) fn util_split(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         return 0;
     }
 
-    let pieces: Vec<Vec<u8>> = if let Some(n) = chunks {
-        // Split into N equal chunks
-        if n == 0 {
-            ctx.output.stderr(b"split: invalid number of chunks\n");
-            return 1;
-        }
-        let chunk_size = input_data.len().div_ceil(n);
-        input_data
-            .chunks(chunk_size.max(1))
-            .map(<[u8]>::to_vec)
-            .collect()
-    } else if let Some(bs) = byte_size {
-        // Split by byte size
-        let bs = bs as usize;
-        if bs == 0 {
-            ctx.output.stderr(b"split: invalid byte size\n");
-            return 1;
-        }
-        input_data.chunks(bs).map(<[u8]>::to_vec).collect()
-    } else {
-        // Split by lines
-        let line_count = lines.unwrap_or(1000);
-        if line_count == 0 {
-            ctx.output.stderr(b"split: invalid line count\n");
-            return 1;
-        }
-        let text = String::from_utf8_lossy(&input_data);
-        let all_lines: Vec<&str> = text.lines().collect();
-        all_lines
-            .chunks(line_count)
-            .map(|chunk| {
-                let mut buf = String::new();
-                for (i, line) in chunk.iter().enumerate() {
-                    buf.push_str(line);
-                    if i + 1 < chunk.len() || text.ends_with('\n') {
-                        buf.push('\n');
-                    }
-                }
-                buf.into_bytes()
-            })
-            .collect()
+    let pieces = match split_into_pieces(ctx, &input_data, &split_args) {
+        Ok(p) => p,
+        Err(status) => return status,
     };
 
-    // Write pieces
     for (i, piece) in pieces.iter().enumerate() {
-        let suffix = if numeric_suffix {
+        let suffix = if split_args.numeric_suffix {
             format!("{i:02}")
         } else {
             suffix_alpha(i)
@@ -620,39 +682,59 @@ fn suffix_alpha(n: usize) -> String {
 // file — detect file type
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_file(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+struct FileFlags {
+    brief: bool,
+    mime_type: bool,
+}
+
+fn parse_file_flags(ctx: &mut UtilContext<'_>, argv: &[&str]) -> Result<(FileFlags, usize), i32> {
     let mut args = &argv[1..];
-    let mut brief = false;
-    let mut mime_type = false;
+    let mut flags = FileFlags {
+        brief: false,
+        mime_type: false,
+    };
+    let mut consumed = 1;
 
     while let Some(arg) = args.first() {
         match *arg {
-            "-b" | "--brief" => {
-                brief = true;
-                args = &args[1..];
-            }
-            "-i" | "--mime-type" => {
-                mime_type = true;
-                args = &args[1..];
-            }
+            "-b" | "--brief" => flags.brief = true,
+            "-i" | "--mime-type" => flags.mime_type = true,
             _ if arg.starts_with('-') && arg.len() > 1 => {
-                // Combined short flags
                 for ch in arg[1..].chars() {
                     match ch {
-                        'b' => brief = true,
-                        'i' => mime_type = true,
+                        'b' => flags.brief = true,
+                        'i' => flags.mime_type = true,
                         _ => {
                             let msg = format!("file: unknown option '-{ch}'\n");
                             ctx.output.stderr(msg.as_bytes());
-                            return 1;
+                            return Err(1);
                         }
                     }
                 }
-                args = &args[1..];
             }
             _ => break,
         }
+        args = &args[1..];
+        consumed += 1;
     }
+    Ok((flags, consumed))
+}
+
+fn emit_file_result(ctx: &mut UtilContext<'_>, path: &str, desc: &str, brief: bool) {
+    let line = if brief {
+        format!("{desc}\n")
+    } else {
+        format!("{path}: {desc}\n")
+    };
+    ctx.output.stdout(line.as_bytes());
+}
+
+pub(crate) fn util_file(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (flags, consumed) = match parse_file_flags(ctx, argv) {
+        Ok(v) => v,
+        Err(status) => return status,
+    };
+    let args = &argv[consumed..];
 
     if args.is_empty() {
         ctx.output.stderr(b"file: missing operand\n");
@@ -663,21 +745,14 @@ pub(crate) fn util_file(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     for path in args {
         let full = resolve_path(ctx.cwd, path);
 
-        // Check if it's a directory
         match ctx.fs.stat(&full) {
             Ok(meta) if meta.is_dir => {
-                let desc = if mime_type {
+                let desc = if flags.mime_type {
                     "inode/directory"
                 } else {
                     "directory"
                 };
-                if brief {
-                    let line = format!("{desc}\n");
-                    ctx.output.stdout(line.as_bytes());
-                } else {
-                    let line = format!("{path}: {desc}\n");
-                    ctx.output.stdout(line.as_bytes());
-                }
+                emit_file_result(ctx, path, desc, flags.brief);
                 continue;
             }
             Ok(_) => {}
@@ -688,25 +763,17 @@ pub(crate) fn util_file(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             }
         }
 
-        // Read file content
         let Ok(data) = read_file_bytes(ctx, path, "file") else {
             status = 1;
             continue;
         };
 
-        let desc = if mime_type {
+        let desc = if flags.mime_type {
             detect_mime_type(&data, path)
         } else {
             detect_file_type(&data, path)
         };
-
-        if brief {
-            let line = format!("{desc}\n");
-            ctx.output.stdout(line.as_bytes());
-        } else {
-            let line = format!("{path}: {desc}\n");
-            ctx.output.stdout(line.as_bytes());
-        }
+        emit_file_result(ctx, path, &desc, flags.brief);
     }
 
     status

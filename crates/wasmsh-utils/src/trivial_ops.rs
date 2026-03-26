@@ -932,8 +932,36 @@ fn unexpand_line(line: &str, tab_width: usize) -> String {
 // truncate — set file size
 // ---------------------------------------------------------------------------
 
+/// Parsed size specification for truncate: mode (+/-/=) and value.
+struct SizeSpec {
+    mode: char,
+    value: u64,
+}
+
+fn parse_size_spec(spec: &str) -> Result<SizeSpec, String> {
+    let (mode, num_str) = if let Some(rest) = spec.strip_prefix('+') {
+        ('+', rest)
+    } else if let Some(rest) = spec.strip_prefix('-') {
+        ('-', rest)
+    } else {
+        ('=', spec)
+    };
+
+    let value = num_str
+        .parse::<u64>()
+        .map_err(|_| format!("truncate: invalid size: '{spec}'"))?;
+    Ok(SizeSpec { mode, value })
+}
+
+fn compute_truncate_size(current_len: u64, spec: &SizeSpec) -> usize {
+    match spec.mode {
+        '+' => current_len.saturating_add(spec.value) as usize,
+        '-' => current_len.saturating_sub(spec.value) as usize,
+        _ => spec.value as usize,
+    }
+}
+
 pub(crate) fn util_truncate(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    // VFS file size limit: 64 MiB (matches wasmsh-fs per-file cap in SECURITY.md)
     const MAX_FILE_SIZE: usize = 64 * 1024 * 1024;
     let mut args = &argv[1..];
     let mut size_spec: Option<&str> = None;
@@ -954,7 +982,7 @@ pub(crate) fn util_truncate(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     }
 
-    let Some(spec) = size_spec else {
+    let Some(spec_str) = size_spec else {
         ctx.output.stderr(b"truncate: missing -s option\n");
         return 1;
     };
@@ -964,26 +992,19 @@ pub(crate) fn util_truncate(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         return 1;
     }
 
-    // Parse size specification: optional +/- prefix, then number
-    let (mode, num_str) = if let Some(rest) = spec.strip_prefix('+') {
-        ('+', rest)
-    } else if let Some(rest) = spec.strip_prefix('-') {
-        ('-', rest)
-    } else {
-        ('=', spec)
-    };
-
-    let Ok(size_val) = num_str.parse::<u64>() else {
-        let msg = format!("truncate: invalid size: '{spec}'\n");
-        ctx.output.stderr(msg.as_bytes());
-        return 1;
+    let spec = match parse_size_spec(spec_str) {
+        Ok(s) => s,
+        Err(msg) => {
+            let out = format!("{msg}\n");
+            ctx.output.stderr(out.as_bytes());
+            return 1;
+        }
     };
 
     let mut status = 0;
     for path in args {
         let full = resolve_path(ctx.cwd, path);
 
-        // Read current contents (or empty if file doesn't exist)
         let current_data = match ctx.fs.open(&full, OpenOptions::read()) {
             Ok(h) => match ctx.fs.read_file(h) {
                 Ok(data) => {
@@ -997,15 +1018,10 @@ pub(crate) fn util_truncate(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     continue;
                 }
             },
-            Err(_) => Vec::new(), // File doesn't exist yet — start empty
+            Err(_) => Vec::new(),
         };
 
-        let new_size = match mode {
-            '+' => (current_data.len() as u64).saturating_add(size_val) as usize,
-            '-' => (current_data.len() as u64).saturating_sub(size_val) as usize,
-            _ => size_val as usize,
-        };
-
+        let new_size = compute_truncate_size(current_data.len() as u64, &spec);
         if new_size > MAX_FILE_SIZE {
             let msg = format!("truncate: size {new_size} exceeds VFS limit\n");
             ctx.output.stderr(msg.as_bytes());
@@ -1014,10 +1030,9 @@ pub(crate) fn util_truncate(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
 
         let mut new_data = current_data;
+        new_data.resize(new_size, 0);
         if new_size < new_data.len() {
             new_data.truncate(new_size);
-        } else {
-            new_data.resize(new_size, 0);
         }
 
         match ctx.fs.open(&full, OpenOptions::write()) {

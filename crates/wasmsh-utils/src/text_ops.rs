@@ -571,117 +571,113 @@ pub(crate) fn util_rev(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 // bat — cat with line numbers and file header
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_bat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+struct BatFlags {
+    show_numbers: bool,
+    show_header: bool,
+    line_range: Option<(Option<usize>, Option<usize>)>,
+    show_all: bool,
+}
+
+fn parse_bat_flags(argv: &[&str]) -> (BatFlags, usize) {
     let mut args = &argv[1..];
-    let mut show_numbers = true;
-    let mut show_header = true;
-    let mut line_range: Option<(Option<usize>, Option<usize>)> = None;
-    let mut show_all = false;
+    let mut flags = BatFlags {
+        show_numbers: true,
+        show_header: true,
+        line_range: None,
+        show_all: false,
+    };
+    let mut consumed = 1;
 
     while let Some(arg) = args.first() {
         match *arg {
-            "-n" | "--number" => {
-                show_numbers = true;
-                args = &args[1..];
-            }
+            "-n" | "--number" => flags.show_numbers = true,
             "-p" | "--plain" => {
-                show_numbers = false;
-                show_header = false;
-                args = &args[1..];
+                flags.show_numbers = false;
+                flags.show_header = false;
             }
-            "-A" | "--show-all" => {
-                show_all = true;
-                args = &args[1..];
-            }
+            "-A" | "--show-all" => flags.show_all = true,
             "-r" | "--line-range" if args.len() > 1 => {
-                line_range = parse_bat_range(args[1]);
+                flags.line_range = parse_bat_range(args[1]);
                 args = &args[2..];
+                consumed += 2;
+                continue;
             }
-            "-l" | "--language" if args.len() > 1 => {
-                // Accepted but ignored (no highlighting in VFS)
+            "-l" | "--language" | "--paging" if args.len() > 1 => {
                 args = &args[2..];
-            }
-            "--paging" if args.len() > 1 => {
-                // Accepted, no-op
-                args = &args[2..];
+                consumed += 2;
+                continue;
             }
             _ if arg.starts_with("--style=") => {
-                let style = &arg["--style=".len()..];
-                match style {
-                    "plain" => {
-                        show_numbers = false;
-                        show_header = false;
-                    }
-                    "numbers" => {
-                        show_numbers = true;
-                        show_header = false;
-                    }
-                    "header" => {
-                        show_numbers = false;
-                        show_header = true;
-                    }
-                    _ => {
-                        show_numbers = true;
-                        show_header = true;
-                    }
-                }
-                args = &args[1..];
+                apply_bat_style(&mut flags, &arg["--style=".len()..]);
             }
             _ if arg.starts_with("--line-range=") => {
-                line_range = parse_bat_range(&arg["--line-range=".len()..]);
-                args = &args[1..];
+                flags.line_range = parse_bat_range(&arg["--line-range=".len()..]);
             }
-            _ if arg.starts_with("--paging=") => {
-                // No-op
-                args = &args[1..];
-            }
-            _ if arg.starts_with("--language=") => {
-                // No-op
-                args = &args[1..];
-            }
+            _ if arg.starts_with("--paging=") | arg.starts_with("--language=") => {}
             _ if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") => {
-                // Combined short flags
-                let flags = &arg[1..];
                 let mut recognized = true;
-                for ch in flags.chars() {
+                for ch in arg[1..].chars() {
                     match ch {
-                        'n' => show_numbers = true,
+                        'n' => flags.show_numbers = true,
                         'p' => {
-                            show_numbers = false;
-                            show_header = false;
+                            flags.show_numbers = false;
+                            flags.show_header = false;
                         }
-                        'A' => show_all = true,
+                        'A' => flags.show_all = true,
                         _ => {
                             recognized = false;
                             break;
                         }
                     }
                 }
-                if recognized {
-                    args = &args[1..];
-                } else {
+                if !recognized {
                     break;
                 }
             }
             _ => break,
         }
+        args = &args[1..];
+        consumed += 1;
     }
+    (flags, consumed)
+}
 
-    // File args
-    let file_args: Vec<&str> = args.to_vec();
+fn apply_bat_style(flags: &mut BatFlags, style: &str) {
+    match style {
+        "plain" => {
+            flags.show_numbers = false;
+            flags.show_header = false;
+        }
+        "numbers" => {
+            flags.show_numbers = true;
+            flags.show_header = false;
+        }
+        "header" => {
+            flags.show_numbers = false;
+            flags.show_header = true;
+        }
+        _ => {
+            flags.show_numbers = true;
+            flags.show_header = true;
+        }
+    }
+}
+
+pub(crate) fn util_bat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (flags, consumed) = parse_bat_flags(argv);
+    let file_args: Vec<&str> = argv[consumed..].to_vec();
 
     if file_args.is_empty() {
-        // Read from stdin
         if let Some(data) = ctx.stdin {
             let text = String::from_utf8_lossy(data).to_string();
             bat_output(
                 ctx,
                 None,
                 &text,
-                show_numbers,
-                show_header,
-                line_range,
-                show_all,
+                flags.show_numbers,
+                flags.show_header,
+                flags.line_range,
+                flags.show_all,
             );
             return 0;
         }
@@ -698,10 +694,10 @@ pub(crate) fn util_bat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     ctx,
                     Some(path),
                     &text,
-                    show_numbers,
-                    show_header,
-                    line_range,
-                    show_all,
+                    flags.show_numbers,
+                    flags.show_header,
+                    flags.line_range,
+                    flags.show_all,
                 );
             }
             Err(e) => {

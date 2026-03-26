@@ -582,7 +582,10 @@ fn diff_texts(
 // diff utility entry point
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_diff(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+fn parse_diff_flags<'a>(
+    ctx: &mut UtilContext<'_>,
+    argv: &'a [&'a str],
+) -> Result<(DiffFlags, Vec<&'a str>), i32> {
     let mut flags = DiffFlags::default();
     let mut positional: Vec<&str> = Vec::new();
     let mut args = &argv[1..];
@@ -614,14 +617,12 @@ pub(crate) fn util_diff(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             flags.new_file = true;
             args = &args[1..];
         } else if arg.starts_with("-U") && arg.len() > 2 {
-            // -U3 style
             if let Ok(n) = arg[2..].parse::<usize>() {
                 flags.unified = true;
                 flags.context_lines = n;
             }
             args = &args[1..];
         } else if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") {
-            // Combined short flags like -uBw
             for ch in arg[1..].chars() {
                 match ch {
                     'u' => flags.unified = true,
@@ -634,7 +635,7 @@ pub(crate) fn util_diff(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     _ => {
                         let msg = format!("diff: unknown option '-{ch}'\n");
                         ctx.output.stderr(msg.as_bytes());
-                        return 2;
+                        return Err(2);
                     }
                 }
             }
@@ -644,6 +645,43 @@ pub(crate) fn util_diff(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             args = &args[1..];
         }
     }
+    Ok((flags, positional))
+}
+
+/// Read a file for diff, returning its text. Handles directories and missing files.
+fn diff_read_file(
+    ctx: &mut UtilContext<'_>,
+    stat: &Result<wasmsh_fs::Metadata, wasmsh_fs::FsError>,
+    path: &str,
+    display: &str,
+    new_file_flag: bool,
+) -> Result<String, i32> {
+    match stat {
+        Ok(m) if m.is_dir => {
+            let msg = format!("diff: {display}: Is a directory\n");
+            ctx.output.stderr(msg.as_bytes());
+            Err(2)
+        }
+        Ok(_) => read_text(ctx.fs, path).map_err(|e| {
+            emit_error(ctx.output, "diff", display, &e);
+            2
+        }),
+        Err(_) => {
+            if new_file_flag {
+                Ok(String::new())
+            } else {
+                emit_error(ctx.output, "diff", display, &"No such file or directory");
+                Err(2)
+            }
+        }
+    }
+}
+
+pub(crate) fn util_diff(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (flags, positional) = match parse_diff_flags(ctx, argv) {
+        Ok(v) => v,
+        Err(status) => return status,
+    };
 
     if positional.len() < 2 {
         ctx.output.stderr(b"diff: missing operand\n");
@@ -656,7 +694,6 @@ pub(crate) fn util_diff(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let stat_a = ctx.fs.stat(&path_a);
     let stat_b = ctx.fs.stat(&path_b);
 
-    // Check if both are directories for recursive mode.
     let a_is_dir = stat_a.as_ref().is_ok_and(|m| m.is_dir);
     let b_is_dir = stat_b.as_ref().is_ok_and(|m| m.is_dir);
 
@@ -669,61 +706,13 @@ pub(crate) fn util_diff(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         return diff_dirs(ctx, &path_a, &path_b, positional[0], positional[1], &flags);
     }
 
-    // Handle missing files with -N flag.
-    let old_text = match &stat_a {
-        Ok(m) if m.is_dir => {
-            let msg = format!("diff: {}: Is a directory\n", positional[0]);
-            ctx.output.stderr(msg.as_bytes());
-            return 2;
-        }
-        Ok(_) => match read_text(ctx.fs, &path_a) {
-            Ok(t) => t,
-            Err(e) => {
-                emit_error(ctx.output, "diff", positional[0], &e);
-                return 2;
-            }
-        },
-        Err(_) => {
-            if flags.new_file {
-                String::new()
-            } else {
-                emit_error(
-                    ctx.output,
-                    "diff",
-                    positional[0],
-                    &"No such file or directory",
-                );
-                return 2;
-            }
-        }
+    let old_text = match diff_read_file(ctx, &stat_a, &path_a, positional[0], flags.new_file) {
+        Ok(t) => t,
+        Err(status) => return status,
     };
-
-    let new_text = match &stat_b {
-        Ok(m) if m.is_dir => {
-            let msg = format!("diff: {}: Is a directory\n", positional[1]);
-            ctx.output.stderr(msg.as_bytes());
-            return 2;
-        }
-        Ok(_) => match read_text(ctx.fs, &path_b) {
-            Ok(t) => t,
-            Err(e) => {
-                emit_error(ctx.output, "diff", positional[1], &e);
-                return 2;
-            }
-        },
-        Err(_) => {
-            if flags.new_file {
-                String::new()
-            } else {
-                emit_error(
-                    ctx.output,
-                    "diff",
-                    positional[1],
-                    &"No such file or directory",
-                );
-                return 2;
-            }
-        }
+    let new_text = match diff_read_file(ctx, &stat_b, &path_b, positional[1], flags.new_file) {
+        Ok(t) => t,
+        Err(status) => return status,
     };
 
     let old_lines: Vec<&str> = old_text.lines().collect();
@@ -739,21 +728,13 @@ pub(crate) fn util_diff(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     i32::from(differs)
 }
 
-/// Recursively diff two directory trees.
-fn diff_dirs(
-    ctx: &mut UtilContext<'_>,
-    dir_a: &str,
-    dir_b: &str,
-    label_a: &str,
-    label_b: &str,
-    flags: &DiffFlags,
-) -> i32 {
+/// Collect and merge unique file entries from two directories.
+fn merge_dir_files(fs: &wasmsh_fs::MemoryFs, dir_a: &str, dir_b: &str) -> Vec<String> {
     let mut entries_a: Vec<(String, bool)> = Vec::new();
     let mut entries_b: Vec<(String, bool)> = Vec::new();
-    collect_dir_entries(ctx.fs, dir_a, "", &mut entries_a);
-    collect_dir_entries(ctx.fs, dir_b, "", &mut entries_b);
+    collect_dir_entries(fs, dir_a, "", &mut entries_a);
+    collect_dir_entries(fs, dir_b, "", &mut entries_b);
 
-    // Keep only files (not directories themselves) for diffing.
     let files_a: Vec<&str> = entries_a
         .iter()
         .filter(|(_, is_dir)| !is_dir)
@@ -765,24 +746,51 @@ fn diff_dirs(
         .map(|(name, _)| name.as_str())
         .collect();
 
-    // Merge sorted lists.
-    let mut all_files: Vec<&str> = Vec::new();
-    all_files.extend_from_slice(&files_a);
+    let mut all_files: Vec<String> = files_a.iter().map(|s| (*s).to_string()).collect();
     for f in &files_b {
-        if !all_files.contains(f) {
-            all_files.push(f);
+        if !files_a.contains(f) {
+            all_files.push((*f).to_string());
         }
     }
     all_files.sort_unstable();
+    all_files
+}
+
+/// Read a file or return empty string if it doesn't exist.
+fn read_text_or_empty(
+    ctx: &mut UtilContext<'_>,
+    path: &str,
+    display: &str,
+    exists: bool,
+) -> Result<String, i32> {
+    if !exists {
+        return Ok(String::new());
+    }
+    read_text(ctx.fs, path).map_err(|e| {
+        emit_error(ctx.output, "diff", display, &e);
+        2
+    })
+}
+
+/// Recursively diff two directory trees.
+fn diff_dirs(
+    ctx: &mut UtilContext<'_>,
+    dir_a: &str,
+    dir_b: &str,
+    label_a: &str,
+    label_b: &str,
+    flags: &DiffFlags,
+) -> i32 {
+    let all_files = merge_dir_files(ctx.fs, dir_a, dir_b);
 
     let mut any_diff = false;
     let mut status = 0;
 
     for rel in &all_files {
-        let full_a = format!("{}/{}", dir_a.trim_end_matches('/'), rel);
-        let full_b = format!("{}/{}", dir_b.trim_end_matches('/'), rel);
-        let lab_a = format!("{}/{}", label_a.trim_end_matches('/'), rel);
-        let lab_b = format!("{}/{}", label_b.trim_end_matches('/'), rel);
+        let full_a = format!("{}/{rel}", dir_a.trim_end_matches('/'));
+        let full_b = format!("{}/{rel}", dir_b.trim_end_matches('/'));
+        let lab_a = format!("{}/{rel}", label_a.trim_end_matches('/'));
+        let lab_b = format!("{}/{rel}", label_b.trim_end_matches('/'));
 
         let a_exists = ctx.fs.stat(&full_a).is_ok();
         let b_exists = ctx.fs.stat(&full_b).is_ok();
@@ -800,29 +808,19 @@ fn diff_dirs(
             continue;
         }
 
-        let old_text = if a_exists {
-            match read_text(ctx.fs, &full_a) {
-                Ok(text) => text,
-                Err(e) => {
-                    emit_error(ctx.output, "diff", rel, &e);
-                    status = 2;
-                    continue;
-                }
+        let old_text = match read_text_or_empty(ctx, &full_a, rel, a_exists) {
+            Ok(t) => t,
+            Err(s) => {
+                status = s;
+                continue;
             }
-        } else {
-            String::new()
         };
-        let new_text = if b_exists {
-            match read_text(ctx.fs, &full_b) {
-                Ok(text) => text,
-                Err(e) => {
-                    emit_error(ctx.output, "diff", rel, &e);
-                    status = 2;
-                    continue;
-                }
+        let new_text = match read_text_or_empty(ctx, &full_b, rel, b_exists) {
+            Ok(t) => t,
+            Err(s) => {
+                status = s;
+                continue;
             }
-        } else {
-            String::new()
         };
 
         let old_lines: Vec<&str> = old_text.lines().collect();
@@ -1059,30 +1057,42 @@ fn try_apply_at(lines: &[String], hunk: &PatchHunk, pos: usize) -> Result<Vec<St
     Ok(result)
 }
 
-pub(crate) fn util_patch(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut strip_count: usize = 0;
-    let mut dry_run = false;
-    let mut reverse = false;
-    let mut patch_file: Option<&str> = None;
+struct PatchFlags<'a> {
+    strip_count: usize,
+    dry_run: bool,
+    reverse: bool,
+    patch_file: Option<&'a str>,
+}
+
+fn parse_patch_flags<'a>(
+    ctx: &mut UtilContext<'_>,
+    argv: &'a [&'a str],
+) -> Result<PatchFlags<'a>, i32> {
+    let mut flags = PatchFlags {
+        strip_count: 0,
+        dry_run: false,
+        reverse: false,
+        patch_file: None,
+    };
     let mut args = &argv[1..];
 
     while let Some(&arg) = args.first() {
         if arg == "--dry-run" {
-            dry_run = true;
+            flags.dry_run = true;
             args = &args[1..];
         } else if arg == "-R" || arg == "--reverse" {
-            reverse = true;
+            flags.reverse = true;
             args = &args[1..];
         } else if arg == "-i" {
             if args.len() < 2 {
                 ctx.output.stderr(b"patch: -i requires an argument\n");
-                return 2;
+                return Err(2);
             }
-            patch_file = Some(args[1]);
+            flags.patch_file = Some(args[1]);
             args = &args[2..];
         } else if let Some(stripped) = arg.strip_prefix("-p") {
             if let Ok(n) = stripped.parse::<usize>() {
-                strip_count = n;
+                flags.strip_count = n;
             }
             args = &args[1..];
         } else if arg == "--" {
@@ -1090,14 +1100,98 @@ pub(crate) fn util_patch(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         } else if arg.starts_with('-') && arg.len() > 1 {
             let msg = format!("patch: unknown option '{arg}'\n");
             ctx.output.stderr(msg.as_bytes());
-            return 2;
+            return Err(2);
         } else {
             break;
         }
     }
+    Ok(flags)
+}
+
+fn reverse_patch_hunks(patch_files: &mut [PatchFile]) {
+    for pf in patch_files {
+        for hunk in &mut pf.hunks {
+            std::mem::swap(&mut hunk.remove, &mut hunk.add);
+            for op in &mut hunk.body {
+                *op = match op {
+                    PatchOp::Remove(s) => PatchOp::Add(std::mem::take(s)),
+                    PatchOp::Add(s) => PatchOp::Remove(std::mem::take(s)),
+                    PatchOp::Context(s) => PatchOp::Context(std::mem::take(s)),
+                };
+            }
+        }
+    }
+}
+
+fn apply_patch_to_file(
+    ctx: &mut UtilContext<'_>,
+    pf: &PatchFile,
+    strip_count: usize,
+    dry_run: bool,
+) -> i32 {
+    let stripped = strip_path_components(&pf.path, strip_count);
+    let target_path = resolve_path(ctx.cwd, stripped);
+
+    let mut lines: Vec<String> = match read_text(ctx.fs, &target_path) {
+        Ok(text) => text.lines().map(String::from).collect(),
+        Err(_) => Vec::new(),
+    };
+
+    let mut hunk_failed = false;
+    let mut status = 0;
+
+    for (hi, hunk) in pf.hunks.iter().enumerate() {
+        match apply_hunk(&lines, hunk, 3) {
+            Ok(new_lines) => {
+                lines = new_lines;
+                let msg = format!("patching file {stripped} (hunk {} succeeded)\n", hi + 1);
+                ctx.output.stdout(msg.as_bytes());
+            }
+            Err(e) => {
+                let msg = format!("patching file {stripped} (hunk {} FAILED -- {e})\n", hi + 1);
+                ctx.output.stderr(msg.as_bytes());
+                hunk_failed = true;
+                status = 1;
+            }
+        }
+    }
+
+    if dry_run || hunk_failed {
+        return status;
+    }
+
+    let content = if lines.is_empty() {
+        String::new()
+    } else {
+        let mut s = lines.join("\n");
+        s.push('\n');
+        s
+    };
+    let wh = match ctx.fs.open(&target_path, OpenOptions::write()) {
+        Ok(h) => h,
+        Err(e) => {
+            emit_error(ctx.output, "patch", stripped, &e);
+            return 2;
+        }
+    };
+    if let Err(e) = ctx.fs.write_file(wh, content.as_bytes()) {
+        ctx.fs.close(wh);
+        emit_error(ctx.output, "patch", stripped, &e);
+        return 2;
+    }
+    ctx.fs.close(wh);
+
+    status
+}
+
+pub(crate) fn util_patch(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let flags = match parse_patch_flags(ctx, argv) {
+        Ok(f) => f,
+        Err(status) => return status,
+    };
 
     // Read the patch text.
-    let patch_text = if let Some(pf) = patch_file {
+    let patch_text = if let Some(pf) = flags.patch_file {
         let full = resolve_path(ctx.cwd, pf);
         match read_text(ctx.fs, &full) {
             Ok(t) => t,
@@ -1115,76 +1209,15 @@ pub(crate) fn util_patch(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     let mut patch_files = parse_unified_diff(&patch_text);
 
-    // If reverse, swap add/remove in each hunk.
-    if reverse {
-        for pf in &mut patch_files {
-            for hunk in &mut pf.hunks {
-                std::mem::swap(&mut hunk.remove, &mut hunk.add);
-                for op in &mut hunk.body {
-                    *op = match op {
-                        PatchOp::Remove(s) => PatchOp::Add(std::mem::take(s)),
-                        PatchOp::Add(s) => PatchOp::Remove(std::mem::take(s)),
-                        PatchOp::Context(s) => PatchOp::Context(std::mem::take(s)),
-                    };
-                }
-            }
-        }
+    if flags.reverse {
+        reverse_patch_hunks(&mut patch_files);
     }
 
     let mut status = 0;
-
     for pf in &patch_files {
-        let stripped = strip_path_components(&pf.path, strip_count);
-        let target_path = resolve_path(ctx.cwd, stripped);
-
-        // Read existing file (or start with empty).
-        let mut lines: Vec<String> = match read_text(ctx.fs, &target_path) {
-            Ok(text) => text.lines().map(String::from).collect(),
-            Err(_) => Vec::new(),
-        };
-
-        let mut hunk_failed = false;
-
-        for (hi, hunk) in pf.hunks.iter().enumerate() {
-            match apply_hunk(&lines, hunk, 3) {
-                Ok(new_lines) => {
-                    lines = new_lines;
-                    let msg = format!("patching file {stripped} (hunk {} succeeded)\n", hi + 1);
-                    ctx.output.stdout(msg.as_bytes());
-                }
-                Err(e) => {
-                    let msg = format!("patching file {stripped} (hunk {} FAILED -- {e})\n", hi + 1);
-                    ctx.output.stderr(msg.as_bytes());
-                    hunk_failed = true;
-                    status = 1;
-                }
-            }
-        }
-
-        if !dry_run && !hunk_failed {
-            // Write the patched content back.
-            let content = if lines.is_empty() {
-                String::new()
-            } else {
-                let mut s = lines.join("\n");
-                s.push('\n');
-                s
-            };
-            let wh = match ctx.fs.open(&target_path, OpenOptions::write()) {
-                Ok(h) => h,
-                Err(e) => {
-                    emit_error(ctx.output, "patch", stripped, &e);
-                    status = 2;
-                    continue;
-                }
-            };
-            if let Err(e) = ctx.fs.write_file(wh, content.as_bytes()) {
-                ctx.fs.close(wh);
-                emit_error(ctx.output, "patch", stripped, &e);
-                status = 2;
-                continue;
-            }
-            ctx.fs.close(wh);
+        let rc = apply_patch_to_file(ctx, pf, flags.strip_count, flags.dry_run);
+        if rc > status {
+            status = rc;
         }
     }
 

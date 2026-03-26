@@ -3,7 +3,8 @@
 use wasmsh_fs::Vfs;
 
 use crate::helpers::{
-    crc32, emit_error, read_file_bytes, read_file_bytes_abs, resolve_path, write_file_bytes,
+    child_path, crc32, emit_error, read_file_bytes, read_file_bytes_abs, resolve_path,
+    write_file_bytes,
 };
 use crate::UtilContext;
 
@@ -64,8 +65,8 @@ fn gzip_compress(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Decompress a gzip file. Supports DEFLATE stored blocks only.
-fn gzip_decompress(data: &[u8]) -> Result<Vec<u8>, String> {
+/// Parse the gzip header and return the position of the DEFLATE stream start.
+fn parse_gzip_header(data: &[u8]) -> Result<usize, String> {
     if data.len() < 10 {
         return Err("invalid gzip: too short".to_string());
     }
@@ -107,7 +108,11 @@ fn gzip_decompress(data: &[u8]) -> Result<Vec<u8>, String> {
         pos += 2;
     }
 
-    // Parse DEFLATE stored blocks
+    Ok(pos)
+}
+
+/// Read DEFLATE stored blocks starting at `pos`, returning `(decompressed, end_pos)`.
+fn read_stored_blocks(data: &[u8], mut pos: usize) -> Result<(Vec<u8>, usize), String> {
     let mut output = Vec::new();
     loop {
         if pos >= data.len() {
@@ -118,27 +123,34 @@ fn gzip_decompress(data: &[u8]) -> Result<Vec<u8>, String> {
         let btype = (header >> 1) & 0x03;
         pos += 1;
 
-        if btype == 0 {
-            // Stored block
-            if pos + 4 > data.len() {
-                return Err("truncated stored block header".to_string());
-            }
-            let len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
-            // Skip nlen (pos+2, pos+3)
-            pos += 4;
-            if pos + len > data.len() {
-                return Err("truncated stored block data".to_string());
-            }
-            output.extend_from_slice(&data[pos..pos + len]);
-            pos += len;
-        } else {
+        if btype != 0 {
             return Err(format!("unsupported DEFLATE block type {btype}"));
         }
+
+        // Stored block
+        if pos + 4 > data.len() {
+            return Err("truncated stored block header".to_string());
+        }
+        let len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+        // Skip nlen (pos+2, pos+3)
+        pos += 4;
+        if pos + len > data.len() {
+            return Err("truncated stored block data".to_string());
+        }
+        output.extend_from_slice(&data[pos..pos + len]);
+        pos += len;
 
         if is_final {
             break;
         }
     }
+    Ok((output, pos))
+}
+
+/// Decompress a gzip file. Supports DEFLATE stored blocks only.
+fn gzip_decompress(data: &[u8]) -> Result<Vec<u8>, String> {
+    let pos = parse_gzip_header(data)?;
+    let (output, pos) = read_stored_blocks(data, pos)?;
 
     // Verify CRC-32 and size from trailer (if present)
     if pos + 8 <= data.len() {
@@ -153,45 +165,116 @@ fn gzip_decompress(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
-pub(crate) fn util_gzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+struct GzipFlags {
+    to_stdout: bool,
+    decompress: bool,
+    keep: bool,
+}
+
+fn parse_gzip_flags(ctx: &mut UtilContext<'_>, argv: &[&str]) -> Result<(GzipFlags, usize), i32> {
     let mut args = &argv[1..];
-    let mut to_stdout = false;
-    let mut decompress = false;
-    let mut keep = false;
+    let mut flags = GzipFlags {
+        to_stdout: false,
+        decompress: false,
+        keep: false,
+    };
+    let mut consumed = 1;
 
     while let Some(arg) = args.first() {
         match *arg {
-            "-c" => {
-                to_stdout = true;
-                args = &args[1..];
-            }
-            "-d" => {
-                decompress = true;
-                args = &args[1..];
-            }
-            "-k" => {
-                keep = true;
-                args = &args[1..];
-            }
+            "-c" => flags.to_stdout = true,
+            "-d" => flags.decompress = true,
+            "-k" => flags.keep = true,
             _ if arg.starts_with('-') && arg.len() > 1 => {
-                // Parse combined flags like -cd, -ck
                 for ch in arg[1..].chars() {
                     match ch {
-                        'c' => to_stdout = true,
-                        'd' => decompress = true,
-                        'k' => keep = true,
+                        'c' => flags.to_stdout = true,
+                        'd' => flags.decompress = true,
+                        'k' => flags.keep = true,
                         _ => {
                             let msg = format!("gzip: unknown option '-{ch}'\n");
                             ctx.output.stderr(msg.as_bytes());
-                            return 1;
+                            return Err(1);
                         }
                     }
                 }
-                args = &args[1..];
             }
             _ => break,
         }
+        args = &args[1..];
+        consumed += 1;
     }
+    Ok((flags, consumed))
+}
+
+fn gzip_decompress_file(
+    ctx: &mut UtilContext<'_>,
+    path: &str,
+    full: &str,
+    data: &[u8],
+    flags: &GzipFlags,
+) -> i32 {
+    let decompressed = match gzip_decompress(data) {
+        Ok(d) => d,
+        Err(e) => {
+            emit_error(ctx.output, "gzip", path, &e);
+            return 1;
+        }
+    };
+    if flags.to_stdout {
+        ctx.output.stdout(&decompressed);
+        return 0;
+    }
+    let out_path = if std::path::Path::new(path)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
+    {
+        full[..full.len() - 3].to_string()
+    } else {
+        format!("{full}.out")
+    };
+    if write_file(ctx, "gzip", &out_path, &decompressed) != 0 {
+        return 1;
+    }
+    remove_original_if_needed(ctx, full, path, flags.keep);
+    0
+}
+
+fn gzip_compress_file(
+    ctx: &mut UtilContext<'_>,
+    path: &str,
+    full: &str,
+    data: &[u8],
+    flags: &GzipFlags,
+) -> i32 {
+    let compressed = gzip_compress(data);
+    if flags.to_stdout {
+        ctx.output.stdout(&compressed);
+        return 0;
+    }
+    let out_path = format!("{full}.gz");
+    if write_file(ctx, "gzip", &out_path, &compressed) != 0 {
+        return 1;
+    }
+    remove_original_if_needed(ctx, full, path, flags.keep);
+    0
+}
+
+fn remove_original_if_needed(ctx: &mut UtilContext<'_>, full: &str, path: &str, keep: bool) {
+    if !keep {
+        if let Err(e) = ctx.fs.remove_file(full) {
+            let msg = format!("gzip: warning: cannot remove '{path}': {e}\n");
+            ctx.output.stderr(msg.as_bytes());
+        }
+    }
+}
+
+pub(crate) fn util_gzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (flags, consumed) = match parse_gzip_flags(ctx, argv) {
+        Ok(v) => v,
+        Err(status) => return status,
+    };
+    let args = &argv[consumed..];
 
     if args.is_empty() {
         ctx.output.stderr(b"gzip: missing file operand\n");
@@ -206,54 +289,13 @@ pub(crate) fn util_gzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             continue;
         };
 
-        if decompress {
-            let decompressed = match gzip_decompress(&data) {
-                Ok(d) => d,
-                Err(e) => {
-                    emit_error(ctx.output, "gzip", path, &e);
-                    status = 1;
-                    continue;
-                }
-            };
-            if to_stdout {
-                ctx.output.stdout(&decompressed);
-            } else {
-                let out_path = if std::path::Path::new(path)
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
-                {
-                    full[..full.len() - 3].to_string()
-                } else {
-                    format!("{full}.out")
-                };
-                if write_file(ctx, "gzip", &out_path, &decompressed) != 0 {
-                    status = 1;
-                    continue;
-                }
-                if !keep {
-                    if let Err(e) = ctx.fs.remove_file(&full) {
-                        let msg = format!("gzip: warning: cannot remove '{path}': {e}\n");
-                        ctx.output.stderr(msg.as_bytes());
-                    }
-                }
-            }
+        let rc = if flags.decompress {
+            gzip_decompress_file(ctx, path, &full, &data, &flags)
         } else {
-            let compressed = gzip_compress(&data);
-            if to_stdout {
-                ctx.output.stdout(&compressed);
-            } else {
-                let out_path = format!("{full}.gz");
-                if write_file(ctx, "gzip", &out_path, &compressed) != 0 {
-                    status = 1;
-                    continue;
-                }
-                if !keep {
-                    if let Err(e) = ctx.fs.remove_file(&full) {
-                        let msg = format!("gzip: warning: cannot remove '{path}': {e}\n");
-                        ctx.output.stderr(msg.as_bytes());
-                    }
-                }
-            }
+            gzip_compress_file(ctx, path, &full, &data, &flags)
+        };
+        if rc != 0 {
+            status = 1;
         }
     }
 
@@ -285,50 +327,63 @@ fn write_file(ctx: &mut UtilContext<'_>, cmd: &str, path: &str, data: &[u8]) -> 
 
 const TAR_BLOCK_SIZE: usize = 512;
 
-pub(crate) fn util_tar(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
-    let mut create = false;
-    let mut extract = false;
-    let mut list = false;
-    let mut gzipped = false;
-    let mut verbose = false;
-    let mut archive: Option<&str> = None;
-    let mut change_dir: Option<&str> = None;
+#[allow(clippy::struct_excessive_bools)]
+struct TarFlags<'a> {
+    create: bool,
+    extract: bool,
+    list: bool,
+    gzipped: bool,
+    verbose: bool,
+    archive: Option<&'a str>,
+    change_dir: Option<&'a str>,
+}
 
-    // Parse flags — support both combined (-czf) and separate (-c -z -f) forms
+fn parse_tar_flags<'a>(
+    ctx: &mut UtilContext<'_>,
+    argv: &'a [&'a str],
+) -> Result<(TarFlags<'a>, usize), i32> {
+    let mut args = &argv[1..];
+    let mut flags = TarFlags {
+        create: false,
+        extract: false,
+        list: false,
+        gzipped: false,
+        verbose: false,
+        archive: None,
+        change_dir: None,
+    };
+    let mut consumed = 1;
+
     while let Some(arg) = args.first() {
         if *arg == "-f" && args.len() > 1 {
-            archive = Some(args[1]);
+            flags.archive = Some(args[1]);
             args = &args[2..];
+            consumed += 2;
         } else if *arg == "-C" && args.len() > 1 {
-            change_dir = Some(args[1]);
+            flags.change_dir = Some(args[1]);
             args = &args[2..];
+            consumed += 2;
         } else if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") {
             let chars: Vec<char> = arg[1..].chars().collect();
             let mut skip_next = false;
             for (ci, ch) in chars.iter().enumerate() {
                 match ch {
-                    'c' => create = true,
-                    'x' => extract = true,
-                    't' => list = true,
-                    'z' => gzipped = true,
-                    'v' => verbose = true,
+                    'c' => flags.create = true,
+                    'x' => flags.extract = true,
+                    't' => flags.list = true,
+                    'z' => flags.gzipped = true,
+                    'v' => flags.verbose = true,
                     'f' => {
-                        // The archive name is either the rest of the flag or the next arg
-                        let rest: String = chars[ci + 1..].iter().collect();
-                        if !rest.is_empty() {
-                            // Archive name is embedded in the flags (rare)
-                            // Skip for simplicity; expect next arg
-                        }
+                        let _rest: String = chars[ci + 1..].iter().collect();
                         if args.len() > 1 {
-                            archive = Some(args[1]);
+                            flags.archive = Some(args[1]);
                             skip_next = true;
                         }
                         break;
                     }
                     'C' => {
                         if args.len() > 1 {
-                            change_dir = Some(args[1]);
+                            flags.change_dir = Some(args[1]);
                             skip_next = true;
                         }
                         break;
@@ -336,32 +391,50 @@ pub(crate) fn util_tar(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     _ => {
                         let msg = format!("tar: unknown option '-{ch}'\n");
                         ctx.output.stderr(msg.as_bytes());
-                        return 1;
+                        return Err(1);
                     }
                 }
             }
             args = &args[1..];
+            consumed += 1;
             if skip_next && !args.is_empty() {
                 args = &args[1..];
+                consumed += 1;
             }
         } else {
             break;
         }
     }
+    Ok((flags, consumed))
+}
 
-    let Some(archive_path) = archive else {
+pub(crate) fn util_tar(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (flags, consumed) = match parse_tar_flags(ctx, argv) {
+        Ok(v) => v,
+        Err(status) => return status,
+    };
+    let args = &argv[consumed..];
+
+    let Some(archive_path) = flags.archive else {
         ctx.output.stderr(b"tar: no archive specified (use -f)\n");
         return 1;
     };
 
-    let base_dir = change_dir.unwrap_or(ctx.cwd);
+    let base_dir = flags.change_dir.unwrap_or(ctx.cwd);
 
-    if create {
-        tar_create(ctx, archive_path, args, base_dir, gzipped, verbose)
-    } else if extract {
-        tar_extract(ctx, archive_path, base_dir, gzipped, verbose)
-    } else if list {
-        tar_list(ctx, archive_path, gzipped)
+    if flags.create {
+        tar_create(
+            ctx,
+            archive_path,
+            args,
+            base_dir,
+            flags.gzipped,
+            flags.verbose,
+        )
+    } else if flags.extract {
+        tar_extract(ctx, archive_path, base_dir, flags.gzipped, flags.verbose)
+    } else if flags.list {
+        tar_list(ctx, archive_path, flags.gzipped)
     } else {
         ctx.output.stderr(b"tar: must specify -c, -x, or -t\n");
         1
@@ -449,7 +522,6 @@ fn tar_add_dir(
     name: &str,
     verbose: bool,
 ) -> i32 {
-    // Add directory entry
     let dir_name = if name.ends_with('/') {
         name.to_string()
     } else {
@@ -464,7 +536,6 @@ fn tar_add_dir(
     let header = make_tar_header(&dir_name, 0, b'5');
     tar_data.extend_from_slice(&header);
 
-    // Recursively add entries
     let Ok(entries) = ctx.fs.read_dir(full_path) else {
         let msg = format!("tar: cannot read directory '{name}': I/O error\n");
         ctx.output.stderr(msg.as_bytes());
@@ -472,17 +543,14 @@ fn tar_add_dir(
     };
 
     for entry in entries {
-        let child_full = if full_path == "/" {
-            format!("/{}", entry.name)
-        } else {
-            format!("{full_path}/{}", entry.name)
-        };
+        let child_full = child_path(full_path, &entry.name);
         let child_name = format!("{dir_name}{}", entry.name);
-        if entry.is_dir {
-            if tar_add_dir(ctx, tar_data, &child_full, &child_name, verbose) != 0 {
-                return 1;
-            }
-        } else if tar_add_file(ctx, tar_data, &child_full, &child_name, verbose) != 0 {
+        let rc = if entry.is_dir {
+            tar_add_dir(ctx, tar_data, &child_full, &child_name, verbose)
+        } else {
+            tar_add_file(ctx, tar_data, &child_full, &child_name, verbose)
+        };
+        if rc != 0 {
             return 1;
         }
     }
@@ -545,6 +613,94 @@ fn make_tar_header(name: &str, size: u64, typeflag: u8) -> [u8; TAR_BLOCK_SIZE] 
     header
 }
 
+/// Parsed tar entry header.
+struct TarEntry {
+    name: String,
+    size: usize,
+    typeflag: u8,
+}
+
+/// Parse a tar header block. Returns `None` for end-of-archive.
+fn parse_tar_entry_header(
+    header: &[u8],
+    ctx: &mut UtilContext<'_>,
+) -> Result<Option<TarEntry>, i32> {
+    if header.iter().all(|&b| b == 0) {
+        return Ok(None);
+    }
+
+    let name_end = header[..100].iter().position(|&b| b == 0).unwrap_or(100);
+    let name = String::from_utf8_lossy(&header[..name_end]).to_string();
+
+    let size_str = String::from_utf8_lossy(&header[124..136])
+        .trim_matches('\0')
+        .trim()
+        .to_string();
+    let Ok(size) = u64::from_str_radix(&size_str, 8).map(|v| v as usize) else {
+        let msg = format!("tar: invalid size in header for '{name}'\n");
+        ctx.output.stderr(msg.as_bytes());
+        return Err(1);
+    };
+
+    Ok(Some(TarEntry {
+        name,
+        size,
+        typeflag: header[156],
+    }))
+}
+
+fn extract_dir_entry(ctx: &mut UtilContext<'_>, full: &str, name: &str) {
+    if ctx.fs.create_dir(full).is_err() && ctx.fs.stat(full).is_err() {
+        let msg = format!("tar: cannot create directory '{name}'\n");
+        ctx.output.stderr(msg.as_bytes());
+    }
+}
+
+fn ensure_parent_dir(ctx: &mut UtilContext<'_>, full: &str, name: &str) {
+    let Some(slash_pos) = full.rfind('/') else {
+        return;
+    };
+    let parent = &full[..slash_pos];
+    if !parent.is_empty()
+        && ctx.fs.stat(parent).is_err()
+        && ctx.fs.create_dir(parent).is_err()
+        && ctx.fs.stat(parent).is_err()
+    {
+        let msg = format!("tar: cannot create directory for '{name}'\n");
+        ctx.output.stderr(msg.as_bytes());
+    }
+}
+
+fn extract_file_entry(
+    ctx: &mut UtilContext<'_>,
+    full: &str,
+    name: &str,
+    tar_data: &[u8],
+    pos: usize,
+    size: usize,
+) -> i32 {
+    ensure_parent_dir(ctx, full, name);
+    let end = (pos + size).min(tar_data.len());
+    let file_data = &tar_data[pos..end];
+    write_file(ctx, "tar", full, file_data)
+}
+
+fn tar_load_data(
+    ctx: &mut UtilContext<'_>,
+    archive_path: &str,
+    gzipped: bool,
+) -> Result<Vec<u8>, i32> {
+    let archive_data = read_file_bytes(ctx, archive_path, "tar")?;
+    if gzipped {
+        gzip_decompress(&archive_data).map_err(|e| {
+            emit_error(ctx.output, "tar", archive_path, &e);
+            1
+        })
+    } else {
+        Ok(archive_data)
+    }
+}
+
 fn tar_extract(
     ctx: &mut UtilContext<'_>,
     archive_path: &str,
@@ -552,89 +708,35 @@ fn tar_extract(
     gzipped: bool,
     verbose: bool,
 ) -> i32 {
-    let archive_data = match read_file_bytes(ctx, archive_path, "tar") {
+    let tar_data = match tar_load_data(ctx, archive_path, gzipped) {
         Ok(d) => d,
         Err(status) => return status,
     };
 
-    let tar_data = if gzipped {
-        match gzip_decompress(&archive_data) {
-            Ok(d) => d,
-            Err(e) => {
-                emit_error(ctx.output, "tar", archive_path, &e);
-                return 1;
-            }
-        }
-    } else {
-        archive_data
-    };
-
     let mut pos = 0;
     while pos + TAR_BLOCK_SIZE <= tar_data.len() {
-        let header = &tar_data[pos..pos + TAR_BLOCK_SIZE];
-
-        // Check for end-of-archive (all zeros)
-        if header.iter().all(|&b| b == 0) {
-            break;
-        }
-
-        // Parse name
-        let name_end = header[..100].iter().position(|&b| b == 0).unwrap_or(100);
-        let name = String::from_utf8_lossy(&header[..name_end]).to_string();
-
-        // Parse size (octal)
-        let size_str = String::from_utf8_lossy(&header[124..136])
-            .trim_matches('\0')
-            .trim()
-            .to_string();
-        let Ok(size) = u64::from_str_radix(&size_str, 8).map(|v| v as usize) else {
-            let msg = format!("tar: invalid size in header for '{name}'\n");
-            ctx.output.stderr(msg.as_bytes());
-            return 1;
+        let entry = match parse_tar_entry_header(&tar_data[pos..pos + TAR_BLOCK_SIZE], ctx) {
+            Ok(Some(e)) => e,
+            Ok(None) => break,
+            Err(status) => return status,
         };
-
-        // Parse typeflag
-        let typeflag = header[156];
 
         pos += TAR_BLOCK_SIZE;
 
         if verbose {
-            let msg = format!("{name}\n");
+            let msg = format!("{}\n", entry.name);
             ctx.output.stderr(msg.as_bytes());
         }
 
-        let full = resolve_path(base_dir, &name);
+        let full = resolve_path(base_dir, &entry.name);
 
-        if typeflag == b'5' || name.ends_with('/') {
-            // Directory
-            if ctx.fs.create_dir(&full).is_err() && ctx.fs.stat(&full).is_err() {
-                let msg = format!("tar: cannot create directory '{name}'\n");
-                ctx.output.stderr(msg.as_bytes());
-            }
+        if entry.typeflag == b'5' || entry.name.ends_with('/') {
+            extract_dir_entry(ctx, &full, &entry.name);
         } else {
-            // Regular file
-            // Ensure parent directory exists
-            if let Some(slash_pos) = full.rfind('/') {
-                let parent = &full[..slash_pos];
-                if !parent.is_empty()
-                    && ctx.fs.stat(parent).is_err()
-                    && ctx.fs.create_dir(parent).is_err()
-                    && ctx.fs.stat(parent).is_err()
-                {
-                    let msg = format!("tar: cannot create directory for '{name}'\n");
-                    ctx.output.stderr(msg.as_bytes());
-                }
-            }
-
-            let end = (pos + size).min(tar_data.len());
-            let file_data = &tar_data[pos..end];
-
-            if write_file(ctx, "tar", &full, file_data) != 0 {
+            if extract_file_entry(ctx, &full, &entry.name, &tar_data, pos, entry.size) != 0 {
                 return 1;
             }
-
-            // Advance past data + padding
-            let blocks = size.div_ceil(TAR_BLOCK_SIZE);
+            let blocks = entry.size.div_ceil(TAR_BLOCK_SIZE);
             pos += blocks * TAR_BLOCK_SIZE;
         }
     }

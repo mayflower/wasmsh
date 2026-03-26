@@ -9,62 +9,72 @@ use crate::UtilContext;
 // du — estimate file space usage
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_du(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+#[allow(clippy::struct_excessive_bools)]
+struct DuFlags {
+    summary: bool,
+    human: bool,
+    all_files: bool,
+    grand_total: bool,
+    max_depth: Option<usize>,
+}
+
+fn parse_du_flags(ctx: &mut UtilContext<'_>, argv: &[&str]) -> Result<(DuFlags, usize), i32> {
     let mut args = &argv[1..];
-    let mut summary = false;
-    let mut human = false;
-    let mut all_files = false;
-    let mut grand_total = false;
-    let mut max_depth: Option<usize> = None;
+    let mut flags = DuFlags {
+        summary: false,
+        human: false,
+        all_files: false,
+        grand_total: false,
+        max_depth: None,
+    };
+    let mut consumed = 1;
 
     while let Some(arg) = args.first() {
         match *arg {
-            "-s" => {
-                summary = true;
-                args = &args[1..];
-            }
-            "-h" => {
-                human = true;
-                args = &args[1..];
-            }
-            "-a" => {
-                all_files = true;
-                args = &args[1..];
-            }
-            "-c" => {
-                grand_total = true;
-                args = &args[1..];
-            }
+            "-s" => flags.summary = true,
+            "-h" => flags.human = true,
+            "-a" => flags.all_files = true,
+            "-c" => flags.grand_total = true,
             "-d" if args.len() > 1 => {
-                max_depth = args[1].parse().ok();
+                flags.max_depth = args[1].parse().ok();
                 args = &args[2..];
+                consumed += 2;
+                continue;
             }
             _ if arg.starts_with("--max-depth=") => {
-                max_depth = arg
+                flags.max_depth = arg
                     .strip_prefix("--max-depth=")
                     .and_then(|v| v.parse().ok());
-                args = &args[1..];
             }
             _ if arg.starts_with('-') && arg.len() > 1 => {
-                // Parse combined flags like -sh, -shc
                 for ch in arg[1..].chars() {
                     match ch {
-                        's' => summary = true,
-                        'h' => human = true,
-                        'a' => all_files = true,
-                        'c' => grand_total = true,
+                        's' => flags.summary = true,
+                        'h' => flags.human = true,
+                        'a' => flags.all_files = true,
+                        'c' => flags.grand_total = true,
                         _ => {
                             let msg = format!("du: unknown option '-{ch}'\n");
                             ctx.output.stderr(msg.as_bytes());
-                            return 1;
+                            return Err(1);
                         }
                     }
                 }
-                args = &args[1..];
             }
             _ => break,
         }
+        args = &args[1..];
+        consumed += 1;
     }
+    Ok((flags, consumed))
+}
+
+pub(crate) fn util_du(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (flags, consumed) = match parse_du_flags(ctx, argv) {
+        Ok(v) => v,
+        Err(status) => return status,
+    };
+    let args = &argv[consumed..];
 
     let targets: Vec<&str> = if args.is_empty() {
         vec!["."]
@@ -80,8 +90,16 @@ pub(crate) fn util_du(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
         match ctx.fs.stat(&full) {
             Ok(meta) if meta.is_dir => {
-                let (size, err) =
-                    du_walk(ctx, &full, target, 0, max_depth, summary, all_files, human);
+                let (size, err) = du_walk(
+                    ctx,
+                    &full,
+                    target,
+                    0,
+                    flags.max_depth,
+                    flags.summary,
+                    flags.all_files,
+                    flags.human,
+                );
                 total_size += size;
                 if err {
                     status = 1;
@@ -90,7 +108,7 @@ pub(crate) fn util_du(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             Ok(meta) => {
                 let size = meta.size;
                 let blocks = to_blocks(size);
-                let line = format!("{}\t{target}\n", format_blocks(blocks, human));
+                let line = format!("{}\t{target}\n", format_blocks(blocks, flags.human));
                 ctx.output.stdout(line.as_bytes());
                 total_size += size;
             }
@@ -102,9 +120,9 @@ pub(crate) fn util_du(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     }
 
-    if grand_total {
+    if flags.grand_total {
         let blocks = to_blocks(total_size);
-        let line = format!("{}\ttotal\n", format_blocks(blocks, human));
+        let line = format!("{}\ttotal\n", format_blocks(blocks, flags.human));
         ctx.output.stdout(line.as_bytes());
     }
 

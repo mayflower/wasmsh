@@ -857,70 +857,91 @@ fn split_words(s: &str) -> Vec<&str> {
 // fd — fast find alternative
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_fd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
-    let mut type_filter: Option<char> = None; // 'f' or 'd'
-    let mut extension: Option<String> = None;
-    let mut show_hidden = false;
-    let mut max_depth: Option<usize> = None;
-    let mut exec_cmd: Option<String> = None;
-    let mut absolute_path = false;
-    let mut glob_mode = false;
-    let mut stop_after_first = false;
+#[allow(clippy::struct_excessive_bools)]
+struct FdArgs {
+    type_filter: Option<char>,
+    extension: Option<String>,
+    show_hidden: bool,
+    max_depth: Option<usize>,
+    exec_cmd: Option<String>,
+    absolute_path: bool,
+    glob_mode: bool,
+    stop_after_first: bool,
+}
 
-    // Parse flags
+fn parse_fd_args(argv: &[&str]) -> (FdArgs, usize) {
+    let mut args = &argv[1..];
+    let mut fd = FdArgs {
+        type_filter: None,
+        extension: None,
+        show_hidden: false,
+        max_depth: None,
+        exec_cmd: None,
+        absolute_path: false,
+        glob_mode: false,
+        stop_after_first: false,
+    };
+    let mut consumed = 1;
+
     while let Some(arg) = args.first() {
         match *arg {
             "-t" | "--type" if args.len() > 1 => {
                 let t = args[1];
                 if t == "f" || t == "d" {
-                    type_filter = Some(t.chars().next().unwrap());
+                    fd.type_filter = Some(t.chars().next().unwrap());
                 }
                 args = &args[2..];
+                consumed += 2;
             }
             "-e" | "--extension" if args.len() > 1 => {
-                extension = Some(args[1].to_string());
+                fd.extension = Some(args[1].to_string());
                 args = &args[2..];
+                consumed += 2;
             }
             "-H" | "--hidden" => {
-                show_hidden = true;
+                fd.show_hidden = true;
                 args = &args[1..];
+                consumed += 1;
             }
             "-I" | "--no-ignore" => {
-                // No-op in VFS (no .gitignore)
                 args = &args[1..];
+                consumed += 1;
             }
             "-d" | "--max-depth" if args.len() > 1 => {
-                max_depth = args[1].parse().ok();
+                fd.max_depth = args[1].parse().ok();
                 args = &args[2..];
+                consumed += 2;
             }
             "-x" | "--exec" if args.len() > 1 => {
-                exec_cmd = Some(args[1].to_string());
+                fd.exec_cmd = Some(args[1].to_string());
                 args = &args[2..];
+                consumed += 2;
             }
             "-a" | "--absolute-path" => {
-                absolute_path = true;
+                fd.absolute_path = true;
                 args = &args[1..];
+                consumed += 1;
             }
             "-g" | "--glob" => {
-                glob_mode = true;
+                fd.glob_mode = true;
                 args = &args[1..];
+                consumed += 1;
             }
             "-1" => {
-                stop_after_first = true;
+                fd.stop_after_first = true;
                 args = &args[1..];
+                consumed += 1;
             }
             _ if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") => {
-                // Try combined short flags
                 let flags = &arg[1..];
                 let mut recognized = true;
                 for ch in flags.chars() {
                     match ch {
-                        'H' => show_hidden = true,
-                        'I' => {} // no-op
-                        'a' => absolute_path = true,
-                        'g' => glob_mode = true,
-                        '1' => stop_after_first = true,
+                        'H' => fd.show_hidden = true,
+                        'I' => {}
+                        'a' => fd.absolute_path = true,
+                        'g' => fd.glob_mode = true,
+                        '1' => fd.stop_after_first = true,
                         _ => {
                             recognized = false;
                             break;
@@ -929,6 +950,7 @@ pub(crate) fn util_fd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                 }
                 if recognized {
                     args = &args[1..];
+                    consumed += 1;
                 } else {
                     break;
                 }
@@ -936,8 +958,56 @@ pub(crate) fn util_fd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             _ => break,
         }
     }
+    (fd, consumed)
+}
 
-    // Remaining positional args: [PATTERN] [PATH]
+fn fd_entry_matches(name: &str, is_dir: bool, fd: &FdArgs, pattern: Option<&str>) -> bool {
+    if let Some(tf) = fd.type_filter {
+        if tf == 'f' && is_dir {
+            return false;
+        }
+        if tf == 'd' && !is_dir {
+            return false;
+        }
+    }
+    if let Some(ref ext) = fd.extension {
+        let dot_ext = format!(".{ext}");
+        if !name.ends_with(&dot_ext) {
+            return false;
+        }
+    }
+    if let Some(pat) = pattern {
+        if fd.glob_mode {
+            if !simple_glob_match(pat, name) {
+                return false;
+            }
+        } else if !name.contains(pat) {
+            return false;
+        }
+    }
+    true
+}
+
+fn fd_format_path(path: &str, search_root: &str, absolute: bool) -> String {
+    if absolute {
+        return path.to_string();
+    }
+    if let Some(rest) = path.strip_prefix(search_root) {
+        let trimmed = rest.strip_prefix('/').unwrap_or(rest);
+        if trimmed.is_empty() {
+            ".".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    } else {
+        path.to_string()
+    }
+}
+
+pub(crate) fn util_fd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (fd_args, consumed) = parse_fd_args(argv);
+    let mut args = &argv[consumed..];
+
     let pattern: Option<&str> = if !args.is_empty() {
         let p = args[0];
         args = &args[1..];
@@ -957,69 +1027,21 @@ pub(crate) fn util_fd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         ctx.fs,
         &search_root,
         0,
-        max_depth,
-        show_hidden,
+        fd_args.max_depth,
+        fd_args.show_hidden,
         &mut results,
     );
-
-    // Sort for deterministic output
     results.sort();
 
     let mut count = 0;
     for (path, is_dir) in &results {
-        // Apply type filter
-        if let Some(tf) = type_filter {
-            if tf == 'f' && *is_dir {
-                continue;
-            }
-            if tf == 'd' && !*is_dir {
-                continue;
-            }
-        }
-
-        // Get the name portion for matching
         let name = path.rsplit('/').next().unwrap_or(path);
-
-        // Apply extension filter
-        if let Some(ref ext) = extension {
-            let dot_ext = format!(".{ext}");
-            if !name.ends_with(&dot_ext) {
-                continue;
-            }
+        if !fd_entry_matches(name, *is_dir, &fd_args, pattern) {
+            continue;
         }
 
-        // Apply pattern filter
-        if let Some(pat) = pattern {
-            if glob_mode {
-                if !simple_glob_match(pat, name) {
-                    continue;
-                }
-            } else {
-                // Substring match
-                if !name.contains(pat) {
-                    continue;
-                }
-            }
-        }
-
-        // Format output path
-        let display = if absolute_path {
-            path.clone()
-        } else {
-            // Make relative to search root
-            if let Some(rest) = path.strip_prefix(&search_root) {
-                let trimmed = rest.strip_prefix('/').unwrap_or(rest);
-                if trimmed.is_empty() {
-                    ".".to_string()
-                } else {
-                    trimmed.to_string()
-                }
-            } else {
-                path.clone()
-            }
-        };
-
-        if let Some(ref cmd) = exec_cmd {
+        let display = fd_format_path(path, &search_root, fd_args.absolute_path);
+        if let Some(ref cmd) = fd_args.exec_cmd {
             let line = format!("{cmd} {display}\n");
             ctx.output.stdout(line.as_bytes());
         } else {
@@ -1028,13 +1050,12 @@ pub(crate) fn util_fd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
 
         count += 1;
-        if stop_after_first {
+        if fd_args.stop_after_first {
             break;
         }
     }
 
     if count == 0 && pattern.is_some() {
-        // No matches, but not an error per se — fd returns 1 when no match
         return 1;
     }
 
