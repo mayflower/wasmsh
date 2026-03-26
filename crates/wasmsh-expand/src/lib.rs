@@ -494,28 +494,40 @@ fn expand_operand_inner(operand: &str, state: &mut ShellState, depth: usize) -> 
             continue;
         }
         pos += 1; // skip $
-        if pos < bytes.len() && bytes[pos] == b'{' {
-            pos += 1; // skip {
-            let (end, new_pos) = scan_braced_param(bytes, pos);
-            let inner = &operand[pos..end];
-            pos = new_pos;
-            expand_part_depth(
-                &WordPart::Parameter(SmolStr::from(inner)),
-                state,
-                &mut out,
-                depth + 1,
-            );
-        } else if pos < bytes.len() && (bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_') {
-            let start = pos;
-            pos = scan_bare_var(bytes, pos);
-            if let Some(val) = state.get_var(&operand[start..pos]) {
-                out.push_str(&val);
-            }
-        } else {
-            out.push('$');
-        }
+        expand_dollar_in_operand(operand, bytes, &mut pos, state, &mut out, depth);
     }
     out
+}
+
+/// Expand a `$` reference within an operand string. Called with `pos` just past `$`.
+fn expand_dollar_in_operand(
+    operand: &str,
+    bytes: &[u8],
+    pos: &mut usize,
+    state: &mut ShellState,
+    out: &mut String,
+    depth: usize,
+) {
+    if *pos < bytes.len() && bytes[*pos] == b'{' {
+        *pos += 1; // skip {
+        let (end, new_pos) = scan_braced_param(bytes, *pos);
+        let inner = &operand[*pos..end];
+        *pos = new_pos;
+        expand_part_depth(
+            &WordPart::Parameter(SmolStr::from(inner)),
+            state,
+            out,
+            depth + 1,
+        );
+    } else if *pos < bytes.len() && (bytes[*pos].is_ascii_alphabetic() || bytes[*pos] == b'_') {
+        let start = *pos;
+        *pos = scan_bare_var(bytes, *pos);
+        if let Some(val) = state.get_var(&operand[start..*pos]) {
+            out.push_str(&val);
+        }
+    } else {
+        out.push('$');
+    }
 }
 
 /// Handle default/assign/error/alternative operators (`:−`, `-`, `:=`, `=`, `:?`, `:+`, `+`).

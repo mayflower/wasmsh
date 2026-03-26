@@ -184,6 +184,18 @@ fn builtin_echo(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     0
 }
 
+/// Parse an octal escape `\0NNN` (up to 3 octal digits).
+fn parse_echo_octal(bytes: &[u8], mut i: usize) -> (char, usize) {
+    let mut val: u8 = 0;
+    let mut count = 0;
+    while i < bytes.len() && count < 3 && bytes[i] >= b'0' && bytes[i] <= b'7' {
+        val = val * 8 + (bytes[i] - b'0');
+        i += 1;
+        count += 1;
+    }
+    (val as char, i)
+}
+
 fn process_echo_escapes(s: &str) -> String {
     let mut result = String::new();
     let bytes = s.as_bytes();
@@ -191,47 +203,24 @@ fn process_echo_escapes(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
             match bytes[i + 1] {
-                b'n' => {
-                    result.push('\n');
-                    i += 2;
-                }
-                b't' => {
-                    result.push('\t');
-                    i += 2;
-                }
-                b'\\' => {
-                    result.push('\\');
-                    i += 2;
-                }
-                b'a' => {
-                    result.push('\x07');
-                    i += 2;
-                }
-                b'b' => {
-                    result.push('\x08');
-                    i += 2;
-                }
-                b'r' => {
-                    result.push('\r');
-                    i += 2;
-                }
+                b'n' => result.push('\n'),
+                b't' => result.push('\t'),
+                b'\\' => result.push('\\'),
+                b'a' => result.push('\x07'),
+                b'b' => result.push('\x08'),
+                b'r' => result.push('\r'),
                 b'0' => {
-                    i += 2;
-                    let mut val: u8 = 0;
-                    let mut count = 0;
-                    while i < bytes.len() && count < 3 && bytes[i] >= b'0' && bytes[i] <= b'7' {
-                        val = val * 8 + (bytes[i] - b'0');
-                        i += 1;
-                        count += 1;
-                    }
-                    result.push(val as char);
+                    let (ch, new_i) = parse_echo_octal(bytes, i + 2);
+                    result.push(ch);
+                    i = new_i;
+                    continue;
                 }
                 _ => {
                     result.push('\\');
                     result.push(bytes[i + 1] as char);
-                    i += 2;
                 }
             }
+            i += 2;
         } else {
             result.push(bytes[i] as char);
             i += 1;
@@ -290,15 +279,9 @@ fn printf_format_once(bytes: &[u8], args: &[&str], arg_idx: &mut usize, output: 
     }
 }
 
-/// Parse and apply a single printf format specifier starting after the `%`.
-/// Returns the new position in the format byte string.
-fn printf_format_spec(
-    bytes: &[u8],
-    mut i: usize,
-    args: &[&str],
-    arg_idx: &mut usize,
-    output: &mut String,
-) -> usize {
+/// Parse printf format flags (`-` for left-align, `0` for zero-pad).
+/// Returns `(left_align, zero_pad, new_position)`.
+fn printf_parse_flags(bytes: &[u8], mut i: usize) -> (bool, bool, usize) {
     let mut left_align = false;
     let mut zero_pad = false;
     loop {
@@ -312,21 +295,45 @@ fn printf_format_spec(
             break;
         }
     }
-    let mut width: usize = 0;
+    (left_align, zero_pad, i)
+}
+
+/// Parse a run of ASCII digits as a `usize`, returning `(value, new_position)`.
+fn printf_parse_digits(bytes: &[u8], mut i: usize) -> (usize, usize) {
+    let mut value: usize = 0;
     while i < bytes.len() && bytes[i].is_ascii_digit() {
-        width = width * 10 + (bytes[i] - b'0') as usize;
+        value = value * 10 + (bytes[i] - b'0') as usize;
         i += 1;
     }
-    let mut precision: Option<usize> = None;
+    (value, i)
+}
+
+/// If the next byte is `.`, parse the precision digits that follow.
+fn printf_parse_precision(bytes: &[u8], mut i: usize) -> (Option<usize>, usize) {
     if i < bytes.len() && bytes[i] == b'.' {
         i += 1;
-        let mut prec: usize = 0;
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            prec = prec * 10 + (bytes[i] - b'0') as usize;
-            i += 1;
-        }
-        precision = Some(prec);
+        let (prec, new_i) = printf_parse_digits(bytes, i);
+        (Some(prec), new_i)
+    } else {
+        (None, i)
     }
+}
+
+/// Parse and apply a single printf format specifier starting after the `%`.
+/// Returns the new position in the format byte string.
+fn printf_format_spec(
+    bytes: &[u8],
+    mut i: usize,
+    args: &[&str],
+    arg_idx: &mut usize,
+    output: &mut String,
+) -> usize {
+    let (left_align, zero_pad, pos) = printf_parse_flags(bytes, i);
+    i = pos;
+    let (width, pos) = printf_parse_digits(bytes, i);
+    i = pos;
+    let (precision, pos) = printf_parse_precision(bytes, i);
+    i = pos;
     if i >= bytes.len() {
         output.push('%');
         return i;
@@ -467,47 +474,24 @@ fn process_printf_backslash_escapes(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
             match bytes[i + 1] {
-                b'n' => {
-                    result.push('\n');
-                    i += 2;
-                }
-                b't' => {
-                    result.push('\t');
-                    i += 2;
-                }
-                b'\\' => {
-                    result.push('\\');
-                    i += 2;
-                }
-                b'a' => {
-                    result.push('\x07');
-                    i += 2;
-                }
-                b'b' => {
-                    result.push('\x08');
-                    i += 2;
-                }
-                b'r' => {
-                    result.push('\r');
-                    i += 2;
-                }
+                b'n' => result.push('\n'),
+                b't' => result.push('\t'),
+                b'\\' => result.push('\\'),
+                b'a' => result.push('\x07'),
+                b'b' => result.push('\x08'),
+                b'r' => result.push('\r'),
                 b'0' => {
-                    i += 2;
-                    let mut val: u8 = 0;
-                    let mut count = 0;
-                    while i < bytes.len() && count < 3 && bytes[i] >= b'0' && bytes[i] <= b'7' {
-                        val = val * 8 + (bytes[i] - b'0');
-                        i += 1;
-                        count += 1;
-                    }
-                    result.push(val as char);
+                    let (ch, new_i) = parse_echo_octal(bytes, i + 2);
+                    result.push(ch);
+                    i = new_i;
+                    continue;
                 }
                 _ => {
                     result.push('\\');
                     result.push(bytes[i + 1] as char);
-                    i += 2;
                 }
             }
+            i += 2;
         } else {
             result.push(bytes[i] as char);
             i += 1;
@@ -593,47 +577,51 @@ fn builtin_cd(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 fn builtin_export(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     for arg in &argv[1..] {
         if let Some(eq_pos) = arg.find('=') {
-            let name = &arg[..eq_pos];
-            let value = &arg[eq_pos + 1..];
-            if let Some(existing) = ctx.state.env.get(name) {
-                if existing.readonly {
-                    let msg = format!("export: {name}: readonly variable\n");
-                    ctx.output.stderr(msg.as_bytes());
-                    continue;
-                }
-            }
-            ctx.state.env.set(
-                SmolStr::from(name),
-                ShellVar {
-                    value: VarValue::Scalar(SmolStr::from(value)),
-                    exported: true,
-                    readonly: false,
-                    integer: false,
-                    nameref: false,
-                },
-            );
+            export_with_value(ctx, &arg[..eq_pos], &arg[eq_pos + 1..]);
         } else {
-            // Export existing variable
-            if let Some(var) = ctx.state.env.get(arg) {
-                let mut var = var.clone();
-                var.exported = true;
-                ctx.state.env.set(SmolStr::from(*arg), var);
-            } else {
-                // Create empty exported variable
-                ctx.state.env.set(
-                    SmolStr::from(*arg),
-                    ShellVar {
-                        value: VarValue::Scalar(SmolStr::default()),
-                        exported: true,
-                        readonly: false,
-                        integer: false,
-                        nameref: false,
-                    },
-                );
-            }
+            export_name_only(ctx, arg);
         }
     }
     0
+}
+
+fn export_with_value(ctx: &mut BuiltinContext<'_>, name: &str, value: &str) {
+    if let Some(existing) = ctx.state.env.get(name) {
+        if existing.readonly {
+            let msg = format!("export: {name}: readonly variable\n");
+            ctx.output.stderr(msg.as_bytes());
+            return;
+        }
+    }
+    ctx.state.env.set(
+        SmolStr::from(name),
+        ShellVar {
+            value: VarValue::Scalar(SmolStr::from(value)),
+            exported: true,
+            readonly: false,
+            integer: false,
+            nameref: false,
+        },
+    );
+}
+
+fn export_name_only(ctx: &mut BuiltinContext<'_>, name: &str) {
+    if let Some(var) = ctx.state.env.get(name) {
+        let mut var = var.clone();
+        var.exported = true;
+        ctx.state.env.set(SmolStr::from(name), var);
+    } else {
+        ctx.state.env.set(
+            SmolStr::from(name),
+            ShellVar {
+                value: VarValue::Scalar(SmolStr::default()),
+                exported: true,
+                readonly: false,
+                integer: false,
+                nameref: false,
+            },
+        );
+    }
 }
 
 /// `unset` — remove variables from the environment.

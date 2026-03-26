@@ -369,45 +369,51 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_command(&mut self) -> Result<Command, ParseError> {
-        // Arithmetic command: (( expr ))
-        // Detected as LParen followed immediately by another LParen with no gap.
         if self.at(&TokenKind::LParen) {
-            if let Ok(next) = self.peek_nth(0) {
-                if next.kind == TokenKind::LParen && next.span.start == self.current.span.end {
-                    return self.parse_arith_command();
-                }
-            }
-            return self.parse_subshell();
+            return self.parse_command_lparen();
         }
-
-        // Extended test: [[ expression ]]
         if self.at(&TokenKind::DblLBracket) {
             return self.parse_double_bracket();
         }
-
         if self.at_word() {
-            let text = self.current_text();
-            match text {
-                "{" => return self.parse_group(),
-                "if" => return self.parse_if(),
-                "while" => return self.parse_while(),
-                "until" => return self.parse_until(),
-                "for" => return self.parse_for(),
-                "case" => return self.parse_case(),
-                "select" => return self.parse_select(),
-                "function" => return self.parse_function_bash(),
-                _ => {
-                    // Check for POSIX function definition: name() ...
-                    if self.peek_nth(0)?.kind == TokenKind::LParen
-                        && self.peek_nth(1)?.kind == TokenKind::RParen
-                    {
-                        return self.parse_function_posix();
-                    }
-                }
+            if let Some(cmd) = self.try_parse_compound_keyword()? {
+                return Ok(cmd);
             }
         }
-
         Ok(Command::Simple(self.parse_simple_command()?))
+    }
+
+    /// Dispatch `(( expr ))` arithmetic command or `( list )` subshell.
+    fn parse_command_lparen(&mut self) -> Result<Command, ParseError> {
+        if let Ok(next) = self.peek_nth(0) {
+            if next.kind == TokenKind::LParen && next.span.start == self.current.span.end {
+                return self.parse_arith_command();
+            }
+        }
+        self.parse_subshell()
+    }
+
+    /// If the current word is a compound keyword, parse and return it.
+    fn try_parse_compound_keyword(&mut self) -> Result<Option<Command>, ParseError> {
+        let text = self.current_text();
+        match text {
+            "{" => Ok(Some(self.parse_group()?)),
+            "if" => Ok(Some(self.parse_if()?)),
+            "while" => Ok(Some(self.parse_while()?)),
+            "until" => Ok(Some(self.parse_until()?)),
+            "for" => Ok(Some(self.parse_for()?)),
+            "case" => Ok(Some(self.parse_case()?)),
+            "select" => Ok(Some(self.parse_select()?)),
+            "function" => Ok(Some(self.parse_function_bash()?)),
+            _ => {
+                if self.peek_nth(0)?.kind == TokenKind::LParen
+                    && self.peek_nth(1)?.kind == TokenKind::RParen
+                {
+                    return Ok(Some(self.parse_function_posix()?));
+                }
+                Ok(None)
+            }
+        }
     }
 
     // ---- Compound commands ----

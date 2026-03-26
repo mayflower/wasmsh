@@ -631,18 +631,23 @@ fn b64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
     Ok(out)
 }
 
-pub(crate) fn util_base64(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
-    let mut decode = false;
-    let mut wrap_col: usize = 76;
+struct Base64Flags {
+    decode: bool,
+    wrap_col: usize,
+}
 
-    // Parse flags
+fn parse_base64_flags<'a>(argv: &'a [&'a str]) -> (Base64Flags, &'a [&'a str]) {
+    let mut args = &argv[1..];
+    let mut flags = Base64Flags {
+        decode: false,
+        wrap_col: 76,
+    };
     while let Some(arg) = args.first() {
         if *arg == "-d" || *arg == "--decode" {
-            decode = true;
+            flags.decode = true;
             args = &args[1..];
         } else if *arg == "-w" && args.len() > 1 {
-            wrap_col = args[1].parse().unwrap_or(76);
+            flags.wrap_col = args[1].parse().unwrap_or(76);
             args = &args[2..];
         } else if arg.starts_with('-') && arg.len() > 1 {
             args = &args[1..];
@@ -650,45 +655,60 @@ pub(crate) fn util_base64(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             break;
         }
     }
+    (flags, args)
+}
 
+fn base64_get_input(ctx: &mut UtilContext<'_>, args: &[&str]) -> Vec<u8> {
     let text = get_input_text(ctx, args);
-    let input_data = if !args.is_empty() || !text.is_empty() {
+    if !args.is_empty() || !text.is_empty() {
         text.into_bytes()
     } else if let Some(d) = ctx.stdin {
         d.to_vec()
     } else {
         Vec::new()
-    };
+    }
+}
 
-    if decode {
-        let input_str = String::from_utf8_lossy(&input_data);
-        match b64_decode(&input_str) {
-            Ok(decoded) => {
-                ctx.output.stdout(&decoded);
-                0
-            }
-            Err(e) => {
-                let msg = format!("base64: {e}\n");
-                ctx.output.stderr(msg.as_bytes());
-                1
-            }
+fn base64_decode_and_emit(ctx: &mut UtilContext<'_>, input_data: &[u8]) -> i32 {
+    let input_str = String::from_utf8_lossy(input_data);
+    match b64_decode(&input_str) {
+        Ok(decoded) => {
+            ctx.output.stdout(&decoded);
+            0
         }
+        Err(e) => {
+            let msg = format!("base64: {e}\n");
+            ctx.output.stderr(msg.as_bytes());
+            1
+        }
+    }
+}
+
+fn base64_encode_and_emit(ctx: &mut UtilContext<'_>, input_data: &[u8], wrap_col: usize) {
+    let encoded = b64_encode(input_data);
+    if wrap_col == 0 {
+        ctx.output.stdout(encoded.as_bytes());
+        ctx.output.stdout(b"\n");
+        return;
+    }
+    let bytes = encoded.as_bytes();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let end = (pos + wrap_col).min(bytes.len());
+        ctx.output.stdout(&bytes[pos..end]);
+        ctx.output.stdout(b"\n");
+        pos = end;
+    }
+}
+
+pub(crate) fn util_base64(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (flags, args) = parse_base64_flags(argv);
+    let input_data = base64_get_input(ctx, args);
+
+    if flags.decode {
+        base64_decode_and_emit(ctx, &input_data)
     } else {
-        let encoded = b64_encode(&input_data);
-        if wrap_col == 0 {
-            ctx.output.stdout(encoded.as_bytes());
-            ctx.output.stdout(b"\n");
-        } else {
-            // Wrap at specified column width
-            let bytes = encoded.as_bytes();
-            let mut pos = 0;
-            while pos < bytes.len() {
-                let end = (pos + wrap_col).min(bytes.len());
-                ctx.output.stdout(&bytes[pos..end]);
-                ctx.output.stdout(b"\n");
-                pos = end;
-            }
-        }
+        base64_encode_and_emit(ctx, &input_data, flags.wrap_col);
         0
     }
 }

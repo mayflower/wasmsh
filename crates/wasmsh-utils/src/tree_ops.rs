@@ -5,8 +5,16 @@ use wasmsh_fs::Vfs;
 use crate::helpers::{child_path, resolve_path, simple_glob_match};
 use crate::UtilContext;
 
-/// Display directory contents in a tree-like format.
-pub(crate) fn util_tree(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+struct TreeFlags {
+    noreport: bool,
+    json_output: bool,
+    opts: TreeOpts,
+}
+
+fn parse_tree_flags<'a>(
+    argv: &'a [&'a str],
+    output: &mut dyn crate::UtilOutput,
+) -> Result<(TreeFlags, &'a [&'a str]), i32> {
     let mut args = &argv[1..];
     let mut max_depth: Option<usize> = None;
     let mut dirs_only = false;
@@ -16,7 +24,6 @@ pub(crate) fn util_tree(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut noreport = false;
     let mut json_output = false;
 
-    // Parse flags
     while let Some(arg) = args.first() {
         match *arg {
             "-L" if args.len() > 1 => {
@@ -49,29 +56,10 @@ pub(crate) fn util_tree(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             }
             _ if arg.starts_with('-') => {
                 let msg = format!("tree: unknown option '{arg}'\n");
-                ctx.output.stderr(msg.as_bytes());
-                return 1;
+                output.stderr(msg.as_bytes());
+                return Err(1);
             }
             _ => break,
-        }
-    }
-
-    // Remaining args are paths to display
-    let root = if args.is_empty() { "." } else { args[0] };
-    let root_path = resolve_path(ctx.cwd, root);
-
-    // Verify the root exists and is a directory
-    match ctx.fs.stat(&root_path) {
-        Ok(meta) if meta.is_dir => {}
-        Ok(_) => {
-            let msg = format!("tree: {root}: not a directory\n");
-            ctx.output.stderr(msg.as_bytes());
-            return 1;
-        }
-        Err(e) => {
-            let msg = format!("tree: {root}: {e}\n");
-            ctx.output.stderr(msg.as_bytes());
-            return 1;
         }
     }
 
@@ -82,17 +70,69 @@ pub(crate) fn util_tree(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         exclude_pattern,
         full_path,
     };
+    Ok((
+        TreeFlags {
+            noreport,
+            json_output,
+            opts,
+        },
+        args,
+    ))
+}
 
-    if json_output {
-        let node = build_json_tree(ctx, &root_path, &opts, 0);
+fn tree_validate_root(ctx: &mut UtilContext<'_>, root: &str, root_path: &str) -> Result<(), i32> {
+    match ctx.fs.stat(root_path) {
+        Ok(meta) if meta.is_dir => Ok(()),
+        Ok(_) => {
+            let msg = format!("tree: {root}: not a directory\n");
+            ctx.output.stderr(msg.as_bytes());
+            Err(1)
+        }
+        Err(e) => {
+            let msg = format!("tree: {root}: {e}\n");
+            ctx.output.stderr(msg.as_bytes());
+            Err(1)
+        }
+    }
+}
+
+fn tree_format_summary(dir_count: usize, file_count: usize, dirs_only: bool) -> String {
+    if dirs_only {
+        format!(
+            "\n{dir_count} director{}\n",
+            if dir_count == 1 { "y" } else { "ies" }
+        )
+    } else {
+        format!(
+            "\n{dir_count} director{}, {file_count} file{}\n",
+            if dir_count == 1 { "y" } else { "ies" },
+            if file_count == 1 { "" } else { "s" },
+        )
+    }
+}
+
+/// Display directory contents in a tree-like format.
+pub(crate) fn util_tree(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (flags, args) = match parse_tree_flags(argv, ctx.output) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+
+    let root = if args.is_empty() { "." } else { args[0] };
+    let root_path = resolve_path(ctx.cwd, root);
+
+    if tree_validate_root(ctx, root, &root_path).is_err() {
+        return 1;
+    }
+
+    if flags.json_output {
+        let node = build_json_tree(ctx, &root_path, &flags.opts, 0);
         let mut buf = String::new();
         json_emit(&node, &mut buf, 0);
         buf.push('\n');
         ctx.output.stdout(buf.as_bytes());
     } else {
-        // Print the root line
         ctx.output.stdout(b".\n");
-
         let mut dir_count: usize = 0;
         let mut file_count: usize = 0;
         let root_for_walk = root_path.clone();
@@ -100,26 +140,14 @@ pub(crate) fn util_tree(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             ctx,
             &root_path,
             &root_for_walk,
-            &opts,
+            &flags.opts,
             &mut Vec::new(),
             0,
             &mut dir_count,
             &mut file_count,
         );
-
-        if !noreport {
-            let summary = if dirs_only {
-                format!(
-                    "\n{dir_count} director{}\n",
-                    if dir_count == 1 { "y" } else { "ies" }
-                )
-            } else {
-                format!(
-                    "\n{dir_count} director{}, {file_count} file{}\n",
-                    if dir_count == 1 { "y" } else { "ies" },
-                    if file_count == 1 { "" } else { "s" },
-                )
-            };
+        if !flags.noreport {
+            let summary = tree_format_summary(dir_count, file_count, flags.opts.dirs_only);
             ctx.output.stdout(summary.as_bytes());
         }
     }

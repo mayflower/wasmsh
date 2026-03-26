@@ -896,12 +896,24 @@ enum MagicKind {
     Wasm,
 }
 
+fn detect_magic_four_byte(data: &[u8]) -> Option<MagicKind> {
+    if data.len() < 4 {
+        return None;
+    }
+    match (data[0], data.get(1..4)) {
+        (0x89, Some(b"PNG")) => Some(MagicKind::Png),
+        (0x7F, Some(b"ELF")) => Some(MagicKind::Elf),
+        (0x00, Some(b"asm")) => Some(MagicKind::Wasm),
+        _ => None,
+    }
+}
+
 fn detect_magic(data: &[u8]) -> Option<MagicKind> {
     const MAGIC_PATTERNS: &[(MagicKind, &[u8])] =
         &[(MagicKind::Pdf, b"%PDF"), (MagicKind::Zip, b"PK\x03\x04")];
 
-    if data.len() >= 4 && data[0] == 0x89 && data.get(1..4) == Some(b"PNG") {
-        return Some(MagicKind::Png);
+    if let Some(kind) = detect_magic_four_byte(data) {
+        return Some(kind);
     }
     if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
         return Some(MagicKind::Gif);
@@ -916,12 +928,6 @@ fn detect_magic(data: &[u8]) -> Option<MagicKind> {
     }
     if data.starts_with(&[0x1F, 0x8B]) {
         return Some(MagicKind::Gzip);
-    }
-    if data.len() >= 4 && data[0] == 0x7F && data.get(1..4) == Some(b"ELF") {
-        return Some(MagicKind::Elf);
-    }
-    if data.len() >= 4 && data[0] == 0x00 && data.get(1..4) == Some(b"asm") {
-        return Some(MagicKind::Wasm);
     }
     None
 }

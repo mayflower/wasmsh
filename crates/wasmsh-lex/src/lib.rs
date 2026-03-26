@@ -241,49 +241,43 @@ impl<'src> Lexer<'src> {
     fn consume_dollar(&mut self) -> Result<(), LexerError> {
         self.pos += 1; // $
         match self.peek() {
-            Some(b'\'') => {
-                // $'...' ANSI-C quoting — consume like single-quoted but we keep the $' prefix
-                self.consume_single_quoted()?;
-            }
-            Some(b'(') => {
-                self.pos += 1;
-                if self.peek() == Some(b'(') {
-                    // $(( ... ))
-                    self.pos += 1;
-                    self.consume_arithmetic()?;
-                } else {
-                    // $( ... )
-                    self.consume_command_subst()?;
-                }
-            }
+            Some(b'\'') => self.consume_single_quoted()?,
+            Some(b'(') => self.consume_dollar_paren()?,
             Some(b'{') => {
                 self.pos += 1;
                 self.consume_brace_param()?;
             }
             Some(b) if b.is_ascii_alphabetic() || b == b'_' => {
-                while let Some(b) = self.peek() {
-                    if b.is_ascii_alphanumeric() || b == b'_' {
-                        self.pos += 1;
-                    } else {
-                        break;
-                    }
-                }
+                self.consume_identifier();
             }
-            Some(b)
-                if b == b'?'
-                    || b == b'!'
-                    || b == b'#'
-                    || b == b'$'
-                    || b == b'@'
-                    || b == b'*'
-                    || b == b'-'
-                    || b.is_ascii_digit() =>
-            {
+            Some(b) if is_special_param(b) => {
                 self.pos += 1;
             }
             _ => {} // lone $
         }
         Ok(())
+    }
+
+    /// Consume `$(...)` or `$((...))`.
+    fn consume_dollar_paren(&mut self) -> Result<(), LexerError> {
+        self.pos += 1; // (
+        if self.peek() == Some(b'(') {
+            self.pos += 1;
+            self.consume_arithmetic()
+        } else {
+            self.consume_command_subst()
+        }
+    }
+
+    /// Consume an identifier (alphanumeric + underscore).
+    fn consume_identifier(&mut self) {
+        while let Some(b) = self.peek() {
+            if b.is_ascii_alphanumeric() || b == b'_' {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
     }
 
     /// Consume until matching `)` for `$(...)`, tracking nested parens and quotes.
@@ -569,6 +563,11 @@ impl<'src> Lexer<'src> {
         }
         Ok(tokens)
     }
+}
+
+/// Returns true for special parameter characters (`? ! # $ @ * -` and digits).
+fn is_special_param(b: u8) -> bool {
+    matches!(b, b'?' | b'!' | b'#' | b'$' | b'@' | b'*' | b'-') || b.is_ascii_digit()
 }
 
 fn is_word_break(b: u8) -> bool {

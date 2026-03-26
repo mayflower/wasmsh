@@ -107,6 +107,23 @@ fn parse_dollar_part(
     }
 }
 
+/// Handle a backslash inside a double-quoted string.
+/// In double quotes, `\` only escapes `$`, `` ` ``, `"`, `\`, and newline.
+fn dq_backslash(bytes: &[u8], pos: &mut usize, lit: &mut String) {
+    *pos += 1;
+    if *pos >= bytes.len() {
+        return;
+    }
+    let c = bytes[*pos];
+    if matches!(c, b'$' | b'`' | b'"' | b'\\' | b'\n') {
+        lit.push(c as char);
+    } else {
+        lit.push('\\');
+        lit.push(c as char);
+    }
+    *pos += 1;
+}
+
 /// Parse the interior of a double-quoted string, stopping at closing `"`.
 fn parse_double_quoted(text: &str, pos: &mut usize) -> Vec<WordPart> {
     let bytes = text.as_bytes();
@@ -116,23 +133,10 @@ fn parse_double_quoted(text: &str, pos: &mut usize) -> Vec<WordPart> {
     while *pos < bytes.len() {
         match bytes[*pos] {
             b'"' => {
-                *pos += 1; // closing "
+                *pos += 1;
                 break;
             }
-            b'\\' => {
-                *pos += 1;
-                if *pos < bytes.len() {
-                    let c = bytes[*pos];
-                    // In double quotes, backslash only escapes $, `, ", \, and newline
-                    if matches!(c, b'$' | b'`' | b'"' | b'\\' | b'\n') {
-                        lit.push(c as char);
-                    } else {
-                        lit.push('\\');
-                        lit.push(c as char);
-                    }
-                    *pos += 1;
-                }
-            }
+            b'\\' => dq_backslash(bytes, pos, &mut lit),
             b'$' => {
                 flush(&mut lit, &mut parts);
                 *pos += 1;

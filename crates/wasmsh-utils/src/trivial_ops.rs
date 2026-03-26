@@ -835,6 +835,12 @@ pub(crate) fn util_nproc(ctx: &mut UtilContext<'_>, _argv: &[&str]) -> i32 {
 // expand — tabs to spaces
 // ---------------------------------------------------------------------------
 
+fn try_parse_inline_tab_width(arg: &str, current: usize) -> usize {
+    arg.strip_prefix("-t")
+        .and_then(|num| num.parse::<usize>().ok())
+        .unwrap_or(current)
+}
+
 fn parse_tab_width<'a>(
     args: &'a [&'a str],
     util_name: &str,
@@ -845,19 +851,10 @@ fn parse_tab_width<'a>(
 
     while let Some(arg) = rest.first() {
         if *arg == "-t" && rest.len() > 1 {
-            let Ok(w) = rest[1].parse::<usize>() else {
-                let msg = format!("{util_name}: invalid number: '{}'\n", rest[1]);
-                output.stderr(msg.as_bytes());
-                return Err(1);
-            };
-            tab_width = w;
+            tab_width = parse_tab_width_value(rest[1], util_name, output)?;
             rest = &rest[2..];
         } else if arg.starts_with('-') && arg.len() > 1 {
-            if let Some(num) = arg.strip_prefix("-t") {
-                if let Ok(w) = num.parse::<usize>() {
-                    tab_width = w;
-                }
-            }
+            tab_width = try_parse_inline_tab_width(arg, tab_width);
             rest = &rest[1..];
         } else {
             break;
@@ -868,6 +865,18 @@ fn parse_tab_width<'a>(
         tab_width = 8;
     }
     Ok((tab_width, rest))
+}
+
+fn parse_tab_width_value(
+    value: &str,
+    util_name: &str,
+    output: &mut dyn crate::UtilOutput,
+) -> Result<usize, i32> {
+    value.parse::<usize>().map_err(|_| {
+        let msg = format!("{util_name}: invalid number: '{value}'\n");
+        output.stderr(msg.as_bytes());
+        1
+    })
 }
 
 fn expand_line(line: &str, tab_width: usize) -> String {

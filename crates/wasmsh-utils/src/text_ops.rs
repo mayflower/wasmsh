@@ -675,22 +675,7 @@ fn parse_bat_flags(argv: &[&str]) -> (BatFlags, usize) {
             }
             _ if arg.starts_with("--paging=") | arg.starts_with("--language=") => {}
             _ if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") => {
-                let mut recognized = true;
-                for ch in arg[1..].chars() {
-                    match ch {
-                        'n' => flags.show_numbers = true,
-                        'p' => {
-                            flags.show_numbers = false;
-                            flags.show_header = false;
-                        }
-                        'A' => flags.show_all = true,
-                        _ => {
-                            recognized = false;
-                            break;
-                        }
-                    }
-                }
-                if !recognized {
+                if !apply_bat_bundled_flags(&mut flags, arg) {
                     break;
                 }
             }
@@ -700,6 +685,23 @@ fn parse_bat_flags(argv: &[&str]) -> (BatFlags, usize) {
         consumed += 1;
     }
     (flags, consumed)
+}
+
+/// Try to apply bundled single-char flags like `-npA`. Returns false if an
+/// unrecognized character is encountered (caller should break out of parsing).
+fn apply_bat_bundled_flags(flags: &mut BatFlags, arg: &str) -> bool {
+    for ch in arg[1..].chars() {
+        match ch {
+            'n' => flags.show_numbers = true,
+            'p' => {
+                flags.show_numbers = false;
+                flags.show_header = false;
+            }
+            'A' => flags.show_all = true,
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn apply_bat_style(flags: &mut BatFlags, style: &str) {

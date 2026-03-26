@@ -163,20 +163,26 @@ impl<'a> BcParser<'a> {
             if b == b' ' || b == b'\t' || b == b'\r' {
                 self.pos += 1;
             } else if self.remaining().starts_with("/*") {
-                // Block comment
-                if let Some(end) = self.remaining()[2..].find("*/") {
-                    self.pos += end + 4;
-                } else {
-                    self.pos = self.input.len();
-                }
+                self.skip_block_comment();
             } else if b == b'#' {
-                // Line comment
-                while self.pos < self.input.len() && self.input.as_bytes()[self.pos] != b'\n' {
-                    self.pos += 1;
-                }
+                self.skip_line_comment();
             } else {
                 break;
             }
+        }
+    }
+
+    fn skip_block_comment(&mut self) {
+        if let Some(end) = self.remaining()[2..].find("*/") {
+            self.pos += end + 4;
+        } else {
+            self.pos = self.input.len();
+        }
+    }
+
+    fn skip_line_comment(&mut self) {
+        while self.pos < self.input.len() && self.input.as_bytes()[self.pos] != b'\n' {
+            self.pos += 1;
         }
     }
 
