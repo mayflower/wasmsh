@@ -133,114 +133,12 @@ fn parse_dollar(text: &str, pos: &mut usize) -> Option<WordPart> {
         b'(' => {
             *pos += 1;
             if *pos < bytes.len() && bytes[*pos] == b'(' {
-                // $(( ... ))
-                *pos += 1;
-                let start = *pos;
-                let mut depth: u32 = 1;
-                while *pos < bytes.len() && depth > 0 {
-                    if bytes[*pos] == b'(' && pos_peek(bytes, *pos + 1) == Some(b'(') {
-                        depth += 1;
-                        *pos += 2;
-                    } else if bytes[*pos] == b')' && pos_peek(bytes, *pos + 1) == Some(b')') {
-                        depth -= 1;
-                        if depth == 0 {
-                            let expr = &text[start..*pos];
-                            *pos += 2; // skip ))
-                            return Some(WordPart::Arithmetic(expr.into()));
-                        }
-                        *pos += 2;
-                    } else {
-                        *pos += 1;
-                    }
-                }
-                // Fallback: unterminated (shouldn't happen — lexer validates)
-                Some(WordPart::Arithmetic(text[start..*pos].into()))
+                parse_dollar_arith(text, pos)
             } else {
-                // $( ... )
-                let start = *pos;
-                let mut depth: u32 = 1;
-                while *pos < bytes.len() && depth > 0 {
-                    match bytes[*pos] {
-                        b'(' => {
-                            depth += 1;
-                            *pos += 1;
-                        }
-                        b')' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                let inner = &text[start..*pos];
-                                *pos += 1; // skip )
-                                return Some(WordPart::CommandSubstitution(inner.into()));
-                            }
-                            *pos += 1;
-                        }
-                        b'\'' => {
-                            *pos += 1;
-                            while *pos < bytes.len() && bytes[*pos] != b'\'' {
-                                *pos += 1;
-                            }
-                            if *pos < bytes.len() {
-                                *pos += 1;
-                            }
-                        }
-                        b'"' => {
-                            *pos += 1;
-                            while *pos < bytes.len() && bytes[*pos] != b'"' {
-                                if *pos >= bytes.len() {
-                                    break;
-                                }
-                                if bytes[*pos] == b'\\' {
-                                    *pos += 1;
-                                    if *pos >= bytes.len() {
-                                        break;
-                                    }
-                                }
-                                *pos += 1;
-                            }
-                            if *pos < bytes.len() {
-                                *pos += 1;
-                            }
-                        }
-                        _ => *pos += 1,
-                    }
-                }
-                Some(WordPart::CommandSubstitution(text[start..*pos].into()))
+                parse_dollar_cmd_subst(text, pos)
             }
         }
-        b'{' => {
-            *pos += 1;
-            let start = *pos;
-            let mut depth: u32 = 1;
-            while *pos < bytes.len() && depth > 0 {
-                if *pos >= bytes.len() {
-                    break;
-                }
-                match bytes[*pos] {
-                    b'{' => {
-                        depth += 1;
-                        *pos += 1;
-                    }
-                    b'}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            let name = &text[start..*pos];
-                            *pos += 1;
-                            return Some(WordPart::Parameter(name.into()));
-                        }
-                        *pos += 1;
-                    }
-                    b'\\' => {
-                        *pos += 1;
-                        if *pos >= bytes.len() {
-                            break;
-                        }
-                        *pos += 1;
-                    }
-                    _ => *pos += 1,
-                }
-            }
-            Some(WordPart::Parameter(text[start..*pos].into()))
-        }
+        b'{' => parse_dollar_brace(text, pos),
         b if b.is_ascii_alphabetic() || b == b'_' => {
             let start = *pos;
             while *pos < bytes.len() && (bytes[*pos].is_ascii_alphanumeric() || bytes[*pos] == b'_')
@@ -249,20 +147,132 @@ fn parse_dollar(text: &str, pos: &mut usize) -> Option<WordPart> {
             }
             Some(WordPart::Parameter(text[start..*pos].into()))
         }
-        b if b == b'?'
-            || b == b'!'
-            || b == b'#'
-            || b == b'$'
-            || b == b'@'
-            || b == b'*'
-            || b == b'-'
-            || b.is_ascii_digit() =>
-        {
+        b if is_special_param(b) => {
             let start = *pos;
             *pos += 1;
             Some(WordPart::Parameter(text[start..*pos].into()))
         }
         _ => None,
+    }
+}
+
+/// Check if a byte is a special parameter character (`?`, `!`, `#`, `$`, `@`, `*`, `-`, digit).
+fn is_special_param(b: u8) -> bool {
+    matches!(b, b'?' | b'!' | b'#' | b'$' | b'@' | b'*' | b'-') || b.is_ascii_digit()
+}
+
+/// Parse `$(( ... ))` arithmetic expansion (pos is just past the second `(`).
+fn parse_dollar_arith(text: &str, pos: &mut usize) -> Option<WordPart> {
+    let bytes = text.as_bytes();
+    *pos += 1; // skip second '('
+    let start = *pos;
+    let mut depth: u32 = 1;
+    while *pos < bytes.len() && depth > 0 {
+        if bytes[*pos] == b'(' && pos_peek(bytes, *pos + 1) == Some(b'(') {
+            depth += 1;
+            *pos += 2;
+        } else if bytes[*pos] == b')' && pos_peek(bytes, *pos + 1) == Some(b')') {
+            depth -= 1;
+            if depth == 0 {
+                let expr = &text[start..*pos];
+                *pos += 2; // skip ))
+                return Some(WordPart::Arithmetic(expr.into()));
+            }
+            *pos += 2;
+        } else {
+            *pos += 1;
+        }
+    }
+    // Fallback: unterminated (shouldn't happen -- lexer validates)
+    Some(WordPart::Arithmetic(text[start..*pos].into()))
+}
+
+/// Parse `$( ... )` command substitution (pos is at first byte inside parens).
+fn parse_dollar_cmd_subst(text: &str, pos: &mut usize) -> Option<WordPart> {
+    let bytes = text.as_bytes();
+    let start = *pos;
+    let mut depth: u32 = 1;
+    while *pos < bytes.len() && depth > 0 {
+        match bytes[*pos] {
+            b'(' => {
+                depth += 1;
+                *pos += 1;
+            }
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    let inner = &text[start..*pos];
+                    *pos += 1; // skip )
+                    return Some(WordPart::CommandSubstitution(inner.into()));
+                }
+                *pos += 1;
+            }
+            b'\'' => skip_single_quoted(bytes, pos),
+            b'"' => skip_double_quoted(bytes, pos),
+            _ => *pos += 1,
+        }
+    }
+    Some(WordPart::CommandSubstitution(text[start..*pos].into()))
+}
+
+/// Parse `${...}` parameter expansion (pos is at `{`).
+fn parse_dollar_brace(text: &str, pos: &mut usize) -> Option<WordPart> {
+    let bytes = text.as_bytes();
+    *pos += 1; // skip '{'
+    let start = *pos;
+    let mut depth: u32 = 1;
+    while *pos < bytes.len() && depth > 0 {
+        match bytes[*pos] {
+            b'{' => {
+                depth += 1;
+                *pos += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let name = &text[start..*pos];
+                    *pos += 1;
+                    return Some(WordPart::Parameter(name.into()));
+                }
+                *pos += 1;
+            }
+            b'\\' => {
+                *pos += 1;
+                if *pos < bytes.len() {
+                    *pos += 1;
+                }
+            }
+            _ => *pos += 1,
+        }
+    }
+    Some(WordPart::Parameter(text[start..*pos].into()))
+}
+
+/// Skip past a single-quoted string (pos is at the opening `'`).
+fn skip_single_quoted(bytes: &[u8], pos: &mut usize) {
+    *pos += 1;
+    while *pos < bytes.len() && bytes[*pos] != b'\'' {
+        *pos += 1;
+    }
+    if *pos < bytes.len() {
+        *pos += 1;
+    }
+}
+
+/// Skip past a double-quoted string (pos is at the opening `"`).
+fn skip_double_quoted(bytes: &[u8], pos: &mut usize) {
+    *pos += 1;
+    while *pos < bytes.len() && bytes[*pos] != b'"' {
+        if bytes[*pos] == b'\\' {
+            *pos += 1;
+            if *pos >= bytes.len() {
+                break;
+            }
+        }
+        *pos += 1;
+    }
+    if *pos < bytes.len() {
+        *pos += 1;
     }
 }
 
@@ -280,94 +290,8 @@ fn parse_ansi_c_quoted(text: &str, pos: &mut usize) -> String {
             }
             b'\\' => {
                 *pos += 1;
-                if *pos >= bytes.len() {
-                    break;
-                }
-                match bytes[*pos] {
-                    b'n' => {
-                        result.push('\n');
-                        *pos += 1;
-                    }
-                    b't' => {
-                        result.push('\t');
-                        *pos += 1;
-                    }
-                    b'r' => {
-                        result.push('\r');
-                        *pos += 1;
-                    }
-                    b'a' => {
-                        result.push('\x07');
-                        *pos += 1;
-                    }
-                    b'b' => {
-                        result.push('\x08');
-                        *pos += 1;
-                    }
-                    b'e' | b'E' => {
-                        result.push('\x1b');
-                        *pos += 1;
-                    }
-                    b'f' => {
-                        result.push('\x0c');
-                        *pos += 1;
-                    }
-                    b'v' => {
-                        result.push('\x0b');
-                        *pos += 1;
-                    }
-                    b'\\' => {
-                        result.push('\\');
-                        *pos += 1;
-                    }
-                    b'\'' => {
-                        result.push('\'');
-                        *pos += 1;
-                    }
-                    b'"' => {
-                        result.push('"');
-                        *pos += 1;
-                    }
-                    b'0' => {
-                        // Octal: \0NNN (up to 3 octal digits)
-                        *pos += 1;
-                        let mut val: u8 = 0;
-                        let mut count = 0;
-                        while *pos < bytes.len()
-                            && count < 3
-                            && bytes[*pos] >= b'0'
-                            && bytes[*pos] <= b'7'
-                        {
-                            val = val * 8 + (bytes[*pos] - b'0');
-                            *pos += 1;
-                            count += 1;
-                        }
-                        result.push(val as char);
-                    }
-                    b'x' => {
-                        // Hex: \xNN (up to 2 hex digits)
-                        *pos += 1;
-                        let mut val: u8 = 0;
-                        let mut count = 0;
-                        while *pos < bytes.len() && count < 2 {
-                            let digit = match bytes[*pos] {
-                                b'0'..=b'9' => bytes[*pos] - b'0',
-                                b'a'..=b'f' => bytes[*pos] - b'a' + 10,
-                                b'A'..=b'F' => bytes[*pos] - b'A' + 10,
-                                _ => break,
-                            };
-                            val = val * 16 + digit;
-                            *pos += 1;
-                            count += 1;
-                        }
-                        result.push(val as char);
-                    }
-                    other => {
-                        // Unknown escape — keep the backslash and char
-                        result.push('\\');
-                        result.push(other as char);
-                        *pos += 1;
-                    }
+                if *pos < bytes.len() {
+                    ansi_c_escape(bytes, pos, &mut result);
                 }
             }
             _ => {
@@ -378,6 +302,99 @@ fn parse_ansi_c_quoted(text: &str, pos: &mut usize) -> String {
     }
 
     result
+}
+
+/// Process a single ANSI-C escape sequence (pos is at the character after `\`).
+fn ansi_c_escape(bytes: &[u8], pos: &mut usize, result: &mut String) {
+    match bytes[*pos] {
+        b'n' => {
+            result.push('\n');
+            *pos += 1;
+        }
+        b't' => {
+            result.push('\t');
+            *pos += 1;
+        }
+        b'r' => {
+            result.push('\r');
+            *pos += 1;
+        }
+        b'a' => {
+            result.push('\x07');
+            *pos += 1;
+        }
+        b'b' => {
+            result.push('\x08');
+            *pos += 1;
+        }
+        b'e' | b'E' => {
+            result.push('\x1b');
+            *pos += 1;
+        }
+        b'f' => {
+            result.push('\x0c');
+            *pos += 1;
+        }
+        b'v' => {
+            result.push('\x0b');
+            *pos += 1;
+        }
+        b'\\' => {
+            result.push('\\');
+            *pos += 1;
+        }
+        b'\'' => {
+            result.push('\'');
+            *pos += 1;
+        }
+        b'"' => {
+            result.push('"');
+            *pos += 1;
+        }
+        b'0' => {
+            *pos += 1;
+            result.push(parse_octal_digits(bytes, pos, 3) as char);
+        }
+        b'x' => {
+            *pos += 1;
+            result.push(parse_hex_digits(bytes, pos, 2) as char);
+        }
+        other => {
+            result.push('\\');
+            result.push(other as char);
+            *pos += 1;
+        }
+    }
+}
+
+/// Parse up to `max_digits` octal digits, advancing `pos`. Returns the accumulated value.
+fn parse_octal_digits(bytes: &[u8], pos: &mut usize, max_digits: usize) -> u8 {
+    let mut val: u8 = 0;
+    let mut count = 0;
+    while *pos < bytes.len() && count < max_digits && bytes[*pos] >= b'0' && bytes[*pos] <= b'7' {
+        val = val * 8 + (bytes[*pos] - b'0');
+        *pos += 1;
+        count += 1;
+    }
+    val
+}
+
+/// Parse up to `max_digits` hex digits, advancing `pos`. Returns the accumulated value.
+fn parse_hex_digits(bytes: &[u8], pos: &mut usize, max_digits: usize) -> u8 {
+    let mut val: u8 = 0;
+    let mut count = 0;
+    while *pos < bytes.len() && count < max_digits {
+        let digit = match bytes[*pos] {
+            b'0'..=b'9' => bytes[*pos] - b'0',
+            b'a'..=b'f' => bytes[*pos] - b'a' + 10,
+            b'A'..=b'F' => bytes[*pos] - b'A' + 10,
+            _ => break,
+        };
+        val = val * 16 + digit;
+        *pos += 1;
+        count += 1;
+    }
+    val
 }
 
 fn pos_peek(bytes: &[u8], pos: usize) -> Option<u8> {

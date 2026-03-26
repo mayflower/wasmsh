@@ -1026,57 +1026,11 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
         opts.remaining_args.to_vec()
     };
 
-    let input_text = if let Some(data) = ctx.stdin {
-        String::from_utf8_lossy(data).to_string()
-    } else if let Some(rem) = ctx.state.get_var("_STDIN_REMAINING") {
-        if rem.is_empty() {
-            return 1;
-        }
-        rem.to_string()
-    } else {
+    let Some(input_text) = read_input_text(ctx) else {
         return 1;
     };
 
-    let delimiter = opts.delimiter;
-    let (line, remaining) = if let Some(n) = opts.exact_nchars {
-        let chars: String = input_text.chars().take(n).collect();
-        let rest_start = chars.len();
-        let rest = if rest_start < input_text.len() {
-            &input_text[rest_start..]
-        } else {
-            ""
-        };
-        (chars, rest.to_string())
-    } else if let Some(n) = opts.nchars {
-        // -n: read at most N characters, but stop at delimiter too
-        let mut chars = String::new();
-        let mut rest_start = 0;
-        for ch in input_text.chars() {
-            if chars.len() >= n || ch == delimiter {
-                break;
-            }
-            chars.push(ch);
-            rest_start += ch.len_utf8();
-        }
-        // Skip the delimiter if present
-        if rest_start < input_text.len()
-            && input_text.as_bytes().get(rest_start) == Some(&(delimiter as u8))
-        {
-            rest_start += 1;
-        }
-        let rest = if rest_start < input_text.len() {
-            &input_text[rest_start..]
-        } else {
-            ""
-        };
-        (chars, rest.to_string())
-    } else {
-        // Normal line-based read using delimiter
-        let mut parts = input_text.splitn(2, delimiter);
-        let first = parts.next().unwrap_or("").to_string();
-        let rest = parts.next().unwrap_or("").to_string();
-        (first, rest)
-    };
+    let (line, remaining) = read_split_input(&input_text, &opts);
 
     // Store remaining data for subsequent read calls
     ctx.state.set_var(
@@ -1086,62 +1040,124 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 
     // Handle -a (read into array)
     if let Some(arr_name) = opts.array_name {
-        let ifs = ctx
-            .state
-            .get_var("IFS")
-            .unwrap_or_else(|| SmolStr::from(" \t\n"));
-        let fields: Vec<&str> = if ifs.is_empty() {
-            vec![line.as_str()]
-        } else {
-            line.split(|c: char| ifs.contains(c))
-                .filter(|s| !s.is_empty())
-                .collect()
-        };
-        ctx.state.init_indexed_array(SmolStr::from(arr_name));
-        for (i, field) in fields.iter().enumerate() {
-            ctx.state.set_array_element(
-                SmolStr::from(arr_name),
-                &i.to_string(),
-                SmolStr::from(*field),
-            );
-        }
+        read_into_array(ctx.state, &line, arr_name);
         return 0;
     }
 
     // Split line by IFS and assign to variables
-    let ifs = ctx
-        .state
+    read_assign_vars(ctx.state, &line, &var_names);
+    0
+}
+
+/// Obtain input text for `read` from stdin or the `_STDIN_REMAINING` variable.
+fn read_input_text(ctx: &mut BuiltinContext<'_>) -> Option<String> {
+    if let Some(data) = ctx.stdin {
+        return Some(String::from_utf8_lossy(data).to_string());
+    }
+    let rem = ctx.state.get_var("_STDIN_REMAINING")?;
+    if rem.is_empty() {
+        return None;
+    }
+    Some(rem.to_string())
+}
+
+/// Split input into (`current_line`, remaining) according to `read` options (-N, -n, delimiter).
+fn read_split_input(input_text: &str, opts: &ReadOpts<'_>) -> (String, String) {
+    if let Some(n) = opts.exact_nchars {
+        return read_split_exact(input_text, n);
+    }
+    if let Some(n) = opts.nchars {
+        return read_split_nchars(input_text, n, opts.delimiter);
+    }
+    // Normal line-based read using delimiter
+    let mut parts = input_text.splitn(2, opts.delimiter);
+    let first = parts.next().unwrap_or("").to_string();
+    let rest = parts.next().unwrap_or("").to_string();
+    (first, rest)
+}
+
+/// Split for `-N` (exact N characters, no delimiter stop).
+fn read_split_exact(input_text: &str, n: usize) -> (String, String) {
+    let chars: String = input_text.chars().take(n).collect();
+    let rest_start = chars.len();
+    let rest = if rest_start < input_text.len() {
+        &input_text[rest_start..]
+    } else {
+        ""
+    };
+    (chars, rest.to_string())
+}
+
+/// Split for `-n` (at most N characters, stop at delimiter too).
+fn read_split_nchars(input_text: &str, n: usize, delimiter: char) -> (String, String) {
+    let mut chars = String::new();
+    let mut rest_start = 0;
+    for ch in input_text.chars() {
+        if chars.len() >= n || ch == delimiter {
+            break;
+        }
+        chars.push(ch);
+        rest_start += ch.len_utf8();
+    }
+    // Skip the delimiter if present
+    if rest_start < input_text.len()
+        && input_text.as_bytes().get(rest_start) == Some(&(delimiter as u8))
+    {
+        rest_start += 1;
+    }
+    let rest = if rest_start < input_text.len() {
+        &input_text[rest_start..]
+    } else {
+        ""
+    };
+    (chars, rest.to_string())
+}
+
+/// Split a line by IFS and store fields into an indexed array.
+fn read_into_array(state: &mut ShellState, line: &str, arr_name: &str) {
+    let fields = ifs_split_fields(state, line);
+    state.init_indexed_array(SmolStr::from(arr_name));
+    for (i, field) in fields.iter().enumerate() {
+        state.set_array_element(
+            SmolStr::from(arr_name),
+            &i.to_string(),
+            SmolStr::from(*field),
+        );
+    }
+}
+
+/// Split a line by IFS and assign fields to the given variable names.
+fn read_assign_vars(state: &mut ShellState, line: &str, var_names: &[&str]) {
+    let fields = ifs_split_fields(state, line);
+    for (i, var_name) in var_names.iter().enumerate() {
+        let val = if i == var_names.len() - 1 {
+            // Last variable gets the rest of the line
+            if i < fields.len() {
+                fields[i..].join(" ")
+            } else {
+                String::new()
+            }
+        } else if let Some(field) = fields.get(i) {
+            (*field).to_string()
+        } else {
+            String::new()
+        };
+        state.set_var(SmolStr::from(*var_name), SmolStr::from(val.as_str()));
+    }
+}
+
+/// Split a line by IFS characters, filtering empty fields.
+fn ifs_split_fields<'a>(state: &ShellState, line: &'a str) -> Vec<&'a str> {
+    let ifs = state
         .get_var("IFS")
         .unwrap_or_else(|| SmolStr::from(" \t\n"));
-
-    let fields: Vec<&str> = if ifs.is_empty() {
-        vec![line.as_str()]
+    if ifs.is_empty() {
+        vec![line]
     } else {
         line.split(|c: char| ifs.contains(c))
             .filter(|s| !s.is_empty())
             .collect()
-    };
-
-    for (i, var_name) in var_names.iter().enumerate() {
-        if i == var_names.len() - 1 {
-            // Last variable gets the rest of the line
-            let rest: String = if i < fields.len() {
-                fields[i..].join(" ")
-            } else {
-                String::new()
-            };
-            ctx.state
-                .set_var(SmolStr::from(*var_name), SmolStr::from(rest.as_str()));
-        } else if let Some(field) = fields.get(i) {
-            ctx.state
-                .set_var(SmolStr::from(*var_name), SmolStr::from(*field));
-        } else {
-            ctx.state
-                .set_var(SmolStr::from(*var_name), SmolStr::default());
-        }
     }
-
-    0
 }
 
 /// `trap` — set handlers for signals/events.

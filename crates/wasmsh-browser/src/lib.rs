@@ -106,6 +106,58 @@ pub struct WorkerRuntime {
     aliases: IndexMap<String, String>,
 }
 
+/// Parsed flags for `declare`/`typeset`.
+#[allow(clippy::struct_excessive_bools)]
+struct DeclareFlags {
+    is_assoc: bool,
+    is_indexed: bool,
+    is_integer: bool,
+    is_export: bool,
+    is_readonly: bool,
+    is_lower: bool,
+    is_upper: bool,
+    is_print: bool,
+    is_nameref: bool,
+}
+
+/// Parse declare/typeset flags from argv, returning (flags, `name_indices`).
+fn parse_declare_flags(argv: &[String]) -> (DeclareFlags, Vec<usize>) {
+    let mut flags = DeclareFlags {
+        is_assoc: false,
+        is_indexed: false,
+        is_integer: false,
+        is_export: false,
+        is_readonly: false,
+        is_lower: false,
+        is_upper: false,
+        is_print: false,
+        is_nameref: false,
+    };
+    let mut names = Vec::new();
+
+    for (i, arg) in argv[1..].iter().enumerate() {
+        if arg.starts_with('-') && arg.len() > 1 {
+            for ch in arg[1..].chars() {
+                match ch {
+                    'A' => flags.is_assoc = true,
+                    'a' => flags.is_indexed = true,
+                    'i' => flags.is_integer = true,
+                    'x' => flags.is_export = true,
+                    'r' => flags.is_readonly = true,
+                    'l' => flags.is_lower = true,
+                    'u' => flags.is_upper = true,
+                    'p' => flags.is_print = true,
+                    'n' => flags.is_nameref = true,
+                    _ => {}
+                }
+            }
+        } else {
+            names.push(i + 1);
+        }
+    }
+    (flags, names)
+}
+
 impl WorkerRuntime {
     #[must_use]
     pub fn new() -> Self {
@@ -1418,10 +1470,8 @@ impl WorkerRuntime {
     fn execute_shopt(&mut self, argv: &[String]) {
         let args = &argv[1..];
 
-        // Parse flags
-        let mut set_mode: Option<bool> = None; // true = -s (enable), false = -u (disable)
+        let mut set_mode: Option<bool> = None;
         let mut names: Vec<&str> = Vec::new();
-
         for arg in args {
             match arg.as_str() {
                 "-s" => set_mode = Some(true),
@@ -1431,257 +1481,221 @@ impl WorkerRuntime {
         }
 
         if let Some(enable) = set_mode {
-            // -s or -u with option names
-            if names.is_empty() {
-                let msg = "shopt: option name required\n";
+            self.shopt_set_options(&names, enable);
+        } else {
+            self.shopt_print_options(&names);
+        }
+    }
+
+    /// Set shopt options (`-s` or `-u`).
+    fn shopt_set_options(&mut self, names: &[&str], enable: bool) {
+        if names.is_empty() {
+            self.vm
+                .stderr
+                .extend_from_slice(b"shopt: option name required\n");
+            self.vm.state.last_status = 1;
+            return;
+        }
+        let val = if enable { "1" } else { "0" };
+        for name in names {
+            if !Self::SHOPT_OPTIONS.contains(name) {
+                let msg = format!("shopt: {name}: invalid shell option name\n");
                 self.vm.stderr.extend_from_slice(msg.as_bytes());
                 self.vm.state.last_status = 1;
                 return;
             }
-            let val = if enable { "1" } else { "0" };
-            for name in &names {
-                if Self::SHOPT_OPTIONS.contains(name) {
-                    let var = format!("SHOPT_{name}");
-                    self.vm.state.set_var(
-                        smol_str::SmolStr::from(var.as_str()),
-                        smol_str::SmolStr::from(val),
-                    );
-                } else {
-                    let msg = format!("shopt: {name}: invalid shell option name\n");
-                    self.vm.stderr.extend_from_slice(msg.as_bytes());
-                    self.vm.state.last_status = 1;
-                    return;
-                }
-            }
-            self.vm.state.last_status = 0;
-        } else if names.is_empty() {
-            // No flags, no names: list all options
-            for opt in Self::SHOPT_OPTIONS {
-                let var = format!("SHOPT_{opt}");
-                let enabled = self.vm.state.get_var(&var).as_deref() == Some("1");
-                let status_str = if enabled { "on" } else { "off" };
-                let line = format!("{opt}\t{status_str}\n");
-                self.vm.stdout.extend_from_slice(line.as_bytes());
-            }
-            self.vm.state.last_status = 0;
-        } else {
-            // No flags, with names: print status of specific options
-            for name in &names {
-                if Self::SHOPT_OPTIONS.contains(name) {
-                    let var = format!("SHOPT_{name}");
-                    let enabled = self.vm.state.get_var(&var).as_deref() == Some("1");
-                    let status_str = if enabled { "on" } else { "off" };
-                    let line = format!("{name}\t{status_str}\n");
-                    self.vm.stdout.extend_from_slice(line.as_bytes());
-                } else {
-                    let msg = format!("shopt: {name}: invalid shell option name\n");
-                    self.vm.stderr.extend_from_slice(msg.as_bytes());
-                    self.vm.state.last_status = 1;
-                    return;
-                }
-            }
-            self.vm.state.last_status = 0;
+            let var = format!("SHOPT_{name}");
+            self.vm.state.set_var(
+                smol_str::SmolStr::from(var.as_str()),
+                smol_str::SmolStr::from(val),
+            );
         }
+        self.vm.state.last_status = 0;
+    }
+
+    /// Print shopt option statuses. If `names` is empty, print all.
+    fn shopt_print_options(&mut self, names: &[&str]) {
+        let options_to_print: Vec<&str> = if names.is_empty() {
+            Self::SHOPT_OPTIONS.to_vec()
+        } else {
+            names.to_vec()
+        };
+        for name in &options_to_print {
+            if !Self::SHOPT_OPTIONS.contains(name) {
+                let msg = format!("shopt: {name}: invalid shell option name\n");
+                self.vm.stderr.extend_from_slice(msg.as_bytes());
+                self.vm.state.last_status = 1;
+                return;
+            }
+            let var = format!("SHOPT_{name}");
+            let enabled = self.vm.state.get_var(&var).as_deref() == Some("1");
+            let status_str = if enabled { "on" } else { "off" };
+            let line = format!("{name}\t{status_str}\n");
+            self.vm.stdout.extend_from_slice(line.as_bytes());
+        }
+        self.vm.state.last_status = 0;
     }
 
     /// Execute `declare`/`typeset` with flag parsing.
-    /// Supports: -i, -a, -A, -x, -r, -l, -u, -p, name=value.
+    /// Supports: -i, -a, -A, -x, -r, -l, -u, -p, -n, name=value.
     fn execute_declare(&mut self, argv: &[String]) {
-        let mut is_assoc = false;
-        let mut is_indexed = false;
-        let mut is_integer = false;
-        let mut is_export = false;
-        let mut is_readonly = false;
-        let mut is_lower = false;
-        let mut is_upper = false;
-        let mut is_print = false;
-        let mut names: Vec<usize> = Vec::new();
+        let (flags, names) = parse_declare_flags(argv);
 
-        for (i, arg) in argv[1..].iter().enumerate() {
-            if arg.starts_with('-') && arg.len() > 1 {
-                for ch in arg[1..].chars() {
-                    match ch {
-                        'A' => is_assoc = true,
-                        'a' => is_indexed = true,
-                        'i' => is_integer = true,
-                        'x' => is_export = true,
-                        'r' => is_readonly = true,
-                        'l' => is_lower = true,
-                        'u' => is_upper = true,
-                        'p' => is_print = true,
-                        _ => {} // silently ignore unknown flags
-                    }
-                }
-            } else {
-                names.push(i + 1); // index into argv
-            }
+        if flags.is_print {
+            self.declare_print(argv, &names);
+            return;
         }
 
-        // declare -p: print variables
-        if is_print && names.is_empty() {
-            // Print all variables
-            // We iterate the global scope for simplicity
-            let vars: Vec<(String, String)> = {
-                let mut result = Vec::new();
-                // Collect from all scopes
-                for scope in &self.vm.state.env.scopes {
-                    for (name, var) in scope {
-                        let val = var.value.as_scalar();
-                        result.push((name.to_string(), val.to_string()));
-                    }
-                }
-                result
-            };
+        for &idx in &names {
+            self.declare_one_name(argv, idx, &flags);
+        }
+        self.vm.state.last_status = 0;
+    }
+
+    /// Handle `declare -p` printing.
+    fn declare_print(&mut self, argv: &[String], names: &[usize]) {
+        if names.is_empty() {
+            let vars: Vec<(String, String)> = self
+                .vm
+                .state
+                .env
+                .scopes
+                .iter()
+                .flat_map(|scope| {
+                    scope
+                        .iter()
+                        .map(|(n, v)| (n.to_string(), v.value.as_scalar().to_string()))
+                })
+                .collect();
             for (name, val) in &vars {
                 let line = format!("declare -- {name}=\"{val}\"\n");
                 self.vm.stdout.extend_from_slice(line.as_bytes());
             }
-            self.vm.state.last_status = 0;
-            return;
-        }
-
-        if is_print && !names.is_empty() {
-            // Print specific variables
-            for &idx in &names {
+        } else {
+            for &idx in names {
                 let name_arg = &argv[idx];
-                let name = if let Some(eq) = name_arg.find('=') {
-                    &name_arg[..eq]
-                } else {
-                    name_arg.as_str()
-                };
+                let name = name_arg
+                    .find('=')
+                    .map_or(name_arg.as_str(), |eq| &name_arg[..eq]);
                 if let Some(var) = self.vm.state.env.get(name) {
                     let val = var.value.as_scalar();
                     let line = format!("declare -- {name}=\"{val}\"\n");
                     self.vm.stdout.extend_from_slice(line.as_bytes());
                 }
             }
-            self.vm.state.last_status = 0;
-            return;
-        }
-
-        for &idx in &names {
-            let name_arg = &argv[idx];
-            let (name, value) = if let Some(eq) = name_arg.find('=') {
-                (&name_arg[..eq], Some(&name_arg[eq + 1..]))
-            } else {
-                (name_arg.as_str(), None)
-            };
-
-            if is_assoc {
-                self.vm
-                    .state
-                    .init_assoc_array(smol_str::SmolStr::from(name));
-            } else if is_indexed {
-                self.vm
-                    .state
-                    .init_indexed_array(smol_str::SmolStr::from(name));
-            }
-
-            if let Some(val) = value {
-                // Handle compound array assignment: value starts with '(' and ends with ')'
-                if val.starts_with('(') && val.ends_with(')') {
-                    let inner = &val[1..val.len() - 1];
-                    let elements = Self::parse_array_elements(inner);
-                    let name_key = smol_str::SmolStr::from(name);
-
-                    if is_assoc || inner.contains("]=") {
-                        // Associative array assignment
-                        self.vm.state.init_assoc_array(name_key.clone());
-                        for pair in Self::parse_assoc_pairs(inner) {
-                            self.vm.state.set_array_element(
-                                name_key.clone(),
-                                &pair.0,
-                                smol_str::SmolStr::from(pair.1.as_str()),
-                            );
-                        }
-                    } else {
-                        // Indexed array assignment
-                        self.vm.state.init_indexed_array(name_key.clone());
-                        for (i, elem) in elements.iter().enumerate() {
-                            self.vm.state.set_array_element(
-                                name_key.clone(),
-                                &i.to_string(),
-                                elem.clone(),
-                            );
-                        }
-                    }
-                } else {
-                    let final_val = if is_integer {
-                        // -i: evaluate as arithmetic
-                        let result = wasmsh_expand::eval_arithmetic(val, &mut self.vm.state);
-                        result.to_string()
-                    } else if is_lower {
-                        val.to_lowercase()
-                    } else if is_upper {
-                        val.to_uppercase()
-                    } else {
-                        val.to_string()
-                    };
-                    self.vm.state.set_var(
-                        smol_str::SmolStr::from(name),
-                        smol_str::SmolStr::from(final_val.as_str()),
-                    );
-                }
-            } else if !is_assoc && !is_indexed {
-                // Declare without value: ensure the variable exists
-                if self.vm.state.get_var(name).is_none() {
-                    self.vm
-                        .state
-                        .set_var(smol_str::SmolStr::from(name), smol_str::SmolStr::default());
-                }
-            }
-
-            if is_export {
-                // Mark as exported
-                if let Some(var) = self.vm.state.env.get_mut(name) {
-                    var.exported = true;
-                }
-            }
-            if is_readonly {
-                // Mark as readonly
-                if let Some(var) = self.vm.state.env.get_mut(name) {
-                    var.readonly = true;
-                }
-            }
-            if is_integer {
-                // Mark as integer
-                if let Some(var) = self.vm.state.env.get_mut(name) {
-                    var.integer = true;
-                }
-            }
-
-            // Handle declare -n (nameref)
-            let is_nameref = argv[1..]
-                .iter()
-                .any(|a| a.starts_with('-') && a.contains('n'));
-            if is_nameref {
-                // For nameref, the value is the TARGET variable name, stored literally
-                // We need to set the var directly (not following existing namerefs)
-                let target_value = if let Some(eq_pos) = name.find('=') {
-                    smol_str::SmolStr::from(&name[eq_pos + 1..])
-                } else if let Some(var) = self.vm.state.env.get(name) {
-                    var.value.as_scalar()
-                } else {
-                    smol_str::SmolStr::default()
-                };
-                let actual_name = if let Some(eq_pos) = name.find('=') {
-                    &name[..eq_pos]
-                } else {
-                    name
-                };
-                self.vm.state.env.set(
-                    smol_str::SmolStr::from(actual_name),
-                    wasmsh_state::ShellVar {
-                        value: wasmsh_state::VarValue::Scalar(target_value),
-                        exported: false,
-                        readonly: false,
-                        integer: false,
-                        nameref: true,
-                    },
-                );
-            }
         }
         self.vm.state.last_status = 0;
+    }
+
+    /// Process a single name in a `declare`/`typeset` command.
+    fn declare_one_name(&mut self, argv: &[String], idx: usize, flags: &DeclareFlags) {
+        let name_arg = &argv[idx];
+        let (name, value) = if let Some(eq) = name_arg.find('=') {
+            (&name_arg[..eq], Some(&name_arg[eq + 1..]))
+        } else {
+            (name_arg.as_str(), None)
+        };
+
+        if flags.is_assoc {
+            self.vm
+                .state
+                .init_assoc_array(smol_str::SmolStr::from(name));
+        } else if flags.is_indexed {
+            self.vm
+                .state
+                .init_indexed_array(smol_str::SmolStr::from(name));
+        }
+
+        if let Some(val) = value {
+            self.declare_assign_value(name, val, flags);
+        } else if !flags.is_assoc && !flags.is_indexed && self.vm.state.get_var(name).is_none() {
+            self.vm
+                .state
+                .set_var(smol_str::SmolStr::from(name), smol_str::SmolStr::default());
+        }
+
+        self.declare_apply_attributes(name, flags);
+
+        if flags.is_nameref {
+            self.declare_apply_nameref(name);
+        }
+    }
+
+    /// Assign a value in `declare`, handling compound arrays and scalar transforms.
+    fn declare_assign_value(&mut self, name: &str, val: &str, flags: &DeclareFlags) {
+        if val.starts_with('(') && val.ends_with(')') {
+            let inner = &val[1..val.len() - 1];
+            let name_key = smol_str::SmolStr::from(name);
+            if flags.is_assoc || inner.contains("]=") {
+                self.vm.state.init_assoc_array(name_key.clone());
+                for pair in Self::parse_assoc_pairs(inner) {
+                    self.vm.state.set_array_element(
+                        name_key.clone(),
+                        &pair.0,
+                        smol_str::SmolStr::from(pair.1.as_str()),
+                    );
+                }
+            } else {
+                let elements = Self::parse_array_elements(inner);
+                self.vm.state.init_indexed_array(name_key.clone());
+                for (i, elem) in elements.iter().enumerate() {
+                    self.vm
+                        .state
+                        .set_array_element(name_key.clone(), &i.to_string(), elem.clone());
+                }
+            }
+            return;
+        }
+        let final_val = if flags.is_integer {
+            wasmsh_expand::eval_arithmetic(val, &mut self.vm.state).to_string()
+        } else if flags.is_lower {
+            val.to_lowercase()
+        } else if flags.is_upper {
+            val.to_uppercase()
+        } else {
+            val.to_string()
+        };
+        self.vm.state.set_var(
+            smol_str::SmolStr::from(name),
+            smol_str::SmolStr::from(final_val.as_str()),
+        );
+    }
+
+    /// Apply export, readonly, integer attributes after declare assignment.
+    fn declare_apply_attributes(&mut self, name: &str, flags: &DeclareFlags) {
+        if let Some(var) = self.vm.state.env.get_mut(name) {
+            if flags.is_export {
+                var.exported = true;
+            }
+            if flags.is_readonly {
+                var.readonly = true;
+            }
+            if flags.is_integer {
+                var.integer = true;
+            }
+        }
+    }
+
+    /// Apply nameref attribute for `declare -n`.
+    fn declare_apply_nameref(&mut self, name: &str) {
+        let target_value = if let Some(eq_pos) = name.find('=') {
+            smol_str::SmolStr::from(&name[eq_pos + 1..])
+        } else if let Some(var) = self.vm.state.env.get(name) {
+            var.value.as_scalar()
+        } else {
+            smol_str::SmolStr::default()
+        };
+        let actual_name = name.find('=').map_or(name, |eq| &name[..eq]);
+        self.vm.state.env.set(
+            smol_str::SmolStr::from(actual_name),
+            wasmsh_state::ShellVar {
+                value: wasmsh_state::VarValue::Scalar(target_value),
+                exported: false,
+                readonly: false,
+                integer: false,
+                nameref: true,
+            },
+        );
     }
 
     fn should_stop_execution(&self) -> bool {
@@ -1705,11 +1719,21 @@ impl WorkerRuntime {
         }
     }
 
+    /// Expand a word value via command substitution and word expansion.
+    fn expand_assignment_value(&mut self, value: Option<&wasmsh_ast::Word>) -> String {
+        if let Some(w) = value {
+            let resolved = self.resolve_command_subst(std::slice::from_ref(w));
+            wasmsh_expand::expand_word(&resolved[0], &mut self.vm.state)
+        } else {
+            String::new()
+        }
+    }
+
     /// Execute a variable assignment, handling array syntax:
-    /// - `name=(val1 val2 ...)` — indexed array compound assignment
-    /// - `name[idx]=val` — single element assignment
-    /// - `name+=(val1 val2 ...)` — array append
-    /// - Plain `name=val` — scalar assignment
+    /// - `name=(val1 val2 ...)` -- indexed array compound assignment
+    /// - `name[idx]=val` -- single element assignment
+    /// - `name+=(val1 val2 ...)` -- array append
+    /// - Plain `name=val` -- scalar assignment
     fn execute_assignment(
         &mut self,
         raw_name: &smol_str::SmolStr,
@@ -1730,12 +1754,7 @@ impl WorkerRuntime {
             if name_str.ends_with(']') {
                 let base = &name_str[..bracket_pos];
                 let index = &name_str[bracket_pos + 1..name_str.len() - 1];
-                let val = if let Some(w) = value {
-                    let resolved = self.resolve_command_subst(std::slice::from_ref(w));
-                    wasmsh_expand::expand_word(&resolved[0], &mut self.vm.state)
-                } else {
-                    String::new()
-                };
+                let val = self.expand_assignment_value(value);
                 self.vm
                     .state
                     .set_array_element(smol_str::SmolStr::from(base), index, val.into());
@@ -1743,49 +1762,11 @@ impl WorkerRuntime {
             }
         }
 
-        // Expand the value
-        let val_str = if let Some(w) = value {
-            let resolved = self.resolve_command_subst(std::slice::from_ref(w));
-            wasmsh_expand::expand_word(&resolved[0], &mut self.vm.state)
-        } else {
-            String::new()
-        };
+        let val_str = self.expand_assignment_value(value);
 
-        // Check for compound array assignment: value starts with '(' and ends with ')'
+        // Compound array assignment: value starts with '(' and ends with ')'
         if val_str.starts_with('(') && val_str.ends_with(')') {
-            let inner = &val_str[1..val_str.len() - 1];
-            let elements = Self::parse_array_elements(inner);
-            let name_key = smol_str::SmolStr::from(name_str);
-
-            if is_append {
-                self.vm.state.append_array(name_str, elements);
-            } else {
-                // Check if this is an associative array assignment: [key]=val pairs
-                let has_assoc_syntax =
-                    !elements.is_empty() && inner.contains('[') && inner.contains("]=");
-
-                if has_assoc_syntax {
-                    // Parse as associative array: [key1]=val1 [key2]=val2
-                    self.vm.state.init_assoc_array(name_key.clone());
-                    for pair in Self::parse_assoc_pairs(inner) {
-                        self.vm.state.set_array_element(
-                            name_key.clone(),
-                            &pair.0,
-                            smol_str::SmolStr::from(pair.1.as_str()),
-                        );
-                    }
-                } else {
-                    // Indexed array
-                    self.vm.state.init_indexed_array(name_key.clone());
-                    for (i, elem) in elements.iter().enumerate() {
-                        self.vm.state.set_array_element(
-                            name_key.clone(),
-                            &i.to_string(),
-                            elem.clone(),
-                        );
-                    }
-                }
-            }
+            self.assign_compound_array(name_str, &val_str, is_append);
             return;
         }
 
@@ -1812,6 +1793,37 @@ impl WorkerRuntime {
         self.vm
             .state
             .set_var(smol_str::SmolStr::from(name_str), final_val.into());
+    }
+
+    /// Assign a compound array value `(...)` to a variable.
+    fn assign_compound_array(&mut self, name_str: &str, val_str: &str, is_append: bool) {
+        let inner = &val_str[1..val_str.len() - 1];
+        let elements = Self::parse_array_elements(inner);
+        let name_key = smol_str::SmolStr::from(name_str);
+
+        if is_append {
+            self.vm.state.append_array(name_str, elements);
+            return;
+        }
+
+        let has_assoc_syntax = !elements.is_empty() && inner.contains('[') && inner.contains("]=");
+        if has_assoc_syntax {
+            self.vm.state.init_assoc_array(name_key.clone());
+            for pair in Self::parse_assoc_pairs(inner) {
+                self.vm.state.set_array_element(
+                    name_key.clone(),
+                    &pair.0,
+                    smol_str::SmolStr::from(pair.1.as_str()),
+                );
+            }
+        } else {
+            self.vm.state.init_indexed_array(name_key.clone());
+            for (i, elem) in elements.iter().enumerate() {
+                self.vm
+                    .state
+                    .set_array_element(name_key.clone(), &i.to_string(), elem.clone());
+            }
+        }
     }
 
     /// Parse space-separated array elements from the inner content of `(...)`.
@@ -2299,79 +2311,24 @@ fn dbl_bracket_eval_primary(
         return result;
     }
 
-    // Unary operators: -z, -n, -f, -d, -e, -s, -r, -w, -x
-    if *pos + 1 < tokens.len() {
-        let op = &tokens[*pos];
-        if op.starts_with('-') && op.len() == 2 {
-            let flag = op.as_bytes()[1];
-            match flag {
-                b'z' | b'n' => {
-                    *pos += 1;
-                    let arg = &tokens[*pos];
-                    *pos += 1;
-                    return match flag {
-                        b'z' => arg.is_empty(),
-                        b'n' => !arg.is_empty(),
-                        _ => unreachable!(),
-                    };
-                }
-                b'f' | b'd' | b'e' | b's' | b'r' | b'w' | b'x' => {
-                    // Check if this is truly a unary file test (not a binary comparison
-                    // where the LHS starts with -). If there's a binary operator after the
-                    // next token, treat the current token as a string operand instead.
-                    if *pos + 2 < tokens.len() && is_binary_op(&tokens[*pos + 2]) {
-                        // Fall through to binary handling below
-                    } else {
-                        *pos += 1;
-                        let path_str = &tokens[*pos];
-                        *pos += 1;
-                        return eval_file_test(flag, path_str, fs);
-                    }
-                }
-                _ => {}
-            }
-        }
+    // Try unary operator
+    if let Some(result) = dbl_bracket_try_unary(tokens, pos, fs) {
+        return result;
     }
 
-    // Single unary: -z or -n with no following token means empty-string test
-    if *pos < tokens.len() && *pos + 1 == tokens.len() {
+    // Single remaining token: true if non-empty
+    if *pos + 1 == tokens.len() {
         let arg = &tokens[*pos];
         *pos += 1;
-        // Single string: true if non-empty
         return !arg.is_empty();
     }
 
-    // Binary operators: check if token at pos+1 is a binary op
-    if *pos + 2 <= tokens.len() {
-        // Peek at the operator position
-        let op_idx = *pos + 1;
-        if op_idx < tokens.len() && is_binary_op(&tokens[op_idx]) {
-            let lhs = tokens[*pos].clone();
-            *pos += 1;
-            let op = tokens[*pos].clone();
-            *pos += 1;
-
-            // For =~, the RHS is the entire remaining regex pattern (until &&, ||, or end).
-            // Parentheses are part of the regex, not grouping operators.
-            if op == "=~" && *pos < tokens.len() {
-                let mut rhs = String::new();
-                while *pos < tokens.len() && tokens[*pos] != "&&" && tokens[*pos] != "||" {
-                    rhs.push_str(&tokens[*pos]);
-                    *pos += 1;
-                }
-                return eval_binary_op(&lhs, &op, &rhs, state);
-            }
-
-            if *pos < tokens.len() {
-                let rhs = tokens[*pos].clone();
-                *pos += 1;
-                return eval_binary_op(&lhs, &op, &rhs, state);
-            }
-            return false;
-        }
+    // Try binary operator
+    if let Some(result) = dbl_bracket_try_binary(tokens, pos, state) {
+        return result;
     }
 
-    // Fallback: single string — true if non-empty
+    // Fallback: single string -- true if non-empty
     if *pos < tokens.len() {
         let s = &tokens[*pos];
         *pos += 1;
@@ -2379,6 +2336,77 @@ fn dbl_bracket_eval_primary(
     }
 
     false
+}
+
+/// Try to evaluate a unary test (`-z`, `-n`, `-f`, etc.). Returns `None` if not a unary op.
+fn dbl_bracket_try_unary(tokens: &[String], pos: &mut usize, fs: &MemoryFs) -> Option<bool> {
+    if *pos + 1 >= tokens.len() {
+        return None;
+    }
+    let op = &tokens[*pos];
+    if !op.starts_with('-') || op.len() != 2 {
+        return None;
+    }
+    let flag = op.as_bytes()[1];
+    match flag {
+        b'z' | b'n' => {
+            *pos += 1;
+            let arg = &tokens[*pos];
+            *pos += 1;
+            Some(if flag == b'z' {
+                arg.is_empty()
+            } else {
+                !arg.is_empty()
+            })
+        }
+        b'f' | b'd' | b'e' | b's' | b'r' | b'w' | b'x' => {
+            // If a binary operator follows the next token, this is not a unary file test.
+            if *pos + 2 < tokens.len() && is_binary_op(&tokens[*pos + 2]) {
+                return None;
+            }
+            *pos += 1;
+            let path_str = &tokens[*pos];
+            *pos += 1;
+            Some(eval_file_test(flag, path_str, fs))
+        }
+        _ => None,
+    }
+}
+
+/// Try to evaluate a binary test. Returns `None` if no binary op at pos+1.
+fn dbl_bracket_try_binary(
+    tokens: &[String],
+    pos: &mut usize,
+    state: &mut ShellState,
+) -> Option<bool> {
+    if *pos + 2 > tokens.len() {
+        return None;
+    }
+    let op_idx = *pos + 1;
+    if op_idx >= tokens.len() || !is_binary_op(&tokens[op_idx]) {
+        return None;
+    }
+    let lhs = tokens[*pos].clone();
+    *pos += 1;
+    let op = tokens[*pos].clone();
+    *pos += 1;
+
+    // For =~, the RHS extends until &&, ||, or end of tokens.
+    if op == "=~" && *pos < tokens.len() {
+        let mut rhs = String::new();
+        while *pos < tokens.len() && tokens[*pos] != "&&" && tokens[*pos] != "||" {
+            rhs.push_str(&tokens[*pos]);
+            *pos += 1;
+        }
+        return Some(eval_binary_op(&lhs, &op, &rhs, state));
+    }
+
+    if *pos < tokens.len() {
+        let rhs = tokens[*pos].clone();
+        *pos += 1;
+        return Some(eval_binary_op(&lhs, &op, &rhs, state));
+    }
+    Some(false)
 }
 
 /// Check whether a token is a binary operator in `[[ ]]` context.
@@ -2391,74 +2419,56 @@ fn is_binary_op(s: &str) -> bool {
 
 /// Evaluate a binary operation.
 fn eval_binary_op(lhs: &str, op: &str, rhs: &str, state: &mut ShellState) -> bool {
-    let nocasematch = state.get_var("SHOPT_nocasematch").as_deref() == Some("1");
     match op {
-        "==" | "=" => {
-            // RHS is a glob pattern
-            if nocasematch {
-                glob_match_inner(rhs.to_lowercase().as_bytes(), lhs.to_lowercase().as_bytes())
-            } else {
-                glob_match_inner(rhs.as_bytes(), lhs.as_bytes())
-            }
-        }
-        "!=" => {
-            if nocasematch {
-                !glob_match_inner(rhs.to_lowercase().as_bytes(), lhs.to_lowercase().as_bytes())
-            } else {
-                !glob_match_inner(rhs.as_bytes(), lhs.as_bytes())
-            }
-        }
-        "=~" => {
-            // Regex match with capture group support for BASH_REMATCH.
-            let captures = regex_match_with_captures(lhs, rhs);
-            let br_name = smol_str::SmolStr::from("BASH_REMATCH");
-            if let Some(caps) = captures {
-                state.init_indexed_array(br_name.clone());
-                for (i, cap) in caps.iter().enumerate() {
-                    state.set_array_element(
-                        br_name.clone(),
-                        &i.to_string(),
-                        smol_str::SmolStr::from(cap.as_str()),
-                    );
-                }
-                true
-            } else {
-                state.init_indexed_array(br_name);
-                false
-            }
-        }
+        "==" | "=" => glob_cmp(lhs, rhs, state, false),
+        "!=" => !glob_cmp(lhs, rhs, state, false),
+        "=~" => eval_regex_match(lhs, rhs, state),
         "<" => lhs < rhs,
         ">" => lhs > rhs,
-        "-eq" => {
-            let a: i64 = lhs.parse().unwrap_or(0);
-            let b: i64 = rhs.parse().unwrap_or(0);
-            a == b
-        }
-        "-ne" => {
-            let a: i64 = lhs.parse().unwrap_or(0);
-            let b: i64 = rhs.parse().unwrap_or(0);
-            a != b
-        }
-        "-lt" => {
-            let a: i64 = lhs.parse().unwrap_or(0);
-            let b: i64 = rhs.parse().unwrap_or(0);
-            a < b
-        }
-        "-le" => {
-            let a: i64 = lhs.parse().unwrap_or(0);
-            let b: i64 = rhs.parse().unwrap_or(0);
-            a <= b
-        }
-        "-gt" => {
-            let a: i64 = lhs.parse().unwrap_or(0);
-            let b: i64 = rhs.parse().unwrap_or(0);
-            a > b
-        }
-        "-ge" => {
-            let a: i64 = lhs.parse().unwrap_or(0);
-            let b: i64 = rhs.parse().unwrap_or(0);
-            a >= b
-        }
+        _ => eval_int_cmp(lhs, op, rhs),
+    }
+}
+
+/// Glob-compare lhs against rhs pattern, respecting nocasematch.
+fn glob_cmp(lhs: &str, rhs: &str, state: &ShellState, _negate: bool) -> bool {
+    let nocasematch = state.get_var("SHOPT_nocasematch").as_deref() == Some("1");
+    if nocasematch {
+        glob_match_inner(rhs.to_lowercase().as_bytes(), lhs.to_lowercase().as_bytes())
+    } else {
+        glob_match_inner(rhs.as_bytes(), lhs.as_bytes())
+    }
+}
+
+/// Evaluate a regex match (`=~`) with capture groups for `BASH_REMATCH`.
+fn eval_regex_match(lhs: &str, rhs: &str, state: &mut ShellState) -> bool {
+    let captures = regex_match_with_captures(lhs, rhs);
+    let br_name = smol_str::SmolStr::from("BASH_REMATCH");
+    let Some(caps) = captures else {
+        state.init_indexed_array(br_name);
+        return false;
+    };
+    state.init_indexed_array(br_name.clone());
+    for (i, cap) in caps.iter().enumerate() {
+        state.set_array_element(
+            br_name.clone(),
+            &i.to_string(),
+            smol_str::SmolStr::from(cap.as_str()),
+        );
+    }
+    true
+}
+
+/// Evaluate an integer comparison operator (`-eq`, `-ne`, `-lt`, `-le`, `-gt`, `-ge`).
+fn eval_int_cmp(lhs: &str, op: &str, rhs: &str) -> bool {
+    let a: i64 = lhs.parse().unwrap_or(0);
+    let b: i64 = rhs.parse().unwrap_or(0);
+    match op {
+        "-eq" => a == b,
+        "-ne" => a != b,
+        "-lt" => a < b,
+        "-le" => a <= b,
+        "-gt" => a > b,
+        "-ge" => a >= b,
         _ => false,
     }
 }
@@ -2479,64 +2489,55 @@ fn eval_file_test(flag: u8, path: &str, fs: &MemoryFs) -> bool {
     }
 }
 
+/// Strip anchoring from a regex pattern, returning (core, `anchored_start`, `anchored_end`).
+fn regex_strip_anchors(pattern: &str) -> (&str, bool, bool) {
+    let anchored_start = pattern.starts_with('^');
+    let anchored_end = pattern.ends_with('$') && !pattern.ends_with("\\$");
+    let core = match (anchored_start, anchored_end) {
+        (true, true) if pattern.len() >= 2 => &pattern[1..pattern.len() - 1],
+        (true, _) => &pattern[1..],
+        (_, true) => &pattern[..pattern.len() - 1],
+        _ => pattern,
+    };
+    (core, anchored_start, anchored_end)
+}
+
+/// Check if a regex core has any special regex metacharacters.
+fn has_regex_metachar(core: &str) -> bool {
+    core.contains('.')
+        || core.contains('+')
+        || core.contains('*')
+        || core.contains('?')
+        || core.contains('[')
+        || core.contains('(')
+        || core.contains('|')
+}
+
+/// Find match range for a literal pattern with anchoring.
+fn literal_match_range(text: &str, core: &str, start: bool, end: bool) -> Option<(usize, usize)> {
+    match (start, end) {
+        (true, true) if text == core => Some((0, text.len())),
+        (true, false) if text.starts_with(core) => Some((0, core.len())),
+        (false, true) if text.ends_with(core) => Some((text.len() - core.len(), text.len())),
+        (false, false) => text.find(core).map(|pos| (pos, pos + core.len())),
+        _ => None,
+    }
+}
+
 /// Regex match with capture group support.
 ///
 /// Returns `Some(captures)` if the pattern matches, where `captures[0]` is the
 /// full match and `captures[1..]` are the parenthesized subgroup matches.
 /// Returns `None` if no match.
 fn regex_match_with_captures(text: &str, pattern: &str) -> Option<Vec<String>> {
-    let anchored_start = pattern.starts_with('^');
-    let anchored_end = pattern.ends_with('$') && !pattern.ends_with("\\$");
+    let (core, anchored_start, anchored_end) = regex_strip_anchors(pattern);
 
-    let core = if anchored_start && anchored_end && pattern.len() >= 2 {
-        &pattern[1..pattern.len() - 1]
-    } else if anchored_start {
-        &pattern[1..]
-    } else if anchored_end {
-        &pattern[..pattern.len() - 1]
-    } else {
-        pattern
-    };
-
-    // Check if pattern has capture groups
-    // If pattern has no special regex chars and no groups, fall back to literal
-    let has_special = core.contains('.')
-        || core.contains('+')
-        || core.contains('*')
-        || core.contains('?')
-        || core.contains('[')
-        || core.contains('(')
-        || core.contains('|');
-
-    if !has_special {
-        // Pure literal matching with anchoring
-        let matched_range = if anchored_start && anchored_end {
-            if text == core {
-                Some((0, text.len()))
-            } else {
-                None
-            }
-        } else if anchored_start {
-            if text.starts_with(core) {
-                Some((0, core.len()))
-            } else {
-                None
-            }
-        } else if anchored_end {
-            if text.ends_with(core) {
-                Some((text.len() - core.len(), text.len()))
-            } else {
-                None
-            }
-        } else {
-            text.find(core).map(|pos| (pos, pos + core.len()))
-        };
-
-        return matched_range.map(|(start, end)| vec![text[start..end].to_string()]);
+    if !has_regex_metachar(core) {
+        return literal_match_range(text, core, anchored_start, anchored_end)
+            .map(|(s, e)| vec![text[s..e].to_string()]);
     }
 
     // Use the backtracking matcher with capture support.
-    // `captures` stores (start, end) pairs for each parenthesized group.
     let start_range = if anchored_start {
         0..=0
     } else {
@@ -2935,43 +2936,14 @@ fn split_alternatives_bytes(pat: &[u8]) -> Vec<Vec<u8>> {
 /// This avoids pulling in a regex crate for wasm32.
 #[allow(dead_code)]
 fn simple_regex_match(text: &str, pattern: &str) -> bool {
-    let anchored_start = pattern.starts_with('^');
-    let anchored_end = pattern.ends_with('$');
+    let (core, anchored_start, anchored_end) = regex_strip_anchors(pattern);
 
-    let core = if anchored_start && anchored_end && pattern.len() >= 2 {
-        &pattern[1..pattern.len() - 1]
-    } else if anchored_start {
-        &pattern[1..]
-    } else if anchored_end {
-        &pattern[..pattern.len() - 1]
-    } else {
-        pattern
-    };
-
-    // Handle . (any char) and .* (any sequence) in the core pattern
-    // For simplicity, convert simple regex tokens to a glob-like match
-    if core.contains('.')
-        || core.contains('+')
-        || core.contains('*')
-        || core.contains('?')
-        || core.contains('[')
-        || core.contains('(')
-        || core.contains('|')
-    {
-        // Build a simple NFA-style character-by-character matcher
+    if has_regex_metachar(core) {
         return regex_like_match(text, pattern);
     }
 
     // Pure literal matching with anchoring
-    if anchored_start && anchored_end {
-        text == core
-    } else if anchored_start {
-        text.starts_with(core)
-    } else if anchored_end {
-        text.ends_with(core)
-    } else {
-        text.contains(core)
-    }
+    literal_match_range(text, core, anchored_start, anchored_end).is_some()
 }
 
 /// A simple regex-like matcher supporting: `.` (any char), `*` (zero or more of previous),
@@ -2980,29 +2952,12 @@ fn simple_regex_match(text: &str, pattern: &str) -> bool {
 /// This is intentionally limited but handles common bash `=~` patterns.
 #[allow(dead_code)]
 fn regex_like_match(text: &str, pattern: &str) -> bool {
-    let anchored_start = pattern.starts_with('^');
-    let anchored_end = pattern.ends_with('$');
-
-    let core = if anchored_start && anchored_end && pattern.len() >= 2 {
-        &pattern[1..pattern.len() - 1]
-    } else if anchored_start {
-        &pattern[1..]
-    } else if anchored_end {
-        &pattern[..pattern.len() - 1]
-    } else {
-        pattern
-    };
+    let (core, anchored_start, anchored_end) = regex_strip_anchors(pattern);
 
     if anchored_start {
         regex_match_at(text, 0, core, anchored_end)
     } else {
-        // Try matching at every position (unanchored)
-        for start in 0..=text.len() {
-            if regex_match_at(text, start, core, anchored_end) {
-                return true;
-            }
-        }
-        false
+        (0..=text.len()).any(|start| regex_match_at(text, start, core, anchored_end))
     }
 }
 
@@ -3113,6 +3068,37 @@ fn parse_regex_elem(pat: &[u8], pi: usize) -> (usize, Box<dyn Fn(u8) -> bool>) {
     }
 }
 
+/// Match a glob character class `[...]` at position `pi` (just past the `[`).
+/// Returns `(new_pi, matched)` where `new_pi` is past the `]`.
+fn glob_match_char_class(pattern: &[u8], mut pi: usize, ch: u8) -> (usize, bool) {
+    let negate = pi < pattern.len() && (pattern[pi] == b'!' || pattern[pi] == b'^');
+    if negate {
+        pi += 1;
+    }
+    let mut matched = false;
+    let mut first = true;
+    while pi < pattern.len() && (first || pattern[pi] != b']') {
+        first = false;
+        if pi + 2 < pattern.len() && pattern[pi + 1] == b'-' {
+            let lo = pattern[pi];
+            let hi = pattern[pi + 2];
+            if ch >= lo && ch <= hi {
+                matched = true;
+            }
+            pi += 3;
+        } else {
+            if pattern[pi] == ch {
+                matched = true;
+            }
+            pi += 1;
+        }
+    }
+    if pi < pattern.len() && pattern[pi] == b']' {
+        pi += 1;
+    }
+    (pi, matched != negate)
+}
+
 /// Core glob pattern matching (byte-level).
 ///
 /// Supports `*` (any sequence), `?` (one char), and `[abc]` (character class).
@@ -3131,45 +3117,16 @@ fn glob_match_inner(pattern: &[u8], name: &[u8]) -> bool {
             star_ni = ni;
             pi += 1;
         } else if pi < pattern.len() && pattern[pi] == b'[' {
-            // Character class
-            pi += 1;
-            let negate = pi < pattern.len() && (pattern[pi] == b'!' || pattern[pi] == b'^');
-            if negate {
-                pi += 1;
-            }
-            let mut matched = false;
-            let mut first = true;
-            while pi < pattern.len() && (first || pattern[pi] != b']') {
-                first = false;
-                if pi + 2 < pattern.len() && pattern[pi + 1] == b'-' {
-                    // Range: [a-z]
-                    let lo = pattern[pi];
-                    let hi = pattern[pi + 2];
-                    if name[ni] >= lo && name[ni] <= hi {
-                        matched = true;
-                    }
-                    pi += 3;
-                } else {
-                    if pattern[pi] == name[ni] {
-                        matched = true;
-                    }
-                    pi += 1;
-                }
-            }
-            if pi < pattern.len() && pattern[pi] == b']' {
-                pi += 1;
-            }
-            if matched == negate {
-                // Match failed
-                if star_pi != usize::MAX {
-                    pi = star_pi + 1;
-                    star_ni += 1;
-                    ni = star_ni;
-                } else {
-                    return false;
-                }
-            } else {
+            let (new_pi, class_matched) = glob_match_char_class(pattern, pi + 1, name[ni]);
+            pi = new_pi;
+            if class_matched {
                 ni += 1;
+            } else if star_pi != usize::MAX {
+                pi = star_pi + 1;
+                star_ni += 1;
+                ni = star_ni;
+            } else {
+                return false;
             }
         } else if pi < pattern.len() && pattern[pi] == name[ni] {
             pi += 1;
