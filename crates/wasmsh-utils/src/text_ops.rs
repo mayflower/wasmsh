@@ -447,58 +447,109 @@ pub(crate) fn util_tee(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     status
 }
 
-pub(crate) fn util_paste(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
-    let mut delimiter = "\t".to_string();
-    let mut serial = false;
+struct PasteFlags {
+    delimiter: String,
+    serial: bool,
+}
 
-    // Parse flags
+fn parse_paste_flags<'a>(argv: &'a [&'a str]) -> (PasteFlags, &'a [&'a str]) {
+    let mut args = &argv[1..];
+    let mut flags = PasteFlags {
+        delimiter: "\t".to_string(),
+        serial: false,
+    };
+
     while let Some(arg) = args.first() {
         if *arg == "-d" && args.len() > 1 {
-            delimiter = args[1].to_string();
+            flags.delimiter = args[1].to_string();
             args = &args[2..];
         } else if *arg == "-s" {
-            serial = true;
+            flags.serial = true;
             args = &args[1..];
         } else if arg.starts_with('-') && arg.len() > 1 {
-            // Try combined flags like -sd or -ds
-            let flags = &arg[1..];
-            let mut consumed = true;
-            for c in flags.chars() {
-                match c {
-                    's' => serial = true,
-                    'd' => {
-                        // -d requires next arg as delimiter
-                        if args.len() > 1 {
-                            delimiter = args[1].to_string();
-                            args = &args[1..];
-                        }
-                    }
-                    _ => {
-                        consumed = false;
-                        break;
-                    }
-                }
-            }
-            if consumed {
-                args = &args[1..];
-            } else {
+            if !parse_paste_bundled(arg, args, &mut flags) {
                 break;
             }
+            args = &args[1..];
         } else {
             break;
         }
     }
+    (flags, args)
+}
+
+/// Parse bundled paste flags like `-sd`. Returns `false` if an unknown flag was found.
+fn parse_paste_bundled<'a>(arg: &str, args: &[&'a str], flags: &mut PasteFlags) -> bool {
+    for c in arg[1..].chars() {
+        match c {
+            's' => flags.serial = true,
+            'd' => {
+                if args.len() > 1 {
+                    flags.delimiter = args[1].to_string();
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn paste_read_files(ctx: &mut UtilContext<'_>, args: &[&str]) -> Result<Vec<Vec<String>>, i32> {
+    let mut file_lines: Vec<Vec<String>> = Vec::new();
+    for path in args {
+        let lines = if *path == "-" {
+            let text = ctx
+                .stdin
+                .map(|d| String::from_utf8_lossy(d).to_string())
+                .unwrap_or_default();
+            text.lines().map(String::from).collect()
+        } else {
+            let full = resolve_path(ctx.cwd, path);
+            match read_text(ctx.fs, &full) {
+                Ok(text) => text.lines().map(String::from).collect(),
+                Err(e) => {
+                    emit_error(ctx.output, "paste", path, &e);
+                    return Err(1);
+                }
+            }
+        };
+        file_lines.push(lines);
+    }
+    Ok(file_lines)
+}
+
+fn paste_serial(ctx: &mut UtilContext<'_>, file_lines: &[Vec<String>], delimiter: &str) {
+    for lines in file_lines {
+        let joined = lines.join(delimiter);
+        ctx.output.stdout(joined.as_bytes());
+        ctx.output.stdout(b"\n");
+    }
+}
+
+fn paste_merge(ctx: &mut UtilContext<'_>, file_lines: &[Vec<String>], delimiter: &str) {
+    let max_lines = file_lines.iter().map(Vec::len).max().unwrap_or(0);
+    for i in 0..max_lines {
+        for (fi, lines) in file_lines.iter().enumerate() {
+            if fi > 0 {
+                ctx.output.stdout(delimiter.as_bytes());
+            }
+            if let Some(line) = lines.get(i) {
+                ctx.output.stdout(line.as_bytes());
+            }
+        }
+        ctx.output.stdout(b"\n");
+    }
+}
+
+pub(crate) fn util_paste(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (flags, args) = parse_paste_flags(argv);
 
     if args.is_empty() {
-        // Read from stdin
-        let text = if let Some(data) = ctx.stdin {
-            String::from_utf8_lossy(data).to_string()
-        } else {
+        let Some(data) = ctx.stdin else {
             ctx.output.stderr(b"paste: missing operand\n");
             return 1;
         };
-        // Just pass through stdin
+        let text = String::from_utf8_lossy(data);
         ctx.output.stdout(text.as_bytes());
         if !text.ends_with('\n') {
             ctx.output.stdout(b"\n");
@@ -506,52 +557,15 @@ pub(crate) fn util_paste(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         return 0;
     }
 
-    // Read all files
-    let mut file_lines: Vec<Vec<String>> = Vec::new();
-    for path in args {
-        if *path == "-" {
-            // Read from stdin
-            let text = if let Some(data) = ctx.stdin {
-                String::from_utf8_lossy(data).to_string()
-            } else {
-                String::new()
-            };
-            file_lines.push(text.lines().map(String::from).collect());
-        } else {
-            let full = resolve_path(ctx.cwd, path);
-            match read_text(ctx.fs, &full) {
-                Ok(text) => {
-                    file_lines.push(text.lines().map(String::from).collect());
-                }
-                Err(e) => {
-                    emit_error(ctx.output, "paste", path, &e);
-                    return 1;
-                }
-            }
-        }
-    }
+    let file_lines = match paste_read_files(ctx, args) {
+        Ok(fl) => fl,
+        Err(status) => return status,
+    };
 
-    if serial {
-        // Serial mode: each file's lines on one output line
-        for lines in &file_lines {
-            let joined = lines.join(&delimiter);
-            ctx.output.stdout(joined.as_bytes());
-            ctx.output.stdout(b"\n");
-        }
+    if flags.serial {
+        paste_serial(ctx, &file_lines, &flags.delimiter);
     } else {
-        // Normal mode: merge corresponding lines
-        let max_lines = file_lines.iter().map(Vec::len).max().unwrap_or(0);
-        for i in 0..max_lines {
-            for (fi, lines) in file_lines.iter().enumerate() {
-                if fi > 0 {
-                    ctx.output.stdout(delimiter.as_bytes());
-                }
-                if let Some(line) = lines.get(i) {
-                    ctx.output.stdout(line.as_bytes());
-                }
-            }
-            ctx.output.stdout(b"\n");
-        }
+        paste_merge(ctx, &file_lines, &flags.delimiter);
     }
     0
 }
@@ -734,6 +748,36 @@ fn parse_bat_range(s: &str) -> Option<(Option<usize>, Option<usize>)> {
     }
 }
 
+fn bat_in_range(line_num: usize, range: Option<(Option<usize>, Option<usize>)>) -> bool {
+    let Some((start, end)) = range else {
+        return true;
+    };
+    if start.is_some_and(|s| line_num < s) {
+        return false;
+    }
+    end.is_none_or(|e| line_num <= e)
+}
+
+fn bat_emit_chrome(
+    ctx: &mut UtilContext<'_>,
+    filename: Option<&str>,
+    rule_left: &str,
+    rule_right: &str,
+) {
+    let top_corner = "\u{252C}";
+    let mid_corner = "\u{253C}";
+    let vert = "\u{2502}";
+
+    let header_line = format!("{rule_left}{top_corner}{rule_right}\n");
+    ctx.output.stdout(header_line.as_bytes());
+    if let Some(name) = filename {
+        let file_line = format!("       {vert} File: {name}\n");
+        ctx.output.stdout(file_line.as_bytes());
+    }
+    let sep_line = format!("{rule_left}{mid_corner}{rule_right}\n");
+    ctx.output.stdout(sep_line.as_bytes());
+}
+
 fn bat_output(
     ctx: &mut UtilContext<'_>,
     filename: Option<&str>,
@@ -744,41 +788,18 @@ fn bat_output(
     show_all: bool,
 ) {
     let separator = "\u{2500}";
-    let top_corner = "\u{252C}";
-    let mid_corner = "\u{253C}";
-    let bot_corner = "\u{2534}";
     let vert = "\u{2502}";
-
     let rule_left: String = separator.repeat(7);
     let rule_right: String = separator.repeat(20);
 
     if show_header {
-        let header_line = format!("{rule_left}{top_corner}{rule_right}\n");
-        ctx.output.stdout(header_line.as_bytes());
-        if let Some(name) = filename {
-            let file_line = format!("       {vert} File: {name}\n");
-            ctx.output.stdout(file_line.as_bytes());
-        }
-        let sep_line = format!("{rule_left}{mid_corner}{rule_right}\n");
-        ctx.output.stdout(sep_line.as_bytes());
+        bat_emit_chrome(ctx, filename, &rule_left, &rule_right);
     }
 
-    let lines: Vec<&str> = text.lines().collect();
-    for (i, line) in lines.iter().enumerate() {
+    for (i, line) in text.lines().enumerate() {
         let line_num = i + 1;
-
-        // Apply line range filter
-        if let Some((start, end)) = line_range {
-            if let Some(s) = start {
-                if line_num < s {
-                    continue;
-                }
-            }
-            if let Some(e) = end {
-                if line_num > e {
-                    continue;
-                }
-            }
+        if !bat_in_range(line_num, line_range) {
+            continue;
         }
 
         let display_line = if show_all {
@@ -787,16 +808,16 @@ fn bat_output(
             line.to_string()
         };
 
-        if show_numbers {
-            let out = format!("{line_num:>5}   {vert} {display_line}\n");
-            ctx.output.stdout(out.as_bytes());
+        let out = if show_numbers {
+            format!("{line_num:>5}   {vert} {display_line}\n")
         } else {
-            let out = format!("{display_line}\n");
-            ctx.output.stdout(out.as_bytes());
-        }
+            format!("{display_line}\n")
+        };
+        ctx.output.stdout(out.as_bytes());
     }
 
     if show_header {
+        let bot_corner = "\u{2534}";
         let footer = format!("{rule_left}{bot_corner}{rule_right}\n");
         ctx.output.stdout(footer.as_bytes());
     }
@@ -820,18 +841,24 @@ fn make_visible(s: &str) -> String {
     out
 }
 
-pub(crate) fn util_column(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
-    let mut table_mode = false;
-    let mut input_delim: Option<String> = None;
+struct ColumnFlags {
+    table_mode: bool,
+    input_delim: Option<String>,
+}
 
-    // Parse flags
+fn parse_column_flags<'a>(argv: &'a [&'a str]) -> (ColumnFlags, &'a [&'a str]) {
+    let mut args = &argv[1..];
+    let mut flags = ColumnFlags {
+        table_mode: false,
+        input_delim: None,
+    };
+
     while let Some(arg) = args.first() {
         if *arg == "-t" {
-            table_mode = true;
+            flags.table_mode = true;
             args = &args[1..];
         } else if *arg == "-s" && args.len() > 1 {
-            input_delim = Some(args[1].to_string());
+            flags.input_delim = Some(args[1].to_string());
             args = &args[2..];
         } else if arg.starts_with('-') && arg.len() > 1 {
             args = &args[1..];
@@ -839,63 +866,63 @@ pub(crate) fn util_column(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             break;
         }
     }
+    (flags, args)
+}
 
+fn column_table_output(ctx: &mut UtilContext<'_>, text: &str, input_delim: Option<&String>) {
+    let rows: Vec<Vec<&str>> = text
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|line| {
+            if let Some(d) = input_delim {
+                line.split(d.as_str()).collect()
+            } else {
+                line.split_whitespace().collect()
+            }
+        })
+        .collect();
+
+    if rows.is_empty() {
+        return;
+    }
+
+    let max_cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut col_widths = vec![0usize; max_cols];
+    for row in &rows {
+        for (i, field) in row.iter().enumerate() {
+            col_widths[i] = col_widths[i].max(field.len());
+        }
+    }
+
+    for row in &rows {
+        let mut line = String::new();
+        for (i, field) in row.iter().enumerate() {
+            if i > 0 {
+                line.push_str("  ");
+            }
+            line.push_str(field);
+            if i < row.len() - 1 {
+                let padding = col_widths[i].saturating_sub(field.len());
+                for _ in 0..padding {
+                    line.push(' ');
+                }
+            }
+        }
+        line.push('\n');
+        ctx.output.stdout(line.as_bytes());
+    }
+}
+
+pub(crate) fn util_column(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (flags, args) = parse_column_flags(argv);
     let text = get_input_text(ctx, args);
     if text.is_empty() {
         return 0;
     }
 
-    if table_mode {
-        // Split each line into fields and align columns
-        let rows: Vec<Vec<&str>> = text
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(|line| {
-                if let Some(ref d) = input_delim {
-                    line.split(d.as_str()).collect()
-                } else {
-                    line.split_whitespace().collect()
-                }
-            })
-            .collect();
-
-        if rows.is_empty() {
-            return 0;
-        }
-
-        // Compute maximum width for each column
-        let max_cols = rows.iter().map(Vec::len).max().unwrap_or(0);
-        let mut col_widths = vec![0usize; max_cols];
-        for row in &rows {
-            for (i, field) in row.iter().enumerate() {
-                col_widths[i] = col_widths[i].max(field.len());
-            }
-        }
-
-        // Output aligned table
-        for row in &rows {
-            let mut line = String::new();
-            for (i, field) in row.iter().enumerate() {
-                if i > 0 {
-                    line.push_str("  ");
-                }
-                if i < row.len() - 1 {
-                    // Left-align and pad
-                    line.push_str(field);
-                    let padding = col_widths[i].saturating_sub(field.len());
-                    for _ in 0..padding {
-                        line.push(' ');
-                    }
-                } else {
-                    // Last column: no trailing padding
-                    line.push_str(field);
-                }
-            }
-            line.push('\n');
-            ctx.output.stdout(line.as_bytes());
-        }
+    if flags.table_mode {
+        column_table_output(ctx, &text, flags.input_delim.as_ref());
     } else {
-        // Simple mode: just pass through
         ctx.output.stdout(text.as_bytes());
         if !text.ends_with('\n') {
             ctx.output.stdout(b"\n");

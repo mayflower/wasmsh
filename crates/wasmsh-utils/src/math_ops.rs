@@ -501,9 +501,55 @@ impl<'a> BcParser<'a> {
         }
     }
 
+    fn parse_cond_and_block(&mut self, ibase: i32) -> Option<(BcExpr, Vec<BcStmt>)> {
+        self.skip_ws();
+        self.eat(b'(');
+        let cond = self.parse_expr(ibase)?;
+        self.eat(b')');
+        let body = self.parse_block(ibase);
+        Some((cond, body))
+    }
+
+    #[allow(clippy::unnecessary_wraps)]
+    fn parse_for_stmt(&mut self, ibase: i32) -> Option<BcStmt> {
+        self.skip_ws();
+        self.eat(b'(');
+        let init = self
+            .parse_stmt(ibase)
+            .unwrap_or(BcStmt::Expr(BcExpr::Num(0.0)));
+        self.eat(b';');
+        let cond = self.parse_expr(ibase).unwrap_or(BcExpr::Num(1.0));
+        self.eat(b';');
+        let incr = self
+            .parse_stmt(ibase)
+            .unwrap_or(BcStmt::Expr(BcExpr::Num(0.0)));
+        self.eat(b')');
+        let body = self.parse_block(ibase);
+        Some(BcStmt::For(Box::new(init), cond, Box::new(incr), body))
+    }
+
+    fn parse_define_stmt(&mut self, ibase: i32) -> Option<BcStmt> {
+        self.skip_ws();
+        let name = self.parse_ident()?;
+        self.eat(b'(');
+        let mut params = Vec::new();
+        if !self.eat(b')') {
+            if let Some(p) = self.parse_ident() {
+                params.push(p);
+            }
+            while self.eat(b',') {
+                if let Some(p) = self.parse_ident() {
+                    params.push(p);
+                }
+            }
+            self.eat(b')');
+        }
+        let body = self.parse_block(ibase);
+        Some(BcStmt::FnDef(name, params, body))
+    }
+
     fn parse_stmt(&mut self, ibase: i32) -> Option<BcStmt> {
         self.skip_ws();
-        // Skip empty separators
         while self.pos < self.input.len()
             && (self.input.as_bytes()[self.pos] == b';' || self.input.as_bytes()[self.pos] == b'\n')
         {
@@ -515,75 +561,31 @@ impl<'a> BcParser<'a> {
             return None;
         }
 
-        // Check for keywords
         if self.eat_str("quit") {
             self.skip_separator();
             return Some(BcStmt::Quit);
         }
-
         if self.eat_str("if") {
-            self.skip_ws();
-            self.eat(b'(');
-            let cond = self.parse_expr(ibase)?;
-            self.eat(b')');
-            let body = self.parse_block(ibase);
+            let (cond, body) = self.parse_cond_and_block(ibase)?;
             return Some(BcStmt::If(cond, body));
         }
-
         if self.eat_str("while") {
-            self.skip_ws();
-            self.eat(b'(');
-            let cond = self.parse_expr(ibase)?;
-            self.eat(b')');
-            let body = self.parse_block(ibase);
+            let (cond, body) = self.parse_cond_and_block(ibase)?;
             return Some(BcStmt::While(cond, body));
         }
-
         if self.eat_str("for") {
-            self.skip_ws();
-            self.eat(b'(');
-            let init = self
-                .parse_stmt(ibase)
-                .unwrap_or(BcStmt::Expr(BcExpr::Num(0.0)));
-            self.eat(b';');
-            let cond = self.parse_expr(ibase).unwrap_or(BcExpr::Num(1.0));
-            self.eat(b';');
-            let incr = self
-                .parse_stmt(ibase)
-                .unwrap_or(BcStmt::Expr(BcExpr::Num(0.0)));
-            self.eat(b')');
-            let body = self.parse_block(ibase);
-            return Some(BcStmt::For(Box::new(init), cond, Box::new(incr), body));
+            return self.parse_for_stmt(ibase);
         }
-
         if self.eat_str("print") {
             self.skip_ws();
             let expr = self.parse_expr(ibase)?;
             self.skip_separator();
             return Some(BcStmt::Print(expr));
         }
-
         if self.eat_str("define") {
-            self.skip_ws();
-            let name = self.parse_ident()?;
-            self.eat(b'(');
-            let mut params = Vec::new();
-            if !self.eat(b')') {
-                if let Some(p) = self.parse_ident() {
-                    params.push(p);
-                }
-                while self.eat(b',') {
-                    if let Some(p) = self.parse_ident() {
-                        params.push(p);
-                    }
-                }
-                self.eat(b')');
-            }
-            let body = self.parse_block(ibase);
-            return Some(BcStmt::FnDef(name, params, body));
+            return self.parse_define_stmt(ibase);
         }
 
-        // Expression statement
         let expr = self.parse_expr(ibase)?;
         self.skip_separator();
         Some(BcStmt::Expr(expr))
@@ -610,6 +612,74 @@ fn bc_parse(input: &str) -> Vec<BcStmt> {
 // Expression evaluator
 // ---------------------------------------------------------------------------
 
+fn eval_binop(l: f64, op: BcOp, r: f64) -> Result<f64, String> {
+    match op {
+        BcOp::Add => Ok(l + r),
+        BcOp::Sub => Ok(l - r),
+        BcOp::Mul => Ok(l * r),
+        BcOp::Div => {
+            if r == 0.0 {
+                return Err("division by zero".to_string());
+            }
+            Ok(l / r)
+        }
+        BcOp::Mod => {
+            if r == 0.0 {
+                return Err("modulo by zero".to_string());
+            }
+            Ok(l % r)
+        }
+        BcOp::Pow => Ok(l.powf(r)),
+        BcOp::Eq => Ok(if (l - r).abs() < f64::EPSILON {
+            1.0
+        } else {
+            0.0
+        }),
+        BcOp::Ne => Ok(if (l - r).abs() >= f64::EPSILON {
+            1.0
+        } else {
+            0.0
+        }),
+        BcOp::Lt => Ok(if l < r { 1.0 } else { 0.0 }),
+        BcOp::Gt => Ok(if l > r { 1.0 } else { 0.0 }),
+        BcOp::Le => Ok(if l <= r { 1.0 } else { 0.0 }),
+        BcOp::Ge => Ok(if l >= r { 1.0 } else { 0.0 }),
+    }
+}
+
+fn assign_special_var(env: &mut BcEnv, name: &str, val: f64) {
+    match name {
+        "scale" => env.scale = val as i32,
+        "ibase" => {
+            let b = val as i32;
+            if (2..=16).contains(&b) {
+                env.ibase = b;
+            }
+        }
+        "obase" => {
+            let b = val as i32;
+            if (2..=16).contains(&b) {
+                env.obase = b;
+            }
+        }
+        _ => env.set_var(name, val),
+    }
+}
+
+fn eval_compound_assign(
+    ctx: &mut UtilContext<'_>,
+    env: &mut BcEnv,
+    name: &str,
+    op: BcOp,
+    rhs: &BcExpr,
+) -> Result<f64, String> {
+    let current = env.get_var(name);
+    let rval = compute(ctx, env, rhs)?;
+    let result = eval_binop(current, op, rval)?;
+    env.set_var(name, result);
+    Ok(result)
+}
+
 fn compute(ctx: &mut UtilContext<'_>, env: &mut BcEnv, expr: &BcExpr) -> Result<f64, String> {
     match expr {
         BcExpr::Num(n) => Ok(*n),
@@ -619,92 +689,18 @@ fn compute(ctx: &mut UtilContext<'_>, env: &mut BcEnv, expr: &BcExpr) -> Result<
             "obase" => Ok(f64::from(env.obase)),
             _ => Ok(env.get_var(name)),
         },
-        BcExpr::UnaryMinus(e) => {
-            let v = compute(ctx, env, e)?;
-            Ok(-v)
-        }
+        BcExpr::UnaryMinus(e) => Ok(-compute(ctx, env, e)?),
         BcExpr::BinOp(left, op, right) => {
             let l = compute(ctx, env, left)?;
             let r = compute(ctx, env, right)?;
-            match op {
-                BcOp::Add => Ok(l + r),
-                BcOp::Sub => Ok(l - r),
-                BcOp::Mul => Ok(l * r),
-                BcOp::Div => {
-                    if r == 0.0 {
-                        Err("division by zero".to_string())
-                    } else {
-                        Ok(l / r)
-                    }
-                }
-                BcOp::Mod => {
-                    if r == 0.0 {
-                        Err("modulo by zero".to_string())
-                    } else {
-                        Ok(l % r)
-                    }
-                }
-                BcOp::Pow => Ok(l.powf(r)),
-                BcOp::Eq => Ok(if (l - r).abs() < f64::EPSILON {
-                    1.0
-                } else {
-                    0.0
-                }),
-                BcOp::Ne => Ok(if (l - r).abs() >= f64::EPSILON {
-                    1.0
-                } else {
-                    0.0
-                }),
-                BcOp::Lt => Ok(if l < r { 1.0 } else { 0.0 }),
-                BcOp::Gt => Ok(if l > r { 1.0 } else { 0.0 }),
-                BcOp::Le => Ok(if l <= r { 1.0 } else { 0.0 }),
-                BcOp::Ge => Ok(if l >= r { 1.0 } else { 0.0 }),
-            }
+            eval_binop(l, *op, r)
         }
         BcExpr::Assign(name, rhs) => {
             let val = compute(ctx, env, rhs)?;
-            match name.as_str() {
-                "scale" => env.scale = val as i32,
-                "ibase" => {
-                    let b = val as i32;
-                    if (2..=16).contains(&b) {
-                        env.ibase = b;
-                    }
-                }
-                "obase" => {
-                    let b = val as i32;
-                    if (2..=16).contains(&b) {
-                        env.obase = b;
-                    }
-                }
-                _ => env.set_var(name, val),
-            }
+            assign_special_var(env, name, val);
             Ok(val)
         }
-        BcExpr::CompoundAssign(name, op, rhs) => {
-            let current = env.get_var(name);
-            let rval = compute(ctx, env, rhs)?;
-            let result = match op {
-                BcOp::Add => current + rval,
-                BcOp::Sub => current - rval,
-                BcOp::Mul => current * rval,
-                BcOp::Div => {
-                    if rval == 0.0 {
-                        return Err("division by zero".to_string());
-                    }
-                    current / rval
-                }
-                BcOp::Mod => {
-                    if rval == 0.0 {
-                        return Err("modulo by zero".to_string());
-                    }
-                    current % rval
-                }
-                _ => current,
-            };
-            env.set_var(name, result);
-            Ok(result)
-        }
+        BcExpr::CompoundAssign(name, op, rhs) => eval_compound_assign(ctx, env, name, *op, rhs),
         BcExpr::PreIncr(name) => {
             let v = env.get_var(name) + 1.0;
             env.set_var(name, v);
@@ -729,99 +725,94 @@ fn compute(ctx: &mut UtilContext<'_>, env: &mut BcEnv, expr: &BcExpr) -> Result<
     }
 }
 
+fn call_builtin(name: &str, arg_vals: &[f64], has_args: bool) -> Option<Result<f64, String>> {
+    let v = arg_vals.first().copied().unwrap_or(0.0);
+    match name {
+        "sqrt" => {
+            if v < 0.0 {
+                return Some(Err("sqrt of negative number".to_string()));
+            }
+            Some(Ok(v.sqrt()))
+        }
+        "length" => {
+            let s = format!("{v}");
+            let len = s.chars().filter(char::is_ascii_digit).count();
+            Some(Ok(len as f64))
+        }
+        "scale" if has_args => {
+            let s = format!("{v}");
+            let scale = s.find('.').map_or(0, |pos| s.len() - pos - 1);
+            Some(Ok(scale as f64))
+        }
+        _ => None,
+    }
+}
+
+fn call_math_lib(name: &str, arg_vals: &[f64]) -> Option<Result<f64, String>> {
+    let v = arg_vals.first().copied().unwrap_or(0.0);
+    match name {
+        "s" => Some(Ok(v.sin())),
+        "c" => Some(Ok(v.cos())),
+        "a" => Some(Ok(v.atan())),
+        "l" => {
+            if v <= 0.0 {
+                return Some(Err("log of non-positive number".to_string()));
+            }
+            Some(Ok(v.ln()))
+        }
+        "e" => Some(Ok(v.exp())),
+        _ => None,
+    }
+}
+
+fn call_user_function(
+    ctx: &mut UtilContext<'_>,
+    env: &mut BcEnv,
+    params: &[String],
+    body: &[BcStmt],
+    arg_vals: &[f64],
+) -> Result<f64, String> {
+    let saved: Vec<(String, f64)> = params.iter().map(|p| (p.clone(), env.get_var(p))).collect();
+    for (i, param) in params.iter().enumerate() {
+        env.set_var(param, arg_vals.get(i).copied().unwrap_or(0.0));
+    }
+    let mut result = 0.0;
+    for stmt in body {
+        if let BcStmt::Expr(ref e) = stmt {
+            result = compute(ctx, env, e)?;
+        } else {
+            bc_run(ctx, env, stmt)?;
+        }
+    }
+    for (vname, val) in saved {
+        env.set_var(&vname, val);
+    }
+    Ok(result)
+}
+
 fn call_function(
     ctx: &mut UtilContext<'_>,
     env: &mut BcEnv,
     name: &str,
     func_args: &[BcExpr],
 ) -> Result<f64, String> {
-    // Compute arguments
     let mut arg_vals = Vec::new();
     for a in func_args {
         arg_vals.push(compute(ctx, env, a)?);
     }
 
-    // Built-in functions
-    match name {
-        "sqrt" => {
-            let v = arg_vals.first().copied().unwrap_or(0.0);
-            if v < 0.0 {
-                return Err("sqrt of negative number".to_string());
-            }
-            return Ok(v.sqrt());
-        }
-        "length" => {
-            let v = arg_vals.first().copied().unwrap_or(0.0);
-            let s = format!("{v}");
-            let len = s.chars().filter(char::is_ascii_digit).count();
-            return Ok(len as f64);
-        }
-        "scale" if !func_args.is_empty() => {
-            let v = arg_vals.first().copied().unwrap_or(0.0);
-            let s = format!("{v}");
-            let scale = if let Some(pos) = s.find('.') {
-                s.len() - pos - 1
-            } else {
-                0
-            };
-            return Ok(scale as f64);
-        }
-        _ => {}
+    if let Some(result) = call_builtin(name, &arg_vals, !func_args.is_empty()) {
+        return result;
     }
-
-    // Math library functions
     if env.math_lib {
-        match name {
-            "s" => {
-                let v = arg_vals.first().copied().unwrap_or(0.0);
-                return Ok(v.sin());
-            }
-            "c" => {
-                let v = arg_vals.first().copied().unwrap_or(0.0);
-                return Ok(v.cos());
-            }
-            "a" => {
-                let v = arg_vals.first().copied().unwrap_or(0.0);
-                return Ok(v.atan());
-            }
-            "l" => {
-                let v = arg_vals.first().copied().unwrap_or(0.0);
-                if v <= 0.0 {
-                    return Err("log of non-positive number".to_string());
-                }
-                return Ok(v.ln());
-            }
-            "e" => {
-                let v = arg_vals.first().copied().unwrap_or(0.0);
-                return Ok(v.exp());
-            }
-            _ => {}
+        if let Some(result) = call_math_lib(name, &arg_vals) {
+            return result;
         }
     }
 
-    // User-defined functions
     let func = env.functions.iter().find(|(n, _, _)| n == name).cloned();
     if let Some((_, params, body)) = func {
-        // Set parameters as local vars
-        let saved: Vec<(String, f64)> =
-            params.iter().map(|p| (p.clone(), env.get_var(p))).collect();
-        for (i, param) in params.iter().enumerate() {
-            let val = arg_vals.get(i).copied().unwrap_or(0.0);
-            env.set_var(param, val);
-        }
-        let mut result = 0.0;
-        for stmt in &body {
-            if let BcStmt::Expr(ref e) = stmt {
-                result = compute(ctx, env, e)?;
-            } else {
-                bc_run(ctx, env, stmt)?;
-            }
-        }
-        // Restore saved vars
-        for (vname, val) in saved {
-            env.set_var(&vname, val);
-        }
-        return Ok(result);
+        return call_user_function(ctx, env, &params, &body, &arg_vals);
     }
 
     Err(format!("undefined function: {name}"))
@@ -881,14 +872,54 @@ fn i64_from_base(s: &str, base: i32) -> i64 {
     result
 }
 
+const BC_MAX_ITERATIONS: usize = 100_000;
+
+fn bc_run_block(ctx: &mut UtilContext<'_>, env: &mut BcEnv, body: &[BcStmt]) -> Result<(), String> {
+    for s in body {
+        bc_run(ctx, env, s)?;
+    }
+    Ok(())
+}
+
+fn bc_run_while(
+    ctx: &mut UtilContext<'_>,
+    env: &mut BcEnv,
+    cond: &BcExpr,
+    body: &[BcStmt],
+) -> Result<(), String> {
+    for _ in 0..BC_MAX_ITERATIONS {
+        if compute(ctx, env, cond)? == 0.0 {
+            return Ok(());
+        }
+        bc_run_block(ctx, env, body)?;
+    }
+    Err("infinite loop detected".to_string())
+}
+
+fn bc_run_for(
+    ctx: &mut UtilContext<'_>,
+    env: &mut BcEnv,
+    init: &BcStmt,
+    cond: &BcExpr,
+    incr: &BcStmt,
+    body: &[BcStmt],
+) -> Result<(), String> {
+    bc_run(ctx, env, init)?;
+    for _ in 0..BC_MAX_ITERATIONS {
+        if compute(ctx, env, cond)? == 0.0 {
+            return Ok(());
+        }
+        bc_run_block(ctx, env, body)?;
+        bc_run(ctx, env, incr)?;
+    }
+    Err("infinite loop detected".to_string())
+}
+
 fn bc_run(ctx: &mut UtilContext<'_>, env: &mut BcEnv, stmt: &BcStmt) -> Result<(), String> {
     match stmt {
         BcStmt::Expr(expr) => {
             let val = compute(ctx, env, expr)?;
-            // Only print if it's a top-level expression (not an assignment)
-            let should_print =
-                !matches!(expr, BcExpr::Assign(_, _) | BcExpr::CompoundAssign(_, _, _));
-            if should_print {
+            if !matches!(expr, BcExpr::Assign(_, _) | BcExpr::CompoundAssign(_, _, _)) {
                 let s = format!("{}\n", format_number(val, env.scale, env.obase));
                 ctx.output.stdout(s.as_bytes());
             }
@@ -899,47 +930,12 @@ fn bc_run(ctx: &mut UtilContext<'_>, env: &mut BcEnv, stmt: &BcStmt) -> Result<(
             ctx.output.stdout(s.as_bytes());
         }
         BcStmt::If(cond, body) => {
-            let val = compute(ctx, env, cond)?;
-            if val != 0.0 {
-                for s in body {
-                    bc_run(ctx, env, s)?;
-                }
+            if compute(ctx, env, cond)? != 0.0 {
+                bc_run_block(ctx, env, body)?;
             }
         }
-        BcStmt::While(cond, body) => {
-            let mut iterations = 0;
-            loop {
-                let val = compute(ctx, env, cond)?;
-                if val == 0.0 {
-                    break;
-                }
-                for s in body {
-                    bc_run(ctx, env, s)?;
-                }
-                iterations += 1;
-                if iterations > 100_000 {
-                    return Err("infinite loop detected".to_string());
-                }
-            }
-        }
-        BcStmt::For(init, cond, incr, body) => {
-            bc_run(ctx, env, init)?;
-            let mut iterations = 0;
-            loop {
-                let val = compute(ctx, env, cond)?;
-                if val == 0.0 {
-                    break;
-                }
-                for s in body {
-                    bc_run(ctx, env, s)?;
-                }
-                bc_run(ctx, env, incr)?;
-                iterations += 1;
-                if iterations > 100_000 {
-                    return Err("infinite loop detected".to_string());
-                }
-            }
-        }
+        BcStmt::While(cond, body) => bc_run_while(ctx, env, cond, body)?,
+        BcStmt::For(init, cond, incr, body) => bc_run_for(ctx, env, init, cond, incr, body)?,
         BcStmt::Quit => {}
         BcStmt::FnDef(name, params, body) => {
             env.functions

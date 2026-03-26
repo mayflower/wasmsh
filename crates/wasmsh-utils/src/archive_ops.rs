@@ -840,134 +840,235 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             .stdout(b"  Length      Name\n---------  --------------------\n");
     }
 
-    let mut pos = 0;
     let data = &archive_data;
-    let mut total_files = 0u32;
-    let mut total_size = 0u64;
+    let mut stats = UnzipStats::default();
     let mut status = 0;
+    let opts = UnzipOpts {
+        overwrite,
+        quiet,
+        base_dir: &base_dir,
+    };
 
+    let mut pos = 0;
     while pos + 30 <= data.len() {
-        // Look for local file header signature: PK\x03\x04
-        if &data[pos..pos + 4] != b"PK\x03\x04" {
-            // Try to find next signature
-            if let Some(next) = find_pk_signature(&data[pos..]) {
-                pos += next;
-                continue;
-            }
-            break;
+        match unzip_advance_to_header(data, &mut pos) {
+            HeaderSearch::Found => {}
+            HeaderSearch::End => break,
         }
 
-        // Parse local file header
-        let compression = u16_le(&data[pos + 8..pos + 10]);
-        let compressed_size = u32_le(&data[pos + 18..pos + 22]) as usize;
-        let uncompressed_size = u32_le(&data[pos + 22..pos + 26]) as usize;
-        let name_len = u16_le(&data[pos + 26..pos + 28]) as usize;
-        let extra_len = u16_le(&data[pos + 28..pos + 30]) as usize;
-
-        let name_start = pos + 30;
-        if name_start + name_len > data.len() {
+        let Some(entry) = parse_zip_local_header(data, pos) else {
             break;
-        }
-        let raw_name =
-            String::from_utf8_lossy(&data[name_start..name_start + name_len]).to_string();
+        };
 
-        let data_start = name_start + name_len + extra_len;
+        pos = entry.data_start;
 
         if list_only {
-            let line = format!("{uncompressed_size:>9}  {raw_name}\n");
-            ctx.output.stdout(line.as_bytes());
-            total_files += 1;
-            total_size += uncompressed_size as u64;
-            pos = data_start + compressed_size;
+            unzip_list_entry(ctx, &entry, &mut stats, quiet);
+            pos += entry.compressed_size;
             continue;
         }
 
-        // Sanitize entry name: strip leading '/' and all '..' components to prevent zip-slip
-        let sanitized: String = raw_name
-            .trim_start_matches('/')
-            .split('/')
-            .filter(|c| *c != "..")
-            .collect::<Vec<_>>()
-            .join("/");
-        let name = sanitized;
-
-        let is_directory = name.ends_with('/');
-
-        if is_directory {
-            let full = resolve_path(&base_dir, &name);
-            if !full.starts_with(&base_dir) {
-                let msg = format!("unzip: skipping '{raw_name}': path traversal detected\n");
-                ctx.output.stderr(msg.as_bytes());
-                pos = data_start + compressed_size;
-                continue;
-            }
-            let _ = ctx.fs.create_dir(&full);
-            if !quiet {
-                let msg = format!("   creating: {name}\n");
-                ctx.output.stdout(msg.as_bytes());
-            }
-        } else if compression == 0 {
-            // Stored (no compression)
-            let end = (data_start + uncompressed_size).min(data.len());
-            let file_data = &data[data_start..end];
-
-            let full = resolve_path(&base_dir, &name);
-            if !full.starts_with(&base_dir) {
-                let msg = format!("unzip: skipping '{raw_name}': path traversal detected\n");
-                ctx.output.stderr(msg.as_bytes());
-                pos = data_start + compressed_size;
-                continue;
-            }
-
-            // Ensure parent directory exists
-            if let Some(slash_pos) = full.rfind('/') {
-                let parent = &full[..slash_pos];
-                if !parent.is_empty() && ctx.fs.stat(parent).is_err() {
-                    let _ = ctx.fs.create_dir(parent);
-                }
-            }
-
-            // Check if file exists and overwrite flag
-            if !overwrite && ctx.fs.stat(&full).is_ok() {
-                if !quiet {
-                    let msg = format!("unzip: {name}: already exists, skipping\n");
-                    ctx.output.stderr(msg.as_bytes());
-                }
-            } else {
-                if write_file(ctx, "unzip", &full, file_data) != 0 {
-                    return 1;
-                }
-                if !quiet {
-                    let msg = format!("  inflating: {name}\n");
-                    ctx.output.stdout(msg.as_bytes());
-                }
-            }
-        } else if compression == 8 {
-            if !quiet {
-                let msg = format!("unzip: {name}: deflate not supported in sandbox\n");
-                ctx.output.stderr(msg.as_bytes());
-            }
-            status = 1;
-        } else {
-            if !quiet {
-                let msg = format!("unzip: {name}: unsupported compression method {compression}\n");
-                ctx.output.stderr(msg.as_bytes());
-            }
-            status = 1;
+        let rc = unzip_extract_entry(ctx, &entry, data, &opts);
+        if rc != 0 {
+            status = rc;
         }
 
-        total_files += 1;
-        total_size += uncompressed_size as u64;
-        pos = data_start + compressed_size;
+        stats.total_files += 1;
+        stats.total_size += entry.uncompressed_size as u64;
+        pos += entry.compressed_size;
     }
 
     if list_only && !quiet {
-        let footer =
-            format!("---------  --------------------\n{total_size:>9}  {total_files} file(s)\n");
+        let footer = format!(
+            "---------  --------------------\n{:>9}  {} file(s)\n",
+            stats.total_size, stats.total_files
+        );
         ctx.output.stdout(footer.as_bytes());
     }
 
     status
+}
+
+struct UnzipOpts<'a> {
+    overwrite: bool,
+    quiet: bool,
+    base_dir: &'a str,
+}
+
+#[derive(Default)]
+struct UnzipStats {
+    total_files: u32,
+    total_size: u64,
+}
+
+enum HeaderSearch {
+    Found,
+    End,
+}
+
+fn unzip_advance_to_header(data: &[u8], pos: &mut usize) -> HeaderSearch {
+    if &data[*pos..*pos + 4] == b"PK\x03\x04" {
+        return HeaderSearch::Found;
+    }
+    if let Some(next) = find_pk_signature(&data[*pos..]) {
+        *pos += next;
+        HeaderSearch::Found
+    } else {
+        HeaderSearch::End
+    }
+}
+
+struct ZipLocalEntry {
+    raw_name: String,
+    compression: u16,
+    compressed_size: usize,
+    uncompressed_size: usize,
+    data_start: usize,
+}
+
+fn parse_zip_local_header(data: &[u8], pos: usize) -> Option<ZipLocalEntry> {
+    let compression = u16_le(&data[pos + 8..pos + 10]);
+    let compressed_size = u32_le(&data[pos + 18..pos + 22]) as usize;
+    let uncompressed_size = u32_le(&data[pos + 22..pos + 26]) as usize;
+    let name_len = u16_le(&data[pos + 26..pos + 28]) as usize;
+    let extra_len = u16_le(&data[pos + 28..pos + 30]) as usize;
+
+    let name_start = pos + 30;
+    if name_start + name_len > data.len() {
+        return None;
+    }
+    let raw_name = String::from_utf8_lossy(&data[name_start..name_start + name_len]).to_string();
+    let data_start = name_start + name_len + extra_len;
+
+    Some(ZipLocalEntry {
+        raw_name,
+        compression,
+        compressed_size,
+        uncompressed_size,
+        data_start,
+    })
+}
+
+fn unzip_list_entry(
+    ctx: &mut UtilContext<'_>,
+    entry: &ZipLocalEntry,
+    stats: &mut UnzipStats,
+    quiet: bool,
+) {
+    if !quiet {
+        let line = format!("{:>9}  {}\n", entry.uncompressed_size, entry.raw_name);
+        ctx.output.stdout(line.as_bytes());
+    }
+    stats.total_files += 1;
+    stats.total_size += entry.uncompressed_size as u64;
+}
+
+/// Sanitize a zip entry name to prevent zip-slip attacks.
+fn sanitize_zip_name(raw_name: &str) -> String {
+    raw_name
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|c| *c != "..")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn unzip_check_traversal(
+    ctx: &mut UtilContext<'_>,
+    full: &str,
+    raw_name: &str,
+    base_dir: &str,
+) -> bool {
+    if full.starts_with(base_dir) {
+        return true;
+    }
+    let msg = format!("unzip: skipping '{raw_name}': path traversal detected\n");
+    ctx.output.stderr(msg.as_bytes());
+    false
+}
+
+fn unzip_ensure_parent(ctx: &mut UtilContext<'_>, full: &str) {
+    if let Some(slash_pos) = full.rfind('/') {
+        let parent = &full[..slash_pos];
+        if !parent.is_empty() && ctx.fs.stat(parent).is_err() {
+            let _ = ctx.fs.create_dir(parent);
+        }
+    }
+}
+
+fn unzip_extract_entry(
+    ctx: &mut UtilContext<'_>,
+    entry: &ZipLocalEntry,
+    data: &[u8],
+    opts: &UnzipOpts<'_>,
+) -> i32 {
+    let name = sanitize_zip_name(&entry.raw_name);
+    let full = resolve_path(opts.base_dir, &name);
+
+    if !unzip_check_traversal(ctx, &full, &entry.raw_name, opts.base_dir) {
+        return 0;
+    }
+
+    if name.ends_with('/') {
+        return unzip_extract_dir(ctx, &full, &name, opts.quiet);
+    }
+
+    match entry.compression {
+        0 => unzip_extract_stored(ctx, entry, data, &full, &name, opts),
+        8 => {
+            if !opts.quiet {
+                let msg = format!("unzip: {name}: deflate not supported in sandbox\n");
+                ctx.output.stderr(msg.as_bytes());
+            }
+            1
+        }
+        other => {
+            if !opts.quiet {
+                let msg = format!("unzip: {name}: unsupported compression method {other}\n");
+                ctx.output.stderr(msg.as_bytes());
+            }
+            1
+        }
+    }
+}
+
+fn unzip_extract_dir(ctx: &mut UtilContext<'_>, full: &str, name: &str, quiet: bool) -> i32 {
+    let _ = ctx.fs.create_dir(full);
+    if !quiet {
+        let msg = format!("   creating: {name}\n");
+        ctx.output.stdout(msg.as_bytes());
+    }
+    0
+}
+
+fn unzip_extract_stored(
+    ctx: &mut UtilContext<'_>,
+    entry: &ZipLocalEntry,
+    data: &[u8],
+    full: &str,
+    name: &str,
+    opts: &UnzipOpts<'_>,
+) -> i32 {
+    let end = (entry.data_start + entry.uncompressed_size).min(data.len());
+    let file_data = &data[entry.data_start..end];
+
+    unzip_ensure_parent(ctx, full);
+
+    if !opts.overwrite && ctx.fs.stat(full).is_ok() {
+        if !opts.quiet {
+            let msg = format!("unzip: {name}: already exists, skipping\n");
+            ctx.output.stderr(msg.as_bytes());
+        }
+        return 0;
+    }
+    if write_file(ctx, "unzip", full, file_data) != 0 {
+        return 1;
+    }
+    if !opts.quiet {
+        let msg = format!("  inflating: {name}\n");
+        ctx.output.stdout(msg.as_bytes());
+    }
+    0
 }
 
 /// Find the next PK\x03\x04 signature in the data.

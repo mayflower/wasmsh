@@ -24,84 +24,101 @@ fn parse_size(s: &str) -> Option<u64> {
 // xxd — hex dump
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_xxd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+struct XxdFlags {
+    reverse: bool,
+    plain: bool,
+    c_include: bool,
+    limit: Option<usize>,
+    skip: usize,
+    cols: usize,
+}
+
+fn parse_xxd_flags(ctx: &mut UtilContext<'_>, argv: &[&str]) -> Result<(XxdFlags, usize), i32> {
     let mut args = &argv[1..];
-    let mut reverse = false;
-    let mut plain = false;
-    let mut c_include = false;
-    let mut limit: Option<usize> = None;
-    let mut skip: usize = 0;
-    let mut cols: usize = 16;
+    let mut flags = XxdFlags {
+        reverse: false,
+        plain: false,
+        c_include: false,
+        limit: None,
+        skip: 0,
+        cols: 16,
+    };
+    let mut consumed = 1;
 
     while let Some(arg) = args.first() {
         match *arg {
-            "-r" => {
-                reverse = true;
-                args = &args[1..];
-            }
-            "-p" => {
-                plain = true;
-                args = &args[1..];
-            }
-            "-i" => {
-                c_include = true;
-                args = &args[1..];
-            }
+            "-r" => flags.reverse = true,
+            "-p" => flags.plain = true,
+            "-i" => flags.c_include = true,
             "-l" if args.len() > 1 => {
-                limit = args[1].parse().ok();
+                flags.limit = args[1].parse().ok();
                 args = &args[2..];
+                consumed += 2;
+                continue;
             }
             "-s" if args.len() > 1 => {
-                let Ok(v) = args[1].parse::<usize>() else {
-                    let msg = format!("xxd: invalid number: '{}'\n", args[1]);
-                    ctx.output.stderr(msg.as_bytes());
-                    return 1;
-                };
-                skip = v;
+                flags.skip = parse_xxd_usize(ctx, args[1])?;
                 args = &args[2..];
+                consumed += 2;
+                continue;
             }
             "-c" if args.len() > 1 => {
-                let Ok(v) = args[1].parse::<usize>() else {
-                    let msg = format!("xxd: invalid number: '{}'\n", args[1]);
-                    ctx.output.stderr(msg.as_bytes());
-                    return 1;
-                };
-                cols = if v == 0 { 16 } else { v };
+                let v = parse_xxd_usize(ctx, args[1])?;
+                flags.cols = if v == 0 { 16 } else { v };
                 args = &args[2..];
+                consumed += 2;
+                continue;
             }
             _ if arg.starts_with('-') && arg.len() > 1 => {
                 let msg = format!("xxd: unknown option '{arg}'\n");
                 ctx.output.stderr(msg.as_bytes());
-                return 1;
+                return Err(1);
             }
             _ => break,
         }
+        args = &args[1..];
+        consumed += 1;
     }
+    Ok((flags, consumed))
+}
 
-    if reverse {
+fn parse_xxd_usize(ctx: &mut UtilContext<'_>, val: &str) -> Result<usize, i32> {
+    val.parse::<usize>().map_err(|_| {
+        let msg = format!("xxd: invalid number: '{val}'\n");
+        ctx.output.stderr(msg.as_bytes());
+        1
+    })
+}
+
+pub(crate) fn util_xxd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (flags, consumed) = match parse_xxd_flags(ctx, argv) {
+        Ok(v) => v,
+        Err(status) => return status,
+    };
+    let args = &argv[consumed..];
+
+    if flags.reverse {
         return xxd_reverse(ctx, args);
     }
 
-    // Get input data
     let data = match read_input_bytes(ctx, args, "xxd") {
         Ok(d) => d,
         Err(status) => return status,
     };
 
-    // Apply skip and limit
-    let start = skip.min(data.len());
+    let start = flags.skip.min(data.len());
     let data = &data[start..];
-    let data = match limit {
+    let data = match flags.limit {
         Some(l) => &data[..l.min(data.len())],
         None => data,
     };
 
-    if plain {
+    if flags.plain {
         xxd_plain(ctx, data);
-    } else if c_include {
+    } else if flags.c_include {
         xxd_c_include(ctx, data, args.first().copied().unwrap_or("stdin"));
     } else {
-        xxd_default(ctx, data, start, cols);
+        xxd_default(ctx, data, start, flags.cols);
     }
 
     0
@@ -193,46 +210,54 @@ fn xxd_c_include(ctx: &mut UtilContext<'_>, data: &[u8], name: &str) {
     ctx.output.stdout(footer.as_bytes());
 }
 
-fn xxd_reverse(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> i32 {
-    let text = if !file_args.is_empty() {
+fn xxd_reverse_read_input(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> Option<String> {
+    if !file_args.is_empty() {
         let full = resolve_path(ctx.cwd, file_args[0]);
         match crate::helpers::read_text(ctx.fs, &full) {
-            Ok(t) => t,
+            Ok(t) => Some(t),
             Err(e) => {
                 emit_error(ctx.output, "xxd", file_args[0], &e);
-                return 1;
+                None
             }
         }
-    } else if let Some(d) = ctx.stdin {
-        String::from_utf8_lossy(d).to_string()
     } else {
-        return 0;
+        ctx.stdin.map(|d| String::from_utf8_lossy(d).to_string())
+    }
+}
+
+fn xxd_extract_hex(line: &str) -> String {
+    let hex_part = line.find(':').map_or(line, |pos| &line[pos + 1..]);
+    let hex_only = hex_part
+        .rfind("  ")
+        .map_or(hex_part, |pos| &hex_part[..pos]);
+    hex_only.chars().filter(char::is_ascii_hexdigit).collect()
+}
+
+fn xxd_hex_to_bytes(hex: &str) -> Vec<u8> {
+    let mut result = Vec::new();
+    for pair in hex.as_bytes().chunks(2) {
+        if pair.len() == 2 {
+            let s = std::str::from_utf8(pair).unwrap_or("00");
+            if let Ok(b) = u8::from_str_radix(s, 16) {
+                result.push(b);
+            }
+        }
+    }
+    result
+}
+
+fn xxd_reverse(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> i32 {
+    let Some(text) = xxd_reverse_read_input(ctx, file_args) else {
+        if file_args.is_empty() {
+            return 0;
+        }
+        return 1;
     };
 
     let mut result = Vec::new();
     for line in text.lines() {
-        // Strip offset prefix (everything before the first colon, if present)
-        let hex_part = if let Some(pos) = line.find(':') {
-            &line[pos + 1..]
-        } else {
-            line
-        };
-        // Strip ASCII portion (after two spaces followed by printable chars at end)
-        let hex_only = if let Some(pos) = hex_part.rfind("  ") {
-            &hex_part[..pos]
-        } else {
-            hex_part
-        };
-        // Parse hex characters, ignoring spaces
-        let clean: String = hex_only.chars().filter(char::is_ascii_hexdigit).collect();
-        for pair in clean.as_bytes().chunks(2) {
-            if pair.len() == 2 {
-                let s = std::str::from_utf8(pair).unwrap_or("00");
-                if let Ok(b) = u8::from_str_radix(s, 16) {
-                    result.push(b);
-                }
-            }
-        }
+        let hex = xxd_extract_hex(line);
+        result.extend(xxd_hex_to_bytes(&hex));
     }
 
     ctx.output.stdout(&result);
@@ -461,48 +486,45 @@ pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 // strings — extract printable strings
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_strings(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+fn parse_strings_min_len(ctx: &mut UtilContext<'_>, val: &str) -> Result<usize, i32> {
+    match val.parse::<usize>() {
+        Ok(0) => Ok(1),
+        Ok(v) => Ok(v),
+        Err(_) => {
+            let msg = format!("strings: invalid number: '{val}'\n");
+            ctx.output.stderr(msg.as_bytes());
+            Err(1)
+        }
+    }
+}
+
+fn parse_strings_flags(ctx: &mut UtilContext<'_>, argv: &[&str]) -> Result<(usize, usize), i32> {
     let mut args = &argv[1..];
     let mut min_len: usize = 4;
+    let mut consumed = 1;
 
     while let Some(arg) = args.first() {
         if (*arg == "-n" || *arg == "--bytes") && args.len() > 1 {
-            min_len = match args[1].parse::<usize>() {
-                Ok(0) => 1,
-                Ok(v) => v,
-                Err(_) => {
-                    let msg = format!("strings: invalid number: '{}'\n", args[1]);
-                    ctx.output.stderr(msg.as_bytes());
-                    return 1;
-                }
-            };
+            min_len = parse_strings_min_len(ctx, args[1])?;
             args = &args[2..];
+            consumed += 2;
         } else if let Some(rest) = arg.strip_prefix("-n") {
-            min_len = match rest.parse::<usize>() {
-                Ok(0) => 1,
-                Ok(v) => v,
-                Err(_) => {
-                    let msg = format!("strings: invalid number: '{rest}'\n");
-                    ctx.output.stderr(msg.as_bytes());
-                    return 1;
-                }
-            };
+            min_len = parse_strings_min_len(ctx, rest)?;
             args = &args[1..];
+            consumed += 1;
         } else if arg.starts_with('-') && arg.len() > 1 {
             args = &args[1..];
+            consumed += 1;
         } else {
             break;
         }
     }
+    Ok((min_len, consumed))
+}
 
-    // Get input data (binary)
-    let data = match read_input_bytes(ctx, args, "strings") {
-        Ok(d) => d,
-        Err(status) => return status,
-    };
-
+fn extract_printable_strings(ctx: &mut UtilContext<'_>, data: &[u8], min_len: usize) {
     let mut current = String::new();
-    for &b in &data {
+    for &b in data {
         if (0x20..=0x7E).contains(&b) {
             current.push(b as char);
         } else {
@@ -513,12 +535,25 @@ pub(crate) fn util_strings(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             current.clear();
         }
     }
-    // Flush remaining
     if current.len() >= min_len {
         ctx.output.stdout(current.as_bytes());
         ctx.output.stdout(b"\n");
     }
+}
 
+pub(crate) fn util_strings(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (min_len, consumed) = match parse_strings_flags(ctx, argv) {
+        Ok(v) => v,
+        Err(status) => return status,
+    };
+    let args = &argv[consumed..];
+
+    let data = match read_input_bytes(ctx, args, "strings") {
+        Ok(d) => d,
+        Err(status) => return status,
+    };
+
+    extract_printable_strings(ctx, &data, min_len);
     0
 }
 
@@ -796,34 +831,96 @@ pub(crate) fn util_file(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     status
 }
 
-fn detect_file_type(data: &[u8], path: &str) -> String {
-    // Check magic bytes first
+/// Known binary format identified by magic bytes.
+enum MagicKind {
+    Png,
+    Gif,
+    Jpeg,
+    Pdf,
+    Zip,
+    Gzip,
+    Elf,
+    Wasm,
+}
+
+fn detect_magic(data: &[u8]) -> Option<MagicKind> {
     if data.len() >= 4 && data[0] == 0x89 && &data[1..4] == b"PNG" {
-        return "PNG image data".to_string();
+        return Some(MagicKind::Png);
     }
     if data.len() >= 6 && (&data[..6] == b"GIF87a" || &data[..6] == b"GIF89a") {
-        return "GIF image data".to_string();
+        return Some(MagicKind::Gif);
     }
     if data.len() >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
-        return "JPEG image data".to_string();
+        return Some(MagicKind::Jpeg);
     }
     if data.len() >= 4 && &data[..4] == b"%PDF" {
-        return "PDF document".to_string();
+        return Some(MagicKind::Pdf);
     }
     if data.len() >= 4 && &data[..4] == b"PK\x03\x04" {
-        return "Zip archive data".to_string();
+        return Some(MagicKind::Zip);
     }
     if data.len() >= 2 && data[0] == 0x1F && data[1] == 0x8B {
-        return "gzip compressed data".to_string();
+        return Some(MagicKind::Gzip);
     }
     if data.len() >= 4 && data[0] == 0x7F && &data[1..4] == b"ELF" {
-        return "ELF executable".to_string();
+        return Some(MagicKind::Elf);
     }
     if data.len() >= 4 && data[0] == 0x00 && &data[1..4] == b"asm" {
-        return "WebAssembly (wasm) binary module".to_string();
+        return Some(MagicKind::Wasm);
+    }
+    None
+}
+
+fn magic_to_type(kind: &MagicKind) -> &'static str {
+    match kind {
+        MagicKind::Png => "PNG image data",
+        MagicKind::Gif => "GIF image data",
+        MagicKind::Jpeg => "JPEG image data",
+        MagicKind::Pdf => "PDF document",
+        MagicKind::Zip => "Zip archive data",
+        MagicKind::Gzip => "gzip compressed data",
+        MagicKind::Elf => "ELF executable",
+        MagicKind::Wasm => "WebAssembly (wasm) binary module",
+    }
+}
+
+fn magic_to_mime(kind: &MagicKind) -> &'static str {
+    match kind {
+        MagicKind::Png => "image/png",
+        MagicKind::Gif => "image/gif",
+        MagicKind::Jpeg => "image/jpeg",
+        MagicKind::Pdf => "application/pdf",
+        MagicKind::Zip => "application/zip",
+        MagicKind::Gzip => "application/gzip",
+        MagicKind::Elf => "application/x-executable",
+        MagicKind::Wasm => "application/wasm",
+    }
+}
+
+/// Detect text format from the first non-whitespace character. Returns `(type_desc, mime)`.
+fn detect_text_format(data: &[u8]) -> Option<(&'static str, &'static str)> {
+    let first_nws = data.iter().find(|b| !b.is_ascii_whitespace())?;
+    if *first_nws == b'{' {
+        return Some(("JSON text data", "application/json"));
+    }
+    if *first_nws == b'<' {
+        let text = String::from_utf8_lossy(data);
+        let lower = text.to_lowercase();
+        if lower.contains("<!doctype") || lower.contains("<html") {
+            return Some(("HTML document", "text/html"));
+        }
+        if lower.contains("<?xml") {
+            return Some(("XML document", "application/xml"));
+        }
+    }
+    None
+}
+
+fn detect_file_type(data: &[u8], path: &str) -> String {
+    if let Some(kind) = detect_magic(data) {
+        return magic_to_type(&kind).to_string();
     }
 
-    // Check shebang
     if data.len() >= 2 && &data[..2] == b"#!" {
         let end = data
             .iter()
@@ -833,84 +930,35 @@ fn detect_file_type(data: &[u8], path: &str) -> String {
         return format!("script text executable ({shebang})");
     }
 
-    // Check first non-whitespace byte for JSON/XML/HTML
-    if let Some(first_nws) = data.iter().find(|b| !b.is_ascii_whitespace()) {
-        if *first_nws == b'{' {
-            return "JSON text data".to_string();
-        }
-        if *first_nws == b'<' {
-            let text = String::from_utf8_lossy(data);
-            let lower = text.to_lowercase();
-            if lower.contains("<!doctype") || lower.contains("<html") {
-                return "HTML document".to_string();
-            }
-            if lower.contains("<?xml") {
-                return "XML document".to_string();
-            }
-        }
+    if let Some((desc, _)) = detect_text_format(data) {
+        return desc.to_string();
     }
 
-    // Extension fallback
     if let Some(desc) = extension_type(path) {
         return desc.to_string();
     }
 
-    // Content analysis
     if is_valid_utf8_text(data) {
-        if data.is_ascii() {
-            return "ASCII text".to_string();
+        return if data.is_ascii() {
+            "ASCII text"
+        } else {
+            "UTF-8 Unicode text"
         }
-        return "UTF-8 Unicode text".to_string();
+        .to_string();
     }
 
     "data".to_string()
 }
 
 fn detect_mime_type(data: &[u8], path: &str) -> String {
-    // Check magic bytes first
-    if data.len() >= 4 && data[0] == 0x89 && &data[1..4] == b"PNG" {
-        return "image/png".to_string();
-    }
-    if data.len() >= 6 && (&data[..6] == b"GIF87a" || &data[..6] == b"GIF89a") {
-        return "image/gif".to_string();
-    }
-    if data.len() >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
-        return "image/jpeg".to_string();
-    }
-    if data.len() >= 4 && &data[..4] == b"%PDF" {
-        return "application/pdf".to_string();
-    }
-    if data.len() >= 4 && &data[..4] == b"PK\x03\x04" {
-        return "application/zip".to_string();
-    }
-    if data.len() >= 2 && data[0] == 0x1F && data[1] == 0x8B {
-        return "application/gzip".to_string();
-    }
-    if data.len() >= 4 && data[0] == 0x7F && &data[1..4] == b"ELF" {
-        return "application/x-executable".to_string();
-    }
-    if data.len() >= 4 && data[0] == 0x00 && &data[1..4] == b"asm" {
-        return "application/wasm".to_string();
+    if let Some(kind) = detect_magic(data) {
+        return magic_to_mime(&kind).to_string();
     }
 
-    // Check first non-whitespace byte for JSON/XML/HTML
-    if let Some(first_nws) = data.iter().find(|b| !b.is_ascii_whitespace()) {
-        if *first_nws == b'{' {
-            return "application/json".to_string();
-        }
-        if *first_nws == b'<' {
-            let text = String::from_utf8_lossy(data);
-            let lower = text.to_lowercase();
-            if lower.contains("<!doctype") || lower.contains("<html") {
-                return "text/html".to_string();
-            }
-            if lower.contains("<?xml") {
-                return "application/xml".to_string();
-            }
-        }
+    if let Some((_, mime)) = detect_text_format(data) {
+        return mime.to_string();
     }
 
-    // Extension-based MIME
     if let Some(mime) = extension_mime(path) {
         return mime.to_string();
     }

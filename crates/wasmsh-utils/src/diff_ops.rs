@@ -92,6 +92,52 @@ struct Hunk<'a> {
     lines: Vec<(EditOp, &'a str)>,
 }
 
+/// Build a single hunk from a slice of edit operations.
+fn build_hunk<'a>(ops: &[(EditOp, usize, usize)], old: &[&'a str], new: &[&'a str]) -> Hunk<'a> {
+    let mut hunk_lines: Vec<(EditOp, &str)> = Vec::new();
+    let mut old_line_start = usize::MAX;
+    let mut new_line_start = usize::MAX;
+    let mut old_count = 0usize;
+    let mut new_count = 0usize;
+
+    for &(op, oi, ni) in ops {
+        if old_line_start == usize::MAX {
+            old_line_start = oi;
+            new_line_start = ni;
+        }
+        match op {
+            EditOp::Equal => {
+                hunk_lines.push((EditOp::Equal, old[oi]));
+                old_count += 1;
+                new_count += 1;
+            }
+            EditOp::Delete => {
+                hunk_lines.push((EditOp::Delete, old[oi]));
+                old_count += 1;
+            }
+            EditOp::Insert => {
+                hunk_lines.push((EditOp::Insert, new[ni]));
+                new_count += 1;
+            }
+        }
+    }
+
+    if old_line_start == usize::MAX {
+        old_line_start = 0;
+    }
+    if new_line_start == usize::MAX {
+        new_line_start = 0;
+    }
+
+    Hunk {
+        old_start: old_line_start + 1,
+        old_count,
+        new_start: new_line_start + 1,
+        new_count,
+        lines: hunk_lines,
+    }
+}
+
 /// Group an edit script into hunks with `ctx` lines of surrounding context.
 fn group_hunks<'a>(
     ops: &[(EditOp, usize, usize)],
@@ -138,57 +184,7 @@ fn group_hunks<'a>(
     for (gs, ge) in groups {
         let start = gs.saturating_sub(ctx);
         let end = (ge + ctx + 1).min(ops.len());
-
-        let mut hunk_lines: Vec<(EditOp, &str)> = Vec::new();
-        let mut old_line_start = usize::MAX;
-        let mut new_line_start = usize::MAX;
-        let mut old_count = 0usize;
-        let mut new_count = 0usize;
-
-        for &(op, oi, ni) in &ops[start..end] {
-            match op {
-                EditOp::Equal => {
-                    if old_line_start == usize::MAX {
-                        old_line_start = oi;
-                        new_line_start = ni;
-                    }
-                    hunk_lines.push((EditOp::Equal, old[oi]));
-                    old_count += 1;
-                    new_count += 1;
-                }
-                EditOp::Delete => {
-                    if old_line_start == usize::MAX {
-                        old_line_start = oi;
-                        new_line_start = ni;
-                    }
-                    hunk_lines.push((EditOp::Delete, old[oi]));
-                    old_count += 1;
-                }
-                EditOp::Insert => {
-                    if old_line_start == usize::MAX {
-                        old_line_start = oi;
-                        new_line_start = ni;
-                    }
-                    hunk_lines.push((EditOp::Insert, new[ni]));
-                    new_count += 1;
-                }
-            }
-        }
-
-        if old_line_start == usize::MAX {
-            old_line_start = 0;
-        }
-        if new_line_start == usize::MAX {
-            new_line_start = 0;
-        }
-
-        hunks.push(Hunk {
-            old_start: old_line_start + 1,
-            old_count,
-            new_start: new_line_start + 1,
-            new_count,
-            lines: hunk_lines,
-        });
+        hunks.push(build_hunk(&ops[start..end], old, new));
     }
 
     hunks
@@ -207,11 +203,102 @@ fn normal_range(start: usize, count: usize) -> String {
     }
 }
 
+/// Track line positions through a hunk to find the change range.
+struct ChangeRange {
+    old_start: usize,
+    old_count: usize,
+    new_start: usize,
+    new_count: usize,
+    found: bool,
+}
+
+fn compute_change_range(hunk: &Hunk<'_>) -> ChangeRange {
+    let mut cr = ChangeRange {
+        old_start: 0,
+        old_count: 0,
+        new_start: 0,
+        new_count: 0,
+        found: false,
+    };
+    let mut old_pos = hunk.old_start;
+    let mut new_pos = hunk.new_start;
+
+    for &(op, _) in &hunk.lines {
+        match op {
+            EditOp::Equal => {
+                old_pos += 1;
+                new_pos += 1;
+            }
+            EditOp::Delete => {
+                if !cr.found {
+                    cr.old_start = old_pos;
+                    cr.new_start = new_pos;
+                    cr.found = true;
+                }
+                cr.old_count += 1;
+                old_pos += 1;
+            }
+            EditOp::Insert => {
+                if !cr.found {
+                    cr.old_start = old_pos;
+                    cr.new_start = new_pos;
+                    cr.found = true;
+                }
+                cr.new_count += 1;
+                new_pos += 1;
+            }
+        }
+    }
+    cr
+}
+
+fn format_normal_ranges(cr: &ChangeRange) -> (String, String) {
+    let old_range = if cr.old_count == 0 {
+        format!("{}", cr.old_start.saturating_sub(1))
+    } else {
+        normal_range(cr.old_start, cr.old_count)
+    };
+    let new_range = if cr.new_count == 0 {
+        format!("{}", cr.new_start.saturating_sub(1))
+    } else {
+        normal_range(cr.new_start, cr.new_count)
+    };
+    (old_range, new_range)
+}
+
+fn emit_normal_hunk(
+    out: &mut String,
+    deleted: &[&str],
+    inserted: &[&str],
+    old_range: &str,
+    new_range: &str,
+) {
+    if !deleted.is_empty() && !inserted.is_empty() {
+        let _ = writeln!(out, "{old_range}c{new_range}");
+        for line in deleted {
+            let _ = writeln!(out, "< {line}");
+        }
+        out.push_str("---\n");
+        for line in inserted {
+            let _ = writeln!(out, "> {line}");
+        }
+    } else if !deleted.is_empty() {
+        let _ = writeln!(out, "{old_range}d{new_range}");
+        for line in deleted {
+            let _ = writeln!(out, "< {line}");
+        }
+    } else {
+        let _ = writeln!(out, "{old_range}a{new_range}");
+        for line in inserted {
+            let _ = writeln!(out, "> {line}");
+        }
+    }
+}
+
 /// Produce normal (ed-style) diff output.
 fn format_normal(hunks: &[Hunk<'_>]) -> String {
     let mut out = String::new();
     for hunk in hunks {
-        // Collect deleted and inserted lines from this hunk.
         let deleted: Vec<&str> = hunk
             .lines
             .iter()
@@ -229,80 +316,13 @@ fn format_normal(hunks: &[Hunk<'_>]) -> String {
             continue;
         }
 
-        // Compute actual line ranges for the change portion only.
-        // We need to track which old/new lines correspond to the non-context parts.
-        let mut old_change_start = 0usize;
-        let mut old_change_count = 0usize;
-        let mut new_change_start = 0usize;
-        let mut new_change_count = 0usize;
-        let mut old_pos = hunk.old_start;
-        let mut new_pos = hunk.new_start;
-        let mut seen_change = false;
-
-        for &(op, _) in &hunk.lines {
-            match op {
-                EditOp::Equal => {
-                    old_pos += 1;
-                    new_pos += 1;
-                }
-                EditOp::Delete => {
-                    if !seen_change {
-                        old_change_start = old_pos;
-                        new_change_start = new_pos;
-                        seen_change = true;
-                    }
-                    old_change_count += 1;
-                    old_pos += 1;
-                }
-                EditOp::Insert => {
-                    if !seen_change {
-                        old_change_start = old_pos;
-                        new_change_start = new_pos;
-                        seen_change = true;
-                    }
-                    new_change_count += 1;
-                    new_pos += 1;
-                }
-            }
-        }
-
-        if !seen_change {
+        let cr = compute_change_range(hunk);
+        if !cr.found {
             continue;
         }
 
-        // Determine the change type marker.
-        let old_range = if old_change_count == 0 {
-            // For insertions after a line, use the line number before.
-            format!("{}", old_change_start.saturating_sub(1))
-        } else {
-            normal_range(old_change_start, old_change_count)
-        };
-        let new_range = if new_change_count == 0 {
-            format!("{}", new_change_start.saturating_sub(1))
-        } else {
-            normal_range(new_change_start, new_change_count)
-        };
-
-        if !deleted.is_empty() && !inserted.is_empty() {
-            let _ = writeln!(out, "{old_range}c{new_range}");
-            for line in &deleted {
-                let _ = writeln!(out, "< {line}");
-            }
-            out.push_str("---\n");
-            for line in &inserted {
-                let _ = writeln!(out, "> {line}");
-            }
-        } else if !deleted.is_empty() {
-            let _ = writeln!(out, "{old_range}d{new_range}");
-            for line in &deleted {
-                let _ = writeln!(out, "< {line}");
-            }
-        } else {
-            let _ = writeln!(out, "{old_range}a{new_range}");
-            for line in &inserted {
-                let _ = writeln!(out, "> {line}");
-            }
-        }
+        let (old_range, new_range) = format_normal_ranges(&cr);
+        emit_normal_hunk(&mut out, &deleted, &inserted, &old_range, &new_range);
     }
     out
 }
@@ -491,6 +511,30 @@ impl Default for DiffFlags {
 // Core diff between two line slices
 // ---------------------------------------------------------------------------
 
+/// Build comparison lines, optionally stripping whitespace.
+fn build_comparison_lines(lines: &[&str], strip_space: bool) -> Vec<String> {
+    if strip_space {
+        lines.iter().map(|l| strip_all_space(l)).collect()
+    } else {
+        lines.iter().map(|l| (*l).to_string()).collect()
+    }
+}
+
+/// Filter blank-line-only changes back to Equal ops if `ignore_blank_lines` is set.
+fn filter_blank_lines(
+    ops: Vec<(EditOp, usize, usize)>,
+    old_lines: &[&str],
+    new_lines: &[&str],
+) -> Vec<(EditOp, usize, usize)> {
+    ops.into_iter()
+        .map(|(op, oi, ni)| match op {
+            EditOp::Delete if is_blank(old_lines.get(oi).unwrap_or(&"")) => (EditOp::Equal, oi, ni),
+            EditOp::Insert if is_blank(new_lines.get(ni).unwrap_or(&"")) => (EditOp::Equal, oi, ni),
+            _ => (op, oi, ni),
+        })
+        .collect()
+}
+
 /// Compare two texts and return the formatted diff string.
 /// Returns `(output, files_differ)`.
 fn diff_texts(
@@ -503,70 +547,33 @@ fn diff_texts(
     let m = old_lines.len();
     let n = new_lines.len();
 
-    // Check if the DP table would be too large.
     if (m as u64) * (n as u64) > MAX_DP_CELLS as u64 {
-        if flags.brief || flags.unified || flags.context_fmt {
-            let msg = format!("Files {old_label} and {new_label} differ\n");
-            return (msg, true);
-        }
-        return (format!("Files {old_label} and {new_label} differ\n"), true);
+        let msg = format!("Files {old_label} and {new_label} differ\n");
+        return (msg, true);
     }
 
-    // Possibly pre-process lines for comparison.
-    let (cmp_old, cmp_new): (Vec<String>, Vec<String>) = if flags.ignore_all_space {
-        (
-            old_lines.iter().map(|l| strip_all_space(l)).collect(),
-            new_lines.iter().map(|l| strip_all_space(l)).collect(),
-        )
-    } else {
-        (
-            old_lines.iter().map(|l| (*l).to_string()).collect(),
-            new_lines.iter().map(|l| (*l).to_string()).collect(),
-        )
-    };
-
-    // Build comparison slices.
+    let cmp_old = build_comparison_lines(old_lines, flags.ignore_all_space);
+    let cmp_new = build_comparison_lines(new_lines, flags.ignore_all_space);
     let cmp_old_refs: Vec<&str> = cmp_old.iter().map(String::as_str).collect();
     let cmp_new_refs: Vec<&str> = cmp_new.iter().map(String::as_str).collect();
 
     let ops = compute_edit_script(&cmp_old_refs, &cmp_new_refs);
-
-    // Filter out blank-line-only changes if requested.
-    let ops: Vec<(EditOp, usize, usize)> = if flags.ignore_blank_lines {
-        ops.into_iter()
-            .map(|(op, oi, ni)| match op {
-                EditOp::Delete if is_blank(old_lines.get(oi).unwrap_or(&"")) => {
-                    (EditOp::Equal, oi, ni)
-                }
-                EditOp::Insert if is_blank(new_lines.get(ni).unwrap_or(&"")) => {
-                    (EditOp::Equal, oi, ni)
-                }
-                _ => (op, oi, ni),
-            })
-            .collect()
+    let ops = if flags.ignore_blank_lines {
+        filter_blank_lines(ops, old_lines, new_lines)
     } else {
         ops
     };
 
-    // Check if there are any actual differences.
     let has_changes = ops.iter().any(|(op, _, _)| *op != EditOp::Equal);
     if !has_changes {
         return (String::new(), false);
     }
-
     if flags.brief {
         let msg = format!("Files {old_label} and {new_label} differ\n");
         return (msg, true);
     }
 
-    // We need the original lines for output (not comparison-normalised ones).
-    // Rebuild the edit script referencing original lines.
-    // The ops indices already reference the original arrays, so we just
-    // need to produce hunks that emit original content.
-
-    // Re-derive hunks using original lines.
     let hunks = group_hunks(&ops, old_lines, new_lines, flags.context_lines);
-
     let output = if flags.unified {
         format_unified(&hunks, old_label, new_label, flags.context_lines)
     } else if flags.context_fmt {
