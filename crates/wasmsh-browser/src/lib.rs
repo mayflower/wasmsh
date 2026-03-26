@@ -106,6 +106,46 @@ pub struct WorkerRuntime {
     aliases: IndexMap<String, String>,
 }
 
+/// Action to take for a character during array element parsing.
+enum ArrayCharAction {
+    Append(char),
+    Skip,
+    SplitField,
+}
+
+/// Quoting state for parsing array elements.
+#[derive(Default)]
+struct ArrayParseState {
+    in_single_quote: bool,
+    in_double_quote: bool,
+    escape_next: bool,
+}
+
+impl ArrayParseState {
+    fn process_char(&mut self, ch: char) -> ArrayCharAction {
+        if self.escape_next {
+            self.escape_next = false;
+            return ArrayCharAction::Append(ch);
+        }
+        if ch == '\\' && !self.in_single_quote {
+            self.escape_next = true;
+            return ArrayCharAction::Skip;
+        }
+        if ch == '\'' && !self.in_double_quote {
+            self.in_single_quote = !self.in_single_quote;
+            return ArrayCharAction::Skip;
+        }
+        if ch == '"' && !self.in_single_quote {
+            self.in_double_quote = !self.in_double_quote;
+            return ArrayCharAction::Skip;
+        }
+        if ch.is_ascii_whitespace() && !self.in_single_quote && !self.in_double_quote {
+            return ArrayCharAction::SplitField;
+        }
+        ArrayCharAction::Append(ch)
+    }
+}
+
 /// Parsed flags for `declare`/`typeset`.
 #[allow(clippy::struct_excessive_bools)]
 struct DeclareFlags {
@@ -357,21 +397,25 @@ impl WorkerRuntime {
         let Some(exit_code) = self.exec.exit_requested else {
             return;
         };
-        let Some(handler) = self.vm.state.get_var("_TRAP_EXIT") else {
+        let Some(handler_str) = self.take_exit_trap_handler() else {
             return;
         };
-        if handler.is_empty() {
-            return;
-        }
+        self.exec.exit_requested = None;
+        events.extend(self.execute_input_inner(&handler_str));
+        self.exec.exit_requested = Some(exit_code);
+    }
 
+    fn take_exit_trap_handler(&mut self) -> Option<String> {
+        let handler = self.vm.state.get_var("_TRAP_EXIT")?;
+        if handler.is_empty() {
+            return None;
+        }
         let handler_str = handler.to_string();
         self.vm.state.set_var(
             smol_str::SmolStr::from("_TRAP_EXIT"),
             smol_str::SmolStr::default(),
         );
-        self.exec.exit_requested = None;
-        events.extend(self.execute_input_inner(&handler_str));
-        self.exec.exit_requested = Some(exit_code);
+        Some(handler_str)
     }
 
     fn drain_io_events(&mut self, events: &mut Vec<WorkerEvent>) {
@@ -452,76 +496,79 @@ impl WorkerRuntime {
     fn execute_pipeline(&mut self, pipeline: &HirPipeline) {
         let cmds = &pipeline.commands;
         if cmds.len() == 1 {
-            self.execute_command(&cmds[0]);
-            // Set PIPESTATUS for single-command pipeline
-            let status_key = smol_str::SmolStr::from("PIPESTATUS");
-            self.vm.state.init_indexed_array(status_key.clone());
-            self.vm.state.set_array_element(
-                status_key,
-                "0",
-                smol_str::SmolStr::from(self.vm.state.last_status.to_string()),
-            );
+            self.execute_single_pipeline(&cmds[0]);
         } else {
-            // Multi-stage pipeline: stdout of stage N feeds stdin of stage N+1.
-            // Each stage runs to completion; its stdout is captured into a
-            // PipeBuffer and provided as pending_stdin to the next stage.
-            use wasmsh_vm::pipe::PipeBuffer;
-
-            let pipefail = self.vm.state.get_var("SHOPT_o_pipefail").as_deref() == Some("1");
-            let mut rightmost_failure: i32 = 0;
-            let mut statuses: Vec<i32> = Vec::new();
-
-            for (i, cmd) in cmds.iter().enumerate() {
-                let is_last = i == cmds.len() - 1;
-                let stdout_before = self.vm.stdout.len();
-                let stderr_before = self.vm.stderr.len();
-
-                self.execute_command(cmd);
-                statuses.push(self.vm.state.last_status);
-
-                if pipefail && self.vm.state.last_status != 0 {
-                    rightmost_failure = self.vm.state.last_status;
-                }
-
-                if !is_last {
-                    // Capture this stage's stdout into a pipe buffer
-                    let mut stage_output = self.vm.stdout[stdout_before..].to_vec();
-                    self.vm.stdout.truncate(stdout_before);
-
-                    // If |& was used, also capture stderr into the pipe
-                    let is_pipe_stderr = pipeline.pipe_stderr.get(i).copied().unwrap_or(false);
-                    if is_pipe_stderr {
-                        let stage_stderr = self.vm.stderr[stderr_before..].to_vec();
-                        self.vm.stderr.truncate(stderr_before);
-                        stage_output.extend_from_slice(&stage_stderr);
-                    }
-
-                    // Feed it as stdin to the next stage
-                    let mut pipe = PipeBuffer::default_size();
-                    pipe.write_all(&stage_output);
-                    pipe.close_write();
-                    self.pending_stdin = Some(pipe.drain());
-                }
-            }
-
-            // Set PIPESTATUS array
-            let status_key = smol_str::SmolStr::from("PIPESTATUS");
-            self.vm.state.init_indexed_array(status_key.clone());
-            for (i, s) in statuses.iter().enumerate() {
-                self.vm.state.set_array_element(
-                    status_key.clone(),
-                    &i.to_string(),
-                    smol_str::SmolStr::from(s.to_string()),
-                );
-            }
-
-            // With pipefail, use the rightmost non-zero exit status
-            if pipefail && rightmost_failure != 0 {
-                self.vm.state.last_status = rightmost_failure;
-            }
+            self.execute_multi_pipeline(cmds, pipeline);
         }
         if pipeline.negated {
             self.vm.state.last_status = i32::from(self.vm.state.last_status == 0);
+        }
+    }
+
+    fn execute_single_pipeline(&mut self, cmd: &HirCommand) {
+        self.execute_command(cmd);
+        self.set_pipestatus(&[self.vm.state.last_status]);
+    }
+
+    fn execute_multi_pipeline(&mut self, cmds: &[HirCommand], pipeline: &HirPipeline) {
+        let pipefail = self.vm.state.get_var("SHOPT_o_pipefail").as_deref() == Some("1");
+        let mut rightmost_failure: i32 = 0;
+        let mut statuses: Vec<i32> = Vec::new();
+
+        for (i, cmd) in cmds.iter().enumerate() {
+            let is_last = i == cmds.len() - 1;
+            let stdout_before = self.vm.stdout.len();
+            let stderr_before = self.vm.stderr.len();
+
+            self.execute_command(cmd);
+            statuses.push(self.vm.state.last_status);
+
+            if pipefail && self.vm.state.last_status != 0 {
+                rightmost_failure = self.vm.state.last_status;
+            }
+
+            if !is_last {
+                self.pipe_stage_output(
+                    stdout_before,
+                    stderr_before,
+                    pipeline.pipe_stderr.get(i).copied().unwrap_or(false),
+                );
+            }
+        }
+
+        self.set_pipestatus(&statuses);
+        if pipefail && rightmost_failure != 0 {
+            self.vm.state.last_status = rightmost_failure;
+        }
+    }
+
+    fn pipe_stage_output(&mut self, stdout_before: usize, stderr_before: usize, pipe_stderr: bool) {
+        use wasmsh_vm::pipe::PipeBuffer;
+
+        let mut stage_output = self.vm.stdout[stdout_before..].to_vec();
+        self.vm.stdout.truncate(stdout_before);
+
+        if pipe_stderr {
+            let stage_stderr = self.vm.stderr[stderr_before..].to_vec();
+            self.vm.stderr.truncate(stderr_before);
+            stage_output.extend_from_slice(&stage_stderr);
+        }
+
+        let mut pipe = PipeBuffer::default_size();
+        pipe.write_all(&stage_output);
+        pipe.close_write();
+        self.pending_stdin = Some(pipe.drain());
+    }
+
+    fn set_pipestatus(&mut self, statuses: &[i32]) {
+        let status_key = smol_str::SmolStr::from("PIPESTATUS");
+        self.vm.state.init_indexed_array(status_key.clone());
+        for (i, s) in statuses.iter().enumerate() {
+            self.vm.state.set_array_element(
+                status_key.clone(),
+                &i.to_string(),
+                smol_str::SmolStr::from(s.to_string()),
+            );
         }
     }
 
@@ -1394,33 +1441,39 @@ impl WorkerRuntime {
     /// Execute `mapfile`/`readarray` — read stdin lines into an indexed array.
     /// Supports `-t` (strip trailing newline). Default array: MAPFILE.
     fn execute_mapfile(&mut self, argv: &[String]) {
-        let args = &argv[1..];
-        let mut strip_newline = false;
-        let mut array_name = "MAPFILE".to_string();
-        let mut positional: Vec<&str> = Vec::new();
+        let (strip_newline, array_name) = Self::parse_mapfile_args(&argv[1..]);
+        let data = self.pending_stdin.take().unwrap_or_default();
+        let text = String::from_utf8_lossy(&data);
 
+        let name_key = smol_str::SmolStr::from(array_name.as_str());
+        self.vm.state.init_indexed_array(name_key.clone());
+        self.populate_mapfile_array(&name_key, &text, strip_newline);
+        self.vm.state.last_status = 0;
+    }
+
+    fn parse_mapfile_args(args: &[String]) -> (bool, String) {
+        let mut strip_newline = false;
+        let mut positional: Vec<&str> = Vec::new();
         for arg in args {
             match arg.as_str() {
                 "-t" => strip_newline = true,
                 _ => positional.push(arg),
             }
         }
+        let array_name = positional
+            .last()
+            .map_or("MAPFILE".to_string(), ToString::to_string);
+        (strip_newline, array_name)
+    }
 
-        // Last positional arg is the array name
-        if let Some(name) = positional.last() {
-            array_name = name.to_string();
-        }
-
-        // Read from pending stdin
-        let data = self.pending_stdin.take().unwrap_or_default();
-        let text = String::from_utf8_lossy(&data);
-
-        let name_key = smol_str::SmolStr::from(array_name.as_str());
-        self.vm.state.init_indexed_array(name_key.clone());
-
+    fn populate_mapfile_array(
+        &mut self,
+        name_key: &smol_str::SmolStr,
+        text: &str,
+        strip_newline: bool,
+    ) {
         let mut idx = 0;
         for line in text.split('\n') {
-            // Skip trailing empty string from final newline
             if line.is_empty() && idx > 0 {
                 continue;
             }
@@ -1436,7 +1489,6 @@ impl WorkerRuntime {
             );
             idx += 1;
         }
-        self.vm.state.last_status = 0;
     }
 
     /// Search `$PATH` directories in the VFS for a file. Returns the first match.
@@ -1673,41 +1725,56 @@ impl WorkerRuntime {
     /// Assign a value in `declare`, handling compound arrays and scalar transforms.
     fn declare_assign_value(&mut self, name: &str, val: &str, flags: &DeclareFlags) {
         if val.starts_with('(') && val.ends_with(')') {
-            let inner = &val[1..val.len() - 1];
-            let name_key = smol_str::SmolStr::from(name);
-            if flags.is_assoc || inner.contains("]=") {
-                self.vm.state.init_assoc_array(name_key.clone());
-                for pair in Self::parse_assoc_pairs(inner) {
-                    self.vm.state.set_array_element(
-                        name_key.clone(),
-                        &pair.0,
-                        smol_str::SmolStr::from(pair.1.as_str()),
-                    );
-                }
-            } else {
-                let elements = Self::parse_array_elements(inner);
-                self.vm.state.init_indexed_array(name_key.clone());
-                for (i, elem) in elements.iter().enumerate() {
-                    self.vm
-                        .state
-                        .set_array_element(name_key.clone(), &i.to_string(), elem.clone());
-                }
-            }
+            self.declare_assign_compound(name, &val[1..val.len() - 1], flags);
             return;
         }
-        let final_val = if flags.is_integer {
-            wasmsh_expand::eval_arithmetic(val, &mut self.vm.state).to_string()
+        let final_val = Self::transform_declare_scalar(val, flags, &mut self.vm.state);
+        self.vm.state.set_var(
+            smol_str::SmolStr::from(name),
+            smol_str::SmolStr::from(final_val.as_str()),
+        );
+    }
+
+    fn declare_assign_compound(&mut self, name: &str, inner: &str, flags: &DeclareFlags) {
+        let name_key = smol_str::SmolStr::from(name);
+        if flags.is_assoc || inner.contains("]=") {
+            self.declare_assign_assoc_compound(&name_key, inner);
+        } else {
+            self.declare_assign_indexed_compound(&name_key, inner);
+        }
+    }
+
+    fn declare_assign_assoc_compound(&mut self, name_key: &smol_str::SmolStr, inner: &str) {
+        self.vm.state.init_assoc_array(name_key.clone());
+        for pair in Self::parse_assoc_pairs(inner) {
+            self.vm.state.set_array_element(
+                name_key.clone(),
+                &pair.0,
+                smol_str::SmolStr::from(pair.1.as_str()),
+            );
+        }
+    }
+
+    fn declare_assign_indexed_compound(&mut self, name_key: &smol_str::SmolStr, inner: &str) {
+        let elements = Self::parse_array_elements(inner);
+        self.vm.state.init_indexed_array(name_key.clone());
+        for (i, elem) in elements.iter().enumerate() {
+            self.vm
+                .state
+                .set_array_element(name_key.clone(), &i.to_string(), elem.clone());
+        }
+    }
+
+    fn transform_declare_scalar(val: &str, flags: &DeclareFlags, state: &mut ShellState) -> String {
+        if flags.is_integer {
+            wasmsh_expand::eval_arithmetic(val, state).to_string()
         } else if flags.is_lower {
             val.to_lowercase()
         } else if flags.is_upper {
             val.to_uppercase()
         } else {
             val.to_string()
-        };
-        self.vm.state.set_var(
-            smol_str::SmolStr::from(name),
-            smol_str::SmolStr::from(final_val.as_str()),
-        );
+        }
     }
 
     /// Apply export, readonly, integer attributes after declare assignment.
@@ -1925,33 +1992,16 @@ impl WorkerRuntime {
     fn parse_array_elements(inner: &str) -> Vec<smol_str::SmolStr> {
         let mut elements = Vec::new();
         let mut current = String::new();
-        let mut in_single_quote = false;
-        let mut in_double_quote = false;
-        let mut escape_next = false;
+        let mut state = ArrayParseState::default();
 
         for ch in inner.chars() {
-            if escape_next {
-                current.push(ch);
-                escape_next = false;
-                continue;
+            match state.process_char(ch) {
+                ArrayCharAction::Append(c) => current.push(c),
+                ArrayCharAction::Skip => {}
+                ArrayCharAction::SplitField => {
+                    Self::push_array_element(&mut elements, &mut current);
+                }
             }
-            if ch == '\\' && !in_single_quote {
-                escape_next = true;
-                continue;
-            }
-            if ch == '\'' && !in_double_quote {
-                in_single_quote = !in_single_quote;
-                continue;
-            }
-            if ch == '"' && !in_single_quote {
-                in_double_quote = !in_double_quote;
-                continue;
-            }
-            if ch.is_ascii_whitespace() && !in_single_quote && !in_double_quote {
-                Self::push_array_element(&mut elements, &mut current);
-                continue;
-            }
-            current.push(ch);
         }
         Self::push_array_element(&mut elements, &mut current);
         elements
@@ -2296,20 +2346,49 @@ impl WorkerRuntime {
             if !glob_match_ext(seg, &entry.name, dotglob, extglob) {
                 continue;
             }
-            let (child_path, child_prefix) = Self::globstar_child_paths(dir, prefix, &entry.name);
-            if is_last {
-                matches.push(child_prefix);
-            } else if self.fs.stat(&child_path).map(|m| m.is_dir).unwrap_or(false) {
-                self.globstar_walk(
-                    &child_path,
-                    segments,
-                    seg_idx + 1,
-                    &child_prefix,
-                    dotglob,
-                    extglob,
-                    matches,
-                );
-            }
+            self.globstar_handle_matched_entry(
+                dir,
+                segments,
+                seg_idx,
+                prefix,
+                dotglob,
+                extglob,
+                matches,
+                &entry.name,
+                is_last,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn globstar_handle_matched_entry(
+        &self,
+        dir: &str,
+        segments: &[&str],
+        seg_idx: usize,
+        prefix: &str,
+        dotglob: bool,
+        extglob: bool,
+        matches: &mut Vec<String>,
+        name: &str,
+        is_last: bool,
+    ) {
+        let (child_path, child_prefix) = Self::globstar_child_paths(dir, prefix, name);
+        if is_last {
+            matches.push(child_prefix);
+            return;
+        }
+        let is_dir = self.fs.stat(&child_path).map(|m| m.is_dir).unwrap_or(false);
+        if is_dir {
+            self.globstar_walk(
+                &child_path,
+                segments,
+                seg_idx + 1,
+                &child_prefix,
+                dotglob,
+                extglob,
+                matches,
+            );
         }
     }
 
@@ -2525,34 +2604,47 @@ fn dbl_bracket_try_unary(tokens: &[String], pos: &mut usize, fs: &MemoryFs) -> O
     if *pos + 1 >= tokens.len() {
         return None;
     }
-    let op = &tokens[*pos];
-    if !op.starts_with('-') || op.len() != 2 {
-        return None;
-    }
-    let flag = op.as_bytes()[1];
+    let flag = dbl_bracket_parse_unary_flag(&tokens[*pos])?;
     match flag {
-        b'z' | b'n' => {
-            *pos += 1;
-            let arg = &tokens[*pos];
-            *pos += 1;
-            Some(if flag == b'z' {
-                arg.is_empty()
-            } else {
-                !arg.is_empty()
-            })
-        }
+        b'z' | b'n' => Some(dbl_bracket_eval_string_test(tokens, pos, flag)),
         b'f' | b'd' | b'e' | b's' | b'r' | b'w' | b'x' => {
-            // If a binary operator follows the next token, this is not a unary file test.
-            if *pos + 2 < tokens.len() && is_binary_op(&tokens[*pos + 2]) {
-                return None;
-            }
-            *pos += 1;
-            let path_str = &tokens[*pos];
-            *pos += 1;
-            Some(eval_file_test(flag, path_str, fs))
+            dbl_bracket_eval_file_test(tokens, pos, flag, fs)
         }
         _ => None,
     }
+}
+
+fn dbl_bracket_parse_unary_flag(op: &str) -> Option<u8> {
+    if !op.starts_with('-') || op.len() != 2 {
+        return None;
+    }
+    Some(op.as_bytes()[1])
+}
+
+fn dbl_bracket_eval_string_test(tokens: &[String], pos: &mut usize, flag: u8) -> bool {
+    *pos += 1;
+    let arg = &tokens[*pos];
+    *pos += 1;
+    if flag == b'z' {
+        arg.is_empty()
+    } else {
+        !arg.is_empty()
+    }
+}
+
+fn dbl_bracket_eval_file_test(
+    tokens: &[String],
+    pos: &mut usize,
+    flag: u8,
+    fs: &MemoryFs,
+) -> Option<bool> {
+    if *pos + 2 < tokens.len() && is_binary_op(&tokens[*pos + 2]) {
+        return None;
+    }
+    *pos += 1;
+    let path_str = &tokens[*pos];
+    *pos += 1;
+    Some(eval_file_test(flag, path_str, fs))
 }
 
 /// Try to evaluate a binary test. Returns `None` if no binary op at pos+1.
@@ -2573,22 +2665,31 @@ fn dbl_bracket_try_binary(
     let op = tokens[*pos].clone();
     *pos += 1;
 
-    // For =~, the RHS extends until &&, ||, or end of tokens.
-    if op == "=~" && *pos < tokens.len() {
-        let mut rhs = String::new();
-        while *pos < tokens.len() && tokens[*pos] != "&&" && tokens[*pos] != "||" {
-            rhs.push_str(&tokens[*pos]);
-            *pos += 1;
-        }
-        return Some(eval_binary_op(&lhs, &op, &rhs, state));
-    }
+    let rhs = dbl_bracket_collect_rhs(tokens, pos, &op);
+    Some(eval_binary_op(&lhs, &op, &rhs, state))
+}
 
-    if *pos < tokens.len() {
-        let rhs = tokens[*pos].clone();
-        *pos += 1;
-        return Some(eval_binary_op(&lhs, &op, &rhs, state));
+/// Collect the right-hand side for a binary operator. For `=~`, the RHS extends
+/// until `&&`, `||`, or end of tokens.
+fn dbl_bracket_collect_rhs(tokens: &[String], pos: &mut usize, op: &str) -> String {
+    if *pos >= tokens.len() {
+        return String::new();
     }
-    Some(false)
+    if op == "=~" {
+        return dbl_bracket_collect_regex_rhs(tokens, pos);
+    }
+    let rhs = tokens[*pos].clone();
+    *pos += 1;
+    rhs
+}
+
+fn dbl_bracket_collect_regex_rhs(tokens: &[String], pos: &mut usize) -> String {
+    let mut rhs = String::new();
+    while *pos < tokens.len() && tokens[*pos] != "&&" && tokens[*pos] != "||" {
+        rhs.push_str(&tokens[*pos]);
+        *pos += 1;
+    }
+    rhs
 }
 
 /// Check whether a token is a binary operator in `[[ ]]` context.
@@ -2718,13 +2819,17 @@ fn regex_match_with_captures(text: &str, pattern: &str) -> Option<Vec<String>> {
         return regex_match_literal_with_captures(text, core, anchored_start, anchored_end);
     }
 
-    let start_range = if anchored_start {
-        0..=0
-    } else {
-        0..=text.len()
-    };
+    regex_find_first_match(text, core, anchored_start, anchored_end)
+}
 
-    for start in start_range {
+fn regex_find_first_match(
+    text: &str,
+    core: &str,
+    anchored_start: bool,
+    anchored_end: bool,
+) -> Option<Vec<String>> {
+    let end = if anchored_start { 0 } else { text.len() };
+    for start in 0..=end {
         if let Some(result) = regex_match_from_start(text, core, anchored_end, start) {
             return Some(result);
         }
@@ -2785,20 +2890,23 @@ fn regex_match_capturing(
     captures: &mut Vec<(usize, usize)>,
 ) -> Option<usize> {
     if pi >= pat.len() {
-        return if must_end && ti < text.len() {
-            None
-        } else {
-            Some(ti)
-        };
+        return regex_check_end(ti, text.len(), must_end);
     }
 
-    // Handle parenthesized groups
     if pat[pi] == b'(' {
         return regex_match_group(text, ti, pat, pi, must_end, captures);
     }
 
-    // Parse one element (not a group) and apply quantifier
     regex_match_elem(text, ti, pat, pi, must_end, captures)
+}
+
+/// Check if end-of-pattern is valid given anchoring.
+fn regex_check_end(ti: usize, text_len: usize, must_end: bool) -> Option<usize> {
+    if must_end && ti < text_len {
+        None
+    } else {
+        Some(ti)
+    }
 }
 
 /// Handle a parenthesized group in the regex, dispatching by quantifier.
@@ -2813,22 +2921,49 @@ fn regex_match_group(
     let close = find_matching_paren_bytes(pat, pi + 1)?;
     let inner = &pat[pi + 1..close];
     let rest = &pat[close + 1..];
-    let (quant, after_quant_offset) = if close + 1 < pat.len() {
+    let (quant, after_quant_offset) = parse_group_quantifier(pat, close);
+    let after_quant = &pat[after_quant_offset..];
+    let alternatives = split_alternatives_bytes(inner);
+
+    regex_dispatch_group_quant(
+        text,
+        ti,
+        rest,
+        after_quant,
+        must_end,
+        captures,
+        &alternatives,
+        quant,
+    )
+}
+
+fn parse_group_quantifier(pat: &[u8], close: usize) -> (u8, usize) {
+    if close + 1 < pat.len() {
         match pat[close + 1] {
-            b'*' | b'+' | b'?' => (pat[close + 1], close + 2),
+            q @ (b'*' | b'+' | b'?') => (q, close + 2),
             _ => (0, close + 1),
         }
     } else {
         (0, close + 1)
-    };
-    let after_quant = &pat[after_quant_offset..];
-    let alternatives = split_alternatives_bytes(inner);
+    }
+}
 
+#[allow(clippy::too_many_arguments)]
+fn regex_dispatch_group_quant(
+    text: &[u8],
+    ti: usize,
+    rest: &[u8],
+    after_quant: &[u8],
+    must_end: bool,
+    captures: &mut Vec<(usize, usize)>,
+    alternatives: &[Vec<u8>],
+    quant: u8,
+) -> Option<usize> {
     match quant {
-        b'+' => regex_match_group_rep(text, ti, after_quant, must_end, captures, &alternatives, 1),
-        b'*' => regex_match_group_rep(text, ti, after_quant, must_end, captures, &alternatives, 0),
-        b'?' => regex_match_group_opt(text, ti, after_quant, must_end, captures, &alternatives),
-        _ => regex_match_group_exact(text, ti, rest, must_end, captures, &alternatives),
+        b'+' => regex_match_group_rep(text, ti, after_quant, must_end, captures, alternatives, 1),
+        b'*' => regex_match_group_rep(text, ti, after_quant, must_end, captures, alternatives, 0),
+        b'?' => regex_match_group_opt(text, ti, after_quant, must_end, captures, alternatives),
+        _ => regex_match_group_exact(text, ti, rest, must_end, captures, alternatives),
     }
 }
 
@@ -2845,17 +2980,42 @@ fn regex_match_group_rep(
     let save = captures.len();
     for end_pos in (ti..=text.len()).rev() {
         captures.truncate(save);
-        if regex_match_group_repeated(text, ti, end_pos, alternatives, min_reps) {
-            if let Some(final_end) =
-                regex_match_capturing(text, end_pos, after, 0, must_end, captures)
-            {
-                captures.insert(save, (ti, end_pos));
-                return Some(final_end);
-            }
+        if let Some(result) = regex_try_group_rep_at(
+            text,
+            ti,
+            end_pos,
+            after,
+            must_end,
+            captures,
+            alternatives,
+            min_reps,
+            save,
+        ) {
+            return Some(result);
         }
     }
     captures.truncate(save);
     None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn regex_try_group_rep_at(
+    text: &[u8],
+    ti: usize,
+    end_pos: usize,
+    after: &[u8],
+    must_end: bool,
+    captures: &mut Vec<(usize, usize)>,
+    alternatives: &[Vec<u8>],
+    min_reps: usize,
+    save: usize,
+) -> Option<usize> {
+    if !regex_match_group_repeated(text, ti, end_pos, alternatives, min_reps) {
+        return None;
+    }
+    let final_end = regex_match_capturing(text, end_pos, after, 0, must_end, captures)?;
+    captures.insert(save, (ti, end_pos));
+    Some(final_end)
 }
 
 /// Match a group with `?` quantifier (zero or one).
@@ -2869,16 +3029,10 @@ fn regex_match_group_opt(
 ) -> Option<usize> {
     let save = captures.len();
     // Try one
-    for alt in alternatives {
-        captures.truncate(save);
-        if let Some(end) = regex_try_match_at(text, ti, alt) {
-            if let Some(final_end) = regex_match_capturing(text, end, after, 0, must_end, captures)
-            {
-                captures.insert(save, (ti, end));
-                return Some(final_end);
-            }
-        }
-        captures.truncate(save);
+    if let Some(result) =
+        regex_try_group_one_alt(text, ti, after, must_end, captures, alternatives, save)
+    {
+        return Some(result);
     }
     // Try zero
     captures.truncate(save);
@@ -2890,6 +3044,42 @@ fn regex_match_group_opt(
     None
 }
 
+fn regex_try_group_one_alt(
+    text: &[u8],
+    ti: usize,
+    after: &[u8],
+    must_end: bool,
+    captures: &mut Vec<(usize, usize)>,
+    alternatives: &[Vec<u8>],
+    save: usize,
+) -> Option<usize> {
+    for alt in alternatives {
+        captures.truncate(save);
+        if let Some(result) =
+            regex_try_alt_then_continue(text, ti, alt, after, must_end, captures, save)
+        {
+            return Some(result);
+        }
+        captures.truncate(save);
+    }
+    None
+}
+
+fn regex_try_alt_then_continue(
+    text: &[u8],
+    ti: usize,
+    alt: &[u8],
+    after: &[u8],
+    must_end: bool,
+    captures: &mut Vec<(usize, usize)>,
+    save: usize,
+) -> Option<usize> {
+    let end = regex_try_match_at(text, ti, alt)?;
+    let final_end = regex_match_capturing(text, end, after, 0, must_end, captures)?;
+    captures.insert(save, (ti, end));
+    Some(final_end)
+}
+
 /// Match a group exactly once (no quantifier).
 fn regex_match_group_exact(
     text: &[u8],
@@ -2899,18 +3089,15 @@ fn regex_match_group_exact(
     captures: &mut Vec<(usize, usize)>,
     alternatives: &[Vec<u8>],
 ) -> Option<usize> {
-    let save = captures.len();
-    for alt in alternatives {
-        captures.truncate(save);
-        if let Some(end) = regex_try_match_at(text, ti, alt) {
-            if let Some(final_end) = regex_match_capturing(text, end, rest, 0, must_end, captures) {
-                captures.insert(save, (ti, end));
-                return Some(final_end);
-            }
-        }
-        captures.truncate(save);
-    }
-    None
+    regex_try_group_one_alt(
+        text,
+        ti,
+        rest,
+        must_end,
+        captures,
+        alternatives,
+        captures.len(),
+    )
 }
 
 /// Parse a quantifier after a regex element.
@@ -3045,13 +3232,16 @@ fn regex_try_match_group(text: &[u8], ti: usize, pat: &[u8], pi: usize) -> Optio
     let rest = &pat[close + 1..];
     let alternatives = split_alternatives_bytes(inner);
     for alt in &alternatives {
-        if let Some(after_alt) = regex_try_match_inner(text, ti, alt, 0) {
-            if let Some(end) = regex_try_match_inner(text, after_alt, rest, 0) {
-                return Some(end);
-            }
+        if let Some(end) = regex_try_alt_and_rest(text, ti, alt, rest) {
+            return Some(end);
         }
     }
     None
+}
+
+fn regex_try_alt_and_rest(text: &[u8], ti: usize, alt: &[u8], rest: &[u8]) -> Option<usize> {
+    let after_alt = regex_try_match_inner(text, ti, alt, 0)?;
+    regex_try_match_inner(text, after_alt, rest, 0)
 }
 
 /// Apply quantifier logic for `regex_try_match_inner`.
@@ -3186,7 +3376,7 @@ fn find_matching_paren_bytes(pat: &[u8], start: usize) -> Option<usize> {
 fn split_alternatives_bytes(pat: &[u8]) -> Vec<Vec<u8>> {
     let mut alternatives = Vec::new();
     let mut current = Vec::new();
-    let mut depth = 0;
+    let mut depth = 0i32;
     let mut i = 0;
     while i < pat.len() {
         if pat[i] == b'\\' && i + 1 < pat.len() {
@@ -3195,22 +3385,35 @@ fn split_alternatives_bytes(pat: &[u8]) -> Vec<Vec<u8>> {
             i += 2;
             continue;
         }
-        if pat[i] == b'(' {
-            depth += 1;
-            current.push(pat[i]);
-        } else if pat[i] == b')' {
-            depth -= 1;
-            current.push(pat[i]);
-        } else if pat[i] == b'|' && depth == 0 {
-            alternatives.push(current);
-            current = Vec::new();
-        } else {
-            current.push(pat[i]);
-        }
+        split_alt_classify_byte(pat[i], &mut depth, &mut current, &mut alternatives);
         i += 1;
     }
     alternatives.push(current);
     alternatives
+}
+
+fn split_alt_classify_byte(
+    byte: u8,
+    depth: &mut i32,
+    current: &mut Vec<u8>,
+    alternatives: &mut Vec<Vec<u8>>,
+) {
+    match byte {
+        b'(' => {
+            *depth += 1;
+            current.push(byte);
+        }
+        b')' => {
+            *depth -= 1;
+            current.push(byte);
+        }
+        b'|' if *depth == 0 => {
+            alternatives.push(std::mem::take(current));
+        }
+        _ => {
+            current.push(byte);
+        }
+    }
 }
 
 /// Simple regex-like matching for `=~`.
@@ -3604,19 +3807,23 @@ fn extglob_star(
         return false;
     }
     // Try zero repetitions
-    let mut combined = Vec::new();
-    combined.extend_from_slice(prefix);
-    combined.extend_from_slice(suffix);
-    if extglob_match_recursive(&combined, name) {
+    if extglob_match_recursive(&build_combined(prefix, &[], suffix), name) {
         return true;
     }
     // Try one repetition followed by zero or more
+    extglob_try_extend(prefix, alternatives, suffix, name, depth)
+}
+
+fn extglob_try_extend(
+    prefix: &[u8],
+    alternatives: &[Vec<u8>],
+    suffix: &[u8],
+    name: &[u8],
+    depth: u32,
+) -> bool {
     let prefix_len = prefix.len();
     for alt in alternatives {
-        let mut new_prefix = Vec::new();
-        new_prefix.extend_from_slice(prefix);
-        new_prefix.extend_from_slice(alt);
-        // Only recurse if prefix is getting longer (consuming input)
+        let new_prefix = build_combined(prefix, alt, &[]);
         if new_prefix.len() > prefix_len
             && extglob_star(&new_prefix, alternatives, suffix, name, depth + 1)
         {
@@ -3637,11 +3844,8 @@ fn extglob_plus(
     if depth > 20 {
         return false;
     }
-    // Must match at least one alternative, then zero or more
     for alt in alternatives {
-        let mut new_prefix = Vec::new();
-        new_prefix.extend_from_slice(prefix);
-        new_prefix.extend_from_slice(alt);
+        let new_prefix = build_combined(prefix, alt, &[]);
         if extglob_star(&new_prefix, alternatives, suffix, name, depth + 1) {
             return true;
         }
