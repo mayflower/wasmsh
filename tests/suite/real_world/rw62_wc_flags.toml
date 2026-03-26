@@ -1,0 +1,17 @@
+[test]
+name = "rw62-wc-flags"
+tags = ["real-world", "bug-fix", "wc"]
+tier = "P1"
+requires = ["wc", "echo", "pipeline"]
+
+[input]
+script = """
+printf 'one\ntwo\nthree\n' | wc -l
+printf 'hello world\n' | wc -w
+printf 'abcdef' | wc -c
+printf 'a\nb\nc\n' | wc -lw
+"""
+
+[expect]
+stdout = "      3\n      2\n      6\n      3      3\n"
+status = 0

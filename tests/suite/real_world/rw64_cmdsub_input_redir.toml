@@ -1,0 +1,16 @@
+[test]
+name = "rw64-cmdsub-input-redirect"
+tags = ["real-world", "bug-fix", "command-substitution", "redirection"]
+tier = "P1"
+requires = ["echo", "cat", "redirection", "command-substitution"]
+
+[input]
+script = """
+mkdir -p /tmp
+echo "file content" > /tmp/src.txt
+cat < /tmp/$(echo src).txt
+"""
+
+[expect]
+stdout = "file content\n"
+status = 0

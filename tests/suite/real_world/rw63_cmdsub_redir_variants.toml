@@ -1,0 +1,23 @@
+[test]
+name = "rw63-cmdsub-redirect-variants"
+tags = ["real-world", "bug-fix", "command-substitution", "redirection"]
+tier = "P1"
+requires = ["echo", "cat", "printf", "redirection", "command-substitution"]
+
+[input]
+script = """
+mkdir -p /tmp
+echo hello > /tmp/$(echo out1).txt
+cat /tmp/out1.txt
+name=$(echo out2)
+echo world > /tmp/${name}.txt
+cat /tmp/out2.txt
+echo data > "/tmp/$(echo 'out 3').txt"
+cat "/tmp/out 3.txt"
+echo appended >> /tmp/$(echo out1).txt
+cat /tmp/out1.txt
+"""
+
+[expect]
+stdout = "hello\nworld\ndata\nhello\nappended\n"
+status = 0
