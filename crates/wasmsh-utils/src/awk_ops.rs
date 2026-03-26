@@ -74,6 +74,43 @@ fn format_num(n: f64) -> String {
     }
 }
 
+fn looks_numeric(v: &AwkValue) -> bool {
+    match v {
+        AwkValue::Num(_) | AwkValue::Uninitialized => true,
+        AwkValue::Str(s) => {
+            let s = s.trim();
+            !s.is_empty() && s.parse::<f64>().is_ok()
+        }
+    }
+}
+
+fn should_compare_numeric(l: &AwkValue, r: &AwkValue) -> bool {
+    let both_num = matches!(
+        (l, r),
+        (
+            AwkValue::Num(_) | AwkValue::Uninitialized,
+            AwkValue::Num(_) | AwkValue::Uninitialized
+        )
+    );
+    both_num || (looks_numeric(l) && looks_numeric(r))
+}
+
+fn compare_nums(ln: f64, rn: f64) -> i8 {
+    if ln < rn {
+        -1
+    } else {
+        i8::from(ln > rn)
+    }
+}
+
+fn compare_strs(ls: &str, rs: &str) -> i8 {
+    match ls.cmp(rs) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
 fn bool_to_num(value: bool) -> f64 {
     if value {
         1.0
@@ -193,6 +230,37 @@ enum Token {
     Eof,
 }
 
+fn keyword_token(id: &str) -> Option<Token> {
+    match id {
+        "BEGIN" => Some(Token::Begin),
+        "END" => Some(Token::End),
+        "if" => Some(Token::If),
+        "else" => Some(Token::Else),
+        "while" => Some(Token::While),
+        "for" => Some(Token::For),
+        "do" => Some(Token::Do),
+        "break" => Some(Token::Break),
+        "continue" => Some(Token::Continue),
+        "next" => Some(Token::Next),
+        "exit" => Some(Token::Exit),
+        "delete" => Some(Token::Delete),
+        "in" => Some(Token::In),
+        "print" => Some(Token::Print),
+        "printf" => Some(Token::Printf),
+        "getline" => Some(Token::Getline),
+        "function" => Some(Token::Function),
+        "return" => Some(Token::Return),
+        _ => None,
+    }
+}
+
+fn is_operator_start(c: char) -> bool {
+    matches!(
+        c,
+        '+' | '-' | '*' | '/' | '%' | '^' | '=' | '!' | '<' | '>' | '~' | '&' | '|'
+    )
+}
+
 struct Lexer {
     chars: Vec<char>,
     pos: usize,
@@ -296,25 +364,30 @@ impl Lexer {
             match self.advance() {
                 None => return Err("unterminated string".to_string()),
                 Some('"') => break,
-                Some('\\') => match self.advance() {
-                    Some('n') => s.push('\n'),
-                    Some('t') => s.push('\t'),
-                    Some('\\') => s.push('\\'),
-                    Some('"') => s.push('"'),
-                    Some('/') => s.push('/'),
-                    Some('a') => s.push('\x07'),
-                    Some('b') => s.push('\x08'),
-                    Some('r') => s.push('\r'),
-                    Some(ch) => {
-                        s.push('\\');
-                        s.push(ch);
-                    }
-                    None => return Err("unterminated string escape".to_string()),
-                },
+                Some('\\') => self.push_string_escape(&mut s)?,
                 Some(ch) => s.push(ch),
             }
         }
         Ok(Token::StringLit(s))
+    }
+
+    fn push_string_escape(&mut self, s: &mut String) -> Result<(), String> {
+        match self.advance() {
+            Some('n') => s.push('\n'),
+            Some('t') => s.push('\t'),
+            Some('\\') => s.push('\\'),
+            Some('"') => s.push('"'),
+            Some('/') => s.push('/'),
+            Some('a') => s.push('\x07'),
+            Some('b') => s.push('\x08'),
+            Some('r') => s.push('\r'),
+            Some(ch) => {
+                s.push('\\');
+                s.push(ch);
+            }
+            None => return Err("unterminated string escape".to_string()),
+        }
+        Ok(())
     }
 
     fn lex_number(&mut self, first: char) -> Result<Token, String> {
@@ -371,27 +444,7 @@ impl Lexer {
                 break;
             }
         }
-        match id.as_str() {
-            "BEGIN" => Token::Begin,
-            "END" => Token::End,
-            "if" => Token::If,
-            "else" => Token::Else,
-            "while" => Token::While,
-            "for" => Token::For,
-            "do" => Token::Do,
-            "break" => Token::Break,
-            "continue" => Token::Continue,
-            "next" => Token::Next,
-            "exit" => Token::Exit,
-            "delete" => Token::Delete,
-            "in" => Token::In,
-            "print" => Token::Print,
-            "printf" => Token::Printf,
-            "getline" => Token::Getline,
-            "function" => Token::Function,
-            "return" => Token::Return,
-            _ => Token::Ident(id),
-        }
+        keyword_token(&id).unwrap_or(Token::Ident(id))
     }
 
     fn lex_operator(&mut self, ch: char) -> Result<Token, String> {
@@ -498,79 +551,64 @@ impl Lexer {
                 break;
             };
 
-            let tok = match c {
-                '\n' => {
-                    self.advance();
-                    while self.peek() == Some('\n') {
-                        self.advance();
-                    }
-                    Token::Newline
-                }
-                '/' if Lexer::can_start_regex(&prev) => self.lex_regex()?,
-                '"' => self.lex_string()?,
-                '0'..='9' | '.' if c == '.' && !matches!(self.peek_at(1), Some('0'..='9')) => {
-                    self.advance();
-                    Token::StringLit(".".to_string())
-                }
-                '0'..='9' | '.' => self.lex_number(c)?,
-                'a'..='z' | 'A'..='Z' | '_' => self.lex_ident_or_keyword(),
-                '?' => {
-                    self.advance();
-                    Token::Question
-                }
-                ':' => {
-                    self.advance();
-                    Token::Colon
-                }
-                '$' => {
-                    self.advance();
-                    Token::Dollar
-                }
-                ',' => {
-                    self.advance();
-                    Token::Comma
-                }
-                ';' => {
-                    self.advance();
-                    Token::Semicolon
-                }
-                '(' => {
-                    self.advance();
-                    Token::LParen
-                }
-                ')' => {
-                    self.advance();
-                    Token::RParen
-                }
-                '{' => {
-                    self.advance();
-                    Token::LBrace
-                }
-                '}' => {
-                    self.advance();
-                    Token::RBrace
-                }
-                '[' => {
-                    self.advance();
-                    Token::LBracket
-                }
-                ']' => {
-                    self.advance();
-                    Token::RBracket
-                }
-                '+' | '-' | '*' | '/' | '%' | '^' | '=' | '!' | '<' | '>' | '~' | '&' | '|' => {
-                    self.lex_operator(c)?
-                }
-                _ => {
-                    return Err(format!("unexpected character '{c}'"));
-                }
-            };
-
+            let tok = self.lex_next_token(c, &prev)?;
             prev = tok.clone();
             tokens.push(tok);
         }
 
         Ok(tokens)
+    }
+
+    fn lex_next_token(&mut self, c: char, prev: &Token) -> Result<Token, String> {
+        match c {
+            '\n' => Ok(self.lex_newlines()),
+            '/' if Lexer::can_start_regex(prev) => self.lex_regex(),
+            '"' => self.lex_string(),
+            '.' if !matches!(self.peek_at(1), Some('0'..='9')) => {
+                self.advance();
+                Ok(Token::StringLit(".".to_string()))
+            }
+            '0'..='9' | '.' => self.lex_number(c),
+            'a'..='z' | 'A'..='Z' | '_' => Ok(self.lex_ident_or_keyword()),
+            _ => self.lex_punctuation_or_operator(c),
+        }
+    }
+
+    fn lex_newlines(&mut self) -> Token {
+        self.advance();
+        while self.peek() == Some('\n') {
+            self.advance();
+        }
+        Token::Newline
+    }
+
+    fn lex_punctuation_or_operator(&mut self, c: char) -> Result<Token, String> {
+        if let Some(tok) = self.try_lex_single_char_punctuation(c) {
+            return Ok(tok);
+        }
+        if is_operator_start(c) {
+            return self.lex_operator(c);
+        }
+        Err(format!("unexpected character '{c}'"))
+    }
+
+    fn try_lex_single_char_punctuation(&mut self, c: char) -> Option<Token> {
+        let tok = match c {
+            '?' => Token::Question,
+            ':' => Token::Colon,
+            '$' => Token::Dollar,
+            ',' => Token::Comma,
+            ';' => Token::Semicolon,
+            '(' => Token::LParen,
+            ')' => Token::RParen,
+            '{' => Token::LBrace,
+            '}' => Token::RBrace,
+            '[' => Token::LBracket,
+            ']' => Token::RBracket,
+            _ => return None,
+        };
+        self.advance();
+        Some(tok)
     }
 }
 
@@ -873,17 +911,7 @@ impl Parser {
                 self.advance();
                 Ok(Stmt::Return(self.parse_optional_expr()?))
             }
-            Token::Delete => {
-                self.advance();
-                let name = match self.advance() {
-                    Token::Ident(n) => n,
-                    t => return Err(format!("expected array name after delete, got {t:?}")),
-                };
-                self.expect(&Token::LBracket)?;
-                let idx = self.parse_expr()?;
-                self.expect(&Token::RBracket)?;
-                Ok(Stmt::Delete(name, idx))
-            }
+            Token::Delete => self.parse_delete(),
             Token::Print => self.parse_print(),
             Token::Printf => self.parse_printf(),
             Token::LBrace => {
@@ -895,6 +923,18 @@ impl Parser {
                 Ok(Stmt::Expr(expr))
             }
         }
+    }
+
+    fn parse_delete(&mut self) -> Result<Stmt, String> {
+        self.advance();
+        let name = match self.advance() {
+            Token::Ident(n) => n,
+            t => return Err(format!("expected array name after delete, got {t:?}")),
+        };
+        self.expect(&Token::LBracket)?;
+        let idx = self.parse_expr()?;
+        self.expect(&Token::RBracket)?;
+        Ok(Stmt::Delete(name, idx))
     }
 
     fn parse_print(&mut self) -> Result<Stmt, String> {
@@ -948,25 +988,18 @@ impl Parser {
         self.expect(&Token::LParen)?;
         let cond = self.parse_expr()?;
         self.expect(&Token::RParen)?;
-        self.skip_terminators();
-        let then_body = if *self.peek() == Token::LBrace {
-            self.parse_action()?
-        } else {
-            vec![self.parse_stmt()?]
-        };
-        self.skip_terminators();
-        let else_body = if *self.peek() == Token::Else {
-            self.advance();
-            self.skip_terminators();
-            if *self.peek() == Token::LBrace {
-                Some(self.parse_action()?)
-            } else {
-                Some(vec![self.parse_stmt()?])
-            }
-        } else {
-            None
-        };
+        let then_body = self.parse_stmt_body()?;
+        let else_body = self.parse_else_clause()?;
         Ok(Stmt::If(cond, then_body, else_body))
+    }
+
+    fn parse_else_clause(&mut self) -> Result<Option<Vec<Stmt>>, String> {
+        self.skip_terminators();
+        if *self.peek() != Token::Else {
+            return Ok(None);
+        }
+        self.advance();
+        Ok(Some(self.parse_stmt_body()?))
     }
 
     fn parse_while(&mut self) -> Result<Stmt, String> {
@@ -1399,22 +1432,37 @@ fn strip_anchors(pattern: &str) -> (&str, bool, bool) {
     (pat, anchored_start, anchored_end)
 }
 
+struct CompiledPattern {
+    nodes: Vec<ReNode>,
+    anchored_start: bool,
+    anchored_end: bool,
+}
+
+fn compile_pattern(pattern: &str) -> CompiledPattern {
+    let (pat, anchored_start, anchored_end) = strip_anchors(pattern);
+    CompiledPattern {
+        nodes: compile_regex(pat),
+        anchored_start,
+        anchored_end,
+    }
+}
+
+fn start_positions(anchored: bool, text_len: usize) -> Box<dyn Iterator<Item = usize>> {
+    if anchored {
+        Box::new(std::iter::once(0))
+    } else {
+        Box::new(0..=text_len)
+    }
+}
+
 /// Simple regex matching supporting: literal chars, `.` (any), `*` (repeat prev),
 /// `+` (one or more), `?` (zero or one), `^` (start), `$` (end), `[...]` char classes,
 /// `[^...]` negated, `\d`, `\w`, `\s` and their negations, escape sequences.
 fn regex_match(text: &str, pattern: &str) -> bool {
-    let (pat, anchored_start, anchored_end) = strip_anchors(pattern);
-    let compiled = compile_regex(pat);
-
-    let start_positions: Box<dyn Iterator<Item = usize>> = if anchored_start {
-        Box::new(std::iter::once(0))
-    } else {
-        Box::new(0..=text.len())
-    };
-
-    for start in start_positions {
-        if let Some(end) = regex_match_here(&compiled, text, start, 0) {
-            if !anchored_end || end == text.len() {
+    let cp = compile_pattern(pattern);
+    for start in start_positions(cp.anchored_start, text.len()) {
+        if let Some(end) = regex_match_here(&cp.nodes, text, start, 0) {
+            if !cp.anchored_end || end == text.len() {
                 return true;
             }
         }
@@ -1424,18 +1472,10 @@ fn regex_match(text: &str, pattern: &str) -> bool {
 
 /// Find the first match of `pattern` in `text`, returning (start, end) byte offsets.
 fn regex_find(text: &str, pattern: &str) -> Option<(usize, usize)> {
-    let (pat, anchored_start, anchored_end) = strip_anchors(pattern);
-    let compiled = compile_regex(pat);
-
-    let start_positions: Box<dyn Iterator<Item = usize>> = if anchored_start {
-        Box::new(std::iter::once(0))
-    } else {
-        Box::new(0..=text.len())
-    };
-
-    for start in start_positions {
-        if let Some(end) = regex_match_here(&compiled, text, start, 0) {
-            if (!anchored_end || end == text.len()) && (start < end || start == text.len()) {
+    let cp = compile_pattern(pattern);
+    for start in start_positions(cp.anchored_start, text.len()) {
+        if let Some(end) = regex_match_here(&cp.nodes, text, start, 0) {
+            if (!cp.anchored_end || end == text.len()) && (start < end || start == text.len()) {
                 return Some((start, end));
             }
         }
@@ -1531,45 +1571,53 @@ fn compile_regex(pat: &str) -> Vec<ReNode> {
     let mut i = 0;
 
     while i < chars.len() {
-        let piece = match chars[i] {
-            '.' => {
-                i += 1;
-                RePiece::Dot
-            }
-            '\\' if i + 1 < chars.len() => {
-                i += 1;
-                let c = chars[i];
-                i += 1;
-                compile_escape(c)
-            }
-            '[' => {
-                i += 1;
-                let (p, new_i) = compile_char_class(&chars, i);
-                i = new_i;
-                p
-            }
-            c => {
-                i += 1;
-                RePiece::Literal(c)
-            }
-        };
-
-        // Check for quantifier
-        let repeat = i < chars.len() && matches!(chars[i], '*' | '+' | '?');
-        if repeat {
-            let kind = match chars[i] {
-                '*' => RepeatKind::Star,
-                '+' => RepeatKind::Plus,
-                _ => RepeatKind::Question,
-            };
-            i += 1;
-            nodes.push(ReNode::Repeat(piece, kind));
-        } else {
-            nodes.push(ReNode::Piece(piece));
-        }
+        let (piece, new_i) = compile_next_piece(&chars, i);
+        i = new_i;
+        let node = attach_quantifier(&chars, &mut i, piece);
+        nodes.push(node);
     }
 
     nodes
+}
+
+fn compile_next_piece(chars: &[char], mut i: usize) -> (RePiece, usize) {
+    let piece = match chars[i] {
+        '.' => {
+            i += 1;
+            RePiece::Dot
+        }
+        '\\' if i + 1 < chars.len() => {
+            i += 1;
+            let c = chars[i];
+            i += 1;
+            compile_escape(c)
+        }
+        '[' => {
+            i += 1;
+            let (p, new_i) = compile_char_class(chars, i);
+            i = new_i;
+            p
+        }
+        c => {
+            i += 1;
+            RePiece::Literal(c)
+        }
+    };
+    (piece, i)
+}
+
+fn attach_quantifier(chars: &[char], i: &mut usize, piece: RePiece) -> ReNode {
+    if *i >= chars.len() {
+        return ReNode::Piece(piece);
+    }
+    let kind = match chars[*i] {
+        '*' => RepeatKind::Star,
+        '+' => RepeatKind::Plus,
+        '?' => RepeatKind::Question,
+        _ => return ReNode::Piece(piece),
+    };
+    *i += 1;
+    ReNode::Repeat(piece, kind)
 }
 
 fn piece_matches(piece: &RePiece, ch: char) -> bool {
@@ -1823,23 +1871,27 @@ impl AwkInterpreter {
             self.fields.push(String::new());
         }
         self.fields[n] = val;
-        // Update NF
-        #[allow(clippy::cast_precision_loss)]
-        let nf = (self.fields.len() - 1) as f64;
-        self.set_var("NF", AwkValue::Num(nf));
-        // Rebuild $0
+        self.update_nf();
         if n > 0 {
             self.rebuild_record();
         } else {
-            // $0 was set directly: re-split
-            let record = self.fields[0].clone();
-            let split = self.split_record(&record);
-            self.fields.truncate(1);
-            self.fields.extend(split);
-            #[allow(clippy::cast_precision_loss)]
-            let nf2 = (self.fields.len() - 1) as f64;
-            self.set_var("NF", AwkValue::Num(nf2));
+            self.resplit_from_record0();
         }
+    }
+
+    fn update_nf(&mut self) {
+        #[allow(clippy::cast_precision_loss)]
+        let nf = (self.fields.len() - 1) as f64;
+        self.set_var("NF", AwkValue::Num(nf));
+    }
+
+    /// Re-split fields from $0 after $0 was set directly.
+    fn resplit_from_record0(&mut self) {
+        let record = self.fields[0].clone();
+        let split = self.split_record(&record);
+        self.fields.truncate(1);
+        self.fields.extend(split);
+        self.update_nf();
     }
 
     /// Simple xorshift64 PRNG.
@@ -1976,26 +2028,26 @@ impl AwkInterpreter {
 
     fn assign_to(&mut self, target: &Expr, val: AwkValue) {
         match target {
-            Expr::Var(name) => {
-                self.set_var(name, val);
-            }
-            Expr::FieldRef(idx_expr) => {
-                let idx = self.eval_expr(idx_expr).to_num();
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let n = idx.max(0.0) as usize;
-                self.set_field(n, val.to_str());
-            }
-            Expr::ArrayRef(name, idx_expr) => {
-                let key = self.eval_expr(idx_expr).to_str();
-                self.arrays
-                    .entry(name.clone())
-                    .or_default()
-                    .insert(key, val);
-            }
-            _ => {
-                // Ignore assignments to non-lvalues (awk just ignores these)
-            }
+            Expr::Var(name) => self.set_var(name, val),
+            Expr::FieldRef(idx_expr) => self.assign_to_field(idx_expr, &val),
+            Expr::ArrayRef(name, idx_expr) => self.assign_to_array(name, idx_expr, val),
+            _ => {} // Ignore assignments to non-lvalues (awk just ignores these)
         }
+    }
+
+    fn assign_to_field(&mut self, idx_expr: &Expr, val: &AwkValue) {
+        let idx = self.eval_expr(idx_expr).to_num();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let n = idx.max(0.0) as usize;
+        self.set_field(n, val.to_str());
+    }
+
+    fn assign_to_array(&mut self, name: &str, idx_expr: &Expr, val: AwkValue) {
+        let key = self.eval_expr(idx_expr).to_str();
+        self.arrays
+            .entry(name.to_string())
+            .or_default()
+            .insert(key, val);
     }
 
     fn apply_binop(&self, op: BinOp, l: &AwkValue, r: &AwkValue) -> AwkValue {
@@ -2066,41 +2118,10 @@ impl AwkInterpreter {
     /// otherwise compare as strings.
     #[allow(clippy::unused_self)]
     fn compare_values(&self, l: &AwkValue, r: &AwkValue) -> i8 {
-        let both_num = matches!(
-            (l, r),
-            (
-                AwkValue::Num(_) | AwkValue::Uninitialized,
-                AwkValue::Num(_) | AwkValue::Uninitialized
-            )
-        );
-
-        // If both are strings that look numeric, compare numerically
-        let looks_numeric = |v: &AwkValue| -> bool {
-            match v {
-                AwkValue::Num(_) | AwkValue::Uninitialized => true,
-                AwkValue::Str(s) => {
-                    let s = s.trim();
-                    !s.is_empty() && s.parse::<f64>().is_ok()
-                }
-            }
-        };
-
-        if both_num || (looks_numeric(l) && looks_numeric(r)) {
-            let ln = l.to_num();
-            let rn = r.to_num();
-            if ln < rn {
-                -1
-            } else {
-                i8::from(ln > rn)
-            }
+        if should_compare_numeric(l, r) {
+            compare_nums(l.to_num(), r.to_num())
         } else {
-            let ls = l.to_str();
-            let rs = r.to_str();
-            match ls.cmp(&rs) {
-                std::cmp::Ordering::Less => -1,
-                std::cmp::Ordering::Equal => 0,
-                std::cmp::Ordering::Greater => 1,
-            }
+            compare_strs(&l.to_str(), &r.to_str())
         }
     }
 
@@ -2229,38 +2250,46 @@ impl AwkInterpreter {
         if args.len() < 2 {
             return AwkValue::Num(0.0);
         }
-        let pattern = match &args[0] {
-            Expr::Regex(re) => re.clone(),
-            other => self.eval_expr(other).to_str(),
-        };
+        let pattern = self.eval_regex_or_str(&args[0]);
         let replacement = self.eval_expr(&args[1]).to_str();
-
-        let (target_str, target_field) = if args.len() >= 3 {
-            match &args[2] {
-                Expr::Var(name) => (self.get_var(name).to_str(), None),
-                Expr::FieldRef(idx) => {
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let n = self.eval_expr(idx).to_num().max(0.0) as usize;
-                    (self.get_field(n).to_str(), Some(n))
-                }
-                _ => (self.get_field(0).to_str(), Some(0)),
-            }
-        } else {
-            (self.get_field(0).to_str(), Some(0))
-        };
-
+        let (target_str, target_field) = self.resolve_sub_target(args);
         let (result, count) = regex_replace(&target_str, &pattern, &replacement, global);
-
-        if let Some(field_n) = target_field {
-            self.set_field(field_n, result);
-        } else if args.len() >= 3 {
-            if let Expr::Var(name) = &args[2] {
-                self.set_var(name, AwkValue::Str(result));
-            }
-        }
+        self.store_sub_result(args, target_field, result);
 
         #[allow(clippy::cast_precision_loss)]
         AwkValue::Num(count as f64)
+    }
+
+    fn eval_regex_or_str(&mut self, expr: &Expr) -> String {
+        match expr {
+            Expr::Regex(re) => re.clone(),
+            other => self.eval_expr(other).to_str(),
+        }
+    }
+
+    /// Resolve the target string and optional field index for sub/gsub.
+    fn resolve_sub_target(&mut self, args: &[Expr]) -> (String, Option<usize>) {
+        if args.len() < 3 {
+            return (self.get_field(0).to_str(), Some(0));
+        }
+        match &args[2] {
+            Expr::Var(name) => (self.get_var(name).to_str(), None),
+            Expr::FieldRef(idx) => {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let n = self.eval_expr(idx).to_num().max(0.0) as usize;
+                (self.get_field(n).to_str(), Some(n))
+            }
+            _ => (self.get_field(0).to_str(), Some(0)),
+        }
+    }
+
+    /// Store the result of sub/gsub back to the target.
+    fn store_sub_result(&mut self, args: &[Expr], target_field: Option<usize>, result: String) {
+        if let Some(field_n) = target_field {
+            self.set_field(field_n, result);
+        } else if let Some(Expr::Var(name)) = args.get(2) {
+            self.set_var(name, AwkValue::Str(result));
+        }
     }
 
     fn call_match_builtin(&mut self, args: &[Expr]) -> AwkValue {
@@ -2268,58 +2297,65 @@ impl AwkInterpreter {
             return AwkValue::Num(0.0);
         }
         let s = self.eval_expr(&args[0]).to_str();
-        let re = match &args[1] {
-            Expr::Regex(r) => r.clone(),
-            other => self.eval_expr(other).to_str(),
-        };
-        if let Some((start, end)) = regex_find(&s, &re) {
-            #[allow(clippy::cast_precision_loss)]
-            {
-                self.set_var("RSTART", AwkValue::Num((start + 1) as f64));
-                self.set_var("RLENGTH", AwkValue::Num((end - start) as f64));
-                AwkValue::Num((start + 1) as f64)
-            }
+        let re = self.eval_regex_or_str(&args[1]);
+        match regex_find(&s, &re) {
+            Some((start, end)) => self.set_match_found(start, end),
+            None => self.set_match_not_found(),
+        }
+    }
+
+    fn set_match_found(&mut self, start: usize, end: usize) -> AwkValue {
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.set_var("RSTART", AwkValue::Num((start + 1) as f64));
+            self.set_var("RLENGTH", AwkValue::Num((end - start) as f64));
+            AwkValue::Num((start + 1) as f64)
+        }
+    }
+
+    fn set_match_not_found(&mut self) -> AwkValue {
+        self.set_var("RSTART", AwkValue::Num(0.0));
+        self.set_var("RLENGTH", AwkValue::Num(-1.0));
+        AwkValue::Num(0.0)
+    }
+
+    fn eval_num_arg(&mut self, args: &[Expr]) -> f64 {
+        if args.is_empty() {
+            0.0
         } else {
-            self.set_var("RSTART", AwkValue::Num(0.0));
-            self.set_var("RLENGTH", AwkValue::Num(-1.0));
-            AwkValue::Num(0.0)
+            self.eval_expr(&args[0]).to_num()
         }
     }
 
     fn call_math_builtin(&mut self, name: &str, args: &[Expr]) -> Option<AwkValue> {
-        let num_arg = |interp: &mut Self| -> f64 {
-            if args.is_empty() {
-                0.0
-            } else {
-                interp.eval_expr(&args[0]).to_num()
-            }
-        };
         match name {
-            "int" => Some(AwkValue::Num(num_arg(self).trunc())),
-            "sqrt" => Some(AwkValue::Num(num_arg(self).sqrt())),
-            "sin" => Some(AwkValue::Num(num_arg(self).sin())),
-            "cos" => Some(AwkValue::Num(num_arg(self).cos())),
-            "log" => Some(AwkValue::Num(num_arg(self).ln())),
-            "exp" => Some(AwkValue::Num(num_arg(self).exp())),
+            "int" => Some(AwkValue::Num(self.eval_num_arg(args).trunc())),
+            "sqrt" => Some(AwkValue::Num(self.eval_num_arg(args).sqrt())),
+            "sin" => Some(AwkValue::Num(self.eval_num_arg(args).sin())),
+            "cos" => Some(AwkValue::Num(self.eval_num_arg(args).cos())),
+            "log" => Some(AwkValue::Num(self.eval_num_arg(args).ln())),
+            "exp" => Some(AwkValue::Num(self.eval_num_arg(args).exp())),
             "rand" => Some(AwkValue::Num(self.next_rand())),
-            "srand" => {
-                let old = self.rand_state;
-                if args.is_empty() {
-                    self.rand_state = 0xdead_beef_cafe_babe;
-                } else {
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    {
-                        self.rand_state = self.eval_expr(&args[0]).to_num() as u64;
-                    }
-                    if self.rand_state == 0 {
-                        self.rand_state = 1;
-                    }
-                }
-                #[allow(clippy::cast_precision_loss)]
-                Some(AwkValue::Num(old as f64))
-            }
+            "srand" => Some(self.call_srand(args)),
             _ => None,
         }
+    }
+
+    fn call_srand(&mut self, args: &[Expr]) -> AwkValue {
+        let old = self.rand_state;
+        if args.is_empty() {
+            self.rand_state = 0xdead_beef_cafe_babe;
+        } else {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            {
+                self.rand_state = self.eval_expr(&args[0]).to_num() as u64;
+            }
+            if self.rand_state == 0 {
+                self.rand_state = 1;
+            }
+        }
+        #[allow(clippy::cast_precision_loss)]
+        AwkValue::Num(old as f64)
     }
 
     fn call_function(&mut self, name: &str, args: &[Expr]) -> AwkValue {
@@ -2526,12 +2562,19 @@ impl AwkInterpreter {
                 return cf;
             }
         }
+        self.exec_for_loop(cond, incr, body)
+    }
+
+    fn exec_for_loop(
+        &mut self,
+        cond: Option<&Expr>,
+        incr: Option<&Stmt>,
+        body: &[Stmt],
+    ) -> ControlFlow {
         let mut iteration = 0;
         loop {
-            if let Some(c) = cond {
-                if !self.eval_expr(c).is_truthy() {
-                    break;
-                }
+            if !self.for_condition_holds(cond) {
+                break;
             }
             match self.exec_stmts(body) {
                 ControlFlow::Break => break,
@@ -2549,6 +2592,13 @@ impl AwkInterpreter {
             }
         }
         ControlFlow::None
+    }
+
+    fn for_condition_holds(&mut self, cond: Option<&Expr>) -> bool {
+        match cond {
+            Some(c) => self.eval_expr(c).is_truthy(),
+            None => true,
+        }
     }
 
     fn exec_for_in(&mut self, var: &str, arr_name: &str, body: &[Stmt]) -> ControlFlow {
@@ -2570,52 +2620,40 @@ impl AwkInterpreter {
 
     fn exec_print(&mut self, args: &[Expr]) -> ControlFlow {
         if args.is_empty() {
-            let s = self.get_field(0).to_str();
-            let ors = self.get_ors();
-            self.write_output(s.as_bytes());
-            self.write_output(ors.as_bytes());
+            self.print_record();
         } else {
-            let ofs = self.get_ofs();
-            let ors = self.get_ors();
-            let mut first = true;
-            for arg in args {
-                if !first {
-                    self.write_output(ofs.as_bytes());
-                }
-                let val = self.eval_expr(arg);
-                self.write_output(val.to_str().as_bytes());
-                first = false;
-            }
-            self.write_output(ors.as_bytes());
+            self.print_args(args);
         }
         ControlFlow::None
     }
 
+    fn print_record(&mut self) {
+        let s = self.get_field(0).to_str();
+        let ors = self.get_ors();
+        self.write_output(s.as_bytes());
+        self.write_output(ors.as_bytes());
+    }
+
+    fn print_args(&mut self, args: &[Expr]) {
+        let ofs = self.get_ofs();
+        let ors = self.get_ors();
+        for (i, arg) in args.iter().enumerate() {
+            if i > 0 {
+                self.write_output(ofs.as_bytes());
+            }
+            let val = self.eval_expr(arg);
+            self.write_output(val.to_str().as_bytes());
+        }
+        self.write_output(ors.as_bytes());
+    }
+
     fn exec_stmt(&mut self, stmt: &Stmt) -> ControlFlow {
         match stmt {
-            Stmt::Expr(expr) => {
-                self.eval_expr(expr);
-                ControlFlow::None
-            }
+            Stmt::Expr(expr) => self.exec_expr_stmt(expr),
             Stmt::Print(args, _redirect) => self.exec_print(args),
-            Stmt::Printf(args, _redirect) => {
-                if args.is_empty() {
-                    return ControlFlow::None;
-                }
-                let fmt = self.eval_expr(&args[0]).to_str();
-                let arg_vals: Vec<AwkValue> = args[1..].iter().map(|a| self.eval_expr(a)).collect();
-                let s = self.format_string(&fmt, &arg_vals);
-                self.write_output(s.as_bytes());
-                ControlFlow::None
-            }
+            Stmt::Printf(args, _redirect) => self.exec_printf(args),
             Stmt::If(cond, then_body, else_body) => {
-                if self.eval_expr(cond).is_truthy() {
-                    self.exec_stmts(then_body)
-                } else if let Some(eb) = else_body {
-                    self.exec_stmts(eb)
-                } else {
-                    ControlFlow::None
-                }
+                self.exec_if(cond, then_body, else_body.as_ref())
             }
             Stmt::While(cond, body) => self.exec_while(cond, body),
             Stmt::DoWhile(body, cond) => self.exec_do_while(body, cond),
@@ -2626,30 +2664,65 @@ impl AwkInterpreter {
             Stmt::Break => ControlFlow::Break,
             Stmt::Continue => ControlFlow::Continue,
             Stmt::Next => ControlFlow::Next,
-            Stmt::Exit(code) => {
-                let c = code.as_ref().map_or(0, |e| {
-                    #[allow(clippy::cast_possible_truncation)]
-                    {
-                        self.eval_expr(e).to_num() as i32
-                    }
-                });
-                ControlFlow::Exit(c)
-            }
-            Stmt::Return(expr) => {
-                let val = expr
-                    .as_ref()
-                    .map_or(AwkValue::Uninitialized, |e| self.eval_expr(e));
-                ControlFlow::Return(val)
-            }
-            Stmt::Delete(name, idx_expr) => {
-                let key = self.eval_expr(idx_expr).to_str();
-                if let Some(arr) = self.arrays.get_mut(name) {
-                    arr.remove(&key);
-                }
-                ControlFlow::None
-            }
+            Stmt::Exit(code) => self.exec_exit(code.as_ref()),
+            Stmt::Return(expr) => self.exec_return(expr.as_ref()),
+            Stmt::Delete(name, idx_expr) => self.exec_delete(name, idx_expr),
             Stmt::Block(stmts) => self.exec_stmts(stmts),
         }
+    }
+
+    fn exec_expr_stmt(&mut self, expr: &Expr) -> ControlFlow {
+        self.eval_expr(expr);
+        ControlFlow::None
+    }
+
+    fn exec_printf(&mut self, args: &[Expr]) -> ControlFlow {
+        if args.is_empty() {
+            return ControlFlow::None;
+        }
+        let fmt = self.eval_expr(&args[0]).to_str();
+        let arg_vals: Vec<AwkValue> = args[1..].iter().map(|a| self.eval_expr(a)).collect();
+        let s = self.format_string(&fmt, &arg_vals);
+        self.write_output(s.as_bytes());
+        ControlFlow::None
+    }
+
+    fn exec_if(
+        &mut self,
+        cond: &Expr,
+        then_body: &[Stmt],
+        else_body: Option<&Vec<Stmt>>,
+    ) -> ControlFlow {
+        if self.eval_expr(cond).is_truthy() {
+            self.exec_stmts(then_body)
+        } else if let Some(eb) = else_body {
+            self.exec_stmts(eb)
+        } else {
+            ControlFlow::None
+        }
+    }
+
+    fn exec_exit(&mut self, code: Option<&Expr>) -> ControlFlow {
+        let c = code.map_or(0, |e| {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                self.eval_expr(e).to_num() as i32
+            }
+        });
+        ControlFlow::Exit(c)
+    }
+
+    fn exec_return(&mut self, expr: Option<&Expr>) -> ControlFlow {
+        let val = expr.map_or(AwkValue::Uninitialized, |e| self.eval_expr(e));
+        ControlFlow::Return(val)
+    }
+
+    fn exec_delete(&mut self, name: &str, idx_expr: &Expr) -> ControlFlow {
+        let key = self.eval_expr(idx_expr).to_str();
+        if let Some(arr) = self.arrays.get_mut(name) {
+            arr.remove(&key);
+        }
+        ControlFlow::None
     }
 
     /// Test a simple (non-range) pattern against the current record.
@@ -2670,22 +2743,31 @@ impl AwkInterpreter {
             AwkPattern::All => true,
             AwkPattern::Expr(_) | AwkPattern::Regex(_) => self.test_simple_pattern(pattern),
             AwkPattern::Range(start_pat, end_pat) => {
-                while self.range_active.len() <= rule_idx {
-                    self.range_active.push(false);
-                }
-                if self.range_active[rule_idx] {
-                    if self.test_simple_pattern(end_pat) {
-                        self.range_active[rule_idx] = false;
-                    }
-                    true
-                } else {
-                    let start_matches = self.test_simple_pattern(start_pat);
-                    if start_matches {
-                        self.range_active[rule_idx] = true;
-                    }
-                    start_matches
-                }
+                self.test_range_pattern(start_pat, end_pat, rule_idx)
             }
+        }
+    }
+
+    fn test_range_pattern(
+        &mut self,
+        start_pat: &AwkPattern,
+        end_pat: &AwkPattern,
+        rule_idx: usize,
+    ) -> bool {
+        while self.range_active.len() <= rule_idx {
+            self.range_active.push(false);
+        }
+        if self.range_active[rule_idx] {
+            if self.test_simple_pattern(end_pat) {
+                self.range_active[rule_idx] = false;
+            }
+            true
+        } else {
+            let start_matches = self.test_simple_pattern(start_pat);
+            if start_matches {
+                self.range_active[rule_idx] = true;
+            }
+            start_matches
         }
     }
 
@@ -2719,41 +2801,55 @@ impl AwkInterpreter {
     fn run(&mut self, program: &AwkProgram, inputs: &[(String, String)]) -> i32 {
         self.functions.clone_from(&program.functions);
 
-        // BEGIN
         if let ControlFlow::Exit(code) = self.exec_stmts(&program.begin) {
             self.exit_code = code;
             self.exec_stmts(&program.end);
             return self.exit_code;
         }
 
-        let mut nr: f64 = 0.0;
-
-        for (filename, content) in inputs {
-            let records = self.split_into_records(content);
-            let mut fnr: f64 = 0.0;
-            self.set_var("FILENAME", AwkValue::Str(filename.clone()));
-
-            for record in records {
-                nr += 1.0;
-                fnr += 1.0;
-                self.set_var("NR", AwkValue::Num(nr));
-                self.set_var("FNR", AwkValue::Num(fnr));
-                self.set_record(record);
-
-                if let Some(code) = self.process_record(program) {
-                    self.exit_code = code;
-                    self.exec_stmts(&program.end);
-                    return self.exit_code;
-                }
-            }
+        if let Some(code) = self.run_main_loop(program, inputs) {
+            self.exit_code = code;
+            self.exec_stmts(&program.end);
+            return self.exit_code;
         }
 
-        // END
         if let ControlFlow::Exit(code) = self.exec_stmts(&program.end) {
             self.exit_code = code;
         }
-
         self.exit_code
+    }
+
+    fn run_main_loop(&mut self, program: &AwkProgram, inputs: &[(String, String)]) -> Option<i32> {
+        let mut nr: f64 = 0.0;
+        for (filename, content) in inputs {
+            if let Some(code) = self.run_input(program, filename, content, &mut nr) {
+                return Some(code);
+            }
+        }
+        None
+    }
+
+    fn run_input(
+        &mut self,
+        program: &AwkProgram,
+        filename: &str,
+        content: &str,
+        nr: &mut f64,
+    ) -> Option<i32> {
+        let records = self.split_into_records(content);
+        let mut fnr: f64 = 0.0;
+        self.set_var("FILENAME", AwkValue::Str(filename.to_string()));
+        for record in records {
+            *nr += 1.0;
+            fnr += 1.0;
+            self.set_var("NR", AwkValue::Num(*nr));
+            self.set_var("FNR", AwkValue::Num(fnr));
+            self.set_record(record);
+            if let Some(code) = self.process_record(program) {
+                return Some(code);
+            }
+        }
+        None
     }
 }
 
@@ -2766,43 +2862,35 @@ fn regex_replace(text: &str, pattern: &str, replacement: &str, global: bool) -> 
     let mut count = 0;
     let mut search_start = 0;
 
-    loop {
-        if search_start > text.len() {
-            break;
-        }
-
-        // Search in the remaining text
+    while search_start <= text.len() {
         let remaining = &text[search_start..];
-        if let Some((match_start, match_end)) = regex_find(remaining, pattern) {
-            // Append text before the match
-            result.push_str(&remaining[..match_start]);
-
-            // Build replacement: & refers to the matched text
-            let matched = &remaining[match_start..match_end];
-            let repl = replacement.replace('&', matched);
-            result.push_str(&repl);
-
-            count += 1;
-
-            // Move past the match
-            let advance = match_end.max(1); // Ensure we always advance
-            search_start += advance;
-
-            if !global {
-                // Append the rest
-                if search_start <= text.len() {
-                    result.push_str(&text[search_start..]);
-                }
-                break;
-            }
-        } else {
-            // No more matches; append the rest
+        let Some((match_start, match_end)) = regex_find(remaining, pattern) else {
             result.push_str(remaining);
+            break;
+        };
+        result.push_str(&remaining[..match_start]);
+        apply_replacement(&mut result, &remaining[match_start..match_end], replacement);
+        count += 1;
+        search_start += match_end.max(1);
+
+        if !global {
+            append_remainder(&mut result, text, search_start);
             break;
         }
     }
 
     (result, count)
+}
+
+fn apply_replacement(result: &mut String, matched: &str, replacement: &str) {
+    let repl = replacement.replace('&', matched);
+    result.push_str(&repl);
+}
+
+fn append_remainder(result: &mut String, text: &str, start: usize) {
+    if start <= text.len() {
+        result.push_str(&text[start..]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2907,73 +2995,104 @@ fn format_one_spec(
     flags: &FormatFlags,
     arg: &AwkValue,
 ) -> String {
-    let pad = if flags.zero_pad { '0' } else { ' ' };
     match spec {
-        'd' | 'i' => {
-            #[allow(clippy::cast_possible_truncation)]
-            let n = arg.to_num() as i64;
-            let s = apply_sign_prefix(&format!("{}", n.abs()), n < 0, flags);
-            pad_string(&s, width, flags.left_align, pad)
-        }
-        'o' => {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let n = arg.to_num() as u64;
-            let s = format!("{n:o}");
-            pad_string(&s, width, flags.left_align, pad)
-        }
-        'x' => {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let n = arg.to_num() as u64;
-            let s = format!("{n:x}");
-            pad_string(&s, width, flags.left_align, pad)
-        }
-        'X' => {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let n = arg.to_num() as u64;
-            let s = format!("{n:X}");
-            pad_string(&s, width, flags.left_align, pad)
-        }
-        'f' => {
-            let n = arg.to_num();
-            let prec = precision.unwrap_or(6);
-            let s = format_signed_float(n, &format!("{:.prec$}", n.abs()), flags);
-            pad_string(&s, width, flags.left_align, pad)
-        }
-        'e' | 'E' => {
-            let n = arg.to_num();
-            let prec = precision.unwrap_or(6);
-            let raw = format_scientific(n.abs(), prec, spec == 'E');
-            let s = format_signed_float(n, &raw, flags);
-            pad_string(&s, width, flags.left_align, pad)
-        }
-        'g' | 'G' => {
-            let n = arg.to_num();
-            let prec = precision.unwrap_or(6).max(1);
-            let raw = format_g(n, prec, spec == 'G');
-            let s = if flags.plus_sign && n >= 0.0 {
-                format!("+{raw}")
-            } else if flags.space_sign && n >= 0.0 {
-                format!(" {raw}")
-            } else {
-                raw
-            };
-            pad_string(&s, width, flags.left_align, pad)
-        }
-        's' => {
-            let mut s = arg.to_str();
-            if let Some(prec) = precision {
-                let truncated: String = s.chars().take(prec).collect();
-                s = truncated;
-            }
-            pad_string(&s, width, flags.left_align, ' ')
-        }
-        'c' => {
-            let s = arg.to_str();
-            let c = s.chars().next().map_or(String::new(), |c| c.to_string());
-            pad_string(&c, width, flags.left_align, ' ')
-        }
+        'd' | 'i' => format_int_spec(width, flags, arg),
+        'o' => format_unsigned_spec(width, flags, arg, 'o'),
+        'x' => format_unsigned_spec(width, flags, arg, 'x'),
+        'X' => format_unsigned_spec(width, flags, arg, 'X'),
+        'f' => format_float_spec(width, precision, flags, arg),
+        'e' | 'E' => format_scientific_spec(width, precision, flags, arg, spec),
+        'g' | 'G' => format_g_spec(width, precision, flags, arg, spec),
+        's' => format_str_spec(width, precision, flags, arg),
+        'c' => format_char_spec(width, flags, arg),
         _ => format!("%{spec}"),
     }
+}
+
+fn pad_char(flags: &FormatFlags) -> char {
+    if flags.zero_pad {
+        '0'
+    } else {
+        ' '
+    }
+}
+
+fn format_int_spec(width: usize, flags: &FormatFlags, arg: &AwkValue) -> String {
+    #[allow(clippy::cast_possible_truncation)]
+    let n = arg.to_num() as i64;
+    let s = apply_sign_prefix(&format!("{}", n.abs()), n < 0, flags);
+    pad_string(&s, width, flags.left_align, pad_char(flags))
+}
+
+fn format_unsigned_spec(width: usize, flags: &FormatFlags, arg: &AwkValue, base: char) -> String {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let n = arg.to_num() as u64;
+    let s = match base {
+        'o' => format!("{n:o}"),
+        'X' => format!("{n:X}"),
+        _ => format!("{n:x}"),
+    };
+    pad_string(&s, width, flags.left_align, pad_char(flags))
+}
+
+fn format_float_spec(
+    width: usize,
+    precision: Option<usize>,
+    flags: &FormatFlags,
+    arg: &AwkValue,
+) -> String {
+    let n = arg.to_num();
+    let prec = precision.unwrap_or(6);
+    let s = format_signed_float(n, &format!("{:.prec$}", n.abs()), flags);
+    pad_string(&s, width, flags.left_align, pad_char(flags))
+}
+
+fn format_scientific_spec(
+    width: usize,
+    precision: Option<usize>,
+    flags: &FormatFlags,
+    arg: &AwkValue,
+    spec: char,
+) -> String {
+    let n = arg.to_num();
+    let prec = precision.unwrap_or(6);
+    let raw = format_scientific(n.abs(), prec, spec == 'E');
+    let s = format_signed_float(n, &raw, flags);
+    pad_string(&s, width, flags.left_align, pad_char(flags))
+}
+
+fn format_g_spec(
+    width: usize,
+    precision: Option<usize>,
+    flags: &FormatFlags,
+    arg: &AwkValue,
+    spec: char,
+) -> String {
+    let n = arg.to_num();
+    let prec = precision.unwrap_or(6).max(1);
+    let raw = format_g(n, prec, spec == 'G');
+    let s = format_signed_float(n, &raw, flags);
+    pad_string(&s, width, flags.left_align, pad_char(flags))
+}
+
+fn format_str_spec(
+    width: usize,
+    precision: Option<usize>,
+    flags: &FormatFlags,
+    arg: &AwkValue,
+) -> String {
+    let mut s = arg.to_str();
+    if let Some(prec) = precision {
+        let truncated: String = s.chars().take(prec).collect();
+        s = truncated;
+    }
+    pad_string(&s, width, flags.left_align, ' ')
+}
+
+fn format_char_spec(width: usize, flags: &FormatFlags, arg: &AwkValue) -> String {
+    let s = arg.to_str();
+    let c = s.chars().next().map_or(String::new(), |c| c.to_string());
+    pad_string(&c, width, flags.left_align, ' ')
 }
 
 /// Apply sign prefix (+, space, or -) to a formatted number string.
@@ -3002,23 +3121,33 @@ fn format_signed_float(n: f64, abs_formatted: &str, flags: &FormatFlags) -> Stri
     }
 }
 
-fn pad_string(s: &str, width: usize, left_align: bool, pad_char: char) -> String {
+fn pad_string(s: &str, width: usize, left_align: bool, pad_ch: char) -> String {
     if s.len() >= width {
         return s.to_string();
     }
-    let padding: String = std::iter::repeat_n(pad_char, width - s.len()).collect();
     if left_align {
-        format!("{s}{padding}")
-    } else {
-        // For zero-padding with a sign, put sign before zeros
-        if pad_char == '0' && (s.starts_with('-') || s.starts_with('+') || s.starts_with(' ')) {
-            let (sign, num) = s.split_at(1);
-            let padding: String = std::iter::repeat_n('0', width - s.len()).collect();
-            format!("{sign}{padding}{num}")
-        } else {
-            format!("{padding}{s}")
-        }
+        return pad_string_left(s, width, pad_ch);
     }
+    pad_string_right(s, width, pad_ch)
+}
+
+fn pad_string_left(s: &str, width: usize, pad_ch: char) -> String {
+    let padding: String = std::iter::repeat_n(pad_ch, width - s.len()).collect();
+    format!("{s}{padding}")
+}
+
+fn pad_string_right(s: &str, width: usize, pad_ch: char) -> String {
+    let padding: String = std::iter::repeat_n(pad_ch, width - s.len()).collect();
+    if pad_ch == '0' && has_sign_prefix(s) {
+        let (sign, num) = s.split_at(1);
+        format!("{sign}{padding}{num}")
+    } else {
+        format!("{padding}{s}")
+    }
+}
+
+fn has_sign_prefix(s: &str) -> bool {
+    s.starts_with('-') || s.starts_with('+') || s.starts_with(' ')
 }
 
 fn format_scientific(n: f64, prec: usize, upper: bool) -> String {
@@ -3041,17 +3170,18 @@ fn format_g(n: f64, prec: usize, upper: bool) -> String {
     if n == 0.0 {
         return "0".to_string();
     }
-    let abs = n.abs();
-    let exp = if abs == 0.0 {
-        0
+    let exp = n.abs().log10().floor() as i32;
+    if use_fixed_notation(exp, prec) {
+        format_g_fixed(n, prec, exp)
     } else {
-        abs.log10().floor() as i32
-    };
-
-    if exp >= -4 && exp < prec as i32 {
-        return format_g_fixed(n, prec, exp);
+        format_g_scientific(n, prec, upper)
     }
-    format_g_scientific(n, prec, upper)
+}
+
+fn use_fixed_notation(exp: i32, prec: usize) -> bool {
+    #[allow(clippy::cast_possible_wrap)]
+    let limit = prec as i32;
+    exp >= -4 && exp < limit
 }
 
 fn format_g_fixed(n: f64, prec: usize, exp: i32) -> String {
@@ -3169,13 +3299,7 @@ fn parse_awk_option<'a>(
         return Ok(false);
     };
     if *arg == "-F" {
-        let Some(value) = args.get(1) else {
-            ctx.output.stderr(b"awk: -F requires an argument\n");
-            return Err(1);
-        };
-        *fs = Some((*value).to_string());
-        *args = &args[2..];
-        return Ok(true);
+        return parse_awk_fs_option(ctx, args, fs);
     }
     if let Some(sep) = arg.strip_prefix("-F") {
         *fs = Some(sep.to_string());
@@ -3183,27 +3307,10 @@ fn parse_awk_option<'a>(
         return Ok(true);
     }
     if *arg == "-v" {
-        let Some(value) = args.get(1) else {
-            ctx.output.stderr(b"awk: -v requires an argument\n");
-            return Err(1);
-        };
-        if let Some((name, val)) = value.split_once('=') {
-            pre_vars.push((name.to_string(), val.to_string()));
-            *args = &args[2..];
-            return Ok(true);
-        }
-        let msg = format!("awk: invalid -v argument: '{value}'\n");
-        ctx.output.stderr(msg.as_bytes());
-        return Err(1);
+        return parse_awk_var_option(ctx, args, pre_vars);
     }
     if *arg == "-f" {
-        let Some(value) = args.get(1) else {
-            ctx.output.stderr(b"awk: -f requires an argument\n");
-            return Err(1);
-        };
-        *prog_file = Some((*value).to_string());
-        *args = &args[2..];
-        return Ok(true);
+        return parse_awk_file_option(ctx, args, prog_file);
     }
     if arg.starts_with('-') && arg.len() > 1 {
         let msg = format!("awk: unknown option: '{arg}'\n");
@@ -3211,6 +3318,53 @@ fn parse_awk_option<'a>(
         return Err(1);
     }
     Ok(false)
+}
+
+fn parse_awk_fs_option<'a>(
+    ctx: &mut UtilContext<'_>,
+    args: &mut &'a [&'a str],
+    fs: &mut Option<String>,
+) -> Result<bool, i32> {
+    let Some(value) = args.get(1) else {
+        ctx.output.stderr(b"awk: -F requires an argument\n");
+        return Err(1);
+    };
+    *fs = Some((*value).to_string());
+    *args = &args[2..];
+    Ok(true)
+}
+
+fn parse_awk_var_option<'a>(
+    ctx: &mut UtilContext<'_>,
+    args: &mut &'a [&'a str],
+    pre_vars: &mut Vec<(String, String)>,
+) -> Result<bool, i32> {
+    let Some(value) = args.get(1) else {
+        ctx.output.stderr(b"awk: -v requires an argument\n");
+        return Err(1);
+    };
+    if let Some((name, val)) = value.split_once('=') {
+        pre_vars.push((name.to_string(), val.to_string()));
+        *args = &args[2..];
+        return Ok(true);
+    }
+    let msg = format!("awk: invalid -v argument: '{value}'\n");
+    ctx.output.stderr(msg.as_bytes());
+    Err(1)
+}
+
+fn parse_awk_file_option<'a>(
+    ctx: &mut UtilContext<'_>,
+    args: &mut &'a [&'a str],
+    prog_file: &mut Option<String>,
+) -> Result<bool, i32> {
+    let Some(value) = args.get(1) else {
+        ctx.output.stderr(b"awk: -f requires an argument\n");
+        return Err(1);
+    };
+    *prog_file = Some((*value).to_string());
+    *args = &args[2..];
+    Ok(true)
 }
 
 fn load_awk_program_text<'a>(
@@ -3265,43 +3419,24 @@ fn is_awk_assignment_name(name: &str) -> bool {
             .is_some_and(|c| c.is_alphabetic() || c == '_')
 }
 
-pub(crate) fn util_awk(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let awk_args = match parse_awk_args(ctx, argv) {
-        Ok(a) => a,
-        Err(code) => return code,
-    };
-
-    let program_src = awk_args.prog_text.unwrap();
-
-    // Tokenize
-    let mut lexer = Lexer::new(&program_src);
-    let tokens = match lexer.tokenize() {
-        Ok(t) => t,
-        Err(e) => {
-            let msg = format!("awk: {e}\n");
-            ctx.output.stderr(msg.as_bytes());
-            return 2;
-        }
-    };
-
-    // Parse
+fn compile_awk_program(ctx: &mut UtilContext<'_>, source: &str) -> Result<AwkProgram, i32> {
+    let mut lexer = Lexer::new(source);
+    let tokens = lexer.tokenize().map_err(|e| {
+        ctx.output.stderr(format!("awk: {e}\n").as_bytes());
+        2
+    })?;
     let mut parser = Parser::new(tokens);
-    let program = match parser.parse_program() {
-        Ok(p) => p,
-        Err(e) => {
-            let msg = format!("awk: {e}\n");
-            ctx.output.stderr(msg.as_bytes());
-            return 2;
-        }
-    };
+    parser.parse_program().map_err(|e| {
+        ctx.output.stderr(format!("awk: {e}\n").as_bytes());
+        2
+    })
+}
 
-    // Build interpreter
+fn init_interpreter(awk_args: &AwkArgs<'_>) -> AwkInterpreter {
     let mut interp = AwkInterpreter::new();
-
     if let Some(ref sep) = awk_args.fs {
         interp.set_var("FS", AwkValue::Str(sep.clone()));
     }
-
     for (name, val) in &awk_args.pre_vars {
         if let Ok(n) = val.parse::<f64>() {
             interp.set_var(name, AwkValue::Num(n));
@@ -3309,21 +3444,32 @@ pub(crate) fn util_awk(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             interp.set_var(name, AwkValue::Str(val.clone()));
         }
     }
+    interp
+}
+
+pub(crate) fn util_awk(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let awk_args = match parse_awk_args(ctx, argv) {
+        Ok(a) => a,
+        Err(code) => return code,
+    };
+
+    let program = match compile_awk_program(ctx, awk_args.prog_text.as_deref().unwrap()) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+
+    let mut interp = init_interpreter(&awk_args);
 
     let inputs = match gather_inputs(ctx, &awk_args.file_args, &mut interp) {
         Ok(v) => v,
         Err(code) => return code,
     };
 
-    // Run
     let exit_code = interp.run(&program, &inputs);
-
-    // Flush output
     ctx.output.stdout(&interp.output_buf);
     if !interp.stderr_buf.is_empty() {
         ctx.output.stderr(&interp.stderr_buf);
     }
-
     exit_code
 }
 
