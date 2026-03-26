@@ -538,31 +538,50 @@ fn read_file_bytes(ctx: &mut UtilContext<'_>, full: &str, display: &str) -> Opti
 // comm — compare two sorted files
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_comm(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
-    let mut suppress1 = false;
-    let mut suppress2 = false;
-    let mut suppress3 = false;
+struct CommOpts {
+    suppress1: bool,
+    suppress2: bool,
+    suppress3: bool,
+}
 
-    while let Some(arg) = args.first() {
+fn parse_comm_opts<'a>(
+    args: &'a [&'a str],
+    output: &mut dyn crate::UtilOutput,
+) -> Result<(CommOpts, &'a [&'a str]), i32> {
+    let mut rest = args;
+    let mut opts = CommOpts {
+        suppress1: false,
+        suppress2: false,
+        suppress3: false,
+    };
+
+    while let Some(arg) = rest.first() {
         if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") {
             for ch in arg[1..].chars() {
                 match ch {
-                    '1' => suppress1 = true,
-                    '2' => suppress2 = true,
-                    '3' => suppress3 = true,
+                    '1' => opts.suppress1 = true,
+                    '2' => opts.suppress2 = true,
+                    '3' => opts.suppress3 = true,
                     _ => {
                         let msg = format!("comm: invalid option -- '{ch}'\n");
-                        ctx.output.stderr(msg.as_bytes());
-                        return 1;
+                        output.stderr(msg.as_bytes());
+                        return Err(1);
                     }
                 }
             }
-            args = &args[1..];
+            rest = &rest[1..];
         } else {
             break;
         }
     }
+    Ok((opts, rest))
+}
+
+pub(crate) fn util_comm(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (opts, args) = match parse_comm_opts(&argv[1..], ctx.output) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
 
     if args.len() < 2 {
         ctx.output.stderr(b"comm: missing operand\n");
@@ -589,7 +608,14 @@ pub(crate) fn util_comm(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     let lines1: Vec<&str> = text1.lines().collect();
     let lines2: Vec<&str> = text2.lines().collect();
-    comm_merge(ctx, &lines1, &lines2, suppress1, suppress2, suppress3);
+    comm_merge(
+        ctx,
+        &lines1,
+        &lines2,
+        opts.suppress1,
+        opts.suppress2,
+        opts.suppress3,
+    );
     0
 }
 
@@ -648,31 +674,38 @@ fn comm_emit(ctx: &mut UtilContext<'_>, prefix: &str, line: &str, show: bool) {
 // fold — wrap lines to width
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_fold(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
+struct FoldOpts {
+    width: usize,
+    break_at_spaces: bool,
+}
+
+fn parse_fold_opts<'a>(
+    args: &'a [&'a str],
+    output: &mut dyn crate::UtilOutput,
+) -> Result<(FoldOpts, &'a [&'a str]), i32> {
+    let mut rest = args;
     let mut width: usize = 80;
     let mut break_at_spaces = false;
 
-    while let Some(arg) = args.first() {
-        if *arg == "-w" && args.len() > 1 {
-            let Ok(w) = args[1].parse::<usize>() else {
-                let msg = format!("fold: invalid number: '{}'\n", args[1]);
-                ctx.output.stderr(msg.as_bytes());
-                return 1;
+    while let Some(arg) = rest.first() {
+        if *arg == "-w" && rest.len() > 1 {
+            let Ok(w) = rest[1].parse::<usize>() else {
+                let msg = format!("fold: invalid number: '{}'\n", rest[1]);
+                output.stderr(msg.as_bytes());
+                return Err(1);
             };
             width = w;
-            args = &args[2..];
+            rest = &rest[2..];
         } else if *arg == "-s" {
             break_at_spaces = true;
-            args = &args[1..];
+            rest = &rest[1..];
         } else if arg.starts_with('-') && arg.len() > 1 {
-            // Try -wN combined form
-            if let Some(rest) = arg.strip_prefix("-w") {
-                if let Ok(w) = rest.parse::<usize>() {
+            if let Some(num) = arg.strip_prefix("-w") {
+                if let Ok(w) = num.parse::<usize>() {
                     width = w;
                 }
             }
-            args = &args[1..];
+            rest = &rest[1..];
         } else {
             break;
         }
@@ -681,6 +714,31 @@ pub(crate) fn util_fold(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     if width == 0 {
         width = 80;
     }
+    Ok((
+        FoldOpts {
+            width,
+            break_at_spaces,
+        },
+        rest,
+    ))
+}
+
+fn fold_hard_break(ctx: &mut UtilContext<'_>, line: &str, width: usize) {
+    let bytes = line.as_bytes();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let end = (pos + width).min(bytes.len());
+        ctx.output.stdout(&bytes[pos..end]);
+        ctx.output.stdout(b"\n");
+        pos = end;
+    }
+}
+
+pub(crate) fn util_fold(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (opts, args) = match parse_fold_opts(&argv[1..], ctx.output) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
 
     let text = get_input_text(ctx, args);
     if text.is_empty() && args.is_empty() && ctx.stdin.is_none() {
@@ -689,24 +747,13 @@ pub(crate) fn util_fold(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     }
 
     for line in text.lines() {
-        if line.len() <= width {
+        if line.len() <= opts.width {
             ctx.output.stdout(line.as_bytes());
             ctx.output.stdout(b"\n");
-            continue;
-        }
-
-        if break_at_spaces {
-            fold_at_spaces(ctx, line, width);
+        } else if opts.break_at_spaces {
+            fold_at_spaces(ctx, line, opts.width);
         } else {
-            // Hard break at width
-            let bytes = line.as_bytes();
-            let mut pos = 0;
-            while pos < bytes.len() {
-                let end = (pos + width).min(bytes.len());
-                ctx.output.stdout(&bytes[pos..end]);
-                ctx.output.stdout(b"\n");
-                pos = end;
-            }
+            fold_hard_break(ctx, line, opts.width);
         }
     }
     0
@@ -755,26 +802,30 @@ pub(crate) fn util_nproc(ctx: &mut UtilContext<'_>, _argv: &[&str]) -> i32 {
 // expand — tabs to spaces
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_expand(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
+fn parse_tab_width<'a>(
+    args: &'a [&'a str],
+    util_name: &str,
+    output: &mut dyn crate::UtilOutput,
+) -> Result<(usize, &'a [&'a str]), i32> {
+    let mut rest = args;
     let mut tab_width: usize = 8;
 
-    while let Some(arg) = args.first() {
-        if *arg == "-t" && args.len() > 1 {
-            let Ok(w) = args[1].parse::<usize>() else {
-                let msg = format!("expand: invalid number: '{}'\n", args[1]);
-                ctx.output.stderr(msg.as_bytes());
-                return 1;
+    while let Some(arg) = rest.first() {
+        if *arg == "-t" && rest.len() > 1 {
+            let Ok(w) = rest[1].parse::<usize>() else {
+                let msg = format!("{util_name}: invalid number: '{}'\n", rest[1]);
+                output.stderr(msg.as_bytes());
+                return Err(1);
             };
             tab_width = w;
-            args = &args[2..];
+            rest = &rest[2..];
         } else if arg.starts_with('-') && arg.len() > 1 {
-            if let Some(rest) = arg.strip_prefix("-t") {
-                if let Ok(w) = rest.parse::<usize>() {
+            if let Some(num) = arg.strip_prefix("-t") {
+                if let Ok(w) = num.parse::<usize>() {
                     tab_width = w;
                 }
             }
-            args = &args[1..];
+            rest = &rest[1..];
         } else {
             break;
         }
@@ -783,6 +834,33 @@ pub(crate) fn util_expand(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     if tab_width == 0 {
         tab_width = 8;
     }
+    Ok((tab_width, rest))
+}
+
+fn expand_line(line: &str, tab_width: usize) -> String {
+    let mut col = 0;
+    let mut out = String::new();
+    for ch in line.chars() {
+        if ch == '\t' {
+            let spaces = tab_width - (col % tab_width);
+            for _ in 0..spaces {
+                out.push(' ');
+            }
+            col += spaces;
+        } else {
+            out.push(ch);
+            col += 1;
+        }
+    }
+    out.push('\n');
+    out
+}
+
+pub(crate) fn util_expand(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (tab_width, args) = match parse_tab_width(&argv[1..], "expand", ctx.output) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
 
     let text = get_input_text(ctx, args);
     if text.is_empty() && args.is_empty() && ctx.stdin.is_none() {
@@ -790,21 +868,7 @@ pub(crate) fn util_expand(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     }
 
     for line in text.lines() {
-        let mut col = 0;
-        let mut out = String::new();
-        for ch in line.chars() {
-            if ch == '\t' {
-                let spaces = tab_width - (col % tab_width);
-                for _ in 0..spaces {
-                    out.push(' ');
-                }
-                col += spaces;
-            } else {
-                out.push(ch);
-                col += 1;
-            }
-        }
-        out.push('\n');
+        let out = expand_line(line, tab_width);
         ctx.output.stdout(out.as_bytes());
     }
     0
@@ -814,33 +878,41 @@ pub(crate) fn util_expand(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 // unexpand — spaces to tabs
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_unexpand(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
+struct UnexpandOpts {
+    tab_width: usize,
+    all: bool,
+}
+
+fn parse_unexpand_opts<'a>(
+    args: &'a [&'a str],
+    output: &mut dyn crate::UtilOutput,
+) -> Result<(UnexpandOpts, &'a [&'a str]), i32> {
+    let mut rest = args;
     let mut tab_width: usize = 8;
     let mut all = false;
 
-    while let Some(arg) = args.first() {
-        if *arg == "-t" && args.len() > 1 {
-            let Ok(w) = args[1].parse::<usize>() else {
-                let msg = format!("unexpand: invalid number: '{}'\n", args[1]);
-                ctx.output.stderr(msg.as_bytes());
-                return 1;
+    while let Some(arg) = rest.first() {
+        if *arg == "-t" && rest.len() > 1 {
+            let Ok(w) = rest[1].parse::<usize>() else {
+                let msg = format!("unexpand: invalid number: '{}'\n", rest[1]);
+                output.stderr(msg.as_bytes());
+                return Err(1);
             };
             tab_width = w;
-            args = &args[2..];
+            rest = &rest[2..];
         } else if *arg == "-a" || *arg == "--all" {
             all = true;
-            args = &args[1..];
+            rest = &rest[1..];
         } else if *arg == "--first-only" {
             all = false;
-            args = &args[1..];
+            rest = &rest[1..];
         } else if arg.starts_with('-') && arg.len() > 1 {
-            if let Some(rest) = arg.strip_prefix("-t") {
-                if let Ok(w) = rest.parse::<usize>() {
+            if let Some(num) = arg.strip_prefix("-t") {
+                if let Ok(w) = num.parse::<usize>() {
                     tab_width = w;
                 }
             }
-            args = &args[1..];
+            rest = &rest[1..];
         } else {
             break;
         }
@@ -849,6 +921,14 @@ pub(crate) fn util_unexpand(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     if tab_width == 0 {
         tab_width = 8;
     }
+    Ok((UnexpandOpts { tab_width, all }, rest))
+}
+
+pub(crate) fn util_unexpand(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (opts, args) = match parse_unexpand_opts(&argv[1..], ctx.output) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
 
     let text = get_input_text(ctx, args);
     if text.is_empty() && args.is_empty() && ctx.stdin.is_none() {
@@ -856,10 +936,10 @@ pub(crate) fn util_unexpand(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     }
 
     for line in text.lines() {
-        let out = if all {
-            unexpand_line(line, tab_width)
+        let out = if opts.all {
+            unexpand_line(line, opts.tab_width)
         } else {
-            unexpand_leading(line, tab_width)
+            unexpand_leading(line, opts.tab_width)
         };
         ctx.output.stdout(out.as_bytes());
         ctx.output.stdout(b"\n");
@@ -966,26 +1046,77 @@ fn compute_truncate_size(current_len: u64, spec: &SizeSpec) -> usize {
     }
 }
 
-pub(crate) fn util_truncate(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    const MAX_FILE_SIZE: usize = 64 * 1024 * 1024;
-    let mut args = &argv[1..];
+fn parse_truncate_opts<'a>(args: &'a [&'a str]) -> (Option<&'a str>, &'a [&'a str]) {
+    let mut rest = args;
     let mut size_spec: Option<&str> = None;
 
-    while let Some(arg) = args.first() {
-        if *arg == "-s" && args.len() > 1 {
-            size_spec = Some(args[1]);
-            args = &args[2..];
-        } else if let Some(rest) = arg.strip_prefix("-s") {
-            if !rest.is_empty() {
-                size_spec = Some(rest);
+    while let Some(arg) = rest.first() {
+        if *arg == "-s" && rest.len() > 1 {
+            size_spec = Some(rest[1]);
+            rest = &rest[2..];
+        } else if let Some(val) = arg.strip_prefix("-s") {
+            if !val.is_empty() {
+                size_spec = Some(val);
             }
-            args = &args[1..];
+            rest = &rest[1..];
         } else if arg.starts_with('-') && arg.len() > 1 {
-            args = &args[1..];
+            rest = &rest[1..];
         } else {
             break;
         }
     }
+    (size_spec, rest)
+}
+
+const TRUNCATE_MAX_FILE_SIZE: usize = 64 * 1024 * 1024;
+
+fn truncate_one_file(ctx: &mut UtilContext<'_>, path: &str, spec: &SizeSpec) -> Result<(), ()> {
+    let full = resolve_path(ctx.cwd, path);
+
+    let current_data = match ctx.fs.open(&full, OpenOptions::read()) {
+        Ok(h) => match ctx.fs.read_file(h) {
+            Ok(data) => {
+                ctx.fs.close(h);
+                data
+            }
+            Err(e) => {
+                ctx.fs.close(h);
+                emit_error(ctx.output, "truncate", path, &e);
+                return Err(());
+            }
+        },
+        Err(_) => Vec::new(),
+    };
+
+    let new_size = compute_truncate_size(current_data.len() as u64, spec);
+    if new_size > TRUNCATE_MAX_FILE_SIZE {
+        let msg = format!("truncate: size {new_size} exceeds VFS limit\n");
+        ctx.output.stderr(msg.as_bytes());
+        return Err(());
+    }
+
+    let mut new_data = current_data;
+    new_data.resize(new_size, 0);
+
+    match ctx.fs.open(&full, OpenOptions::write()) {
+        Ok(h) => {
+            if let Err(e) = ctx.fs.write_file(h, &new_data) {
+                emit_error(ctx.output, "truncate", path, &e);
+                ctx.fs.close(h);
+                return Err(());
+            }
+            ctx.fs.close(h);
+        }
+        Err(e) => {
+            emit_error(ctx.output, "truncate", path, &e);
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn util_truncate(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (size_spec, args) = parse_truncate_opts(&argv[1..]);
 
     let Some(spec_str) = size_spec else {
         ctx.output.stderr(b"truncate: missing -s option\n");
@@ -1008,50 +1139,8 @@ pub(crate) fn util_truncate(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     let mut status = 0;
     for path in args {
-        let full = resolve_path(ctx.cwd, path);
-
-        let current_data = match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => match ctx.fs.read_file(h) {
-                Ok(data) => {
-                    ctx.fs.close(h);
-                    data
-                }
-                Err(e) => {
-                    ctx.fs.close(h);
-                    emit_error(ctx.output, "truncate", path, &e);
-                    status = 1;
-                    continue;
-                }
-            },
-            Err(_) => Vec::new(),
-        };
-
-        let new_size = compute_truncate_size(current_data.len() as u64, &spec);
-        if new_size > MAX_FILE_SIZE {
-            let msg = format!("truncate: size {new_size} exceeds VFS limit\n");
-            ctx.output.stderr(msg.as_bytes());
+        if truncate_one_file(ctx, path, &spec).is_err() {
             status = 1;
-            continue;
-        }
-
-        let mut new_data = current_data;
-        new_data.resize(new_size, 0);
-        if new_size < new_data.len() {
-            new_data.truncate(new_size);
-        }
-
-        match ctx.fs.open(&full, OpenOptions::write()) {
-            Ok(h) => {
-                if let Err(e) = ctx.fs.write_file(h, &new_data) {
-                    emit_error(ctx.output, "truncate", path, &e);
-                    status = 1;
-                }
-                ctx.fs.close(h);
-            }
-            Err(e) => {
-                emit_error(ctx.output, "truncate", path, &e);
-                status = 1;
-            }
         }
     }
     status
@@ -1159,6 +1248,81 @@ pub(crate) fn util_cksum(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 // tsort — topological sort
 // ---------------------------------------------------------------------------
 
+struct TsortGraph {
+    node_names: Vec<String>,
+    adj: Vec<Vec<usize>>,
+    in_degree: Vec<usize>,
+}
+
+fn tsort_build_graph(tokens: &[&str]) -> TsortGraph {
+    let mut node_names: Vec<String> = Vec::new();
+    let mut node_map = std::collections::HashMap::<String, usize>::new();
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+
+    let mut i = 0;
+    while i < tokens.len() {
+        let from = *node_map.entry(tokens[i].to_string()).or_insert_with(|| {
+            let id = node_names.len();
+            node_names.push(tokens[i].to_string());
+            id
+        });
+        let to = *node_map
+            .entry(tokens[i + 1].to_string())
+            .or_insert_with(|| {
+                let id = node_names.len();
+                node_names.push(tokens[i + 1].to_string());
+                id
+            });
+        if from != to {
+            edges.push((from, to));
+        }
+        i += 2;
+    }
+
+    let n = node_names.len();
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut in_degree: Vec<usize> = vec![0; n];
+
+    for &(from, to) in &edges {
+        adj[from].push(to);
+        in_degree[to] += 1;
+    }
+
+    TsortGraph {
+        node_names,
+        adj,
+        in_degree,
+    }
+}
+
+/// Run Kahn's algorithm, returning sorted indices. Returns `Err` (partial result) on cycle.
+fn tsort_kahn(graph: &mut TsortGraph) -> Result<Vec<usize>, Vec<usize>> {
+    let n = graph.node_names.len();
+    let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    for (idx, &deg) in graph.in_degree.iter().enumerate() {
+        if deg == 0 {
+            queue.push_back(idx);
+        }
+    }
+
+    let mut result: Vec<usize> = Vec::with_capacity(n);
+    while let Some(node) = queue.pop_front() {
+        result.push(node);
+        for &neighbor in &graph.adj[node] {
+            graph.in_degree[neighbor] -= 1;
+            if graph.in_degree[neighbor] == 0 {
+                queue.push_back(neighbor);
+            }
+        }
+    }
+
+    if result.len() == n {
+        Ok(result)
+    } else {
+        Err(result)
+    }
+}
+
 pub(crate) fn util_tsort(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let file_args = &argv[1..];
     let text = get_input_text(ctx, file_args);
@@ -1173,131 +1337,66 @@ pub(crate) fn util_tsort(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         return 1;
     }
 
-    // Build adjacency list using indices for efficiency
-    let mut node_index: Vec<String> = Vec::new();
-    let mut node_map = std::collections::HashMap::<String, usize>::new();
-
-    let get_or_insert = |name: &str,
-                         idx: &mut Vec<String>,
-                         map: &mut std::collections::HashMap<String, usize>|
-     -> usize {
-        if let Some(&i) = map.get(name) {
-            i
-        } else {
-            let i = idx.len();
-            idx.push(name.to_string());
-            map.insert(name.to_string(), i);
-            i
-        }
-    };
-
-    // First pass: collect all nodes
-    let mut edges: Vec<(usize, usize)> = Vec::new();
-    let mut i = 0;
-    while i < tokens.len() {
-        let from = get_or_insert(tokens[i], &mut node_index, &mut node_map);
-        let to = get_or_insert(tokens[i + 1], &mut node_index, &mut node_map);
-        if from != to {
-            edges.push((from, to));
-        }
-        i += 2;
-    }
-
-    let n = node_index.len();
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut in_degree: Vec<usize> = vec![0; n];
-
-    for &(from, to) in &edges {
-        adj[from].push(to);
-        in_degree[to] += 1;
-    }
-
-    // Kahn's algorithm
-    let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
-    for (idx, &deg) in in_degree.iter().enumerate() {
-        if deg == 0 {
-            queue.push_back(idx);
-        }
-    }
-
-    let mut result: Vec<usize> = Vec::with_capacity(n);
-    while let Some(node) = queue.pop_front() {
-        result.push(node);
-        for &neighbor in &adj[node] {
-            in_degree[neighbor] -= 1;
-            if in_degree[neighbor] == 0 {
-                queue.push_back(neighbor);
+    let mut graph = tsort_build_graph(&tokens);
+    match tsort_kahn(&mut graph) {
+        Ok(order) => {
+            for idx in &order {
+                ctx.output.stdout(graph.node_names[*idx].as_bytes());
+                ctx.output.stdout(b"\n");
             }
+            0
+        }
+        Err(partial) => {
+            ctx.output.stderr(b"tsort: input contains a cycle\n");
+            for idx in &partial {
+                ctx.output.stdout(graph.node_names[*idx].as_bytes());
+                ctx.output.stdout(b"\n");
+            }
+            1
         }
     }
-
-    if result.len() != n {
-        ctx.output.stderr(b"tsort: input contains a cycle\n");
-        // Still output what we can
-        for idx in &result {
-            ctx.output.stdout(node_index[*idx].as_bytes());
-            ctx.output.stdout(b"\n");
-        }
-        return 1;
-    }
-
-    for idx in &result {
-        ctx.output.stdout(node_index[*idx].as_bytes());
-        ctx.output.stdout(b"\n");
-    }
-    0
 }
 
 // ---------------------------------------------------------------------------
 // install — copy files with directory creation
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_install(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
+fn parse_install_opts<'a>(args: &'a [&'a str]) -> (bool, &'a [&'a str]) {
+    let mut rest = args;
     let mut dir_mode = false;
 
-    while let Some(arg) = args.first() {
+    while let Some(arg) = rest.first() {
         if *arg == "-d" {
             dir_mode = true;
-            args = &args[1..];
-        } else if *arg == "-m" && args.len() > 1 {
-            // Mode is ignored in VFS, but consume the argument
-            args = &args[2..];
+            rest = &rest[1..];
+        } else if *arg == "-m" && rest.len() > 1 {
+            rest = &rest[2..];
         } else if arg.starts_with('-') && arg.len() > 1 {
-            args = &args[1..];
+            rest = &rest[1..];
         } else {
             break;
         }
     }
+    (dir_mode, rest)
+}
 
-    if args.is_empty() {
-        ctx.output.stderr(b"install: missing operand\n");
-        return 1;
-    }
-
-    if dir_mode {
-        // install -d DIR ... — create directories (like mkdir -p)
-        let mut status = 0;
-        for path in args {
-            let full = resolve_path(ctx.cwd, path);
-            if let Err(e) = create_dir_parents(ctx, &full) {
-                let msg = format!("install: cannot create directory '{path}': {e}\n");
-                ctx.output.stderr(msg.as_bytes());
-                status = 1;
-            }
+fn install_dir_mode(ctx: &mut UtilContext<'_>, args: &[&str]) -> i32 {
+    let mut status = 0;
+    for path in args {
+        let full = resolve_path(ctx.cwd, path);
+        if let Err(e) = create_dir_parents(ctx, &full) {
+            let msg = format!("install: cannot create directory '{path}': {e}\n");
+            ctx.output.stderr(msg.as_bytes());
+            status = 1;
         }
-        return status;
     }
+    status
+}
 
-    if args.len() < 2 {
-        ctx.output.stderr(b"install: missing destination operand\n");
-        return 1;
-    }
-
+fn install_copy_mode(ctx: &mut UtilContext<'_>, args: &[&str]) -> i32 {
     let src = resolve_path(ctx.cwd, args[0]);
     let dst = resolve_path(ctx.cwd, args[args.len() - 1]);
 
-    // Ensure parent directory of destination exists
     if let Some(pos) = dst.rfind('/') {
         let parent = &dst[..pos];
         if !parent.is_empty() && ctx.fs.stat(parent).is_err() {
@@ -1314,6 +1413,26 @@ pub(crate) fn util_install(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         return 1;
     }
     0
+}
+
+pub(crate) fn util_install(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (dir_mode, args) = parse_install_opts(&argv[1..]);
+
+    if args.is_empty() {
+        ctx.output.stderr(b"install: missing operand\n");
+        return 1;
+    }
+
+    if dir_mode {
+        return install_dir_mode(ctx, args);
+    }
+
+    if args.len() < 2 {
+        ctx.output.stderr(b"install: missing destination operand\n");
+        return 1;
+    }
+
+    install_copy_mode(ctx, args)
 }
 
 fn create_dir_parents(ctx: &mut UtilContext<'_>, path: &str) -> Result<(), String> {
@@ -1389,66 +1508,57 @@ pub(crate) fn util_timeout(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 // cal — simple calendar
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_cal(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let args = &argv[1..];
-
-    // Parse optional month and year arguments
-    let (month, year) = match args.len() {
-        0 => {
-            // Default: January 2026 (deterministic for sandbox)
-            (1u32, 2026u32)
-        }
-        1 => {
-            // Just year
-            match args[0].parse::<u32>() {
-                Ok(y) if y >= 1 => (1, y),
-                _ => {
-                    let msg = format!("cal: invalid year '{}'\n", args[0]);
-                    ctx.output.stderr(msg.as_bytes());
-                    return 1;
-                }
+fn parse_cal_args(args: &[&str], output: &mut dyn crate::UtilOutput) -> Result<(u32, u32), i32> {
+    match args.len() {
+        0 => Ok((1, 2026)),
+        1 => match args[0].parse::<u32>() {
+            Ok(y) if y >= 1 => Ok((1, y)),
+            _ => {
+                let msg = format!("cal: invalid year '{}'\n", args[0]);
+                output.stderr(msg.as_bytes());
+                Err(1)
             }
-        }
+        },
         _ => {
-            // month year
             let m = match args[0].parse::<u32>() {
                 Ok(m) if (1..=12).contains(&m) => m,
                 _ => {
                     let msg = format!("cal: invalid month '{}'\n", args[0]);
-                    ctx.output.stderr(msg.as_bytes());
-                    return 1;
+                    output.stderr(msg.as_bytes());
+                    return Err(1);
                 }
             };
             let y = match args[1].parse::<u32>() {
                 Ok(y) if y >= 1 => y,
                 _ => {
                     let msg = format!("cal: invalid year '{}'\n", args[1]);
-                    ctx.output.stderr(msg.as_bytes());
-                    return 1;
+                    output.stderr(msg.as_bytes());
+                    return Err(1);
                 }
             };
-            (m, y)
+            Ok((m, y))
         }
-    };
+    }
+}
 
-    let month_names = [
-        "January",
-        "February",
-        "March",
-        "April",
-        "May",
-        "June",
-        "July",
-        "August",
-        "September",
-        "October",
-        "November",
-        "December",
-    ];
+const MONTH_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
 
-    let name = month_names[(month - 1) as usize];
+fn render_cal(ctx: &mut UtilContext<'_>, month: u32, year: u32) {
+    let name = MONTH_NAMES[(month - 1) as usize];
     let header = format!("{name} {year}");
-    // Center the header in 20 chars
     let pad = if header.len() < 20 {
         (20 - header.len()) / 2
     } else {
@@ -1458,16 +1568,15 @@ pub(crate) fn util_cal(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     ctx.output.stdout(header_line.as_bytes());
     ctx.output.stdout(b"Su Mo Tu We Th Fr Sa\n");
 
-    let days_in_month = days_in_month(month, year);
-    let start_day = day_of_week(year, month, 1); // 0=Sunday
+    let total_days = days_in_month(month, year);
+    let start_day = day_of_week(year, month, 1);
 
-    // Print leading spaces
     let mut col = start_day as usize;
     for _ in 0..col {
         ctx.output.stdout(b"   ");
     }
 
-    for day in 1..=days_in_month {
+    for day in 1..=total_days {
         if col > 0 {
             ctx.output.stdout(b" ");
         }
@@ -1482,6 +1591,14 @@ pub(crate) fn util_cal(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     if col != 0 {
         ctx.output.stdout(b"\n");
     }
+}
+
+pub(crate) fn util_cal(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (month, year) = match parse_cal_args(&argv[1..], ctx.output) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    render_cal(ctx, month, year);
     0
 }
 
