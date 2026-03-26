@@ -595,26 +595,7 @@ fn parse_diff_flags<'a>(
             args = &args[1..];
             positional.extend_from_slice(args);
             break;
-        } else if arg == "-u" || arg == "--unified" {
-            flags.unified = true;
-            args = &args[1..];
-        } else if arg == "-c" {
-            flags.context_fmt = true;
-            args = &args[1..];
-        } else if arg == "-q" || arg == "--brief" {
-            flags.brief = true;
-            args = &args[1..];
-        } else if arg == "-B" || arg == "--ignore-blank-lines" {
-            flags.ignore_blank_lines = true;
-            args = &args[1..];
-        } else if arg == "-w" || arg == "--ignore-all-space" {
-            flags.ignore_all_space = true;
-            args = &args[1..];
-        } else if arg == "-r" || arg == "--recursive" {
-            flags.recursive = true;
-            args = &args[1..];
-        } else if arg == "-N" || arg == "--new-file" {
-            flags.new_file = true;
+        } else if try_set_diff_long_flag(arg, &mut flags) {
             args = &args[1..];
         } else if arg.starts_with("-U") && arg.len() > 2 {
             if let Ok(n) = arg[2..].parse::<usize>() {
@@ -623,22 +604,7 @@ fn parse_diff_flags<'a>(
             }
             args = &args[1..];
         } else if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") {
-            for ch in arg[1..].chars() {
-                match ch {
-                    'u' => flags.unified = true,
-                    'c' => flags.context_fmt = true,
-                    'q' => flags.brief = true,
-                    'B' => flags.ignore_blank_lines = true,
-                    'w' => flags.ignore_all_space = true,
-                    'r' => flags.recursive = true,
-                    'N' => flags.new_file = true,
-                    _ => {
-                        let msg = format!("diff: unknown option '-{ch}'\n");
-                        ctx.output.stderr(msg.as_bytes());
-                        return Err(2);
-                    }
-                }
-            }
+            parse_diff_bundled_flags(ctx, arg, &mut flags)?;
             args = &args[1..];
         } else {
             positional.push(arg);
@@ -646,6 +612,45 @@ fn parse_diff_flags<'a>(
         }
     }
     Ok((flags, positional))
+}
+
+/// Try to match a long/single-char diff flag. Returns `true` if consumed.
+fn try_set_diff_long_flag(arg: &str, flags: &mut DiffFlags) -> bool {
+    match arg {
+        "-u" | "--unified" => flags.unified = true,
+        "-c" => flags.context_fmt = true,
+        "-q" | "--brief" => flags.brief = true,
+        "-B" | "--ignore-blank-lines" => flags.ignore_blank_lines = true,
+        "-w" | "--ignore-all-space" => flags.ignore_all_space = true,
+        "-r" | "--recursive" => flags.recursive = true,
+        "-N" | "--new-file" => flags.new_file = true,
+        _ => return false,
+    }
+    true
+}
+
+fn parse_diff_bundled_flags(
+    ctx: &mut UtilContext<'_>,
+    arg: &str,
+    flags: &mut DiffFlags,
+) -> Result<(), i32> {
+    for ch in arg[1..].chars() {
+        match ch {
+            'u' => flags.unified = true,
+            'c' => flags.context_fmt = true,
+            'q' => flags.brief = true,
+            'B' => flags.ignore_blank_lines = true,
+            'w' => flags.ignore_all_space = true,
+            'r' => flags.recursive = true,
+            'N' => flags.new_file = true,
+            _ => {
+                let msg = format!("diff: unknown option '-{ch}'\n");
+                ctx.output.stderr(msg.as_bytes());
+                return Err(2);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Read a file for diff, returning its text. Handles directories and missing files.
@@ -1077,35 +1082,53 @@ fn parse_patch_flags<'a>(
     let mut args = &argv[1..];
 
     while let Some(&arg) = args.first() {
-        if arg == "--dry-run" {
+        let advance = parse_single_patch_flag(ctx, arg, args, &mut flags)?;
+        if advance == 0 {
+            break;
+        }
+        args = &args[advance..];
+    }
+    Ok(flags)
+}
+
+/// Parse one patch flag. Returns number of args consumed, or 0 to stop.
+fn parse_single_patch_flag<'a>(
+    ctx: &mut UtilContext<'_>,
+    arg: &'a str,
+    args: &[&'a str],
+    flags: &mut PatchFlags<'a>,
+) -> Result<usize, i32> {
+    match arg {
+        "--dry-run" => {
             flags.dry_run = true;
-            args = &args[1..];
-        } else if arg == "-R" || arg == "--reverse" {
+            Ok(1)
+        }
+        "-R" | "--reverse" => {
             flags.reverse = true;
-            args = &args[1..];
-        } else if arg == "-i" {
+            Ok(1)
+        }
+        "-i" => {
             if args.len() < 2 {
                 ctx.output.stderr(b"patch: -i requires an argument\n");
                 return Err(2);
             }
             flags.patch_file = Some(args[1]);
-            args = &args[2..];
-        } else if let Some(stripped) = arg.strip_prefix("-p") {
-            if let Ok(n) = stripped.parse::<usize>() {
+            Ok(2)
+        }
+        "--" => Ok(0),
+        _ if arg.starts_with("-p") => {
+            if let Ok(n) = arg[2..].parse::<usize>() {
                 flags.strip_count = n;
             }
-            args = &args[1..];
-        } else if arg == "--" {
-            break;
-        } else if arg.starts_with('-') && arg.len() > 1 {
+            Ok(1)
+        }
+        _ if arg.starts_with('-') && arg.len() > 1 => {
             let msg = format!("patch: unknown option '{arg}'\n");
             ctx.output.stderr(msg.as_bytes());
-            return Err(2);
-        } else {
-            break;
+            Err(2)
         }
+        _ => Ok(0),
     }
-    Ok(flags)
 }
 
 fn reverse_patch_hunks(patch_files: &mut [PatchFile]) {

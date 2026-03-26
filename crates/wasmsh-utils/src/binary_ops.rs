@@ -271,51 +271,65 @@ fn parse_dd_args<'a>(ctx: &mut UtilContext<'_>, argv: &'a [&'a str]) -> Result<D
     };
 
     for arg in &argv[1..] {
-        if let Some(val) = arg.strip_prefix("if=") {
-            args.input_file = Some(val);
-        } else if let Some(val) = arg.strip_prefix("of=") {
-            args.output_file = Some(val);
-        } else if let Some(val) = arg.strip_prefix("bs=") {
-            let Some(v) = parse_size(val) else {
-                let msg = format!("dd: invalid number: '{val}'\n");
+        parse_dd_single_arg(ctx, arg, &mut args)?;
+    }
+    Ok(args)
+}
+
+fn parse_dd_single_arg<'a>(
+    ctx: &mut UtilContext<'_>,
+    arg: &'a str,
+    args: &mut DdArgs<'a>,
+) -> Result<(), i32> {
+    if let Some(val) = arg.strip_prefix("if=") {
+        args.input_file = Some(val);
+    } else if let Some(val) = arg.strip_prefix("of=") {
+        args.output_file = Some(val);
+    } else if let Some(val) = arg.strip_prefix("bs=") {
+        let Some(v) = parse_size(val) else {
+            let msg = format!("dd: invalid number: '{val}'\n");
+            ctx.output.stderr(msg.as_bytes());
+            return Err(1);
+        };
+        if v > MAX_DD_SIZE {
+            ctx.output.stderr(b"dd: block size too large\n");
+            return Err(1);
+        }
+        args.block_size = v;
+    } else if let Some(val) = arg.strip_prefix("count=") {
+        args.count = val.parse().ok();
+    } else if let Some(val) = arg.strip_prefix("skip=") {
+        args.skip_blocks = parse_dd_u64(ctx, val)?;
+    } else if let Some(val) = arg.strip_prefix("seek=") {
+        args.seek_blocks = parse_dd_u64(ctx, val)?;
+    } else if let Some(val) = arg.strip_prefix("conv=") {
+        parse_dd_conv(ctx, val, args)?;
+    }
+    Ok(())
+}
+
+fn parse_dd_u64(ctx: &mut UtilContext<'_>, val: &str) -> Result<u64, i32> {
+    val.parse::<u64>().map_err(|_| {
+        let msg = format!("dd: invalid number: '{val}'\n");
+        ctx.output.stderr(msg.as_bytes());
+        1
+    })
+}
+
+fn parse_dd_conv(ctx: &mut UtilContext<'_>, val: &str, args: &mut DdArgs<'_>) -> Result<(), i32> {
+    for opt in val.split(',') {
+        match opt {
+            "ucase" => args.conv_ucase = true,
+            "lcase" => args.conv_lcase = true,
+            "notrunc" => args.conv_notrunc = true,
+            _ => {
+                let msg = format!("dd: unknown conv option '{opt}'\n");
                 ctx.output.stderr(msg.as_bytes());
                 return Err(1);
-            };
-            if v > MAX_DD_SIZE {
-                ctx.output.stderr(b"dd: block size too large\n");
-                return Err(1);
-            }
-            args.block_size = v;
-        } else if let Some(val) = arg.strip_prefix("count=") {
-            args.count = val.parse().ok();
-        } else if let Some(val) = arg.strip_prefix("skip=") {
-            args.skip_blocks = val.parse::<u64>().map_err(|_| {
-                let msg = format!("dd: invalid number: '{val}'\n");
-                ctx.output.stderr(msg.as_bytes());
-                1
-            })?;
-        } else if let Some(val) = arg.strip_prefix("seek=") {
-            args.seek_blocks = val.parse::<u64>().map_err(|_| {
-                let msg = format!("dd: invalid number: '{val}'\n");
-                ctx.output.stderr(msg.as_bytes());
-                1
-            })?;
-        } else if let Some(val) = arg.strip_prefix("conv=") {
-            for opt in val.split(',') {
-                match opt {
-                    "ucase" => args.conv_ucase = true,
-                    "lcase" => args.conv_lcase = true,
-                    "notrunc" => args.conv_notrunc = true,
-                    _ => {
-                        let msg = format!("dd: unknown conv option '{opt}'\n");
-                        ctx.output.stderr(msg.as_bytes());
-                        return Err(1);
-                    }
-                }
             }
         }
     }
-    Ok(args)
+    Ok(())
 }
 
 fn dd_copy(input_data: &[u8], args: &DdArgs<'_>) -> Result<(Vec<u8>, u64, u64), &'static str> {
@@ -337,10 +351,17 @@ fn dd_copy(input_data: &[u8], args: &DdArgs<'_>) -> Result<(Vec<u8>, u64, u64), 
     }
 
     let mut output = vec![0u8; seek_bytes as usize];
+    let (blocks_full, blocks_partial) = dd_copy_blocks(input, bs, args.count, &mut output);
 
+    dd_apply_conversions(&mut output, args);
+
+    Ok((output, blocks_full, blocks_partial))
+}
+
+fn dd_copy_blocks(input: &[u8], bs: usize, count: Option<u64>, output: &mut Vec<u8>) -> (u64, u64) {
     let mut blocks_full = 0u64;
     let mut blocks_partial = 0u64;
-    let max_blocks = args.count.unwrap_or(u64::MAX);
+    let max_blocks = count.unwrap_or(u64::MAX);
     let mut offset = 0;
     let mut block_count = 0u64;
 
@@ -356,24 +377,20 @@ fn dd_copy(input_data: &[u8], args: &DdArgs<'_>) -> Result<(Vec<u8>, u64, u64), 
         offset += bs;
         block_count += 1;
     }
+    (blocks_full, blocks_partial)
+}
 
-    // Apply conversions
+fn dd_apply_conversions(output: &mut [u8], args: &DdArgs<'_>) {
     if args.conv_ucase {
-        for b in &mut output {
-            if b.is_ascii_lowercase() {
-                *b = b.to_ascii_uppercase();
-            }
+        for b in output.iter_mut() {
+            b.make_ascii_uppercase();
         }
     }
     if args.conv_lcase {
-        for b in &mut output {
-            if b.is_ascii_uppercase() {
-                *b = b.to_ascii_lowercase();
-            }
+        for b in output.iter_mut() {
+            b.make_ascii_lowercase();
         }
     }
-
-    Ok((output, blocks_full, blocks_partial))
 }
 
 pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {

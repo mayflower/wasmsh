@@ -78,11 +78,14 @@ fn parse_gzip_header(data: &[u8]) -> Result<usize, String> {
     }
 
     let flags = data[3];
-    let mut pos = 10;
+    let pos = skip_gzip_optional_fields(data, flags)?;
+    Ok(pos)
+}
 
-    // Skip optional fields based on flags
+/// Skip optional gzip header fields (FEXTRA, FNAME, FCOMMENT, FHCRC).
+fn skip_gzip_optional_fields(data: &[u8], flags: u8) -> Result<usize, String> {
+    let mut pos = 10;
     if flags & 0x04 != 0 {
-        // FEXTRA
         if pos + 2 > data.len() {
             return Err("truncated gzip header".to_string());
         }
@@ -90,25 +93,23 @@ fn parse_gzip_header(data: &[u8]) -> Result<usize, String> {
         pos += 2 + xlen;
     }
     if flags & 0x08 != 0 {
-        // FNAME: null-terminated string
-        while pos < data.len() && data[pos] != 0 {
-            pos += 1;
-        }
-        pos += 1; // skip null
+        pos = skip_null_terminated(data, pos);
     }
     if flags & 0x10 != 0 {
-        // FCOMMENT: null-terminated string
-        while pos < data.len() && data[pos] != 0 {
-            pos += 1;
-        }
-        pos += 1;
+        pos = skip_null_terminated(data, pos);
     }
     if flags & 0x02 != 0 {
-        // FHCRC
         pos += 2;
     }
-
     Ok(pos)
+}
+
+/// Skip past a null-terminated string in `data` starting at `pos`.
+fn skip_null_terminated(data: &[u8], mut pos: usize) -> usize {
+    while pos < data.len() && data[pos] != 0 {
+        pos += 1;
+    }
+    pos + 1
 }
 
 /// Read DEFLATE stored blocks starting at `pos`, returning `(decompressed, end_pos)`.
@@ -364,37 +365,7 @@ fn parse_tar_flags<'a>(
             args = &args[2..];
             consumed += 2;
         } else if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") {
-            let chars: Vec<char> = arg[1..].chars().collect();
-            let mut skip_next = false;
-            for (ci, ch) in chars.iter().enumerate() {
-                match ch {
-                    'c' => flags.create = true,
-                    'x' => flags.extract = true,
-                    't' => flags.list = true,
-                    'z' => flags.gzipped = true,
-                    'v' => flags.verbose = true,
-                    'f' => {
-                        let _rest: String = chars[ci + 1..].iter().collect();
-                        if args.len() > 1 {
-                            flags.archive = Some(args[1]);
-                            skip_next = true;
-                        }
-                        break;
-                    }
-                    'C' => {
-                        if args.len() > 1 {
-                            flags.change_dir = Some(args[1]);
-                            skip_next = true;
-                        }
-                        break;
-                    }
-                    _ => {
-                        let msg = format!("tar: unknown option '-{ch}'\n");
-                        ctx.output.stderr(msg.as_bytes());
-                        return Err(1);
-                    }
-                }
-            }
+            let skip_next = parse_tar_bundled_flags(ctx, arg, args, &mut flags)?;
             args = &args[1..];
             consumed += 1;
             if skip_next && !args.is_empty() {
@@ -406,6 +377,47 @@ fn parse_tar_flags<'a>(
         }
     }
     Ok((flags, consumed))
+}
+
+/// Parse a bundled tar flag string like `-czvf`. Returns `true` if the next arg was consumed.
+fn parse_tar_bundled_flags<'a>(
+    ctx: &mut UtilContext<'_>,
+    arg: &str,
+    args: &[&'a str],
+    flags: &mut TarFlags<'a>,
+) -> Result<bool, i32> {
+    let chars: Vec<char> = arg[1..].chars().collect();
+    let mut skip_next = false;
+    for (ci, ch) in chars.iter().enumerate() {
+        match ch {
+            'c' => flags.create = true,
+            'x' => flags.extract = true,
+            't' => flags.list = true,
+            'z' => flags.gzipped = true,
+            'v' => flags.verbose = true,
+            'f' => {
+                let _rest: String = chars[ci + 1..].iter().collect();
+                if args.len() > 1 {
+                    flags.archive = Some(args[1]);
+                    skip_next = true;
+                }
+                break;
+            }
+            'C' => {
+                if args.len() > 1 {
+                    flags.change_dir = Some(args[1]);
+                    skip_next = true;
+                }
+                break;
+            }
+            _ => {
+                let msg = format!("tar: unknown option '-{ch}'\n");
+                ctx.output.stderr(msg.as_bytes());
+                return Err(1);
+            }
+        }
+    }
+    Ok(skip_next)
 }
 
 pub(crate) fn util_tar(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {

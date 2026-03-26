@@ -884,108 +884,110 @@ fn parse_fd_args(argv: &[&str]) -> (FdArgs, usize) {
     let mut consumed = 1;
 
     while let Some(arg) = args.first() {
-        match *arg {
-            "-t" | "--type" if args.len() > 1 => {
-                let t = args[1];
-                if t == "f" || t == "d" {
-                    fd.type_filter = Some(t.chars().next().unwrap());
-                }
-                args = &args[2..];
-                consumed += 2;
-            }
-            "-e" | "--extension" if args.len() > 1 => {
-                fd.extension = Some(args[1].to_string());
-                args = &args[2..];
-                consumed += 2;
-            }
-            "-H" | "--hidden" => {
-                fd.show_hidden = true;
-                args = &args[1..];
-                consumed += 1;
-            }
-            "-I" | "--no-ignore" => {
-                args = &args[1..];
-                consumed += 1;
-            }
-            "-d" | "--max-depth" if args.len() > 1 => {
-                fd.max_depth = args[1].parse().ok();
-                args = &args[2..];
-                consumed += 2;
-            }
-            "-x" | "--exec" if args.len() > 1 => {
-                fd.exec_cmd = Some(args[1].to_string());
-                args = &args[2..];
-                consumed += 2;
-            }
-            "-a" | "--absolute-path" => {
-                fd.absolute_path = true;
-                args = &args[1..];
-                consumed += 1;
-            }
-            "-g" | "--glob" => {
-                fd.glob_mode = true;
-                args = &args[1..];
-                consumed += 1;
-            }
-            "-1" => {
-                fd.stop_after_first = true;
-                args = &args[1..];
-                consumed += 1;
-            }
-            _ if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") => {
-                let flags = &arg[1..];
-                let mut recognized = true;
-                for ch in flags.chars() {
-                    match ch {
-                        'H' => fd.show_hidden = true,
-                        'I' => {}
-                        'a' => fd.absolute_path = true,
-                        'g' => fd.glob_mode = true,
-                        '1' => fd.stop_after_first = true,
-                        _ => {
-                            recognized = false;
-                            break;
-                        }
-                    }
-                }
-                if recognized {
-                    args = &args[1..];
-                    consumed += 1;
-                } else {
-                    break;
-                }
-            }
-            _ => break,
+        let advance = parse_fd_single_flag(arg, args, &mut fd);
+        if advance == 0 {
+            break;
         }
+        args = &args[advance..];
+        consumed += advance;
     }
     (fd, consumed)
 }
 
-fn fd_entry_matches(name: &str, is_dir: bool, fd: &FdArgs, pattern: Option<&str>) -> bool {
-    if let Some(tf) = fd.type_filter {
-        if tf == 'f' && is_dir {
-            return false;
-        }
-        if tf == 'd' && !is_dir {
-            return false;
-        }
-    }
-    if let Some(ref ext) = fd.extension {
-        let dot_ext = format!(".{ext}");
-        if !name.ends_with(&dot_ext) {
-            return false;
-        }
-    }
-    if let Some(pat) = pattern {
-        if fd.glob_mode {
-            if !simple_glob_match(pat, name) {
-                return false;
+/// Parse one fd flag. Returns number of args consumed, or 0 to stop.
+fn parse_fd_single_flag(arg: &str, args: &[&str], fd: &mut FdArgs) -> usize {
+    match arg {
+        "-t" | "--type" if args.len() > 1 => {
+            let t = args[1];
+            if t == "f" || t == "d" {
+                fd.type_filter = Some(t.chars().next().unwrap());
             }
-        } else if !name.contains(pat) {
-            return false;
+            2
+        }
+        "-e" | "--extension" if args.len() > 1 => {
+            fd.extension = Some(args[1].to_string());
+            2
+        }
+        "-H" | "--hidden" => {
+            fd.show_hidden = true;
+            1
+        }
+        "-I" | "--no-ignore" => 1,
+        "-d" | "--max-depth" if args.len() > 1 => {
+            fd.max_depth = args[1].parse().ok();
+            2
+        }
+        "-x" | "--exec" if args.len() > 1 => {
+            fd.exec_cmd = Some(args[1].to_string());
+            2
+        }
+        "-a" | "--absolute-path" => {
+            fd.absolute_path = true;
+            1
+        }
+        "-g" | "--glob" => {
+            fd.glob_mode = true;
+            1
+        }
+        "-1" => {
+            fd.stop_after_first = true;
+            1
+        }
+        _ if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") => {
+            usize::from(parse_fd_bundled_flags(&arg[1..], fd))
+        }
+        _ => 0,
+    }
+}
+
+fn parse_fd_bundled_flags(flags: &str, fd: &mut FdArgs) -> bool {
+    for ch in flags.chars() {
+        match ch {
+            'H' => fd.show_hidden = true,
+            'I' => {}
+            'a' => fd.absolute_path = true,
+            'g' => fd.glob_mode = true,
+            '1' => fd.stop_after_first = true,
+            _ => return false,
         }
     }
     true
+}
+
+fn fd_entry_matches(name: &str, is_dir: bool, fd: &FdArgs, pattern: Option<&str>) -> bool {
+    if !fd_type_matches(fd.type_filter, is_dir) {
+        return false;
+    }
+    if !fd_extension_matches(name, fd.extension.as_deref()) {
+        return false;
+    }
+    fd_pattern_matches(name, pattern, fd.glob_mode)
+}
+
+fn fd_type_matches(type_filter: Option<char>, is_dir: bool) -> bool {
+    match type_filter {
+        Some('f') if is_dir => false,
+        Some('d') if !is_dir => false,
+        _ => true,
+    }
+}
+
+fn fd_extension_matches(name: &str, extension: Option<&str>) -> bool {
+    match extension {
+        Some(ext) => {
+            let dot_ext = format!(".{ext}");
+            name.ends_with(&dot_ext)
+        }
+        None => true,
+    }
+}
+
+fn fd_pattern_matches(name: &str, pattern: Option<&str>, glob_mode: bool) -> bool {
+    match pattern {
+        Some(pat) if glob_mode => simple_glob_match(pat, name),
+        Some(pat) => name.contains(pat),
+        None => true,
+    }
 }
 
 fn fd_format_path(path: &str, search_root: &str, absolute: bool) -> String {
