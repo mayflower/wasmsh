@@ -1,0 +1,20 @@
+[test]
+name = "rw61-cmdsub-in-redirect-target"
+tags = ["real-world", "bug-fix", "command-substitution"]
+tier = "P1"
+requires = ["printf", "echo", "for", "redirection", "command-substitution"]
+
+[input]
+script = """
+mkdir -p /tmp
+for i in 1 2 3; do
+  echo "line $i" > "/tmp/out_$(printf '%03d' "$i").txt"
+done
+cat /tmp/out_001.txt
+cat /tmp/out_002.txt
+cat /tmp/out_003.txt
+"""
+
+[expect]
+stdout = "line 1\nline 2\nline 3\n"
+status = 0

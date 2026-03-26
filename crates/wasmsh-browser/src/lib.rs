@@ -744,13 +744,17 @@ impl WorkerRuntime {
                     }
                 }
                 RedirectionOp::HereString => {
-                    let content = wasmsh_expand::expand_word(&redir.target, &mut self.vm.state);
+                    let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
+                    let resolved_target = resolved.first().unwrap_or(&redir.target);
+                    let content = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
                     let mut data = content.into_bytes();
                     data.push(b'\n');
                     self.pending_stdin = Some(data);
                 }
                 RedirectionOp::Input => {
-                    let target = wasmsh_expand::expand_word(&redir.target, &mut self.vm.state);
+                    let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
+                    let resolved_target = resolved.first().unwrap_or(&redir.target);
+                    let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
                     let path = self.resolve_cwd_path(&target);
                     if let Ok(h) = self.fs.open(&path, OpenOptions::read()) {
                         match self.fs.read_file(h) {
@@ -2437,7 +2441,10 @@ impl WorkerRuntime {
     /// Supports fd-specific redirections (2>, 2>>) and &> (both stdout and stderr).
     fn apply_redirections(&mut self, redirections: &[HirRedirection], stdout_before: usize) {
         for redir in redirections {
-            let target = wasmsh_expand::expand_word(&redir.target, &mut self.vm.state);
+            // Resolve command substitutions in redirect targets before expansion
+            let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
+            let resolved_target = resolved.first().unwrap_or(&redir.target);
+            let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
             let path = self.resolve_cwd_path(&target);
             let fd = redir.fd.unwrap_or(1);
 
