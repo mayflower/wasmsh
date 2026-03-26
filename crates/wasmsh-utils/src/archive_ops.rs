@@ -734,26 +734,39 @@ fn tar_extract(
         };
 
         pos += TAR_BLOCK_SIZE;
-
-        if verbose {
-            let msg = format!("{}\n", entry.name);
-            ctx.output.stderr(msg.as_bytes());
-        }
-
-        let full = resolve_path(base_dir, &entry.name);
-
-        if entry.typeflag == b'5' || entry.name.ends_with('/') {
-            extract_dir_entry(ctx, &full, &entry.name);
-        } else {
-            if extract_file_entry(ctx, &full, &entry.name, &tar_data, pos, entry.size) != 0 {
-                return 1;
-            }
-            let blocks = entry.size.div_ceil(TAR_BLOCK_SIZE);
-            pos += blocks * TAR_BLOCK_SIZE;
-        }
+        let Some(next_pos) = tar_extract_entry(ctx, &entry, &tar_data, pos, base_dir, verbose)
+        else {
+            return 1;
+        };
+        pos = next_pos;
     }
 
     0
+}
+
+fn tar_extract_entry(
+    ctx: &mut UtilContext<'_>,
+    entry: &TarEntry,
+    tar_data: &[u8],
+    pos: usize,
+    base_dir: &str,
+    verbose: bool,
+) -> Option<usize> {
+    if verbose {
+        let msg = format!("{}\n", entry.name);
+        ctx.output.stderr(msg.as_bytes());
+    }
+
+    let full = resolve_path(base_dir, &entry.name);
+    if entry.typeflag == b'5' || entry.name.ends_with('/') {
+        extract_dir_entry(ctx, &full, &entry.name);
+        return Some(pos);
+    }
+
+    if extract_file_entry(ctx, &full, &entry.name, tar_data, pos, entry.size) != 0 {
+        return None;
+    }
+    Some(pos + entry.size.div_ceil(TAR_BLOCK_SIZE) * TAR_BLOCK_SIZE)
 }
 
 // ---------------------------------------------------------------------------
@@ -761,52 +774,10 @@ fn tar_extract(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
-    let mut list_only = false;
-    let mut overwrite = false;
-    let mut dest_dir: Option<String> = None;
-    let mut quiet = false;
-
-    while let Some(arg) = args.first() {
-        match *arg {
-            "-l" => {
-                list_only = true;
-                args = &args[1..];
-            }
-            "-o" => {
-                overwrite = true;
-                args = &args[1..];
-            }
-            "-d" if args.len() > 1 => {
-                dest_dir = Some(args[1].to_string());
-                args = &args[2..];
-            }
-            "-q" => {
-                quiet = true;
-                args = &args[1..];
-            }
-            _ if arg.starts_with('-') && arg.len() > 1 => {
-                let mut recognized = true;
-                for ch in arg[1..].chars() {
-                    match ch {
-                        'l' => list_only = true,
-                        'o' => overwrite = true,
-                        'q' => quiet = true,
-                        _ => {
-                            recognized = false;
-                            break;
-                        }
-                    }
-                }
-                if recognized {
-                    args = &args[1..];
-                } else {
-                    break;
-                }
-            }
-            _ => break,
-        }
-    }
+    let (mut opts, args) = match parse_unzip_args(argv) {
+        Ok(result) => result,
+        Err(status) => return status,
+    };
 
     if args.is_empty() {
         ctx.output.stderr(b"unzip: missing archive operand\n");
@@ -814,37 +785,24 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     }
 
     let archive_path = args[0];
-
-    // Check for -d after the filename
-    let rest = &args[1..];
-    if rest.len() >= 2 && rest[0] == "-d" {
-        dest_dir = Some(rest[1].to_string());
-    }
+    unzip_apply_post_archive_dest(&mut opts.dest_dir, &args[1..]);
 
     let archive_data = match read_file_bytes(ctx, archive_path, "unzip") {
         Ok(d) => d,
         Err(status) => return status,
     };
 
-    let base_dir = if let Some(ref d) = dest_dir {
-        let full = resolve_path(ctx.cwd, d);
-        // Ensure directory exists
-        let _ = ctx.fs.create_dir(&full);
-        full
-    } else {
-        ctx.cwd.to_string()
-    };
+    let base_dir = unzip_base_dir(ctx, opts.dest_dir.as_deref());
 
-    if list_only && !quiet {
-        ctx.output
-            .stdout(b"  Length      Name\n---------  --------------------\n");
-    }
+    unzip_emit_list_header(ctx, opts.list_only, opts.quiet);
 
+    let list_only = opts.list_only;
+    let quiet = opts.quiet;
     let data = &archive_data;
     let mut stats = UnzipStats::default();
     let mut status = 0;
-    let opts = UnzipOpts {
-        overwrite,
+    let extract_opts = UnzipOpts {
+        overwrite: opts.overwrite,
         quiet,
         base_dir: &base_dir,
     };
@@ -868,7 +826,7 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             continue;
         }
 
-        let rc = unzip_extract_entry(ctx, &entry, data, &opts);
+        let rc = unzip_extract_entry(ctx, &entry, data, &extract_opts);
         if rc != 0 {
             status = rc;
         }
@@ -878,6 +836,91 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         pos += entry.compressed_size;
     }
 
+    unzip_emit_list_footer(ctx, &stats, quiet, list_only);
+
+    status
+}
+
+struct ParsedUnzipOpts {
+    list_only: bool,
+    overwrite: bool,
+    quiet: bool,
+    dest_dir: Option<String>,
+}
+
+fn parse_unzip_args<'a>(argv: &'a [&'a str]) -> Result<(ParsedUnzipOpts, &'a [&'a str]), i32> {
+    let mut args = &argv[1..];
+    let mut opts = ParsedUnzipOpts {
+        list_only: false,
+        overwrite: false,
+        quiet: false,
+        dest_dir: None,
+    };
+
+    while let Some(arg) = args.first() {
+        match *arg {
+            "-l" => opts.list_only = true,
+            "-o" => opts.overwrite = true,
+            "-q" => opts.quiet = true,
+            "-d" if args.len() > 1 => {
+                opts.dest_dir = Some(args[1].to_string());
+                args = &args[2..];
+                continue;
+            }
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                if !apply_unzip_short_flags(arg, &mut opts) {
+                    break;
+                }
+            }
+            _ => break,
+        }
+        args = &args[1..];
+    }
+
+    Ok((opts, args))
+}
+
+fn apply_unzip_short_flags(arg: &str, opts: &mut ParsedUnzipOpts) -> bool {
+    for ch in arg[1..].chars() {
+        match ch {
+            'l' => opts.list_only = true,
+            'o' => opts.overwrite = true,
+            'q' => opts.quiet = true,
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn unzip_apply_post_archive_dest(dest_dir: &mut Option<String>, rest: &[&str]) {
+    if rest.len() >= 2 && rest[0] == "-d" {
+        *dest_dir = Some(rest[1].to_string());
+    }
+}
+
+fn unzip_base_dir(ctx: &mut UtilContext<'_>, dest_dir: Option<&str>) -> String {
+    if let Some(dest) = dest_dir {
+        let full = resolve_path(ctx.cwd, dest);
+        let _ = ctx.fs.create_dir(&full);
+        full
+    } else {
+        ctx.cwd.to_string()
+    }
+}
+
+fn unzip_emit_list_header(ctx: &mut UtilContext<'_>, list_only: bool, quiet: bool) {
+    if list_only && !quiet {
+        ctx.output
+            .stdout(b"  Length      Name\n---------  --------------------\n");
+    }
+}
+
+fn unzip_emit_list_footer(
+    ctx: &mut UtilContext<'_>,
+    stats: &UnzipStats,
+    quiet: bool,
+    list_only: bool,
+) {
     if list_only && !quiet {
         let footer = format!(
             "---------  --------------------\n{:>9}  {} file(s)\n",
@@ -885,8 +928,6 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         );
         ctx.output.stdout(footer.as_bytes());
     }
-
-    status
 }
 
 struct UnzipOpts<'a> {

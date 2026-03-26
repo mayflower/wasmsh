@@ -107,57 +107,91 @@ pub(crate) fn util_dirname(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 pub(crate) fn util_expr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let args = &argv[1..];
     if args.len() == 3 {
-        // String comparison operators don't require numeric operands
-        if args[1] == "=" || args[1] == "!=" {
-            let result = match args[1] {
-                "=" => i64::from(args[0] == args[2]),
-                "!=" => i64::from(args[0] != args[2]),
-                _ => 0,
-            };
-            let s = format!("{result}\n");
-            ctx.output.stdout(s.as_bytes());
-            return i32::from(result == 0);
-        }
-        let Ok(left) = args[0].parse::<i64>() else {
-            let msg = format!("expr: non-numeric argument: '{}'\n", args[0]);
-            ctx.output.stderr(msg.as_bytes());
-            return 2;
-        };
-        let Ok(right) = args[2].parse::<i64>() else {
-            let msg = format!("expr: non-numeric argument: '{}'\n", args[2]);
-            ctx.output.stderr(msg.as_bytes());
-            return 2;
-        };
-        let result = match args[1] {
-            "+" => left.wrapping_add(right),
-            "-" => left.wrapping_sub(right),
-            "*" => left.wrapping_mul(right),
-            "/" => {
-                if right == 0 {
-                    ctx.output.stderr(b"expr: division by zero\n");
-                    return 2;
-                }
-                left.wrapping_div(right)
-            }
-            "%" => {
-                if right == 0 {
-                    ctx.output.stderr(b"expr: division by zero\n");
-                    return 2;
-                }
-                left.wrapping_rem(right)
-            }
-            _ => 0,
-        };
-        let s = format!("{result}\n");
-        ctx.output.stdout(s.as_bytes());
-        i32::from(result == 0)
-    } else if args.len() == 1 {
-        ctx.output.stdout(args[0].as_bytes());
-        ctx.output.stdout(b"\n");
-        i32::from(args[0] == "0" || args[0].is_empty())
-    } else {
-        ctx.output.stderr(b"expr: syntax error\n");
+        return expr_eval_binary(ctx, args);
+    }
+    if args.len() == 1 {
+        return expr_emit_scalar(ctx, args[0]);
+    }
+    ctx.output.stderr(b"expr: syntax error\n");
+    2
+}
+
+fn expr_emit_result(ctx: &mut UtilContext<'_>, result: i64) -> i32 {
+    let s = format!("{result}\n");
+    ctx.output.stdout(s.as_bytes());
+    i32::from(result == 0)
+}
+
+fn expr_emit_scalar(ctx: &mut UtilContext<'_>, value: &str) -> i32 {
+    ctx.output.stdout(value.as_bytes());
+    ctx.output.stdout(b"\n");
+    i32::from(value == "0" || value.is_empty())
+}
+
+fn expr_parse_operand(ctx: &mut UtilContext<'_>, value: &str) -> Result<i64, i32> {
+    value.parse::<i64>().map_err(|_| {
+        let msg = format!("expr: non-numeric argument: '{value}'\n");
+        ctx.output.stderr(msg.as_bytes());
         2
+    })
+}
+
+fn expr_division_by_zero(ctx: &mut UtilContext<'_>) -> i32 {
+    ctx.output.stderr(b"expr: division by zero\n");
+    2
+}
+
+fn expr_eval_string(op: &str, left: &str, right: &str) -> i64 {
+    match op {
+        "=" => i64::from(left == right),
+        "!=" => i64::from(left != right),
+        _ => 0,
+    }
+}
+
+fn expr_eval_numeric(
+    ctx: &mut UtilContext<'_>,
+    op: &str,
+    left: i64,
+    right: i64,
+) -> Result<i64, i32> {
+    match op {
+        "+" => Ok(left.wrapping_add(right)),
+        "-" => Ok(left.wrapping_sub(right)),
+        "*" => Ok(left.wrapping_mul(right)),
+        "/" => {
+            if right == 0 {
+                Err(expr_division_by_zero(ctx))
+            } else {
+                Ok(left.wrapping_div(right))
+            }
+        }
+        "%" => {
+            if right == 0 {
+                Err(expr_division_by_zero(ctx))
+            } else {
+                Ok(left.wrapping_rem(right))
+            }
+        }
+        _ => Ok(0),
+    }
+}
+
+fn expr_eval_binary(ctx: &mut UtilContext<'_>, args: &[&str]) -> i32 {
+    if matches!(args[1], "=" | "!=") {
+        return expr_emit_result(ctx, expr_eval_string(args[1], args[0], args[2]));
+    }
+    let left = match expr_parse_operand(ctx, args[0]) {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+    let right = match expr_parse_operand(ctx, args[2]) {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+    match expr_eval_numeric(ctx, args[1], left, right) {
+        Ok(result) => expr_emit_result(ctx, result),
+        Err(status) => status,
     }
 }
 

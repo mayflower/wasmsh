@@ -42,7 +42,6 @@ pub fn run_toml_file(path: &Path) -> TestOutcome {
 
 /// Run a parsed TOML test case.
 pub fn run_toml_case(case: &TomlTestFile) -> TestOutcome {
-    // Feature gate check
     let missing = features::missing_features(&case.test.requires);
     if !missing.is_empty() {
         return TestOutcome::Skipped {
@@ -50,102 +49,140 @@ pub fn run_toml_case(case: &TomlTestFile) -> TestOutcome {
         };
     }
 
-    // Get the script
-    let script = match &case.input.script {
-        Some(s) => s.clone(),
-        None => {
-            return TestOutcome::Failed {
-                reason: "no script provided".into(),
-            };
-        }
+    let Some(script) = case.input.script.clone() else {
+        return TestOutcome::Failed {
+            reason: "no script provided".into(),
+        };
     };
 
-    // Create runtime and initialize
+    let mut rt = new_runtime();
+    seed_files(&mut rt, case);
+    seed_env(&mut rt, case);
+    let events = rt.handle_command(HostCommand::Run { input: script });
+    let status = extract_exit_status(&events);
+    let stdout = collect_event_data(&events, |e| matches!(e, WorkerEvent::Stdout(_)));
+    let stderr = collect_event_data(&events, |e| matches!(e, WorkerEvent::Stderr(_)));
+
+    let mut failures = Vec::new();
+    compare_status(case, status, &mut failures);
+    compare_stream(
+        "stdout",
+        &stdout,
+        case.expect.stdout.as_ref(),
+        &mut failures,
+    );
+    compare_contains(
+        "stdout",
+        &stdout,
+        case.expect.stdout_contains.as_ref(),
+        &mut failures,
+    );
+    compare_stream(
+        "stderr",
+        &stderr,
+        case.expect.stderr.as_ref(),
+        &mut failures,
+    );
+    compare_contains(
+        "stderr",
+        &stderr,
+        case.expect.stderr_contains.as_ref(),
+        &mut failures,
+    );
+    compare_files(case, &mut rt, &mut failures);
+    compare_env(case, &mut rt, &mut failures);
+
+    if failures.is_empty() {
+        TestOutcome::Passed
+    } else {
+        TestOutcome::Failed {
+            reason: failures.join("\n"),
+        }
+    }
+}
+
+fn new_runtime() -> WorkerRuntime {
     let mut rt = WorkerRuntime::new();
     rt.handle_command(HostCommand::Init {
         step_budget: 100_000,
     });
+    rt
+}
 
-    // Set up VFS files
+fn seed_files(rt: &mut WorkerRuntime, case: &TomlTestFile) {
     for (path, content) in &case.setup.files {
         rt.handle_command(HostCommand::WriteFile {
             path: path.clone(),
             data: content.as_bytes().to_vec(),
         });
     }
+}
 
-    // Set up environment variables via shell assignments
-    if !case.setup.env.is_empty() {
-        let env_script: String = case
-            .setup
-            .env
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        rt.handle_command(HostCommand::Run { input: env_script });
+fn seed_env(rt: &mut WorkerRuntime, case: &TomlTestFile) {
+    if case.setup.env.is_empty() {
+        return;
     }
-
-    // Execute the script
-    let events = rt.handle_command(HostCommand::Run { input: script });
-
-    // Extract results
-    let status = events
+    let env_script = case
+        .setup
+        .env
         .iter()
-        .find_map(|e| {
-            if let WorkerEvent::Exit(s) = e {
-                Some(*s)
-            } else {
-                None
-            }
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    rt.handle_command(HostCommand::Run { input: env_script });
+}
+
+fn extract_exit_status(events: &[WorkerEvent]) -> i32 {
+    events
+        .iter()
+        .find_map(|event| match event {
+            WorkerEvent::Exit(status) => Some(*status),
+            _ => None,
         })
-        .unwrap_or(-1);
+        .unwrap_or(-1)
+}
 
-    let stdout = collect_event_data(&events, |e| matches!(e, WorkerEvent::Stdout(_)));
-    let stderr = collect_event_data(&events, |e| matches!(e, WorkerEvent::Stderr(_)));
-
-    // Compare against expectations
-    let mut failures = Vec::new();
-
+fn compare_status(case: &TomlTestFile, status: i32, failures: &mut Vec<String>) {
     if let Some(expected_status) = case.expect.status {
         if status != expected_status {
             failures.push(format!("status: expected {expected_status}, got {status}"));
         }
     }
+}
 
-    if let Some(expected_stdout) = &case.expect.stdout {
-        if stdout != *expected_stdout {
-            failures.push(format!(
-                "stdout mismatch:\n  expected: {expected_stdout:?}\n  got:      {stdout:?}"
-            ));
+fn compare_stream(
+    label: &str,
+    actual: &str,
+    expected: Option<&String>,
+    failures: &mut Vec<String>,
+) {
+    let Some(expected) = expected else {
+        return;
+    };
+    if actual != expected {
+        failures.push(format!(
+            "{label} mismatch:\n  expected: {expected:?}\n  got:      {actual:?}"
+        ));
+    }
+}
+
+fn compare_contains(
+    label: &str,
+    actual: &str,
+    expected: Option<&Vec<String>>,
+    failures: &mut Vec<String>,
+) {
+    let Some(expected) = expected else {
+        return;
+    };
+    for needle in expected {
+        if !actual.contains(needle.as_str()) {
+            failures.push(format!("{label} missing: {needle:?}"));
         }
     }
+}
 
-    if let Some(contains) = &case.expect.stdout_contains {
-        for needle in contains {
-            if !stdout.contains(needle.as_str()) {
-                failures.push(format!("stdout missing: {needle:?}"));
-            }
-        }
-    }
-
-    if let Some(expected_stderr) = &case.expect.stderr {
-        if stderr != *expected_stderr {
-            failures.push(format!(
-                "stderr mismatch:\n  expected: {expected_stderr:?}\n  got:      {stderr:?}"
-            ));
-        }
-    }
-
-    if let Some(contains) = &case.expect.stderr_contains {
-        for needle in contains {
-            if !stderr.contains(needle.as_str()) {
-                failures.push(format!("stderr missing: {needle:?}"));
-            }
-        }
-    }
-
-    // Verify VFS file contents after execution
+fn compare_files(case: &TomlTestFile, rt: &mut WorkerRuntime, failures: &mut Vec<String>) {
     for (path, expected_content) in &case.expect.files {
         let read_events = rt.handle_command(HostCommand::ReadFile { path: path.clone() });
         let file_data = collect_event_data(&read_events, |e| matches!(e, WorkerEvent::Stdout(_)));
@@ -155,8 +192,9 @@ pub fn run_toml_case(case: &TomlTestFile) -> TestOutcome {
             ));
         }
     }
+}
 
-    // Verify environment variables after execution
+fn compare_env(case: &TomlTestFile, rt: &mut WorkerRuntime, failures: &mut Vec<String>) {
     for (name, expected_val) in &case.expect.env {
         let check_events = rt.handle_command(HostCommand::Run {
             input: format!("echo ${name}"),
@@ -167,14 +205,6 @@ pub fn run_toml_case(case: &TomlTestFile) -> TestOutcome {
             failures.push(format!(
                 "env ${name} mismatch: expected {expected_val:?}, got {actual_trimmed:?}"
             ));
-        }
-    }
-
-    if failures.is_empty() {
-        TestOutcome::Passed
-    } else {
-        TestOutcome::Failed {
-            reason: failures.join("\n"),
         }
     }
 }

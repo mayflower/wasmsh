@@ -233,31 +233,35 @@ impl<'a> BcParser<'a> {
     fn parse_number(&mut self, ibase: i32) -> Option<f64> {
         self.skip_ws();
         let start = self.pos;
+        let has_dot = self.consume_number_chars(ibase);
+        (self.pos > start)
+            .then(|| self.parse_number_slice(start, has_dot, ibase))
+            .flatten()
+    }
+
+    fn consume_number_chars(&mut self, ibase: i32) -> bool {
         let mut has_dot = false;
         while self.pos < self.input.len() {
             let b = self.input.as_bytes()[self.pos];
-            if b.is_ascii_digit()
-                || (b == b'.' && !has_dot)
-                || (ibase > 10 && b.is_ascii_hexdigit())
-            {
-                if b == b'.' {
-                    has_dot = true;
-                }
-                self.pos += 1;
-            } else {
+            if !Self::is_number_char(b, has_dot, ibase) {
                 break;
             }
+            has_dot |= b == b'.';
+            self.pos += 1;
         }
-        if self.pos > start {
-            let s = &self.input[start..self.pos];
-            if ibase != 10 && !has_dot {
-                let val = i64_from_base(s, ibase);
-                Some(val as f64)
-            } else {
-                s.parse::<f64>().ok()
-            }
+        has_dot
+    }
+
+    fn is_number_char(b: u8, has_dot: bool, ibase: i32) -> bool {
+        b.is_ascii_digit() || (b == b'.' && !has_dot) || (ibase > 10 && b.is_ascii_hexdigit())
+    }
+
+    fn parse_number_slice(&self, start: usize, has_dot: bool, ibase: i32) -> Option<f64> {
+        let s = &self.input[start..self.pos];
+        if ibase != 10 && !has_dot {
+            Some(i64_from_base(s, ibase) as f64)
         } else {
-            None
+            s.parse::<f64>().ok()
         }
     }
 
@@ -430,45 +434,49 @@ impl<'a> BcParser<'a> {
         }
 
         let b = self.input.as_bytes()[self.pos];
-
-        // Parenthesized expression
         if b == b'(' {
-            self.advance();
-            let expr = self.parse_expr(ibase)?;
-            self.eat(b')');
-            return Some(expr);
+            return self.parse_parenthesized_expr(ibase);
         }
-
-        // Number
         if b.is_ascii_digit() || b == b'.' {
-            let n = self.parse_number(ibase)?;
-            return Some(BcExpr::Num(n));
+            return self.parse_number(ibase).map(BcExpr::Num);
         }
-
-        // Identifier or function call
         if b.is_ascii_alphabetic() || b == b'_' {
-            let name = self.parse_ident()?;
-            self.skip_ws();
-            if self.eat(b'(') {
-                // Function call
-                let mut func_args = Vec::new();
-                if !self.eat(b')') {
-                    if let Some(arg) = self.parse_expr(ibase) {
-                        func_args.push(arg);
-                    }
-                    while self.eat(b',') {
-                        if let Some(arg) = self.parse_expr(ibase) {
-                            func_args.push(arg);
-                        }
-                    }
-                    self.eat(b')');
-                }
-                return Some(BcExpr::FnCall(name, func_args));
-            }
+            return self.parse_ident_expr(ibase);
+        }
+        None
+    }
+
+    fn parse_parenthesized_expr(&mut self, ibase: i32) -> Option<BcExpr> {
+        self.advance();
+        let expr = self.parse_expr(ibase)?;
+        self.eat(b')');
+        Some(expr)
+    }
+
+    fn parse_ident_expr(&mut self, ibase: i32) -> Option<BcExpr> {
+        let name = self.parse_ident()?;
+        self.skip_ws();
+        if !self.eat(b'(') {
             return Some(BcExpr::Var(name));
         }
+        Some(BcExpr::FnCall(name, self.parse_call_args(ibase)))
+    }
 
-        None
+    fn parse_call_args(&mut self, ibase: i32) -> Vec<BcExpr> {
+        let mut func_args = Vec::new();
+        if self.eat(b')') {
+            return func_args;
+        }
+        if let Some(arg) = self.parse_expr(ibase) {
+            func_args.push(arg);
+        }
+        while self.eat(b',') {
+            if let Some(arg) = self.parse_expr(ibase) {
+                func_args.push(arg);
+            }
+        }
+        self.eat(b')');
+        func_args
     }
 
     fn parse_block(&mut self, ibase: i32) -> Vec<BcStmt> {
@@ -617,33 +625,31 @@ fn eval_binop(l: f64, op: BcOp, r: f64) -> Result<f64, String> {
         BcOp::Add => Ok(l + r),
         BcOp::Sub => Ok(l - r),
         BcOp::Mul => Ok(l * r),
-        BcOp::Div => {
-            if r == 0.0 {
-                return Err("division by zero".to_string());
-            }
-            Ok(l / r)
-        }
-        BcOp::Mod => {
-            if r == 0.0 {
-                return Err("modulo by zero".to_string());
-            }
-            Ok(l % r)
-        }
+        BcOp::Div => checked_binop(r, "division by zero", || l / r),
+        BcOp::Mod => checked_binop(r, "modulo by zero", || l % r),
         BcOp::Pow => Ok(l.powf(r)),
-        BcOp::Eq => Ok(if (l - r).abs() < f64::EPSILON {
-            1.0
-        } else {
-            0.0
-        }),
-        BcOp::Ne => Ok(if (l - r).abs() >= f64::EPSILON {
-            1.0
-        } else {
-            0.0
-        }),
-        BcOp::Lt => Ok(if l < r { 1.0 } else { 0.0 }),
-        BcOp::Gt => Ok(if l > r { 1.0 } else { 0.0 }),
-        BcOp::Le => Ok(if l <= r { 1.0 } else { 0.0 }),
-        BcOp::Ge => Ok(if l >= r { 1.0 } else { 0.0 }),
+        BcOp::Eq => Ok(bool_to_num((l - r).abs() < f64::EPSILON)),
+        BcOp::Ne => Ok(bool_to_num((l - r).abs() >= f64::EPSILON)),
+        BcOp::Lt => Ok(bool_to_num(l < r)),
+        BcOp::Gt => Ok(bool_to_num(l > r)),
+        BcOp::Le => Ok(bool_to_num(l <= r)),
+        BcOp::Ge => Ok(bool_to_num(l >= r)),
+    }
+}
+
+fn checked_binop(r: f64, message: &str, f: impl FnOnce() -> f64) -> Result<f64, String> {
+    if r == 0.0 {
+        Err(message.to_string())
+    } else {
+        Ok(f())
+    }
+}
+
+fn bool_to_num(value: bool) -> f64 {
+    if value {
+        1.0
+    } else {
+        0.0
     }
 }
 

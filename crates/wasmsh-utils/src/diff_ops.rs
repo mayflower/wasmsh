@@ -799,51 +799,9 @@ fn diff_dirs(
     let mut status = 0;
 
     for rel in &all_files {
-        let full_a = format!("{}/{rel}", dir_a.trim_end_matches('/'));
-        let full_b = format!("{}/{rel}", dir_b.trim_end_matches('/'));
-        let lab_a = format!("{}/{rel}", label_a.trim_end_matches('/'));
-        let lab_b = format!("{}/{rel}", label_b.trim_end_matches('/'));
-
-        let a_exists = ctx.fs.stat(&full_a).is_ok();
-        let b_exists = ctx.fs.stat(&full_b).is_ok();
-
-        if !a_exists && !flags.new_file {
-            let msg = format!("Only in {label_b}: {rel}\n");
-            ctx.output.stdout(msg.as_bytes());
-            any_diff = true;
-            continue;
-        }
-        if !b_exists && !flags.new_file {
-            let msg = format!("Only in {label_a}: {rel}\n");
-            ctx.output.stdout(msg.as_bytes());
-            any_diff = true;
-            continue;
-        }
-
-        let old_text = match read_text_or_empty(ctx, &full_a, rel, a_exists) {
-            Ok(t) => t,
-            Err(s) => {
-                status = s;
-                continue;
-            }
-        };
-        let new_text = match read_text_or_empty(ctx, &full_b, rel, b_exists) {
-            Ok(t) => t,
-            Err(s) => {
-                status = s;
-                continue;
-            }
-        };
-
-        let old_lines: Vec<&str> = old_text.lines().collect();
-        let new_lines: Vec<&str> = new_text.lines().collect();
-
-        let (output, differs) = diff_texts(&old_lines, &new_lines, &lab_a, &lab_b, flags);
-        if differs {
-            any_diff = true;
-            if !output.is_empty() {
-                ctx.output.stdout(output.as_bytes());
-            }
+        match diff_dir_entry(ctx, dir_a, dir_b, label_a, label_b, rel, flags) {
+            Ok(differs) => any_diff |= differs,
+            Err(entry_status) => status = entry_status,
         }
     }
 
@@ -852,6 +810,67 @@ fn diff_dirs(
     } else {
         i32::from(any_diff)
     }
+}
+
+fn diff_dir_entry(
+    ctx: &mut UtilContext<'_>,
+    dir_a: &str,
+    dir_b: &str,
+    label_a: &str,
+    label_b: &str,
+    rel: &str,
+    flags: &DiffFlags,
+) -> Result<bool, i32> {
+    let full_a = format!("{}/{rel}", dir_a.trim_end_matches('/'));
+    let full_b = format!("{}/{rel}", dir_b.trim_end_matches('/'));
+    let lab_a = format!("{}/{rel}", label_a.trim_end_matches('/'));
+    let lab_b = format!("{}/{rel}", label_b.trim_end_matches('/'));
+    let a_exists = ctx.fs.stat(&full_a).is_ok();
+    let b_exists = ctx.fs.stat(&full_b).is_ok();
+
+    if let Some(differs) = diff_missing_dir_entry(
+        ctx,
+        rel,
+        label_a,
+        label_b,
+        a_exists,
+        b_exists,
+        flags.new_file,
+    ) {
+        return Ok(differs);
+    }
+
+    let old_text = read_text_or_empty(ctx, &full_a, rel, a_exists)?;
+    let new_text = read_text_or_empty(ctx, &full_b, rel, b_exists)?;
+    let old_lines: Vec<&str> = old_text.lines().collect();
+    let new_lines: Vec<&str> = new_text.lines().collect();
+    let (output, differs) = diff_texts(&old_lines, &new_lines, &lab_a, &lab_b, flags);
+    if differs && !output.is_empty() {
+        ctx.output.stdout(output.as_bytes());
+    }
+    Ok(differs)
+}
+
+fn diff_missing_dir_entry(
+    ctx: &mut UtilContext<'_>,
+    rel: &str,
+    label_a: &str,
+    label_b: &str,
+    a_exists: bool,
+    b_exists: bool,
+    new_file: bool,
+) -> Option<bool> {
+    if !a_exists && !new_file {
+        let msg = format!("Only in {label_b}: {rel}\n");
+        ctx.output.stdout(msg.as_bytes());
+        return Some(true);
+    }
+    if !b_exists && !new_file {
+        let msg = format!("Only in {label_a}: {rel}\n");
+        ctx.output.stdout(msg.as_bytes());
+        return Some(true);
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -892,75 +911,103 @@ fn parse_unified_diff(text: &str) -> Vec<PatchFile> {
     let mut i = 0;
 
     while i < lines.len() {
-        // Look for --- / +++ header pair.
-        if lines[i].starts_with("--- ") && i + 1 < lines.len() && lines[i + 1].starts_with("+++ ") {
-            let old_path = lines[i][4..].split('\t').next().unwrap_or(&lines[i][4..]);
-            let new_path = lines[i + 1][4..]
-                .split('\t')
-                .next()
-                .unwrap_or(&lines[i + 1][4..]);
-            i += 2;
-
-            let mut hunks: Vec<PatchHunk> = Vec::new();
-
-            // Parse hunks.
-            while i < lines.len() && lines[i].starts_with("@@ ") {
-                // Parse @@ -a,b +c,d @@
-                let hdr = lines[i];
-                let old_start = parse_hunk_header_old(hdr);
-                i += 1;
-
-                let mut remove = Vec::new();
-                let mut add = Vec::new();
-                let mut body = Vec::new();
-
-                while i < lines.len() {
-                    let line = lines[i];
-                    if line.starts_with("@@ ") || line.starts_with("--- ") {
-                        break;
-                    }
-                    if let Some(rest) = line.strip_prefix('-') {
-                        remove.push(rest.to_string());
-                        body.push(PatchOp::Remove(rest.to_string()));
-                    } else if let Some(rest) = line.strip_prefix('+') {
-                        add.push(rest.to_string());
-                        body.push(PatchOp::Add(rest.to_string()));
-                    } else if let Some(rest) = line.strip_prefix(' ') {
-                        body.push(PatchOp::Context(rest.to_string()));
-                    } else if line.is_empty() {
-                        // Treat empty line as context (empty context line).
-                        body.push(PatchOp::Context(String::new()));
-                    } else {
-                        // Unknown prefix; stop parsing this hunk.
-                        break;
-                    }
-                    i += 1;
-                }
-
-                hunks.push(PatchHunk {
-                    old_start,
-                    remove,
-                    add,
-                    body,
-                });
-            }
-
-            // Prefer old path (standard patch behavior), unless it's /dev/null
-            let chosen_path = if old_path == "/dev/null" {
-                new_path
-            } else {
-                old_path
-            };
-            files.push(PatchFile {
-                path: chosen_path.to_string(),
-                hunks,
-            });
-        } else {
+        let Some((old_path, new_path)) = parse_patch_header(&lines, i) else {
             i += 1;
-        }
+            continue;
+        };
+        i += 2;
+        let hunks = parse_patch_hunks(&lines, &mut i);
+        files.push(PatchFile {
+            path: pick_patch_path(old_path, new_path).to_string(),
+            hunks,
+        });
     }
 
     files
+}
+
+fn parse_patch_header<'a>(lines: &'a [&'a str], index: usize) -> Option<(&'a str, &'a str)> {
+    if !(lines.get(index)?.starts_with("--- ") && lines.get(index + 1)?.starts_with("+++ ")) {
+        return None;
+    }
+    let old_path = lines[index][4..]
+        .split('\t')
+        .next()
+        .unwrap_or(&lines[index][4..]);
+    let new_path = lines[index + 1][4..]
+        .split('\t')
+        .next()
+        .unwrap_or(&lines[index + 1][4..]);
+    Some((old_path, new_path))
+}
+
+fn parse_patch_hunks(lines: &[&str], index: &mut usize) -> Vec<PatchHunk> {
+    let mut hunks = Vec::new();
+    while *index < lines.len() && lines[*index].starts_with("@@ ") {
+        hunks.push(parse_patch_hunk(lines, index));
+    }
+    hunks
+}
+
+fn parse_patch_hunk(lines: &[&str], index: &mut usize) -> PatchHunk {
+    let old_start = parse_hunk_header_old(lines[*index]);
+    *index += 1;
+    let mut remove = Vec::new();
+    let mut add = Vec::new();
+    let mut body = Vec::new();
+
+    while *index < lines.len() {
+        let line = lines[*index];
+        if line.starts_with("@@ ") || line.starts_with("--- ") {
+            break;
+        }
+        if !parse_patch_body_line(line, &mut remove, &mut add, &mut body) {
+            break;
+        }
+        *index += 1;
+    }
+
+    PatchHunk {
+        old_start,
+        remove,
+        add,
+        body,
+    }
+}
+
+fn parse_patch_body_line(
+    line: &str,
+    remove: &mut Vec<String>,
+    add: &mut Vec<String>,
+    body: &mut Vec<PatchOp>,
+) -> bool {
+    if let Some(rest) = line.strip_prefix('-') {
+        remove.push(rest.to_string());
+        body.push(PatchOp::Remove(rest.to_string()));
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix('+') {
+        add.push(rest.to_string());
+        body.push(PatchOp::Add(rest.to_string()));
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix(' ') {
+        body.push(PatchOp::Context(rest.to_string()));
+        return true;
+    }
+    if line.is_empty() {
+        body.push(PatchOp::Context(String::new()));
+        return true;
+    }
+    false
+}
+
+fn pick_patch_path<'a>(old_path: &'a str, new_path: &'a str) -> &'a str {
+    if old_path == "/dev/null" {
+        new_path
+    } else {
+        old_path
+    }
 }
 
 /// Extract the old-file start line from a unified hunk header.

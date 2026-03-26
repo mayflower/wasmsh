@@ -403,22 +403,25 @@ fn printf_apply_width(
     left_align: bool,
     zero_pad: bool,
 ) {
-    if width > 0 && formatted.len() < width {
-        let pad_char = if zero_pad && !left_align { '0' } else { ' ' };
-        let padding = width - formatted.len();
-        if left_align {
-            output.push_str(formatted);
-            for _ in 0..padding {
-                output.push(' ');
-            }
-        } else {
-            for _ in 0..padding {
-                output.push(pad_char);
-            }
-            output.push_str(formatted);
-        }
-    } else {
+    if width == 0 || formatted.len() >= width {
         output.push_str(formatted);
+        return;
+    }
+
+    let pad_char = if zero_pad && !left_align { '0' } else { ' ' };
+    let padding = width - formatted.len();
+    if left_align {
+        output.push_str(formatted);
+        push_repeated_char(output, ' ', padding);
+    } else {
+        push_repeated_char(output, pad_char, padding);
+        output.push_str(formatted);
+    }
+}
+
+fn push_repeated_char(output: &mut String, ch: char, count: usize) {
+    for _ in 0..count {
+        output.push(ch);
     }
 }
 
@@ -957,52 +960,24 @@ fn parse_read_opts<'a>(argv: &'a [&'a str]) -> ReadOpts<'a> {
         match *arg {
             "-r" | "-s" => args = &args[1..],
             "-p" => {
-                if args.len() > 1 {
-                    opts.prompt = Some(args[1]);
-                    args = &args[2..];
-                } else {
-                    args = &args[1..];
-                }
+                opts.prompt = take_read_opt_value(&mut args);
             }
             "-d" => {
-                if args.len() > 1 {
-                    opts.delimiter = args[1].chars().next().unwrap_or('\n');
-                    args = &args[2..];
-                } else {
-                    args = &args[1..];
+                if let Some(value) = take_read_opt_value(&mut args) {
+                    opts.delimiter = value.chars().next().unwrap_or('\n');
                 }
             }
             "-n" => {
-                if args.len() > 1 {
-                    opts.nchars = args[1].parse().ok();
-                    args = &args[2..];
-                } else {
-                    args = &args[1..];
-                }
+                opts.nchars = take_read_opt_value(&mut args).and_then(|value| value.parse().ok());
             }
             "-N" => {
-                if args.len() > 1 {
-                    opts.exact_nchars = args[1].parse().ok();
-                    args = &args[2..];
-                } else {
-                    args = &args[1..];
-                }
+                opts.exact_nchars =
+                    take_read_opt_value(&mut args).and_then(|value| value.parse().ok());
             }
             "-a" => {
-                if args.len() > 1 {
-                    opts.array_name = Some(args[1]);
-                    args = &args[2..];
-                } else {
-                    args = &args[1..];
-                }
+                opts.array_name = take_read_opt_value(&mut args);
             }
-            "-t" => {
-                if args.len() > 1 {
-                    args = &args[2..];
-                } else {
-                    args = &args[1..];
-                }
-            }
+            "-t" => drop(take_read_opt_value(&mut args)),
             _ => break,
         }
     }
@@ -1010,43 +985,55 @@ fn parse_read_opts<'a>(argv: &'a [&'a str]) -> ReadOpts<'a> {
     opts
 }
 
+fn take_read_opt_value<'a>(args: &mut &'a [&'a str]) -> Option<&'a str> {
+    if args.len() > 1 {
+        let value = args[1];
+        *args = &args[2..];
+        Some(value)
+    } else {
+        *args = &args[1..];
+        None
+    }
+}
+
 /// `read` — read a line from stdin into variable(s).
 /// Supports: `-r` (no backslash interpretation), `-p prompt`, `-d delim`,
 /// `-n nchars`, `-N nchars`, `-a array`, `-t timeout`, `-s` (silent).
 fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     let opts = parse_read_opts(argv);
-
-    if let Some(p) = opts.prompt {
-        ctx.output.stderr(p.as_bytes());
-    }
-
-    let var_names: Vec<&str> = if opts.array_name.is_some() || opts.remaining_args.is_empty() {
-        vec!["REPLY"]
-    } else {
-        opts.remaining_args.to_vec()
-    };
-
+    emit_read_prompt(ctx, opts.prompt);
+    let var_names = read_var_names(&opts);
     let Some(input_text) = read_input_text(ctx) else {
         return 1;
     };
 
     let (line, remaining) = read_split_input(&input_text, &opts);
-
-    // Store remaining data for subsequent read calls
-    ctx.state.set_var(
-        SmolStr::from("_STDIN_REMAINING"),
-        SmolStr::from(remaining.as_str()),
-    );
-
-    // Handle -a (read into array)
+    store_read_remaining(ctx, &remaining);
     if let Some(arr_name) = opts.array_name {
         read_into_array(ctx.state, &line, arr_name);
         return 0;
     }
-
-    // Split line by IFS and assign to variables
     read_assign_vars(ctx.state, &line, &var_names);
     0
+}
+
+fn emit_read_prompt(ctx: &mut BuiltinContext<'_>, prompt: Option<&str>) {
+    if let Some(prompt) = prompt {
+        ctx.output.stderr(prompt.as_bytes());
+    }
+}
+
+fn read_var_names<'a>(opts: &'a ReadOpts<'a>) -> Vec<&'a str> {
+    if opts.array_name.is_some() || opts.remaining_args.is_empty() {
+        vec!["REPLY"]
+    } else {
+        opts.remaining_args.to_vec()
+    }
+}
+
+fn store_read_remaining(ctx: &mut BuiltinContext<'_>, remaining: &str) {
+    ctx.state
+        .set_var(SmolStr::from("_STDIN_REMAINING"), SmolStr::from(remaining));
 }
 
 /// Obtain input text for `read` from stdin or the `_STDIN_REMAINING` variable.

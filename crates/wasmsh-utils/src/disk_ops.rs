@@ -153,11 +153,7 @@ fn du_walk(
 
     for entry in &entries {
         let child_full = child_path(full_path, &entry.name);
-        let child_display = if display_path == "." {
-            format!("./{}", entry.name)
-        } else {
-            format!("{display_path}/{}", entry.name)
-        };
+        let child_display = du_child_display(display_path, &entry.name);
 
         if entry.is_dir {
             let (sub_size, sub_err) = du_walk(
@@ -175,45 +171,62 @@ fn du_walk(
                 had_error = true;
             }
         } else {
-            let size = match ctx.fs.stat(&child_full) {
-                Ok(m) => m.size,
-                Err(e) => {
-                    emit_error(ctx.output, "du", &child_display, &e);
-                    had_error = true;
-                    0
-                }
-            };
+            let (size, stat_failed) = du_file_size(ctx, &child_full, &child_display);
             total += size;
+            had_error |= stat_failed;
 
-            if all_files && !summary {
-                let at_depth_limit = max_depth.is_some_and(|md| depth + 1 > md);
-                if !at_depth_limit {
-                    let blocks = to_blocks(size);
-                    let line = format!("{}\t{child_display}\n", format_blocks(blocks, human));
-                    ctx.output.stdout(line.as_bytes());
-                }
+            if du_should_print_file(depth + 1, max_depth, summary, all_files) {
+                du_emit_size(ctx, size, &child_display, human);
             }
         }
     }
 
-    // Print directory line
-    if summary {
-        // Only print top-level entries (depth 0)
-        if depth == 0 {
-            let blocks = to_blocks(total);
-            let line = format!("{}\t{display_path}\n", format_blocks(blocks, human));
-            ctx.output.stdout(line.as_bytes());
-        }
-    } else {
-        let at_depth_limit = max_depth.is_some_and(|md| depth > md);
-        if !at_depth_limit {
-            let blocks = to_blocks(total);
-            let line = format!("{}\t{display_path}\n", format_blocks(blocks, human));
-            ctx.output.stdout(line.as_bytes());
-        }
+    if du_should_print_dir(depth, max_depth, summary) {
+        du_emit_size(ctx, total, display_path, human);
     }
 
     (total, had_error)
+}
+
+fn du_child_display(display_path: &str, name: &str) -> String {
+    if display_path == "." {
+        format!("./{name}")
+    } else {
+        format!("{display_path}/{name}")
+    }
+}
+
+fn du_file_size(ctx: &mut UtilContext<'_>, full: &str, display: &str) -> (u64, bool) {
+    match ctx.fs.stat(full) {
+        Ok(meta) => (meta.size, false),
+        Err(e) => {
+            emit_error(ctx.output, "du", display, &e);
+            (0, true)
+        }
+    }
+}
+
+fn du_should_print_file(
+    depth: usize,
+    max_depth: Option<usize>,
+    summary: bool,
+    all_files: bool,
+) -> bool {
+    all_files && !summary && !max_depth.is_some_and(|md| depth > md)
+}
+
+fn du_should_print_dir(depth: usize, max_depth: Option<usize>, summary: bool) -> bool {
+    if summary {
+        depth == 0
+    } else {
+        !max_depth.is_some_and(|md| depth > md)
+    }
+}
+
+fn du_emit_size(ctx: &mut UtilContext<'_>, size: u64, display_path: &str, human: bool) {
+    let blocks = to_blocks(size);
+    let line = format!("{}\t{display_path}\n", format_blocks(blocks, human));
+    ctx.output.stdout(line.as_bytes());
 }
 
 /// Convert bytes to 1K blocks (matching du default behavior).

@@ -218,19 +218,7 @@ pub(crate) fn util_which(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn util_rmdir(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
-    let mut parents = false;
-
-    while let Some(arg) = args.first() {
-        if *arg == "-p" || *arg == "--parents" {
-            parents = true;
-            args = &args[1..];
-        } else if arg.starts_with('-') && arg.len() > 1 {
-            args = &args[1..];
-        } else {
-            break;
-        }
-    }
+    let (parents, args) = parse_rmdir_args(argv);
 
     if args.is_empty() {
         ctx.output.stderr(b"rmdir: missing operand\n");
@@ -245,32 +233,53 @@ pub(crate) fn util_rmdir(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             status = 1;
             continue;
         }
-
         if parents {
-            // Remove parent directories as long as they are empty
-            let mut current = full.clone();
-            loop {
-                let parent = match current.rfind('/') {
-                    Some(0) | None => break, // reached root
-                    Some(pos) => &current[..pos],
-                };
-                if parent.is_empty() {
-                    break;
-                }
-                // Check if parent is empty
-                match ctx.fs.read_dir(parent) {
-                    Ok(entries) if entries.is_empty() => {
-                        if ctx.fs.remove_dir(parent).is_err() {
-                            break;
-                        }
-                        current = parent.to_string();
-                    }
-                    _ => break,
-                }
-            }
+            rmdir_parents(ctx, &full);
         }
     }
     status
+}
+
+fn parse_rmdir_args<'a>(argv: &'a [&'a str]) -> (bool, &'a [&'a str]) {
+    let mut args = &argv[1..];
+    let mut parents = false;
+    while let Some(arg) = args.first() {
+        if *arg == "-p" || *arg == "--parents" {
+            parents = true;
+            args = &args[1..];
+        } else if arg.starts_with('-') && arg.len() > 1 {
+            args = &args[1..];
+        } else {
+            break;
+        }
+    }
+    (parents, args)
+}
+
+fn rmdir_parents(ctx: &mut UtilContext<'_>, full: &str) {
+    let mut current = full.to_string();
+    while let Some(parent) = rmdir_parent_path(&current) {
+        if !rmdir_remove_if_empty(ctx, parent) {
+            break;
+        }
+        current = parent.to_string();
+    }
+}
+
+fn rmdir_parent_path(path: &str) -> Option<&str> {
+    let pos = match path.rfind('/') {
+        Some(0) | None => return None,
+        Some(pos) => pos,
+    };
+    let parent = &path[..pos];
+    (!parent.is_empty()).then_some(parent)
+}
+
+fn rmdir_remove_if_empty(ctx: &mut UtilContext<'_>, parent: &str) -> bool {
+    match ctx.fs.read_dir(parent) {
+        Ok(entries) if entries.is_empty() => ctx.fs.remove_dir(parent).is_ok(),
+        _ => false,
+    }
 }
 
 fn rmdir_one(ctx: &mut UtilContext<'_>, full: &str, display: &str) -> Result<(), String> {
@@ -326,16 +335,27 @@ pub(crate) fn util_tac(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn util_nl(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
-    let mut number_all = false; // -b a: number all lines; -b t (default): non-empty only
+    let (number_all, args) = parse_nl_args(argv);
 
+    let text = get_input_text(ctx, args);
+    if text.is_empty() && args.is_empty() && ctx.stdin.is_none() {
+        ctx.output.stderr(b"nl: missing operand\n");
+        return 1;
+    }
+
+    let mut line_num: u64 = 0;
+    for line in text.lines() {
+        nl_emit_line(ctx, line, number_all, &mut line_num);
+    }
+    0
+}
+
+fn parse_nl_args<'a>(argv: &'a [&'a str]) -> (bool, &'a [&'a str]) {
+    let mut args = &argv[1..];
+    let mut number_all = false;
     while let Some(arg) = args.first() {
         if *arg == "-b" && args.len() > 1 {
-            match args[1] {
-                "a" => number_all = true,
-                "t" => number_all = false,
-                _ => {}
-            }
+            number_all = args[1] == "a";
             args = &args[2..];
         } else if *arg == "-ba" {
             number_all = true;
@@ -346,26 +366,17 @@ pub(crate) fn util_nl(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             break;
         }
     }
+    (number_all, args)
+}
 
-    let text = get_input_text(ctx, args);
-    if text.is_empty() && args.is_empty() && ctx.stdin.is_none() {
-        ctx.output.stderr(b"nl: missing operand\n");
-        return 1;
+fn nl_emit_line(ctx: &mut UtilContext<'_>, line: &str, number_all: bool, line_num: &mut u64) {
+    if number_all || !line.is_empty() {
+        *line_num += 1;
+        let out = format!("{line_num:>6}\t{line}\n");
+        ctx.output.stdout(out.as_bytes());
+    } else {
+        ctx.output.stdout(b"\n");
     }
-
-    let mut line_num: u64 = 0;
-    for line in text.lines() {
-        let is_empty = line.is_empty();
-        if number_all || !is_empty {
-            line_num += 1;
-            let out = format!("{line_num:>6}\t{line}\n");
-            ctx.output.stdout(out.as_bytes());
-        } else {
-            // Blank line — output without numbering
-            ctx.output.stdout(b"\n");
-        }
-    }
-    0
 }
 
 // ---------------------------------------------------------------------------
@@ -467,37 +478,54 @@ fn cmp_data(
     verbose: bool,
 ) -> i32 {
     let min_len = data1.len().min(data2.len());
-    let mut differ = false;
-
     for i in 0..min_len {
         if data1[i] != data2[i] {
-            differ = true;
-            if silent {
-                return 1;
-            }
-            if verbose {
-                let out = format!("{:>4} {:>3} {:>3}\n", i + 1, data1[i], data2[i]);
-                ctx.output.stdout(out.as_bytes());
-            } else {
-                return cmp_report_first_diff(ctx, data1, i, name1, name2);
-            }
+            return cmp_handle_mismatch(ctx, data1, data2, i, name1, name2, silent, verbose);
         }
     }
 
     if data1.len() != data2.len() {
-        if !silent {
-            let shorter = if data1.len() < data2.len() {
-                name1
-            } else {
-                name2
-            };
-            let msg = format!("cmp: EOF on {shorter}\n");
-            ctx.output.stderr(msg.as_bytes());
-        }
-        return 1;
+        return cmp_handle_length_mismatch(ctx, data1.len(), data2.len(), name1, name2, silent);
     }
 
-    i32::from(differ)
+    0
+}
+
+fn cmp_handle_mismatch(
+    ctx: &mut UtilContext<'_>,
+    data1: &[u8],
+    data2: &[u8],
+    index: usize,
+    name1: &str,
+    name2: &str,
+    silent: bool,
+    verbose: bool,
+) -> i32 {
+    if silent {
+        return 1;
+    }
+    if verbose {
+        let out = format!("{:>4} {:>3} {:>3}\n", index + 1, data1[index], data2[index]);
+        ctx.output.stdout(out.as_bytes());
+        return 1;
+    }
+    cmp_report_first_diff(ctx, data1, index, name1, name2)
+}
+
+fn cmp_handle_length_mismatch(
+    ctx: &mut UtilContext<'_>,
+    len1: usize,
+    len2: usize,
+    name1: &str,
+    name2: &str,
+    silent: bool,
+) -> i32 {
+    if !silent {
+        let shorter = if len1 < len2 { name1 } else { name2 };
+        let msg = format!("cmp: EOF on {shorter}\n");
+        ctx.output.stderr(msg.as_bytes());
+    }
+    1
 }
 
 fn cmp_report_first_diff(
@@ -689,22 +717,13 @@ fn parse_fold_opts<'a>(
 
     while let Some(arg) = rest.first() {
         if *arg == "-w" && rest.len() > 1 {
-            let Ok(w) = rest[1].parse::<usize>() else {
-                let msg = format!("fold: invalid number: '{}'\n", rest[1]);
-                output.stderr(msg.as_bytes());
-                return Err(1);
-            };
-            width = w;
+            width = parse_fold_width(rest[1], output)?;
             rest = &rest[2..];
         } else if *arg == "-s" {
             break_at_spaces = true;
             rest = &rest[1..];
         } else if arg.starts_with('-') && arg.len() > 1 {
-            if let Some(num) = arg.strip_prefix("-w") {
-                if let Ok(w) = num.parse::<usize>() {
-                    width = w;
-                }
-            }
+            width = parse_fold_inline_width(arg, width);
             rest = &rest[1..];
         } else {
             break;
@@ -721,6 +740,20 @@ fn parse_fold_opts<'a>(
         },
         rest,
     ))
+}
+
+fn parse_fold_width(value: &str, output: &mut dyn crate::UtilOutput) -> Result<usize, i32> {
+    value.parse::<usize>().map_err(|_| {
+        let msg = format!("fold: invalid number: '{value}'\n");
+        output.stderr(msg.as_bytes());
+        1
+    })
+}
+
+fn parse_fold_inline_width(arg: &str, current: usize) -> usize {
+    arg.strip_prefix("-w")
+        .and_then(|num| num.parse::<usize>().ok())
+        .unwrap_or(current)
 }
 
 fn fold_hard_break(ctx: &mut UtilContext<'_>, line: &str, width: usize) {
@@ -893,12 +926,7 @@ fn parse_unexpand_opts<'a>(
 
     while let Some(arg) = rest.first() {
         if *arg == "-t" && rest.len() > 1 {
-            let Ok(w) = rest[1].parse::<usize>() else {
-                let msg = format!("unexpand: invalid number: '{}'\n", rest[1]);
-                output.stderr(msg.as_bytes());
-                return Err(1);
-            };
-            tab_width = w;
+            tab_width = parse_unexpand_width(rest[1], output)?;
             rest = &rest[2..];
         } else if *arg == "-a" || *arg == "--all" {
             all = true;
@@ -907,11 +935,7 @@ fn parse_unexpand_opts<'a>(
             all = false;
             rest = &rest[1..];
         } else if arg.starts_with('-') && arg.len() > 1 {
-            if let Some(num) = arg.strip_prefix("-t") {
-                if let Ok(w) = num.parse::<usize>() {
-                    tab_width = w;
-                }
-            }
+            tab_width = parse_unexpand_inline_width(arg, tab_width);
             rest = &rest[1..];
         } else {
             break;
@@ -922,6 +946,20 @@ fn parse_unexpand_opts<'a>(
         tab_width = 8;
     }
     Ok((UnexpandOpts { tab_width, all }, rest))
+}
+
+fn parse_unexpand_width(value: &str, output: &mut dyn crate::UtilOutput) -> Result<usize, i32> {
+    value.parse::<usize>().map_err(|_| {
+        let msg = format!("unexpand: invalid number: '{value}'\n");
+        output.stderr(msg.as_bytes());
+        1
+    })
+}
+
+fn parse_unexpand_inline_width(arg: &str, current: usize) -> usize {
+    arg.strip_prefix("-t")
+        .and_then(|num| num.parse::<usize>().ok())
+        .unwrap_or(current)
 }
 
 pub(crate) fn util_unexpand(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
@@ -960,11 +998,7 @@ fn unexpand_leading(line: &str, tab_width: usize) -> String {
             }
         } else {
             if in_leading {
-                // Emit remaining spaces that didn't fill a tab stop
-                let remaining = col % tab_width;
-                for _ in 0..remaining {
-                    out.push(' ');
-                }
+                unexpand_emit_remaining_spaces(&mut out, col, tab_width);
                 in_leading = false;
             }
             out.push(ch);
@@ -972,13 +1006,16 @@ fn unexpand_leading(line: &str, tab_width: usize) -> String {
     }
 
     if in_leading {
-        let remaining = col % tab_width;
-        for _ in 0..remaining {
-            out.push(' ');
-        }
+        unexpand_emit_remaining_spaces(&mut out, col, tab_width);
     }
 
     out
+}
+
+fn unexpand_emit_remaining_spaces(out: &mut String, col: usize, tab_width: usize) {
+    for _ in 0..(col % tab_width) {
+        out.push(' ');
+    }
 }
 
 fn unexpand_line(line: &str, tab_width: usize) -> String {

@@ -508,16 +508,10 @@ impl<'src> Parser<'src> {
         let start = self.current.span.start;
         self.expect_word("for")?;
 
-        // C-style for: for (( init; cond; step )) do body done
-        if self.at(&TokenKind::LParen) {
-            if let Ok(next) = self.peek_nth(0) {
-                if next.kind == TokenKind::LParen && next.span.start == self.current.span.end {
-                    return self.parse_arith_for(start);
-                }
-            }
+        if self.is_arith_for_start() {
+            return self.parse_arith_for(start);
         }
 
-        // Variable name
         if !self.at_word() {
             return Err(ParseError {
                 message: "expected variable name after 'for'".into(),
@@ -527,28 +521,7 @@ impl<'src> Parser<'src> {
         let var_name = self.current_text().into();
         self.advance()?;
 
-        // Optional `in word...` clause
-        let words = if self.at_word_eq("in") {
-            self.advance()?;
-            let mut words = Vec::new();
-            while self.at_word()
-                && !self.at_word_eq("do")
-                && !TERMINATOR_WORDS.contains(&self.current_text())
-            {
-                words.push(self.parse_word()?);
-            }
-            // Consume optional ; or newline before `do`
-            if self.at(&TokenKind::Semi) {
-                self.advance()?;
-            }
-            Some(words)
-        } else {
-            // Consume optional ; or newline before `do`
-            if self.at(&TokenKind::Semi) {
-                self.advance()?;
-            }
-            None
-        };
+        let words = self.parse_loop_words_clause()?;
 
         self.skip_newlines()?;
         self.expect_word("do")?;
@@ -561,6 +534,39 @@ impl<'src> Parser<'src> {
             body,
             span: self.span_from(start),
         }))
+    }
+
+    fn is_arith_for_start(&mut self) -> bool {
+        let current_end = self.current.span.end;
+        self.at(&TokenKind::LParen)
+            && self
+                .peek_nth(0)
+                .is_ok_and(|next| next.kind == TokenKind::LParen && next.span.start == current_end)
+    }
+
+    fn parse_loop_words_clause(&mut self) -> Result<Option<Vec<Word>>, ParseError> {
+        if !self.at_word_eq("in") {
+            self.consume_optional_semi()?;
+            return Ok(None);
+        }
+
+        self.advance()?;
+        let mut words = Vec::new();
+        while self.at_word()
+            && !self.at_word_eq("do")
+            && !TERMINATOR_WORDS.contains(&self.current_text())
+        {
+            words.push(self.parse_word()?);
+        }
+        self.consume_optional_semi()?;
+        Ok(Some(words))
+    }
+
+    fn consume_optional_semi(&mut self) -> Result<(), ParseError> {
+        if self.at(&TokenKind::Semi) {
+            self.advance()?;
+        }
+        Ok(())
     }
 
     /// Parse `select name [in word ...]; do body; done`.
@@ -741,51 +747,11 @@ impl<'src> Parser<'src> {
 
         let mut items = Vec::new();
         while !self.at_word_eq("esac") && !self.at(&TokenKind::Eof) {
-            // Parse patterns: pattern1 | pattern2 ) body ;;
-            // Optional leading (
-            if self.at(&TokenKind::LParen) {
-                self.advance()?;
-            }
-            let mut patterns = Vec::new();
-            patterns.push(self.parse_word()?);
-            while self.at(&TokenKind::Pipe) {
-                self.advance()?;
-                patterns.push(self.parse_word()?);
-            }
-            // Expect )
-            if !self.at(&TokenKind::RParen) {
-                return Err(ParseError {
-                    message: "expected ')' after case pattern".into(),
-                    offset: self.current.span.start,
-                });
-            }
-            self.advance()?;
+            let patterns = self.parse_case_patterns()?;
             self.skip_newlines()?;
 
-            // Parse body: commands until `;;`, `;&`, `;;&`, or `esac`
-            let mut body = Vec::new();
-            while self.at_command_start() && !self.is_double_semi() && !self.is_case_fallthrough() {
-                body.push(self.parse_complete_command()?);
-                self.skip_newlines()?;
-            }
-
-            // Consume terminator: `;;`, `;;&`, `;&`, or none (before esac)
-            let terminator = if self.is_case_continue_testing() {
-                self.advance()?; // first ;
-                self.advance()?; // second ;
-                self.advance()?; // &
-                CaseTerminator::ContinueTesting
-            } else if self.is_double_semi() {
-                self.advance()?; // first ;
-                self.advance()?; // second ;
-                CaseTerminator::Break
-            } else if self.is_case_fallthrough() {
-                self.advance()?; // ;
-                self.advance()?; // &
-                CaseTerminator::Fallthrough
-            } else {
-                CaseTerminator::Break
-            };
+            let body = self.parse_case_body()?;
+            let terminator = self.parse_case_terminator()?;
             self.skip_newlines()?;
 
             items.push(CaseItem {
@@ -801,6 +767,54 @@ impl<'src> Parser<'src> {
             items,
             span: self.span_from(start),
         }))
+    }
+
+    fn parse_case_patterns(&mut self) -> Result<Vec<Word>, ParseError> {
+        if self.at(&TokenKind::LParen) {
+            self.advance()?;
+        }
+        let mut patterns = vec![self.parse_word()?];
+        while self.at(&TokenKind::Pipe) {
+            self.advance()?;
+            patterns.push(self.parse_word()?);
+        }
+        if !self.at(&TokenKind::RParen) {
+            return Err(ParseError {
+                message: "expected ')' after case pattern".into(),
+                offset: self.current.span.start,
+            });
+        }
+        self.advance()?;
+        Ok(patterns)
+    }
+
+    fn parse_case_body(&mut self) -> Result<Vec<CompleteCommand>, ParseError> {
+        let mut body = Vec::new();
+        while self.at_command_start() && !self.is_double_semi() && !self.is_case_fallthrough() {
+            body.push(self.parse_complete_command()?);
+            self.skip_newlines()?;
+        }
+        Ok(body)
+    }
+
+    fn parse_case_terminator(&mut self) -> Result<CaseTerminator, ParseError> {
+        if self.is_case_continue_testing() {
+            self.advance()?;
+            self.advance()?;
+            self.advance()?;
+            return Ok(CaseTerminator::ContinueTesting);
+        }
+        if self.is_double_semi() {
+            self.advance()?;
+            self.advance()?;
+            return Ok(CaseTerminator::Break);
+        }
+        if self.is_case_fallthrough() {
+            self.advance()?;
+            self.advance()?;
+            return Ok(CaseTerminator::Fallthrough);
+        }
+        Ok(CaseTerminator::Break)
     }
 
     /// Parse `[[ expression ]]` extended test command.
@@ -901,33 +915,12 @@ impl<'src> Parser<'src> {
         let mut past_assignments = false;
 
         loop {
-            if self.at_fd_prefix_redirection() {
-                // Current token is a digit, next is a redirection op
-                let fd_text = self.current_text();
-                let fd: u32 = fd_text.parse().unwrap_or(0);
-                self.advance()?; // consume the digit
-                let mut redir = self.parse_redirection()?;
-                redir.fd = Some(fd);
-                redirections.push(redir);
-            } else if self.at_redirection() {
-                redirections.push(self.parse_redirection()?);
-            } else if self.at_word() {
-                let text = self.current_text();
-                if !past_assignments && is_assignment_text(text) {
-                    assignments.push(self.parse_assignment()?);
-                } else {
-                    // Check if this word ends with '=' and is followed by LParen
-                    // (compound array assignment in command position, e.g. `declare -a arr=(...)`)
-                    if text.ends_with('=') && self.peek_is_lparen() {
-                        let word = self.parse_compound_assign_word()?;
-                        past_assignments = true;
-                        words.push(word);
-                    } else {
-                        past_assignments = true;
-                        words.push(self.parse_word()?);
-                    }
-                }
-            } else {
+            if !self.parse_simple_command_part(
+                &mut assignments,
+                &mut words,
+                &mut redirections,
+                &mut past_assignments,
+            )? {
                 break;
             }
         }
@@ -945,6 +938,57 @@ impl<'src> Parser<'src> {
             redirections,
             span: self.span_from(start),
         })
+    }
+
+    fn parse_simple_command_part(
+        &mut self,
+        assignments: &mut Vec<Assignment>,
+        words: &mut Vec<Word>,
+        redirections: &mut Vec<Redirection>,
+        past_assignments: &mut bool,
+    ) -> Result<bool, ParseError> {
+        if self.at_fd_prefix_redirection() {
+            redirections.push(self.parse_fd_prefixed_redirection()?);
+            return Ok(true);
+        }
+        if self.at_redirection() {
+            redirections.push(self.parse_redirection()?);
+            return Ok(true);
+        }
+        if self.at_word() {
+            self.parse_simple_word_part(assignments, words, past_assignments)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn parse_fd_prefixed_redirection(&mut self) -> Result<Redirection, ParseError> {
+        let fd_text = self.current_text();
+        let fd: u32 = fd_text.parse().unwrap_or(0);
+        self.advance()?;
+        let mut redir = self.parse_redirection()?;
+        redir.fd = Some(fd);
+        Ok(redir)
+    }
+
+    fn parse_simple_word_part(
+        &mut self,
+        assignments: &mut Vec<Assignment>,
+        words: &mut Vec<Word>,
+        past_assignments: &mut bool,
+    ) -> Result<(), ParseError> {
+        let text = self.current_text();
+        if !*past_assignments && is_assignment_text(text) {
+            assignments.push(self.parse_assignment()?);
+            return Ok(());
+        }
+        *past_assignments = true;
+        if text.ends_with('=') && self.peek_is_lparen() {
+            words.push(self.parse_compound_assign_word()?);
+        } else {
+            words.push(self.parse_word()?);
+        }
+        Ok(())
     }
 
     fn parse_word(&mut self) -> Result<Word, ParseError> {
@@ -965,51 +1009,9 @@ impl<'src> Parser<'src> {
         let val_str = &text[eq_pos + 1..];
 
         let value = if val_str.is_empty() {
-            // Check for compound array assignment: name=( ... )
-            if self.at(&TokenKind::LParen) {
-                self.advance()?; // consume '('
-                let paren_start = tok.span.start + eq_pos as u32 + 1;
-                let mut elements = Vec::new();
-                while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
-                    if self.at(&TokenKind::Newline) {
-                        self.advance()?;
-                        continue;
-                    }
-                    if self.at_word() {
-                        let w = self.advance()?;
-                        elements.push(w.text(self.source).to_string());
-                    } else {
-                        break;
-                    }
-                }
-                let end_span = if self.at(&TokenKind::RParen) {
-                    self.advance()?.span.end
-                } else {
-                    self.current.span.end
-                };
-                // Build a synthetic word like "(one two three)" so
-                // execute_assignment can detect compound array syntax.
-                let compound = format!("({})", elements.join(" "));
-                Some(Word {
-                    parts: vec![WordPart::Literal(compound.into())],
-                    span: Span {
-                        start: paren_start,
-                        end: end_span,
-                    },
-                })
-            } else {
-                None
-            }
+            self.parse_assignment_compound_value(&tok, eq_pos)?
         } else {
-            let val_start = tok.span.start + eq_pos as u32 + 1;
-            let parts = word_parser::parse_word_parts(val_str);
-            Some(Word {
-                parts,
-                span: Span {
-                    start: val_start,
-                    end: tok.span.end,
-                },
-            })
+            Some(self.make_assignment_word(&tok, eq_pos, val_str))
         };
 
         Ok(Assignment {
@@ -1017,6 +1019,55 @@ impl<'src> Parser<'src> {
             value,
             span: tok.span,
         })
+    }
+
+    fn parse_assignment_compound_value(
+        &mut self,
+        tok: &Token,
+        eq_pos: usize,
+    ) -> Result<Option<Word>, ParseError> {
+        if !self.at(&TokenKind::LParen) {
+            return Ok(None);
+        }
+        self.advance()?;
+        let paren_start = tok.span.start + eq_pos as u32 + 1;
+        let mut elements = Vec::new();
+        while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+            if self.at(&TokenKind::Newline) {
+                self.advance()?;
+                continue;
+            }
+            if !self.at_word() {
+                break;
+            }
+            let word = self.advance()?;
+            elements.push(word.text(self.source).to_string());
+        }
+        let end_span = if self.at(&TokenKind::RParen) {
+            self.advance()?.span.end
+        } else {
+            self.current.span.end
+        };
+        Ok(Some(Word {
+            parts: vec![WordPart::Literal(
+                format!("({})", elements.join(" ")).into(),
+            )],
+            span: Span {
+                start: paren_start,
+                end: end_span,
+            },
+        }))
+    }
+
+    fn make_assignment_word(&self, tok: &Token, eq_pos: usize, val_str: &str) -> Word {
+        let val_start = tok.span.start + eq_pos as u32 + 1;
+        Word {
+            parts: word_parser::parse_word_parts(val_str),
+            span: Span {
+                start: val_start,
+                end: tok.span.end,
+            },
+        }
     }
 
     fn parse_redirection(&mut self) -> Result<Redirection, ParseError> {
@@ -1108,7 +1159,6 @@ impl<'src> Parser<'src> {
 
     /// Read here-doc bodies from source and attach them to the AST.
     fn resolve_heredocs(&mut self, cc: &mut CompleteCommand) -> Result<(), ParseError> {
-        // current token is Newline — body starts right after it
         let newline_end = self.current.span.end as usize;
         let mut scan_pos = newline_end;
 
@@ -1116,43 +1166,11 @@ impl<'src> Parser<'src> {
         for hd in &self.pending_heredocs {
             let body_start = scan_pos;
             loop {
-                let line_start = scan_pos;
-                let line_end = self.source[scan_pos..]
-                    .find('\n')
-                    .map_or(self.source.len(), |i| scan_pos + i);
-                let line = &self.source[line_start..line_end];
-
-                let check_line = if hd.strip_tabs {
-                    line.trim_start_matches('\t')
-                } else {
-                    line
-                };
-
+                let (line_start, line_end, line) = self.heredoc_line(scan_pos);
+                let check_line = self.heredoc_check_line(line, hd.strip_tabs);
                 if check_line == hd.delimiter {
-                    // Build body content
-                    let raw_body = &self.source[body_start..line_start];
-                    let content = if hd.strip_tabs {
-                        raw_body
-                            .lines()
-                            .map(|l| l.trim_start_matches('\t'))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                            + if raw_body.ends_with('\n') { "\n" } else { "" }
-                    } else {
-                        raw_body.to_string()
-                    };
-                    scan_pos = if line_end < self.source.len() {
-                        line_end + 1
-                    } else {
-                        line_end
-                    };
-                    bodies.push(HereDocBody {
-                        content: content.into(),
-                        span: Span {
-                            start: body_start as u32,
-                            end: line_start as u32,
-                        },
-                    });
+                    bodies.push(self.build_heredoc_body(body_start, line_start, hd.strip_tabs));
+                    scan_pos = self.advance_heredoc_scan(line_end);
                     break;
                 }
 
@@ -1172,12 +1190,61 @@ impl<'src> Parser<'src> {
 
         self.pending_heredocs.clear();
 
-        // Reposition lexer past the here-doc bodies and refresh current token
         self.lexer.set_position(scan_pos);
         self.peeked.clear();
         self.current = self.lexer.next_token().map_err(lex_err)?;
 
         Ok(())
+    }
+
+    fn heredoc_line(&self, scan_pos: usize) -> (usize, usize, &str) {
+        let line_start = scan_pos;
+        let line_end = self.source[scan_pos..]
+            .find('\n')
+            .map_or(self.source.len(), |i| scan_pos + i);
+        (line_start, line_end, &self.source[line_start..line_end])
+    }
+
+    fn heredoc_check_line<'a>(&self, line: &'a str, strip_tabs: bool) -> &'a str {
+        if strip_tabs {
+            line.trim_start_matches('\t')
+        } else {
+            line
+        }
+    }
+
+    fn build_heredoc_body(
+        &self,
+        body_start: usize,
+        line_start: usize,
+        strip_tabs: bool,
+    ) -> HereDocBody {
+        let raw_body = &self.source[body_start..line_start];
+        let content = if strip_tabs {
+            raw_body
+                .lines()
+                .map(|line| line.trim_start_matches('\t'))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + if raw_body.ends_with('\n') { "\n" } else { "" }
+        } else {
+            raw_body.to_string()
+        };
+        HereDocBody {
+            content: content.into(),
+            span: Span {
+                start: body_start as u32,
+                end: line_start as u32,
+            },
+        }
+    }
+
+    fn advance_heredoc_scan(&self, line_end: usize) -> usize {
+        if line_end < self.source.len() {
+            line_end + 1
+        } else {
+            line_end
+        }
     }
 }
 

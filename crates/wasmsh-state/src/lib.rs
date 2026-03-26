@@ -212,52 +212,54 @@ impl ShellState {
             "@" | "*" => Some(self.positional.join(" ").into()),
             "RANDOM" => Some(SmolStr::from(self.next_random().to_string())),
             "LINENO" => Some(SmolStr::from(self.lineno.to_string())),
-            "SECONDS" => {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let elapsed = self.start_time.elapsed().as_secs();
-                    Some(SmolStr::from(elapsed.to_string()))
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    Some(SmolStr::from("0"))
-                }
-            }
-            "FUNCNAME" => {
-                if let Some(name) = self.func_stack.last() {
-                    Some(name.clone())
-                } else {
-                    Some(SmolStr::default())
-                }
-            }
-            "BASH_SOURCE" => {
-                if let Some(src) = self.source_stack.last() {
-                    Some(src.clone())
-                } else {
-                    Some(SmolStr::default())
-                }
-            }
-            _ => {
-                // Positional parameter ($1, $2, ...)
-                if let Ok(n) = name.parse::<usize>() {
-                    if n >= 1 {
-                        return self.positional.get(n - 1).cloned();
-                    }
-                }
-                if let Some(var) = self.env.get(name) {
-                    if var.nameref {
-                        // Follow the nameref: value is the name of another variable
-                        let target = var.value.as_scalar();
-                        if !target.is_empty() && target.as_str() != name {
-                            return self.env.get(&target).map(|v| v.value.as_scalar());
-                        }
-                    }
-                    Some(var.value.as_scalar())
-                } else {
-                    None
-                }
-            }
+            "SECONDS" => Some(self.seconds_value()),
+            "FUNCNAME" => Some(self.stack_last_or_default(&self.func_stack)),
+            "BASH_SOURCE" => Some(self.stack_last_or_default(&self.source_stack)),
+            _ => self.get_named_or_positional_var(name),
         }
+    }
+
+    fn seconds_value(&self) -> SmolStr {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            SmolStr::from(self.start_time.elapsed().as_secs().to_string())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            SmolStr::from("0")
+        }
+    }
+
+    fn stack_last_or_default(&self, stack: &[SmolStr]) -> SmolStr {
+        stack.last().cloned().unwrap_or_default()
+    }
+
+    fn get_named_or_positional_var(&self, name: &str) -> Option<SmolStr> {
+        if let Some(index) = self.positional_param_index(name) {
+            return self.positional.get(index).cloned();
+        }
+        self.get_env_var(name)
+    }
+
+    fn positional_param_index(&self, name: &str) -> Option<usize> {
+        let n = name.parse::<usize>().ok()?;
+        (n >= 1).then_some(n - 1)
+    }
+
+    fn get_env_var(&self, name: &str) -> Option<SmolStr> {
+        let var = self.env.get(name)?;
+        if let Some(target) = self.nameref_target(var, name) {
+            return self.env.get(&target).map(|v| v.value.as_scalar());
+        }
+        Some(var.value.as_scalar())
+    }
+
+    fn nameref_target(&self, var: &ShellVar, name: &str) -> Option<SmolStr> {
+        if !var.nameref {
+            return None;
+        }
+        let target = var.value.as_scalar();
+        (!target.is_empty() && target.as_str() != name).then_some(target)
     }
 
     /// Set a named variable (not a special parameter).
@@ -500,47 +502,27 @@ impl ShellState {
     /// If the variable is a scalar, it is first converted to an indexed array
     /// with the scalar as element 0.
     pub fn append_array(&mut self, name: &str, values: Vec<SmolStr>) {
-        if let Some(var) = self.env.get(name) {
-            if var.readonly {
-                return;
-            }
+        if self.env.get(name).is_some_and(|var| var.readonly) {
+            return;
         }
 
         let name_key = SmolStr::from(name);
         if let Some(var) = self.env.get_mut(name) {
             match &mut var.value {
-                VarValue::IndexedArray(map) => {
-                    let next = map.keys().max().map_or(0, |k| k + 1);
-                    for (i, v) in values.into_iter().enumerate() {
-                        map.insert(next + i, v);
-                    }
-                }
+                VarValue::IndexedArray(map) => append_to_indexed_array(map, values),
                 VarValue::AssocArray(_) => {
                     // Bash doesn't support += for assoc arrays in the same way;
                     // silently ignore.
                 }
                 VarValue::Scalar(s) => {
-                    let mut map = IndexMap::new();
-                    if !s.is_empty() {
-                        map.insert(0, s.clone());
-                    }
-                    let next = map.keys().max().map_or(0, |k| k + 1);
-                    for (i, v) in values.into_iter().enumerate() {
-                        map.insert(next + i, v);
-                    }
-                    var.value = VarValue::IndexedArray(map);
+                    var.value = VarValue::IndexedArray(scalar_to_indexed_array(s, values));
                 }
             }
         } else {
-            // Variable doesn't exist; create indexed array
-            let mut map = IndexMap::new();
-            for (i, v) in values.into_iter().enumerate() {
-                map.insert(i, v);
-            }
             self.env.set(
                 name_key,
                 ShellVar {
-                    value: VarValue::IndexedArray(map),
+                    value: VarValue::IndexedArray(values_to_indexed_array(values)),
                     exported: false,
                     readonly: false,
                     integer: false,
@@ -617,6 +599,32 @@ impl ShellState {
             },
         );
     }
+}
+
+fn append_to_indexed_array(map: &mut IndexMap<usize, SmolStr>, values: Vec<SmolStr>) {
+    let next = next_array_index(map);
+    for (i, value) in values.into_iter().enumerate() {
+        map.insert(next + i, value);
+    }
+}
+
+fn scalar_to_indexed_array(scalar: &SmolStr, values: Vec<SmolStr>) -> IndexMap<usize, SmolStr> {
+    let mut map = IndexMap::new();
+    if !scalar.is_empty() {
+        map.insert(0, scalar.clone());
+    }
+    append_to_indexed_array(&mut map, values);
+    map
+}
+
+fn values_to_indexed_array(values: Vec<SmolStr>) -> IndexMap<usize, SmolStr> {
+    let mut map = IndexMap::new();
+    append_to_indexed_array(&mut map, values);
+    map
+}
+
+fn next_array_index(map: &IndexMap<usize, SmolStr>) -> usize {
+    map.keys().max().map_or(0, |k| k + 1)
 }
 
 impl Default for ShellState {

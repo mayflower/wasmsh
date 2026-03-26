@@ -49,53 +49,54 @@ pub(crate) fn util_ls(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         .filter(|a| !a.starts_with('-'))
         .collect();
     if args.is_empty() {
-        // No arguments: list cwd
-        let full = resolve_path(ctx.cwd, ctx.cwd);
-        match ctx.fs.read_dir(&full) {
-            Ok(entries) => {
-                for entry in entries {
-                    ctx.output.stdout(entry.name.as_bytes());
-                    ctx.output.stdout(b"\n");
-                }
-                0
-            }
-            Err(e) => {
-                emit_error(ctx.output, "ls", ctx.cwd, &e);
-                1
-            }
-        }
+        return i32::from(ls_emit_dir(ctx, ctx.cwd, &resolve_path(ctx.cwd, ctx.cwd)).is_err());
     } else {
         let mut status = 0;
         for path in &args {
-            let full = resolve_path(ctx.cwd, path);
-            match ctx.fs.stat(&full) {
-                Ok(meta) if meta.is_dir => {
-                    // Directory argument: list its contents
-                    match ctx.fs.read_dir(&full) {
-                        Ok(entries) => {
-                            for entry in entries {
-                                ctx.output.stdout(entry.name.as_bytes());
-                                ctx.output.stdout(b"\n");
-                            }
-                        }
-                        Err(e) => {
-                            emit_error(ctx.output, "ls", path, &e);
-                            status = 1;
-                        }
-                    }
-                }
-                Ok(_) => {
-                    // File argument: just print the name
-                    ctx.output.stdout(path.as_bytes());
-                    ctx.output.stdout(b"\n");
-                }
-                Err(e) => {
-                    emit_error(ctx.output, "ls", path, &e);
-                    status = 1;
-                }
+            if ls_path(ctx, path) != 0 {
+                status = 1;
             }
         }
         status
+    }
+}
+
+fn ls_emit_entries(
+    ctx: &mut UtilContext<'_>,
+    entries: impl IntoIterator<Item = wasmsh_fs::DirEntry>,
+) {
+    for entry in entries {
+        ctx.output.stdout(entry.name.as_bytes());
+        ctx.output.stdout(b"\n");
+    }
+}
+
+fn ls_emit_dir(ctx: &mut UtilContext<'_>, display: &str, full: &str) -> Result<(), ()> {
+    match ctx.fs.read_dir(full) {
+        Ok(entries) => {
+            ls_emit_entries(ctx, entries);
+            Ok(())
+        }
+        Err(e) => {
+            emit_error(ctx.output, "ls", display, &e);
+            Err(())
+        }
+    }
+}
+
+fn ls_path(ctx: &mut UtilContext<'_>, path: &str) -> i32 {
+    let full = resolve_path(ctx.cwd, path);
+    match ctx.fs.stat(&full) {
+        Ok(meta) if meta.is_dir => i32::from(ls_emit_dir(ctx, path, &full).is_err()),
+        Ok(_) => {
+            ctx.output.stdout(path.as_bytes());
+            ctx.output.stdout(b"\n");
+            0
+        }
+        Err(e) => {
+            emit_error(ctx.output, "ls", path, &e);
+            1
+        }
     }
 }
 

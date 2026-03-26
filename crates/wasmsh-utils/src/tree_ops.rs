@@ -157,72 +157,19 @@ fn walk_tree(
     dir_count: &mut usize,
     file_count: &mut usize,
 ) {
-    if let Some(max) = opts.max_depth {
-        if depth >= max {
-            return;
-        }
+    if opts.max_depth.is_some_and(|max| depth >= max) {
+        return;
     }
 
-    let entries = match ctx.fs.read_dir(dir_path) {
-        Ok(mut entries) => {
-            entries.sort_by(|a, b| a.name.cmp(&b.name));
-            entries
-        }
-        Err(e) => {
-            let msg = format!("tree: {dir_path}: {e}\n");
-            ctx.output.stderr(msg.as_bytes());
-            return;
-        }
+    let visible = match tree_visible_entries(ctx, dir_path, opts) {
+        Ok(entries) => entries,
+        Err(()) => return,
     };
-
-    // Filter entries
-    let visible: Vec<_> = entries
-        .into_iter()
-        .filter(|e| {
-            if !should_show(&e.name, opts) {
-                return false;
-            }
-            if opts.dirs_only && !e.is_dir {
-                return false;
-            }
-            true
-        })
-        .collect();
 
     for (idx, entry) in visible.iter().enumerate() {
         let is_last = idx == visible.len() - 1;
-
-        // Build the prefix string from parent continuation flags
-        let mut prefix = String::new();
-        for &has_more in prefix_parts.iter() {
-            if has_more {
-                prefix.push_str("\u{2502}   "); // │
-            } else {
-                prefix.push_str("    ");
-            }
-        }
-
-        // Add the connector for this entry
-        if is_last {
-            prefix.push_str("\u{2514}\u{2500}\u{2500} "); // └──
-        } else {
-            prefix.push_str("\u{251c}\u{2500}\u{2500} "); // ├──
-        }
-
-        // Determine display name
-        let display_name = if opts.full_path {
-            let abs_child = child_path(dir_path, &entry.name);
-            // Strip root prefix to get relative path
-            let relative = if let Some(rest) = abs_child.strip_prefix(root_path) {
-                rest.strip_prefix('/').unwrap_or(rest)
-            } else {
-                &abs_child
-            };
-            format!("./{relative}")
-        } else {
-            entry.name.clone()
-        };
-
+        let prefix = tree_prefix(prefix_parts, is_last);
+        let display_name = tree_display_name(dir_path, root_path, &entry.name, opts.full_path);
         let line = format!("{prefix}{display_name}\n");
         ctx.output.stdout(line.as_bytes());
 
@@ -247,6 +194,52 @@ fn walk_tree(
     }
 }
 
+fn tree_visible_entries(
+    ctx: &mut UtilContext<'_>,
+    dir_path: &str,
+    opts: &TreeOpts,
+) -> Result<Vec<wasmsh_fs::DirEntry>, ()> {
+    match ctx.fs.read_dir(dir_path) {
+        Ok(mut entries) => {
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(entries
+                .into_iter()
+                .filter(|entry| should_show(&entry.name, opts) && (!opts.dirs_only || entry.is_dir))
+                .collect())
+        }
+        Err(e) => {
+            let msg = format!("tree: {dir_path}: {e}\n");
+            ctx.output.stderr(msg.as_bytes());
+            Err(())
+        }
+    }
+}
+
+fn tree_prefix(prefix_parts: &[bool], is_last: bool) -> String {
+    let mut prefix = String::new();
+    for &has_more in prefix_parts {
+        prefix.push_str(if has_more { "\u{2502}   " } else { "    " });
+    }
+    prefix.push_str(if is_last {
+        "\u{2514}\u{2500}\u{2500} "
+    } else {
+        "\u{251c}\u{2500}\u{2500} "
+    });
+    prefix
+}
+
+fn tree_display_name(dir_path: &str, root_path: &str, name: &str, full_path: bool) -> String {
+    if !full_path {
+        return name.to_string();
+    }
+    let abs_child = child_path(dir_path, name);
+    let relative = abs_child
+        .strip_prefix(root_path)
+        .and_then(|rest| rest.strip_prefix('/').or(Some(rest)))
+        .unwrap_or(&abs_child);
+    format!("./{relative}")
+}
+
 // ---------------------------------------------------------------------------
 // JSON output support
 // ---------------------------------------------------------------------------
@@ -269,48 +262,41 @@ fn build_json_tree(
         dir_path.rsplit('/').next().unwrap_or(dir_path).to_string()
     };
 
-    let at_max = opts.max_depth.is_some_and(|max| depth >= max);
-
-    let children = if !at_max {
-        if let Ok(mut entries) = ctx.fs.read_dir(dir_path) {
-            entries.sort_by(|a, b| a.name.cmp(&b.name));
-            let nodes: Vec<JsonNode> = entries
-                .into_iter()
-                .filter(|e| {
-                    if !should_show(&e.name, opts) {
-                        return false;
-                    }
-                    if opts.dirs_only && !e.is_dir {
-                        return false;
-                    }
-                    true
-                })
-                .map(|e| {
-                    if e.is_dir {
-                        let child = child_path(dir_path, &e.name);
-                        build_json_tree(ctx, &child, opts, depth + 1)
-                    } else {
-                        JsonNode {
-                            name: e.name,
-                            is_dir: false,
-                            children: None,
-                        }
-                    }
-                })
-                .collect();
-            Some(nodes)
-        } else {
-            Some(Vec::new())
-        }
-    } else {
-        Some(Vec::new())
-    };
-
     JsonNode {
         name,
         is_dir: true,
-        children,
+        children: Some(json_child_nodes(ctx, dir_path, opts, depth)),
     }
+}
+
+fn json_child_nodes(
+    ctx: &mut UtilContext<'_>,
+    dir_path: &str,
+    opts: &TreeOpts,
+    depth: usize,
+) -> Vec<JsonNode> {
+    if opts.max_depth.is_some_and(|max| depth >= max) {
+        return Vec::new();
+    }
+    let Ok(mut entries) = ctx.fs.read_dir(dir_path) else {
+        return Vec::new();
+    };
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    entries
+        .into_iter()
+        .filter(|entry| should_show(&entry.name, opts) && (!opts.dirs_only || entry.is_dir))
+        .map(|entry| {
+            if entry.is_dir {
+                build_json_tree(ctx, &child_path(dir_path, &entry.name), opts, depth + 1)
+            } else {
+                JsonNode {
+                    name: entry.name,
+                    is_dir: false,
+                    children: None,
+                }
+            }
+        })
+        .collect()
 }
 
 fn json_emit(node: &JsonNode, buf: &mut String, indent: usize) {

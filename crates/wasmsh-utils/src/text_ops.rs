@@ -115,32 +115,10 @@ pub(crate) fn util_wc(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 }
 
 pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
-    let mut ignore_case = false;
-    let mut invert = false;
-    let mut count_only = false;
-    let mut show_line_numbers = false;
-
-    while let Some(arg) = args.first() {
-        if arg.starts_with('-') && arg.len() > 1 {
-            for c in arg[1..].chars() {
-                match c {
-                    'i' => ignore_case = true,
-                    'v' => invert = true,
-                    'c' => count_only = true,
-                    'n' => show_line_numbers = true,
-                    _ => {
-                        let msg = format!("grep: invalid option -- '{c}'\n");
-                        ctx.output.stderr(msg.as_bytes());
-                        return 2;
-                    }
-                }
-            }
-            args = &args[1..];
-        } else {
-            break;
-        }
-    }
+    let (flags, args) = match parse_grep_flags(ctx, argv) {
+        Ok(result) => result,
+        Err(status) => return status,
+    };
 
     if args.is_empty() {
         ctx.output.stderr(b"grep: missing pattern\n");
@@ -149,50 +127,109 @@ pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     let pattern = args[0];
     let file_args = &args[1..];
+    let text = match grep_read_text(ctx, file_args) {
+        Ok(text) => text,
+        Err(status) => return status,
+    };
+    grep_process_lines(ctx, &text, pattern, &flags)
+}
 
-    let text = if file_args.is_empty() {
-        if let Some(data) = ctx.stdin {
-            String::from_utf8_lossy(data).to_string()
-        } else {
-            ctx.output.stderr(b"grep: missing file operand\n");
-            return 2;
+struct GrepFlags {
+    ignore_case: bool,
+    invert: bool,
+    count_only: bool,
+    show_line_numbers: bool,
+}
+
+fn parse_grep_flags<'a>(
+    ctx: &mut UtilContext<'_>,
+    argv: &'a [&'a str],
+) -> Result<(GrepFlags, &'a [&'a str]), i32> {
+    let mut args = &argv[1..];
+    let mut flags = GrepFlags {
+        ignore_case: false,
+        invert: false,
+        count_only: false,
+        show_line_numbers: false,
+    };
+
+    while let Some(arg) = args.first() {
+        if !(arg.starts_with('-') && arg.len() > 1) {
+            break;
         }
-    } else {
-        let mut combined = String::new();
-        for path in file_args {
-            let full = resolve_path(ctx.cwd, path);
-            match read_text(ctx.fs, &full) {
-                Ok(t) => combined.push_str(&t),
-                Err(e) => {
-                    emit_error(ctx.output, "grep", path, &e);
-                    return 2;
+        for c in arg[1..].chars() {
+            match c {
+                'i' => flags.ignore_case = true,
+                'v' => flags.invert = true,
+                'c' => flags.count_only = true,
+                'n' => flags.show_line_numbers = true,
+                _ => {
+                    let msg = format!("grep: invalid option -- '{c}'\n");
+                    ctx.output.stderr(msg.as_bytes());
+                    return Err(2);
                 }
             }
         }
-        combined
-    };
+        args = &args[1..];
+    }
 
+    Ok((flags, args))
+}
+
+fn grep_read_text(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> Result<String, i32> {
+    if file_args.is_empty() {
+        return ctx
+            .stdin
+            .map(|data| String::from_utf8_lossy(data).to_string())
+            .ok_or_else(|| {
+                ctx.output.stderr(b"grep: missing file operand\n");
+                2
+            });
+    }
+
+    let mut combined = String::new();
+    for path in file_args {
+        let full = resolve_path(ctx.cwd, path);
+        match read_text(ctx.fs, &full) {
+            Ok(text) => combined.push_str(&text),
+            Err(e) => {
+                emit_error(ctx.output, "grep", path, &e);
+                return Err(2);
+            }
+        }
+    }
+    Ok(combined)
+}
+
+fn grep_process_lines(
+    ctx: &mut UtilContext<'_>,
+    text: &str,
+    pattern: &str,
+    flags: &GrepFlags,
+) -> i32 {
     let mut match_count = 0u64;
     let mut found = false;
 
     for (i, line) in text.lines().enumerate() {
-        let matches = grep_matches(line, pattern, ignore_case) != invert;
-        if !matches {
+        if !grep_line_matches(line, pattern, flags) {
             continue;
         }
         found = true;
         match_count += 1;
-        if !count_only {
-            grep_emit_line(ctx, line, i + 1, show_line_numbers);
+        if !flags.count_only {
+            grep_emit_line(ctx, line, i + 1, flags.show_line_numbers);
         }
     }
 
-    if count_only {
+    if flags.count_only {
         let out = format!("{match_count}\n");
         ctx.output.stdout(out.as_bytes());
     }
-
     i32::from(!found)
+}
+
+fn grep_line_matches(line: &str, pattern: &str, flags: &GrepFlags) -> bool {
+    grep_matches(line, pattern, flags.ignore_case) != flags.invert
 }
 
 fn grep_emit_line(ctx: &mut UtilContext<'_>, line: &str, line_num: usize, show_num: bool) {
@@ -257,36 +294,10 @@ pub(crate) fn parse_sed_substitute(expr: &str) -> Option<SedSubstitute> {
 }
 
 pub(crate) fn util_sort(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
-    let mut numeric = false;
-    let mut reverse = false;
-
-    while let Some(arg) = args.first() {
-        if arg.starts_with('-') && arg.len() > 1 {
-            for c in arg[1..].chars() {
-                match c {
-                    'n' => numeric = true,
-                    'r' => reverse = true,
-                    _ => {}
-                }
-            }
-            args = &args[1..];
-        } else {
-            break;
-        }
-    }
-
+    let (numeric, reverse, args) = parse_sort_flags(argv);
     let text = get_input_text(ctx, args);
     let mut lines: Vec<&str> = text.lines().collect();
-    if numeric {
-        lines.sort_by(|a, b| {
-            let na: i64 = a.trim().parse().unwrap_or(0);
-            let nb: i64 = b.trim().parse().unwrap_or(0);
-            na.cmp(&nb)
-        });
-    } else {
-        lines.sort_unstable();
-    }
+    sort_lines(&mut lines, numeric);
     if reverse {
         lines.reverse();
     }
@@ -296,6 +307,36 @@ pub(crate) fn util_sort(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         ctx.output.stdout(b"\n");
     }
     0
+}
+
+fn parse_sort_flags<'a>(argv: &'a [&'a str]) -> (bool, bool, &'a [&'a str]) {
+    let mut args = &argv[1..];
+    let mut numeric = false;
+    let mut reverse = false;
+
+    while let Some(arg) = args.first() {
+        if !(arg.starts_with('-') && arg.len() > 1) {
+            break;
+        }
+        for c in arg[1..].chars() {
+            match c {
+                'n' => numeric = true,
+                'r' => reverse = true,
+                _ => {}
+            }
+        }
+        args = &args[1..];
+    }
+
+    (numeric, reverse, args)
+}
+
+fn sort_lines(lines: &mut Vec<&str>, numeric: bool) {
+    if numeric {
+        lines.sort_by_key(|line| line.trim().parse::<i64>().unwrap_or(0));
+    } else {
+        lines.sort_unstable();
+    }
 }
 
 pub(crate) fn util_uniq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
@@ -870,47 +911,54 @@ fn parse_column_flags<'a>(argv: &'a [&'a str]) -> (ColumnFlags, &'a [&'a str]) {
 }
 
 fn column_table_output(ctx: &mut UtilContext<'_>, text: &str, input_delim: Option<&String>) {
-    let rows: Vec<Vec<&str>> = text
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|line| {
-            if let Some(d) = input_delim {
-                line.split(d.as_str()).collect()
-            } else {
-                line.split_whitespace().collect()
-            }
-        })
-        .collect();
+    let rows = column_rows(text, input_delim);
 
     if rows.is_empty() {
         return;
     }
 
+    let col_widths = column_widths(&rows);
+
+    for row in &rows {
+        let mut line = column_format_row(row, &col_widths);
+        line.push('\n');
+        ctx.output.stdout(line.as_bytes());
+    }
+}
+
+fn column_rows<'a>(text: &'a str, input_delim: Option<&String>) -> Vec<Vec<&'a str>> {
+    text.lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| match input_delim {
+            Some(delim) => line.split(delim.as_str()).collect(),
+            None => line.split_whitespace().collect(),
+        })
+        .collect()
+}
+
+fn column_widths(rows: &[Vec<&str>]) -> Vec<usize> {
     let max_cols = rows.iter().map(Vec::len).max().unwrap_or(0);
     let mut col_widths = vec![0usize; max_cols];
-    for row in &rows {
+    for row in rows {
         for (i, field) in row.iter().enumerate() {
             col_widths[i] = col_widths[i].max(field.len());
         }
     }
+    col_widths
+}
 
-    for row in &rows {
-        let mut line = String::new();
-        for (i, field) in row.iter().enumerate() {
-            if i > 0 {
-                line.push_str("  ");
-            }
-            line.push_str(field);
-            if i < row.len() - 1 {
-                let padding = col_widths[i].saturating_sub(field.len());
-                for _ in 0..padding {
-                    line.push(' ');
-                }
-            }
+fn column_format_row(row: &[&str], col_widths: &[usize]) -> String {
+    let mut line = String::new();
+    for (i, field) in row.iter().enumerate() {
+        if i > 0 {
+            line.push_str("  ");
         }
-        line.push('\n');
-        ctx.output.stdout(line.as_bytes());
+        line.push_str(field);
+        if i + 1 < row.len() {
+            line.push_str(&" ".repeat(col_widths[i].saturating_sub(field.len())));
+        }
     }
+    line
 }
 
 pub(crate) fn util_column(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {

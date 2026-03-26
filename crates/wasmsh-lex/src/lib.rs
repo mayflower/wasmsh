@@ -422,66 +422,61 @@ impl<'src> Lexer<'src> {
             std::str::from_utf8(self.source).expect("lexer source must be valid UTF-8");
 
         loop {
-            match self.peek() {
-                None => break,
-                Some(b) if is_word_break(b) => break,
-                Some(b'\'') => self.consume_single_quoted()?,
-                Some(b'"') => self.consume_double_quoted()?,
-                Some(b'\\') => self.consume_backslash(),
-                Some(b'$') => {
-                    // $"..." locale quoting at the top level of a word
-                    if self.peek_ahead(1) == Some(b'"') {
-                        self.pos += 1; // skip $
-                        self.consume_double_quoted()?;
-                    } else {
-                        self.consume_dollar()?;
-                    }
-                }
-                Some(_) => {
-                    // Check for extglob: `?(`, `*(`, `+(`, `@(`, `!(` patterns.
-                    // These operators followed by `(` should consume the entire
-                    // pattern including `|` and `)` as part of the word.
-                    let cur = self.source[self.pos];
-                    if matches!(cur, b'?' | b'*' | b'+' | b'@' | b'!')
-                        && self.peek_ahead(1) == Some(b'(')
-                    {
-                        self.consume_extglob()?;
-                    } else {
-                        self.pos += 1;
-                    }
-                }
+            let Some(next) = self.peek() else {
+                break;
+            };
+            if is_word_break(next) {
+                break;
             }
+            self.read_word_part(next)?;
         }
 
+        Ok(self.make_word_token(source_str, start))
+    }
+
+    fn read_word_part(&mut self, next: u8) -> Result<(), LexerError> {
+        match next {
+            b'\'' => self.consume_single_quoted(),
+            b'"' => self.consume_double_quoted(),
+            b'\\' => {
+                self.consume_backslash();
+                Ok(())
+            }
+            b'$' => self.consume_word_dollar(),
+            _ => self.consume_word_plain(),
+        }
+    }
+
+    fn consume_word_dollar(&mut self) -> Result<(), LexerError> {
+        if self.peek_ahead(1) == Some(b'"') {
+            self.pos += 1;
+            self.consume_double_quoted()
+        } else {
+            self.consume_dollar()
+        }
+    }
+
+    fn consume_word_plain(&mut self) -> Result<(), LexerError> {
+        let cur = self.source[self.pos];
+        if matches!(cur, b'?' | b'*' | b'+' | b'@' | b'!') && self.peek_ahead(1) == Some(b'(') {
+            self.consume_extglob()
+        } else {
+            self.pos += 1;
+            Ok(())
+        }
+    }
+
+    fn make_word_token(&self, source_str: &str, start: usize) -> Token {
         let text = &source_str[start..self.pos];
         let span = self.span_from(start);
         let is_plain = !text.contains('\'')
             && !text.contains('"')
             && !text.contains('\\')
             && !text.contains('$');
-
-        // Emit dedicated tokens for `[[` and `]]`
-        if is_plain && text == "[[" {
-            return Ok(Token {
-                kind: TokenKind::DblLBracket,
-                span,
-            });
-        }
-        if is_plain && text == "]]" {
-            return Ok(Token {
-                kind: TokenKind::DblRBracket,
-                span,
-            });
-        }
-
-        let is_candidate = is_plain && is_reserved_word(text);
-
-        Ok(Token {
-            kind: TokenKind::Word {
-                is_reserved_candidate: is_candidate,
-            },
-            span,
-        })
+        let kind = plain_word_token_kind(text, is_plain).unwrap_or(TokenKind::Word {
+            is_reserved_candidate: is_plain && is_reserved_word(text),
+        });
+        Token { kind, span }
     }
 
     /// Produce the next token.
@@ -492,77 +487,73 @@ impl<'src> Lexer<'src> {
                     self.consume_comment();
                     self.mode = LexerMode::Normal;
                 }
-                LexerMode::Normal => {
-                    self.skip_blanks();
-
-                    let Some(b) = self.peek() else {
-                        return Ok(Token {
-                            kind: TokenKind::Eof,
-                            span: self.span_from(self.pos),
-                        });
-                    };
-
-                    match b {
-                        b'\n' => return Ok(self.single_op(TokenKind::Newline)),
-                        b';' => return Ok(self.single_op(TokenKind::Semi)),
-                        b'(' => return Ok(self.single_op(TokenKind::LParen)),
-                        b')' => return Ok(self.single_op(TokenKind::RParen)),
-
-                        b'#' => {
-                            self.mode = LexerMode::Comment;
-                        }
-
-                        b'&' => {
-                            if self.peek_ahead(1) == Some(b'&') {
-                                return Ok(self.double_op(TokenKind::AndAnd));
-                            }
-                            if self.peek_ahead(1) == Some(b'>') {
-                                return Ok(self.double_op(TokenKind::AmpGreater));
-                            }
-                            return Ok(self.single_op(TokenKind::Amp));
-                        }
-
-                        b'|' => {
-                            if self.peek_ahead(1) == Some(b'|') {
-                                return Ok(self.double_op(TokenKind::OrOr));
-                            }
-                            if self.peek_ahead(1) == Some(b'&') {
-                                return Ok(self.double_op(TokenKind::PipeAmp));
-                            }
-                            return Ok(self.single_op(TokenKind::Pipe));
-                        }
-
-                        b'>' => {
-                            if self.peek_ahead(1) == Some(b'>') {
-                                return Ok(self.double_op(TokenKind::GreaterGreater));
-                            }
-                            return Ok(self.single_op(TokenKind::Greater));
-                        }
-
-                        b'<' => match self.peek_ahead(1) {
-                            Some(b'<') => {
-                                if self.peek_ahead(2) == Some(b'<') {
-                                    return Ok(self.triple_op(TokenKind::LessLessLess));
-                                }
-                                if self.peek_ahead(2) == Some(b'-') {
-                                    return Ok(self.triple_op(TokenKind::LessLessDash));
-                                }
-                                return Ok(self.double_op(TokenKind::LessLess));
-                            }
-                            Some(b'>') => {
-                                return Ok(self.double_op(TokenKind::LessGreater));
-                            }
-                            _ => {
-                                return Ok(self.single_op(TokenKind::Less));
-                            }
-                        },
-
-                        _ => {
-                            return self.read_word();
-                        }
-                    }
-                }
+                LexerMode::Normal => return self.next_normal_token(),
             }
+        }
+    }
+
+    fn next_normal_token(&mut self) -> Result<Token, LexerError> {
+        self.skip_blanks();
+
+        let Some(b) = self.peek() else {
+            return Ok(Token {
+                kind: TokenKind::Eof,
+                span: self.span_from(self.pos),
+            });
+        };
+
+        match b {
+            b'\n' => Ok(self.single_op(TokenKind::Newline)),
+            b';' => Ok(self.single_op(TokenKind::Semi)),
+            b'(' => Ok(self.single_op(TokenKind::LParen)),
+            b')' => Ok(self.single_op(TokenKind::RParen)),
+            b'#' => {
+                self.mode = LexerMode::Comment;
+                self.next_token()
+            }
+            b'&' => Ok(self.amp_token()),
+            b'|' => Ok(self.pipe_token()),
+            b'>' => Ok(self.greater_token()),
+            b'<' => Ok(self.less_token()),
+            _ => self.read_word(),
+        }
+    }
+
+    fn amp_token(&mut self) -> Token {
+        if self.peek_ahead(1) == Some(b'&') {
+            self.double_op(TokenKind::AndAnd)
+        } else if self.peek_ahead(1) == Some(b'>') {
+            self.double_op(TokenKind::AmpGreater)
+        } else {
+            self.single_op(TokenKind::Amp)
+        }
+    }
+
+    fn pipe_token(&mut self) -> Token {
+        if self.peek_ahead(1) == Some(b'|') {
+            self.double_op(TokenKind::OrOr)
+        } else if self.peek_ahead(1) == Some(b'&') {
+            self.double_op(TokenKind::PipeAmp)
+        } else {
+            self.single_op(TokenKind::Pipe)
+        }
+    }
+
+    fn greater_token(&mut self) -> Token {
+        if self.peek_ahead(1) == Some(b'>') {
+            self.double_op(TokenKind::GreaterGreater)
+        } else {
+            self.single_op(TokenKind::Greater)
+        }
+    }
+
+    fn less_token(&mut self) -> Token {
+        match (self.peek_ahead(1), self.peek_ahead(2)) {
+            (Some(b'<'), Some(b'<')) => self.triple_op(TokenKind::LessLessLess),
+            (Some(b'<'), Some(b'-')) => self.triple_op(TokenKind::LessLessDash),
+            (Some(b'<'), _) => self.double_op(TokenKind::LessLess),
+            (Some(b'>'), _) => self.double_op(TokenKind::LessGreater),
+            _ => self.single_op(TokenKind::Less),
         }
     }
 
@@ -585,6 +576,17 @@ fn is_word_break(b: u8) -> bool {
         b,
         b' ' | b'\t' | b'\n' | b';' | b'&' | b'|' | b'<' | b'>' | b'(' | b')' | b'#'
     )
+}
+
+fn plain_word_token_kind(text: &str, is_plain: bool) -> Option<TokenKind> {
+    if !is_plain {
+        return None;
+    }
+    match text {
+        "[[" => Some(TokenKind::DblLBracket),
+        "]]" => Some(TokenKind::DblRBracket),
+        _ => None,
+    }
 }
 
 /// Convenience function: tokenize a source string into all tokens.

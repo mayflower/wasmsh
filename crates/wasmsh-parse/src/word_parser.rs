@@ -14,66 +14,97 @@ pub(crate) fn parse_word_parts(text: &str) -> Vec<WordPart> {
     let mut lit = String::new();
 
     while pos < bytes.len() {
-        match bytes[pos] {
-            b'\'' => {
-                flush(&mut lit, &mut parts);
-                pos += 1;
-                let start = pos;
-                while pos < bytes.len() && bytes[pos] != b'\'' {
-                    pos += 1;
-                }
-                parts.push(WordPart::SingleQuoted(text[start..pos].into()));
-                if pos < bytes.len() {
-                    pos += 1; // closing '
-                }
-            }
-            b'"' => {
-                flush(&mut lit, &mut parts);
-                pos += 1;
-                let inner = parse_double_quoted(text, &mut pos);
-                parts.push(WordPart::DoubleQuoted(inner));
-            }
-            b'\\' => {
-                pos += 1;
-                if pos < bytes.len() {
-                    lit.push(bytes[pos] as char);
-                    pos += 1;
-                }
-            }
-            b'$' => {
-                // Check for $'...' ANSI-C quoting
-                if pos + 1 < bytes.len() && bytes[pos + 1] == b'\'' {
-                    flush(&mut lit, &mut parts);
-                    pos += 2; // skip $'
-                    let s = parse_ansi_c_quoted(text, &mut pos);
-                    parts.push(WordPart::Literal(s.into()));
-                } else if pos + 1 < bytes.len() && bytes[pos + 1] == b'"' {
-                    // $"..." locale quoting — in sandbox, treat as regular double-quoted string
-                    flush(&mut lit, &mut parts);
-                    pos += 1; // skip $, let the " be handled by double-quote parsing
-                    pos += 1; // skip opening "
-                    let inner = parse_double_quoted(text, &mut pos);
-                    parts.push(WordPart::DoubleQuoted(inner));
-                } else {
-                    flush(&mut lit, &mut parts);
-                    pos += 1;
-                    if let Some(part) = parse_dollar(text, &mut pos) {
-                        parts.push(part);
-                    } else {
-                        // Lone $
-                        lit.push('$');
-                    }
-                }
-            }
-            _ => {
-                lit.push(bytes[pos] as char);
-                pos += 1;
-            }
-        }
+        parse_word_part(text, bytes, &mut pos, &mut lit, &mut parts);
     }
 
     flush(&mut lit, &mut parts);
     parts
+}
+
+fn parse_word_part(
+    text: &str,
+    bytes: &[u8],
+    pos: &mut usize,
+    lit: &mut String,
+    parts: &mut Vec<WordPart>,
+) {
+    match bytes[*pos] {
+        b'\'' => parse_single_quoted_part(text, bytes, pos, lit, parts),
+        b'"' => parse_double_quoted_part(text, pos, lit, parts),
+        b'\\' => parse_escaped_literal(bytes, pos, lit),
+        b'$' => parse_dollar_part(text, bytes, pos, lit, parts),
+        _ => {
+            lit.push(bytes[*pos] as char);
+            *pos += 1;
+        }
+    }
+}
+
+fn parse_single_quoted_part(
+    text: &str,
+    bytes: &[u8],
+    pos: &mut usize,
+    lit: &mut String,
+    parts: &mut Vec<WordPart>,
+) {
+    flush(lit, parts);
+    *pos += 1;
+    let start = *pos;
+    while *pos < bytes.len() && bytes[*pos] != b'\'' {
+        *pos += 1;
+    }
+    parts.push(WordPart::SingleQuoted(text[start..*pos].into()));
+    if *pos < bytes.len() {
+        *pos += 1;
+    }
+}
+
+fn parse_double_quoted_part(
+    text: &str,
+    pos: &mut usize,
+    lit: &mut String,
+    parts: &mut Vec<WordPart>,
+) {
+    flush(lit, parts);
+    *pos += 1;
+    parts.push(WordPart::DoubleQuoted(parse_double_quoted(text, pos)));
+}
+
+fn parse_escaped_literal(bytes: &[u8], pos: &mut usize, lit: &mut String) {
+    *pos += 1;
+    if *pos < bytes.len() {
+        lit.push(bytes[*pos] as char);
+        *pos += 1;
+    }
+}
+
+fn parse_dollar_part(
+    text: &str,
+    bytes: &[u8],
+    pos: &mut usize,
+    lit: &mut String,
+    parts: &mut Vec<WordPart>,
+) {
+    if pos_peek(bytes, *pos + 1) == Some(b'\'') {
+        flush(lit, parts);
+        *pos += 2;
+        parts.push(WordPart::Literal(parse_ansi_c_quoted(text, pos).into()));
+        return;
+    }
+    if pos_peek(bytes, *pos + 1) == Some(b'"') {
+        flush(lit, parts);
+        *pos += 2;
+        parts.push(WordPart::DoubleQuoted(parse_double_quoted(text, pos)));
+        return;
+    }
+
+    flush(lit, parts);
+    *pos += 1;
+    if let Some(part) = parse_dollar(text, pos) {
+        parts.push(part);
+    } else {
+        lit.push('$');
+    }
 }
 
 /// Parse the interior of a double-quoted string, stopping at closing `"`.
@@ -130,30 +161,35 @@ fn parse_dollar(text: &str, pos: &mut usize) -> Option<WordPart> {
     }
 
     match bytes[*pos] {
-        b'(' => {
-            *pos += 1;
-            if *pos < bytes.len() && bytes[*pos] == b'(' {
-                parse_dollar_arith(text, pos)
-            } else {
-                parse_dollar_cmd_subst(text, pos)
-            }
-        }
+        b'(' => parse_dollar_paren(text, bytes, pos),
         b'{' => parse_dollar_brace(text, pos),
-        b if b.is_ascii_alphabetic() || b == b'_' => {
-            let start = *pos;
-            while *pos < bytes.len() && (bytes[*pos].is_ascii_alphanumeric() || bytes[*pos] == b'_')
-            {
-                *pos += 1;
-            }
-            Some(WordPart::Parameter(text[start..*pos].into()))
-        }
-        b if is_special_param(b) => {
-            let start = *pos;
-            *pos += 1;
-            Some(WordPart::Parameter(text[start..*pos].into()))
-        }
+        b if b.is_ascii_alphabetic() || b == b'_' => parse_named_parameter(text, bytes, pos),
+        b if is_special_param(b) => parse_special_parameter(text, pos),
         _ => None,
     }
+}
+
+fn parse_dollar_paren(text: &str, bytes: &[u8], pos: &mut usize) -> Option<WordPart> {
+    *pos += 1;
+    if *pos < bytes.len() && bytes[*pos] == b'(' {
+        parse_dollar_arith(text, pos)
+    } else {
+        parse_dollar_cmd_subst(text, pos)
+    }
+}
+
+fn parse_named_parameter(text: &str, bytes: &[u8], pos: &mut usize) -> Option<WordPart> {
+    let start = *pos;
+    while *pos < bytes.len() && (bytes[*pos].is_ascii_alphanumeric() || bytes[*pos] == b'_') {
+        *pos += 1;
+    }
+    Some(WordPart::Parameter(text[start..*pos].into()))
+}
+
+fn parse_special_parameter(text: &str, pos: &mut usize) -> Option<WordPart> {
+    let start = *pos;
+    *pos += 1;
+    Some(WordPart::Parameter(text[start..*pos].into()))
 }
 
 /// Check if a byte is a special parameter character (`?`, `!`, `#`, `$`, `@`, `*`, `-`, digit).
@@ -283,22 +319,19 @@ fn parse_ansi_c_quoted(text: &str, pos: &mut usize) -> String {
     let mut result = String::new();
 
     while *pos < bytes.len() {
-        match bytes[*pos] {
-            b'\'' => {
-                *pos += 1; // closing '
-                break;
-            }
-            b'\\' => {
-                *pos += 1;
-                if *pos < bytes.len() {
-                    ansi_c_escape(bytes, pos, &mut result);
-                }
-            }
-            _ => {
-                result.push(bytes[*pos] as char);
-                *pos += 1;
-            }
+        if bytes[*pos] == b'\'' {
+            *pos += 1;
+            break;
         }
+        if bytes[*pos] == b'\\' {
+            *pos += 1;
+            if *pos < bytes.len() {
+                ansi_c_escape(bytes, pos, &mut result);
+            }
+            continue;
+        }
+        result.push(bytes[*pos] as char);
+        *pos += 1;
     }
 
     result

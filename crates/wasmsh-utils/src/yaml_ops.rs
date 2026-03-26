@@ -342,71 +342,73 @@ impl<'a> YamlParser<'a> {
     }
 
     fn parse_multiline_string_body(&mut self, folded: bool) -> YamlValue {
-        let mut lines = Vec::new();
-        let body_indent = if self.pos < self.lines.len() {
-            let line = self.lines[self.pos];
-            if line.trim().is_empty() {
-                // Find first non-empty line to determine indent
-                let mut idx = self.pos;
-                while idx < self.lines.len() && self.lines[idx].trim().is_empty() {
-                    idx += 1;
-                }
-                if idx < self.lines.len() {
-                    let l = self.lines[idx];
-                    l.len() - l.trim_start().len()
-                } else {
-                    return YamlValue::String(String::new());
-                }
-            } else {
-                line.len() - line.trim_start().len()
-            }
-        } else {
+        let Some(body_indent) = self.multiline_body_indent() else {
             return YamlValue::String(String::new());
         };
+        let mut lines = self.collect_multiline_lines(body_indent);
+        trim_trailing_empty_lines(&mut lines);
+        YamlValue::String(format_multiline_lines(&lines, folded))
+    }
 
+    fn multiline_body_indent(&self) -> Option<usize> {
+        let line = *self.lines.get(self.pos)?;
+        if !line.trim().is_empty() {
+            return Some(line.len() - line.trim_start().len());
+        }
+        let idx = (self.pos..self.lines.len()).find(|&idx| !self.lines[idx].trim().is_empty())?;
+        let line = self.lines[idx];
+        Some(line.len() - line.trim_start().len())
+    }
+
+    fn collect_multiline_lines(&mut self, body_indent: usize) -> Vec<&'a str> {
+        let mut lines = Vec::new();
         while self.pos < self.lines.len() {
             let line = self.lines[self.pos];
             let indent = line.len() - line.trim_start().len();
             if !line.trim().is_empty() && indent < body_indent {
                 break;
             }
-            if line.trim().is_empty() {
-                lines.push("");
-            } else {
-                lines.push(&line[body_indent..]);
-            }
+            lines.push(multiline_line_content(line, body_indent));
             self.pos += 1;
         }
-
-        // Remove trailing empty lines
-        while lines.last() == Some(&"") {
-            lines.pop();
-        }
-
-        let result = if folded {
-            // Folded: newlines become spaces (except double newlines)
-            let mut out = String::new();
-            for (i, line) in lines.iter().enumerate() {
-                if line.is_empty() {
-                    out.push('\n');
-                } else {
-                    if i > 0 && !lines[i - 1].is_empty() && !out.ends_with('\n') {
-                        out.push(' ');
-                    }
-                    out.push_str(line);
-                }
-            }
-            out.push('\n');
-            out
-        } else {
-            // Literal: preserve newlines
-            let mut out = lines.join("\n");
-            out.push('\n');
-            out
-        };
-
-        YamlValue::String(result)
+        lines
     }
+}
+
+fn multiline_line_content(line: &str, body_indent: usize) -> &str {
+    if line.trim().is_empty() {
+        ""
+    } else {
+        &line[body_indent..]
+    }
+}
+
+fn trim_trailing_empty_lines(lines: &mut Vec<&str>) {
+    while lines.last() == Some(&"") {
+        lines.pop();
+    }
+}
+
+fn format_multiline_lines(lines: &[&str], folded: bool) -> String {
+    if !folded {
+        let mut out = lines.join("\n");
+        out.push('\n');
+        return out;
+    }
+
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if line.is_empty() {
+            out.push('\n');
+            continue;
+        }
+        if i > 0 && !lines[i - 1].is_empty() && !out.ends_with('\n') {
+            out.push(' ');
+        }
+        out.push_str(line);
+    }
+    out.push('\n');
+    out
 }
 
 /// Find `: ` separator in a line (not inside quotes).
@@ -590,28 +592,21 @@ fn split_flow_items(s: &str) -> Vec<String> {
     let mut in_double_quote = false;
 
     for ch in s.chars() {
-        if ch == '\'' && !in_double_quote {
-            in_single_quote = !in_single_quote;
+        if flow_toggle_quote(ch, &mut in_single_quote, &mut in_double_quote) {
             current.push(ch);
-        } else if ch == '"' && !in_single_quote {
-            in_double_quote = !in_double_quote;
-            current.push(ch);
-        } else if !in_single_quote && !in_double_quote {
-            if ch == '[' || ch == '{' {
-                depth += 1;
-                current.push(ch);
-            } else if ch == ']' || ch == '}' {
-                depth -= 1;
-                current.push(ch);
-            } else if ch == ',' && depth == 0 {
-                items.push(current.clone());
-                current.clear();
-            } else {
-                current.push(ch);
-            }
-        } else {
-            current.push(ch);
+            continue;
         }
+        if in_single_quote || in_double_quote {
+            current.push(ch);
+            continue;
+        }
+        if flow_split_here(ch, depth) {
+            items.push(current.clone());
+            current.clear();
+            continue;
+        }
+        depth = flow_update_depth(depth, ch);
+        current.push(ch);
     }
 
     if !current.trim().is_empty() {
@@ -619,6 +614,30 @@ fn split_flow_items(s: &str) -> Vec<String> {
     }
 
     items
+}
+
+fn flow_toggle_quote(ch: char, in_single_quote: &mut bool, in_double_quote: &mut bool) -> bool {
+    if ch == '\'' && !*in_double_quote {
+        *in_single_quote = !*in_single_quote;
+        return true;
+    }
+    if ch == '"' && !*in_single_quote {
+        *in_double_quote = !*in_double_quote;
+        return true;
+    }
+    false
+}
+
+fn flow_split_here(ch: char, depth: i32) -> bool {
+    ch == ',' && depth == 0
+}
+
+fn flow_update_depth(depth: i32, ch: char) -> i32 {
+    match ch {
+        '[' | '{' => depth + 1,
+        ']' | '}' => depth - 1,
+        _ => depth,
+    }
 }
 
 // ---------------------------------------------------------------------------

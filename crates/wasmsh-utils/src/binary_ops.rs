@@ -125,41 +125,45 @@ pub(crate) fn util_xxd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 }
 
 fn xxd_default(ctx: &mut UtilContext<'_>, data: &[u8], base_offset: usize, cols: usize) {
-    use std::fmt::Write;
     for (chunk_idx, chunk) in data.chunks(cols).enumerate() {
         let offset = base_offset + chunk_idx * cols;
         let mut line = format!("{offset:08x}:");
-
-        // Hex bytes in pairs
-        for (i, &b) in chunk.iter().enumerate() {
-            if i % 2 == 0 {
-                line.push(' ');
-            }
-            let _ = write!(line, "{b:02x}");
-        }
-
-        // Pad remaining hex space
-        let remaining = cols - chunk.len();
-        for i in 0..remaining {
-            if (chunk.len() + i) % 2 == 0 {
-                line.push(' ');
-            }
-            line.push_str("  ");
-        }
-
+        xxd_write_hex(&mut line, chunk, cols);
         line.push_str("  ");
-
-        // ASCII representation
-        for &b in chunk {
-            if b.is_ascii_graphic() || b == b' ' {
-                line.push(b as char);
-            } else {
-                line.push('.');
-            }
-        }
-
+        xxd_write_ascii(&mut line, chunk);
         line.push('\n');
         ctx.output.stdout(line.as_bytes());
+    }
+}
+
+fn xxd_write_hex(line: &mut String, chunk: &[u8], cols: usize) {
+    use std::fmt::Write;
+
+    for (i, &b) in chunk.iter().enumerate() {
+        if i % 2 == 0 {
+            line.push(' ');
+        }
+        let _ = write!(line, "{b:02x}");
+    }
+    xxd_pad_hex(line, chunk.len(), cols);
+}
+
+fn xxd_pad_hex(line: &mut String, used: usize, cols: usize) {
+    for i in 0..(cols - used) {
+        if (used + i) % 2 == 0 {
+            line.push(' ');
+        }
+        line.push_str("  ");
+    }
+}
+
+fn xxd_write_ascii(line: &mut String, chunk: &[u8]) {
+    for &b in chunk {
+        line.push(if b.is_ascii_graphic() || b == b' ' {
+            b as char
+        } else {
+            '.'
+        });
     }
 }
 
@@ -424,15 +428,9 @@ pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         Err(status) => return status,
     };
 
-    let input_data = if let Some(path) = args.input_file {
-        match read_file_bytes(ctx, path, "dd") {
-            Ok(d) => d,
-            Err(status) => return status,
-        }
-    } else if let Some(d) = ctx.stdin {
-        d.to_vec()
-    } else {
-        Vec::new()
+    let input_data = match dd_input_data(ctx, &args) {
+        Ok(data) => data,
+        Err(status) => return status,
     };
 
     let (output_data, blocks_full, blocks_partial) = match dd_copy(&input_data, &args) {
@@ -446,40 +444,71 @@ pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let seek_bytes = args.seek_blocks.saturating_mul(args.block_size) as usize;
     let total_bytes = output_data.len() - seek_bytes;
 
-    // Write output
-    if let Some(path) = args.output_file {
-        let full = resolve_path(ctx.cwd, path);
-        let opts = if args.conv_notrunc {
-            OpenOptions::append()
-        } else {
-            OpenOptions::write()
-        };
-        match ctx.fs.open(&full, opts) {
-            Ok(h) => {
-                if let Err(e) = ctx.fs.write_file(h, &output_data) {
-                    ctx.fs.close(h);
-                    emit_error(ctx.output, "dd", path, &e);
-                    return 1;
-                }
+    if dd_write_output(ctx, &args, &output_data, seek_bytes) != 0 {
+        return 1;
+    }
+
+    dd_emit_stats(ctx, blocks_full, blocks_partial, total_bytes);
+
+    0
+}
+
+fn dd_input_data(ctx: &mut UtilContext<'_>, args: &DdArgs<'_>) -> Result<Vec<u8>, i32> {
+    if let Some(path) = args.input_file {
+        read_file_bytes(ctx, path, "dd")
+    } else if let Some(data) = ctx.stdin {
+        Ok(data.to_vec())
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn dd_write_output(
+    ctx: &mut UtilContext<'_>,
+    args: &DdArgs<'_>,
+    output_data: &[u8],
+    seek_bytes: usize,
+) -> i32 {
+    let Some(path) = args.output_file else {
+        ctx.output.stdout(&output_data[seek_bytes..]);
+        return 0;
+    };
+
+    let full = resolve_path(ctx.cwd, path);
+    let opts = if args.conv_notrunc {
+        OpenOptions::append()
+    } else {
+        OpenOptions::write()
+    };
+    match ctx.fs.open(&full, opts) {
+        Ok(h) => {
+            if let Err(e) = ctx.fs.write_file(h, output_data) {
                 ctx.fs.close(h);
-            }
-            Err(e) => {
                 emit_error(ctx.output, "dd", path, &e);
                 return 1;
             }
+            ctx.fs.close(h);
+            0
         }
-    } else {
-        ctx.output.stdout(&output_data[seek_bytes..]);
+        Err(e) => {
+            emit_error(ctx.output, "dd", path, &e);
+            1
+        }
     }
+}
 
+fn dd_emit_stats(
+    ctx: &mut UtilContext<'_>,
+    blocks_full: u64,
+    blocks_partial: u64,
+    total_bytes: usize,
+) {
     let stats = format!(
         "{blocks_full}+{blocks_partial} records in\n\
          {blocks_full}+{blocks_partial} records out\n\
          {total_bytes} bytes transferred\n"
     );
     ctx.output.stderr(stats.as_bytes());
-
-    0
 }
 
 // ---------------------------------------------------------------------------
@@ -625,26 +654,47 @@ fn split_into_pieces(
     args: &SplitArgs<'_>,
 ) -> Result<Vec<Vec<u8>>, i32> {
     if let Some(n) = args.chunks {
-        if n == 0 {
-            ctx.output.stderr(b"split: invalid number of chunks\n");
-            return Err(1);
-        }
-        let chunk_size = input_data.len().div_ceil(n);
-        return Ok(input_data
-            .chunks(chunk_size.max(1))
-            .map(<[u8]>::to_vec)
-            .collect());
+        return split_by_chunks(ctx, input_data, n);
     }
     if let Some(bs) = args.byte_size {
-        let bs = bs as usize;
-        if bs == 0 {
-            ctx.output.stderr(b"split: invalid byte size\n");
-            return Err(1);
-        }
-        return Ok(input_data.chunks(bs).map(<[u8]>::to_vec).collect());
+        return split_by_bytes(ctx, input_data, bs as usize);
     }
-    // Split by lines
-    let line_count = args.lines.unwrap_or(1000);
+    split_by_lines(ctx, input_data, args.lines.unwrap_or(1000))
+}
+
+fn split_by_chunks(
+    ctx: &mut UtilContext<'_>,
+    input_data: &[u8],
+    chunks: usize,
+) -> Result<Vec<Vec<u8>>, i32> {
+    if chunks == 0 {
+        ctx.output.stderr(b"split: invalid number of chunks\n");
+        return Err(1);
+    }
+    let chunk_size = input_data.len().div_ceil(chunks);
+    Ok(input_data
+        .chunks(chunk_size.max(1))
+        .map(<[u8]>::to_vec)
+        .collect())
+}
+
+fn split_by_bytes(
+    ctx: &mut UtilContext<'_>,
+    input_data: &[u8],
+    byte_size: usize,
+) -> Result<Vec<Vec<u8>>, i32> {
+    if byte_size == 0 {
+        ctx.output.stderr(b"split: invalid byte size\n");
+        return Err(1);
+    }
+    Ok(input_data.chunks(byte_size).map(<[u8]>::to_vec).collect())
+}
+
+fn split_by_lines(
+    ctx: &mut UtilContext<'_>,
+    input_data: &[u8],
+    line_count: usize,
+) -> Result<Vec<Vec<u8>>, i32> {
     if line_count == 0 {
         ctx.output.stderr(b"split: invalid line count\n");
         return Err(1);
@@ -653,17 +703,19 @@ fn split_into_pieces(
     let all_lines: Vec<&str> = text.lines().collect();
     Ok(all_lines
         .chunks(line_count)
-        .map(|chunk| {
-            let mut buf = String::new();
-            for (i, line) in chunk.iter().enumerate() {
-                buf.push_str(line);
-                if i + 1 < chunk.len() || text.ends_with('\n') {
-                    buf.push('\n');
-                }
-            }
-            buf.into_bytes()
-        })
+        .map(|chunk| split_line_chunk(chunk, text.ends_with('\n')))
         .collect())
+}
+
+fn split_line_chunk(chunk: &[&str], ends_with_newline: bool) -> Vec<u8> {
+    let mut buf = String::new();
+    for (i, line) in chunk.iter().enumerate() {
+        buf.push_str(line);
+        if i + 1 < chunk.len() || ends_with_newline {
+            buf.push('\n');
+        }
+    }
+    buf.into_bytes()
 }
 
 pub(crate) fn util_split(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
@@ -832,6 +884,7 @@ pub(crate) fn util_file(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 }
 
 /// Known binary format identified by magic bytes.
+#[derive(Clone, Copy)]
 enum MagicKind {
     Png,
     Gif,
@@ -844,28 +897,30 @@ enum MagicKind {
 }
 
 fn detect_magic(data: &[u8]) -> Option<MagicKind> {
-    if data.len() >= 4 && data[0] == 0x89 && &data[1..4] == b"PNG" {
+    const MAGIC_PATTERNS: &[(MagicKind, &[u8])] =
+        &[(MagicKind::Pdf, b"%PDF"), (MagicKind::Zip, b"PK\x03\x04")];
+
+    if data.len() >= 4 && data[0] == 0x89 && data.get(1..4) == Some(b"PNG") {
         return Some(MagicKind::Png);
     }
-    if data.len() >= 6 && (&data[..6] == b"GIF87a" || &data[..6] == b"GIF89a") {
+    if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
         return Some(MagicKind::Gif);
     }
-    if data.len() >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+    if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
         return Some(MagicKind::Jpeg);
     }
-    if data.len() >= 4 && &data[..4] == b"%PDF" {
-        return Some(MagicKind::Pdf);
+    for (kind, prefix) in MAGIC_PATTERNS {
+        if data.starts_with(prefix) {
+            return Some(*kind);
+        }
     }
-    if data.len() >= 4 && &data[..4] == b"PK\x03\x04" {
-        return Some(MagicKind::Zip);
-    }
-    if data.len() >= 2 && data[0] == 0x1F && data[1] == 0x8B {
+    if data.starts_with(&[0x1F, 0x8B]) {
         return Some(MagicKind::Gzip);
     }
-    if data.len() >= 4 && data[0] == 0x7F && &data[1..4] == b"ELF" {
+    if data.len() >= 4 && data[0] == 0x7F && data.get(1..4) == Some(b"ELF") {
         return Some(MagicKind::Elf);
     }
-    if data.len() >= 4 && data[0] == 0x00 && &data[1..4] == b"asm" {
+    if data.len() >= 4 && data[0] == 0x00 && data.get(1..4) == Some(b"asm") {
         return Some(MagicKind::Wasm);
     }
     None
