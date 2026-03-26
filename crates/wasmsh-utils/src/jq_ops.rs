@@ -190,9 +190,30 @@ fn format_number(n: f64) -> String {
     }
 }
 
+/// Decode a simple JSON escape character (not `\u`).
+fn simple_json_escape(c: u8) -> Option<char> {
+    match c {
+        b'"' => Some('"'),
+        b'\\' => Some('\\'),
+        b'/' => Some('/'),
+        b'n' => Some('\n'),
+        b't' => Some('\t'),
+        b'r' => Some('\r'),
+        b'b' => Some('\u{0008}'),
+        b'f' => Some('\u{000C}'),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // JSON parser
 // ---------------------------------------------------------------------------
+
+enum StringChar {
+    End,
+    Escape,
+    Literal(u8),
+}
 
 struct JsonParser<'a> {
     input: &'a [u8],
@@ -270,31 +291,36 @@ impl<'a> JsonParser<'a> {
         self.expect(b'"')?;
         let mut s = String::new();
         loop {
-            match self.advance() {
-                Some(b'"') => return Ok(s),
-                Some(b'\\') => self.parse_string_escape(&mut s)?,
-                Some(c) => s.push(c as char),
-                None => return Err("unterminated string".into()),
+            match self.parse_string_char()? {
+                StringChar::End => return Ok(s),
+                StringChar::Escape => self.parse_string_escape(&mut s)?,
+                StringChar::Literal(c) => s.push(c as char),
             }
         }
     }
 
-    fn parse_string_escape(&mut self, out: &mut String) -> Result<(), String> {
+    fn parse_string_char(&mut self) -> Result<StringChar, String> {
         match self.advance() {
-            Some(b'"') => out.push('"'),
-            Some(b'\\') => out.push('\\'),
-            Some(b'/') => out.push('/'),
-            Some(b'n') => out.push('\n'),
-            Some(b't') => out.push('\t'),
-            Some(b'r') => out.push('\r'),
-            Some(b'b') => out.push('\u{0008}'),
-            Some(b'f') => out.push('\u{000C}'),
-            Some(b'u') => out.push(self.parse_unicode_escape()?),
-            Some(c) => {
-                out.push('\\');
-                out.push(c as char);
-            }
-            None => return Err("unterminated string escape".into()),
+            Some(b'"') => Ok(StringChar::End),
+            Some(b'\\') => Ok(StringChar::Escape),
+            Some(c) => Ok(StringChar::Literal(c)),
+            None => Err("unterminated string".into()),
+        }
+    }
+
+    fn parse_string_escape(&mut self, out: &mut String) -> Result<(), String> {
+        let Some(c) = self.advance() else {
+            return Err("unterminated string escape".into());
+        };
+        if c == b'u' {
+            out.push(self.parse_unicode_escape()?);
+            return Ok(());
+        }
+        if let Some(decoded) = simple_json_escape(c) {
+            out.push(decoded);
+        } else {
+            out.push('\\');
+            out.push(c as char);
         }
         Ok(())
     }
@@ -481,26 +507,9 @@ fn json_write_array(out: &mut String, arr: &[JqValue], compact: bool, indent: us
         out.push_str("[]");
         return;
     }
-    out.push('[');
-    if !compact {
-        out.push('\n');
-    }
-    for (i, v) in arr.iter().enumerate() {
-        if !compact {
-            write_indent(out, indent + 1);
-        }
-        json_write(out, v, compact, indent + 1);
-        if i + 1 < arr.len() {
-            out.push(',');
-        }
-        if !compact {
-            out.push('\n');
-        }
-    }
-    if !compact {
-        write_indent(out, indent);
-    }
-    out.push(']');
+    json_write_container(out, compact, indent, '[', ']', arr.len(), |out, i| {
+        json_write(out, &arr[i], compact, indent + 1);
+    });
 }
 
 fn json_write_object(out: &mut String, pairs: &[(String, JqValue)], compact: bool, indent: usize) {
@@ -508,31 +517,47 @@ fn json_write_object(out: &mut String, pairs: &[(String, JqValue)], compact: boo
         out.push_str("{}");
         return;
     }
-    out.push('{');
-    if !compact {
-        out.push('\n');
-    }
-    for (i, (k, v)) in pairs.iter().enumerate() {
-        if !compact {
-            write_indent(out, indent + 1);
-        }
-        json_write_string(out, k);
+    json_write_container(out, compact, indent, '{', '}', pairs.len(), |out, i| {
+        json_write_string(out, &pairs[i].0);
         out.push(':');
         if !compact {
             out.push(' ');
         }
-        json_write(out, v, compact, indent + 1);
-        if i + 1 < pairs.len() {
+        json_write(out, &pairs[i].1, compact, indent + 1);
+    });
+}
+
+fn json_write_container(
+    out: &mut String,
+    compact: bool,
+    indent: usize,
+    open: char,
+    close: char,
+    count: usize,
+    mut write_item: impl FnMut(&mut String, usize),
+) {
+    out.push(open);
+    json_write_newline(out, compact);
+    for i in 0..count {
+        if !compact {
+            write_indent(out, indent + 1);
+        }
+        write_item(out, i);
+        if i + 1 < count {
             out.push(',');
         }
-        if !compact {
-            out.push('\n');
-        }
+        json_write_newline(out, compact);
     }
     if !compact {
         write_indent(out, indent);
     }
-    out.push('}');
+    out.push(close);
+}
+
+fn json_write_newline(out: &mut String, compact: bool) {
+    if !compact {
+        out.push('\n');
+    }
 }
 
 fn write_indent(out: &mut String, level: usize) {
@@ -883,26 +908,19 @@ impl<'a> Tokenizer<'a> {
         if self.pos >= self.input.len() {
             return Err("unterminated string escape".into());
         }
-        match self.input[self.pos] {
-            b'"' => out.push('"'),
-            b'\\' => out.push('\\'),
-            b'/' => out.push('/'),
-            b'n' => out.push('\n'),
-            b't' => out.push('\t'),
-            b'r' => out.push('\r'),
-            b'b' => out.push('\u{0008}'),
-            b'f' => out.push('\u{000C}'),
-            b'u' => {
-                self.pos += 1;
-                if let Some(ch) = self.tokenize_unicode_escape() {
-                    out.push(ch);
-                }
-                return Ok(());
+        let c = self.input[self.pos];
+        if c == b'u' {
+            self.pos += 1;
+            if let Some(ch) = self.tokenize_unicode_escape() {
+                out.push(ch);
             }
-            c => {
-                out.push('\\');
-                out.push(c as char);
-            }
+            return Ok(());
+        }
+        if let Some(decoded) = simple_json_escape(c) {
+            out.push(decoded);
+        } else {
+            out.push('\\');
+            out.push(c as char);
         }
         self.pos += 1;
         Ok(())
@@ -922,31 +940,36 @@ impl<'a> Tokenizer<'a> {
 
     fn tokenize_number(&mut self) -> Token {
         let start = self.pos;
-        while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
-            self.pos += 1;
-        }
-        if self.pos < self.input.len() && self.input[self.pos] == b'.' {
-            self.pos += 1;
-            while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
-                self.pos += 1;
-            }
-        }
-        if self.pos < self.input.len()
-            && (self.input[self.pos] == b'e' || self.input[self.pos] == b'E')
-        {
-            self.pos += 1;
-            if self.pos < self.input.len()
-                && (self.input[self.pos] == b'+' || self.input[self.pos] == b'-')
-            {
-                self.pos += 1;
-            }
-            while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
-                self.pos += 1;
-            }
-        }
+        self.skip_digits();
+        self.skip_token_fraction();
+        self.skip_token_exponent();
         let s = std::str::from_utf8(&self.input[start..self.pos]).unwrap_or("0");
         let n: f64 = s.parse().unwrap_or(0.0);
         Token::NumLit(n)
+    }
+
+    fn skip_digits(&mut self) {
+        while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
+            self.pos += 1;
+        }
+    }
+
+    fn skip_token_fraction(&mut self) {
+        if self.pos < self.input.len() && self.input[self.pos] == b'.' {
+            self.pos += 1;
+            self.skip_digits();
+        }
+    }
+
+    fn skip_token_exponent(&mut self) {
+        if self.pos >= self.input.len() || !matches!(self.input[self.pos], b'e' | b'E') {
+            return;
+        }
+        self.pos += 1;
+        if self.pos < self.input.len() && matches!(self.input[self.pos], b'+' | b'-') {
+            self.pos += 1;
+        }
+        self.skip_digits();
     }
 
     fn tokenize_ident(&mut self) -> Token {
@@ -957,28 +980,32 @@ impl<'a> Tokenizer<'a> {
             self.pos += 1;
         }
         let s = std::str::from_utf8(&self.input[start..self.pos]).unwrap_or("");
-        match s {
-            "and" => Token::And,
-            "or" => Token::Or,
-            "not" => Token::Not,
-            "if" => Token::If,
-            "then" => Token::Then,
-            "elif" => Token::Elif,
-            "else" => Token::Else,
-            "end" => Token::End,
-            "as" => Token::As,
-            "def" => Token::Def,
-            "reduce" => Token::Reduce,
-            "foreach" => Token::Foreach,
-            "try" => Token::Try,
-            "catch" => Token::Catch,
-            "label" => Token::Label,
-            "true" => Token::True,
-            "false" => Token::False,
-            "null" => Token::Null,
-            "empty" => Token::Empty,
-            _ => Token::Ident(s.to_string()),
-        }
+        keyword_token(s).unwrap_or_else(|| Token::Ident(s.to_string()))
+    }
+}
+
+fn keyword_token(s: &str) -> Option<Token> {
+    match s {
+        "and" => Some(Token::And),
+        "or" => Some(Token::Or),
+        "not" => Some(Token::Not),
+        "if" => Some(Token::If),
+        "then" => Some(Token::Then),
+        "elif" => Some(Token::Elif),
+        "else" => Some(Token::Else),
+        "end" => Some(Token::End),
+        "as" => Some(Token::As),
+        "def" => Some(Token::Def),
+        "reduce" => Some(Token::Reduce),
+        "foreach" => Some(Token::Foreach),
+        "try" => Some(Token::Try),
+        "catch" => Some(Token::Catch),
+        "label" => Some(Token::Label),
+        "true" => Some(Token::True),
+        "false" => Some(Token::False),
+        "null" => Some(Token::Null),
+        "empty" => Some(Token::Empty),
+        _ => None,
     }
 }
 
@@ -1148,29 +1175,11 @@ impl FilterParser {
         let mut expr = self.parse_primary()?;
         loop {
             match self.peek() {
-                Token::Dot => {
-                    let saved = self.pos;
-                    self.advance();
-                    if let Token::Ident(name) = self.peek() {
-                        let name = name.clone();
-                        self.advance();
-                        if *self.peek() == Token::Question {
-                            self.advance();
-                            expr = JqFilter::Pipe(
-                                Box::new(expr),
-                                Box::new(JqFilter::OptionalField(name)),
-                            );
-                        } else {
-                            expr = JqFilter::Pipe(Box::new(expr), Box::new(JqFilter::Field(name)));
-                        }
-                    } else {
-                        self.pos = saved;
-                        break;
-                    }
-                }
-                Token::LBracket => {
-                    expr = self.parse_bracket_suffix(expr)?;
-                }
+                Token::Dot => match self.try_parse_dot_field() {
+                    Some(field) => expr = JqFilter::Pipe(Box::new(expr), Box::new(field)),
+                    None => break,
+                },
+                Token::LBracket => expr = self.parse_bracket_suffix(expr)?,
                 Token::Question => {
                     self.advance();
                     expr = JqFilter::TryCatch {
@@ -1183,23 +1192,46 @@ impl FilterParser {
                     expr = JqFilter::Pipe(Box::new(expr), Box::new(JqFilter::Not));
                 }
                 Token::As => {
-                    self.advance();
-                    let var = match self.advance() {
-                        Token::Variable(name) => name,
-                        t => return Err(format!("expected variable after 'as', got {t:?}")),
-                    };
-                    self.expect(&Token::Pipe)?;
-                    let body = self.parse_pipe()?;
-                    expr = JqFilter::Binding {
-                        expr: Box::new(expr),
-                        var,
-                        body: Box::new(body),
-                    };
+                    expr = self.parse_postfix_as(expr)?;
                 }
                 _ => break,
             }
         }
         Ok(expr)
+    }
+
+    /// Try to parse `.ident` or `.ident?` after a dot. Returns `None` if
+    /// the dot is not followed by an identifier (in which case pos is restored).
+    fn try_parse_dot_field(&mut self) -> Option<JqFilter> {
+        let saved = self.pos;
+        self.advance();
+        let Token::Ident(name) = self.peek() else {
+            self.pos = saved;
+            return None;
+        };
+        let name = name.clone();
+        self.advance();
+        if *self.peek() == Token::Question {
+            self.advance();
+            Some(JqFilter::OptionalField(name))
+        } else {
+            Some(JqFilter::Field(name))
+        }
+    }
+
+    fn parse_postfix_as(&mut self, expr: JqFilter) -> Result<JqFilter, String> {
+        self.advance();
+        let var = match self.advance() {
+            Token::Variable(name) => name,
+            t => return Err(format!("expected variable after 'as', got {t:?}")),
+        };
+        self.expect(&Token::Pipe)?;
+        let body = self.parse_pipe()?;
+        Ok(JqFilter::Binding {
+            expr: Box::new(expr),
+            var,
+            body: Box::new(body),
+        })
     }
 
     /// Consume a trailing `?` if present, returning `true` if consumed.
@@ -1226,60 +1258,70 @@ impl FilterParser {
 
     fn parse_bracket_suffix(&mut self, base: JqFilter) -> Result<JqFilter, String> {
         self.expect(&Token::LBracket)?;
-        // .[]
         if *self.peek() == Token::RBracket {
-            self.advance();
-            let optional = self.eat_question();
-            return Ok(JqFilter::Pipe(
-                Box::new(base),
-                Box::new(if optional {
-                    JqFilter::OptionalIterate
-                } else {
-                    JqFilter::Iterate
-                }),
-            ));
+            return self.parse_bracket_iterate(base);
         }
-        // .[:M]
         if *self.peek() == Token::Colon {
-            self.advance();
-            let to = self.parse_pipe()?;
-            self.expect(&Token::RBracket)?;
-            let optional = self.eat_question();
-            let f = JqFilter::Slice(None, Some(Box::new(to)));
-            let result = JqFilter::Pipe(Box::new(base), Box::new(f));
-            return Ok(Self::wrap_optional(result, optional));
+            return self.parse_bracket_slice_from_start(base);
         }
         let idx = self.parse_pipe()?;
         if *self.peek() == Token::Colon {
-            // .[expr:expr?]
-            self.advance();
-            let to = if *self.peek() == Token::RBracket {
-                None
-            } else {
-                Some(Box::new(self.parse_pipe()?))
-            };
-            self.expect(&Token::RBracket)?;
-            let optional = self.eat_question();
-            let f = JqFilter::Slice(Some(Box::new(idx)), to);
-            let result = JqFilter::Pipe(Box::new(base), Box::new(f));
-            return Ok(Self::wrap_optional(result, optional));
+            return self.parse_bracket_slice_with_from(base, idx);
         }
-        self.expect(&Token::RBracket)?;
-        let optional = self.eat_question();
-        if optional {
-            Ok(JqFilter::Pipe(
-                Box::new(base),
-                Box::new(JqFilter::OptionalIndex(Box::new(idx))),
-            ))
-        } else {
-            Ok(JqFilter::Pipe(
-                Box::new(base),
-                Box::new(JqFilter::Index(Box::new(idx))),
-            ))
-        }
+        self.parse_bracket_index(base, idx)
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::unnecessary_wraps)]
+    fn parse_bracket_iterate(&mut self, base: JqFilter) -> Result<JqFilter, String> {
+        self.advance();
+        let optional = self.eat_question();
+        let iter = if optional {
+            JqFilter::OptionalIterate
+        } else {
+            JqFilter::Iterate
+        };
+        Ok(JqFilter::Pipe(Box::new(base), Box::new(iter)))
+    }
+
+    fn parse_bracket_slice_from_start(&mut self, base: JqFilter) -> Result<JqFilter, String> {
+        self.advance();
+        let to = self.parse_pipe()?;
+        self.expect(&Token::RBracket)?;
+        let optional = self.eat_question();
+        let f = JqFilter::Slice(None, Some(Box::new(to)));
+        let result = JqFilter::Pipe(Box::new(base), Box::new(f));
+        Ok(Self::wrap_optional(result, optional))
+    }
+
+    fn parse_bracket_slice_with_from(
+        &mut self,
+        base: JqFilter,
+        idx: JqFilter,
+    ) -> Result<JqFilter, String> {
+        self.advance();
+        let to = if *self.peek() == Token::RBracket {
+            None
+        } else {
+            Some(Box::new(self.parse_pipe()?))
+        };
+        self.expect(&Token::RBracket)?;
+        let optional = self.eat_question();
+        let f = JqFilter::Slice(Some(Box::new(idx)), to);
+        let result = JqFilter::Pipe(Box::new(base), Box::new(f));
+        Ok(Self::wrap_optional(result, optional))
+    }
+
+    fn parse_bracket_index(&mut self, base: JqFilter, idx: JqFilter) -> Result<JqFilter, String> {
+        self.expect(&Token::RBracket)?;
+        let optional = self.eat_question();
+        let index_filter = if optional {
+            JqFilter::OptionalIndex(Box::new(idx))
+        } else {
+            JqFilter::Index(Box::new(idx))
+        };
+        Ok(JqFilter::Pipe(Box::new(base), Box::new(index_filter)))
+    }
+
     fn parse_primary(&mut self) -> Result<JqFilter, String> {
         match self.peek().clone() {
             Token::Dot => self.parse_dot_primary(),
@@ -1293,11 +1335,29 @@ impl FilterParser {
                 self.parse_object_construct()
             }
             Token::LParen => self.parse_grouped_primary(),
+            Token::Minus => self.parse_minus_primary(),
+            Token::Ident(name) => self.parse_ident_primary(name),
+            _ => self.parse_primary_token(),
+        }
+    }
+
+    fn parse_primary_token(&mut self) -> Result<JqFilter, String> {
+        match self.peek().clone() {
             Token::StrLit(s) => Ok(self.parse_literal_primary(JqValue::String(s))),
             Token::NumLit(n) => Ok(self.parse_literal_primary(JqValue::Number(n))),
             Token::True => Ok(self.parse_literal_primary(JqValue::Bool(true))),
             Token::False => Ok(self.parse_literal_primary(JqValue::Bool(false))),
             Token::Null => Ok(self.parse_literal_primary(JqValue::Null)),
+            Token::AtFormat(name) => {
+                self.advance();
+                Ok(JqFilter::Format(name))
+            }
+            _ => self.parse_primary_keyword(),
+        }
+    }
+
+    fn parse_primary_keyword(&mut self) -> Result<JqFilter, String> {
+        match self.peek().clone() {
             Token::Empty => {
                 self.advance();
                 Ok(JqFilter::FuncCall("empty".into(), vec![]))
@@ -1327,24 +1387,20 @@ impl FilterParser {
                 self.advance();
                 self.parse_def()
             }
-            Token::Label => {
-                self.advance();
-                let var = match self.advance() {
-                    Token::Variable(name) => name,
-                    t => return Err(format!("expected variable after 'label', got {t:?}")),
-                };
-                self.expect(&Token::Pipe)?;
-                let body = self.parse_pipe()?;
-                Ok(JqFilter::Label(var, Box::new(body)))
-            }
-            Token::Minus => self.parse_minus_primary(),
-            Token::AtFormat(name) => {
-                self.advance();
-                Ok(JqFilter::Format(name))
-            }
-            Token::Ident(name) => self.parse_ident_primary(name),
+            Token::Label => self.parse_label_primary(),
             t => Err(format!("unexpected token: {t:?}")),
         }
+    }
+
+    fn parse_label_primary(&mut self) -> Result<JqFilter, String> {
+        self.advance();
+        let var = match self.advance() {
+            Token::Variable(name) => name,
+            t => return Err(format!("expected variable after 'label', got {t:?}")),
+        };
+        self.expect(&Token::Pipe)?;
+        let body = self.parse_pipe()?;
+        Ok(JqFilter::Label(var, Box::new(body)))
     }
 
     fn parse_dot_primary(&mut self) -> Result<JqFilter, String> {
@@ -1475,29 +1531,11 @@ impl FilterParser {
         let mut expr = self.parse_primary()?;
         loop {
             match self.peek() {
-                Token::Dot => {
-                    let saved = self.pos;
-                    self.advance();
-                    if let Token::Ident(name) = self.peek() {
-                        let name = name.clone();
-                        self.advance();
-                        if *self.peek() == Token::Question {
-                            self.advance();
-                            expr = JqFilter::Pipe(
-                                Box::new(expr),
-                                Box::new(JqFilter::OptionalField(name)),
-                            );
-                        } else {
-                            expr = JqFilter::Pipe(Box::new(expr), Box::new(JqFilter::Field(name)));
-                        }
-                    } else {
-                        self.pos = saved;
-                        break;
-                    }
-                }
-                Token::LBracket => {
-                    expr = self.parse_bracket_suffix(expr)?;
-                }
+                Token::Dot => match self.try_parse_dot_field() {
+                    Some(field) => expr = JqFilter::Pipe(Box::new(expr), Box::new(field)),
+                    None => break,
+                },
+                Token::LBracket => expr = self.parse_bracket_suffix(expr)?,
                 Token::Question => {
                     self.advance();
                     expr = JqFilter::TryCatch {
@@ -1619,58 +1657,49 @@ impl FilterParser {
         match self.peek().clone() {
             Token::Ident(name) => {
                 self.advance();
-                if *self.peek() == Token::Colon {
-                    self.advance();
-                    let val = self.parse_alternative()?;
-                    Ok((JqObjKey::Ident(name), Some(val)))
-                } else {
-                    // Shorthand: {name} means {name: .name}
-                    Ok((JqObjKey::Ident(name), None))
-                }
+                self.parse_obj_ident_pair(name, None)
             }
             Token::StrLit(s) => {
                 self.advance();
-                if *self.peek() == Token::Colon {
-                    self.advance();
-                    let val = self.parse_alternative()?;
-                    Ok((JqObjKey::Ident(s), Some(val)))
-                } else {
-                    Ok((JqObjKey::Ident(s), None))
-                }
+                self.parse_obj_ident_pair(s, None)
             }
             Token::Variable(name) => {
                 self.advance();
-                if *self.peek() == Token::Colon {
-                    self.advance();
-                    let val = self.parse_alternative()?;
-                    Ok((JqObjKey::Ident(name.clone()), Some(val)))
-                } else {
-                    Ok((
-                        JqObjKey::Ident(name.clone()),
-                        Some(JqFilter::Variable(name)),
-                    ))
-                }
+                self.parse_obj_ident_pair(name.clone(), Some(JqFilter::Variable(name)))
             }
-            Token::LParen => {
-                self.advance();
-                let key_expr = self.parse_pipe()?;
-                self.expect(&Token::RParen)?;
-                self.expect(&Token::Colon)?;
-                let val = self.parse_alternative()?;
-                Ok((JqObjKey::Dynamic(key_expr), Some(val)))
-            }
+            Token::LParen => self.parse_obj_dynamic_pair(),
             Token::AtFormat(name) => {
                 self.advance();
-                if *self.peek() == Token::Colon {
-                    self.advance();
-                    let val = self.parse_alternative()?;
-                    Ok((JqObjKey::Ident(format!("@{name}")), Some(val)))
-                } else {
-                    Ok((JqObjKey::Ident(format!("@{name}")), None))
-                }
+                self.parse_obj_ident_pair(format!("@{name}"), None)
             }
             t => Err(format!("expected object key, got {t:?}")),
         }
+    }
+
+    /// Parse `key: value` or shorthand `key` in object construction.
+    /// `default` is used when there is no `:value` — `None` for ident/string,
+    /// `Some(Variable(...))` for `$var`.
+    fn parse_obj_ident_pair(
+        &mut self,
+        name: String,
+        default: Option<JqFilter>,
+    ) -> Result<(JqObjKey, Option<JqFilter>), String> {
+        if *self.peek() == Token::Colon {
+            self.advance();
+            let val = self.parse_alternative()?;
+            Ok((JqObjKey::Ident(name), Some(val)))
+        } else {
+            Ok((JqObjKey::Ident(name), default))
+        }
+    }
+
+    fn parse_obj_dynamic_pair(&mut self) -> Result<(JqObjKey, Option<JqFilter>), String> {
+        self.advance();
+        let key_expr = self.parse_pipe()?;
+        self.expect(&Token::RParen)?;
+        self.expect(&Token::Colon)?;
+        let val = self.parse_alternative()?;
+        Ok((JqObjKey::Dynamic(key_expr), Some(val)))
     }
 }
 
@@ -1718,7 +1747,6 @@ fn run_filter(filter: &JqFilter, input: &JqValue, env: &JqEnv) -> Result<Vec<JqV
     apply_filter(filter, input, env, 0)
 }
 
-#[allow(clippy::too_many_lines)]
 #[allow(clippy::cast_possible_wrap)]
 fn apply_filter(
     filter: &JqFilter,
@@ -1730,6 +1758,35 @@ fn apply_filter(
         return Err("recursion limit exceeded".into());
     }
     match filter {
+        JqFilter::Identity
+        | JqFilter::Field(_)
+        | JqFilter::OptionalField(_)
+        | JqFilter::Index(_)
+        | JqFilter::OptionalIndex(_)
+        | JqFilter::Slice(..)
+        | JqFilter::Iterate
+        | JqFilter::OptionalIterate => apply_filter_access(filter, input, env, depth),
+
+        JqFilter::Pipe(..)
+        | JqFilter::Comma(..)
+        | JqFilter::Literal(_)
+        | JqFilter::Comparison(..)
+        | JqFilter::Arithmetic(..)
+        | JqFilter::Not
+        | JqFilter::And(..)
+        | JqFilter::Or(..) => apply_filter_compose(filter, input, env, depth),
+
+        _ => apply_filter_control(filter, input, env, depth),
+    }
+}
+
+fn apply_filter_access(
+    filter: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    match filter {
         JqFilter::Identity => Ok(vec![input.clone()]),
         JqFilter::Field(name) => Ok(vec![field_access(input, name)]),
         JqFilter::OptionalField(name) => apply_optional_field(name, input),
@@ -1738,6 +1795,17 @@ fn apply_filter(
         JqFilter::Slice(from, to) => apply_slice(from.as_deref(), to.as_deref(), input, env, depth),
         JqFilter::Iterate => apply_iterate(input),
         JqFilter::OptionalIterate => apply_optional_iterate(input),
+        _ => unreachable!(),
+    }
+}
+
+fn apply_filter_compose(
+    filter: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    match filter {
         JqFilter::Pipe(left, right) => apply_pipe(left, right, input, env, depth),
         JqFilter::Comma(left, right) => apply_comma(left, right, input, env, depth),
         JqFilter::Literal(val) => Ok(vec![val.clone()]),
@@ -1750,6 +1818,17 @@ fn apply_filter(
         JqFilter::Not => Ok(vec![JqValue::Bool(!input.is_truthy())]),
         JqFilter::And(left, right) => apply_and(left, right, input, env, depth),
         JqFilter::Or(left, right) => apply_or(left, right, input, env, depth),
+        _ => unreachable!(),
+    }
+}
+
+fn apply_filter_control(
+    filter: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    match filter {
         JqFilter::If {
             cond,
             then_,
@@ -1797,6 +1876,7 @@ fn apply_filter(
         JqFilter::Label(_name, body) => apply_label(body, input, env, depth),
         JqFilter::Negate(inner) => apply_negate(inner, input, env, depth),
         JqFilter::Format(name) => apply_format(name, input),
+        _ => unreachable!(),
     }
 }
 
@@ -2335,59 +2415,79 @@ fn normalize_index(idx: i64, len: usize) -> i64 {
 
 #[allow(clippy::needless_pass_by_value)]
 fn arith_op(left: &JqValue, op: &ArithOp, right: &JqValue) -> Result<JqValue, String> {
-    match (left, op, right) {
-        (JqValue::Number(a), ArithOp::Add, JqValue::Number(b)) => Ok(JqValue::Number(a + b)),
-        (JqValue::Number(a), ArithOp::Sub, JqValue::Number(b)) => Ok(JqValue::Number(a - b)),
-        (JqValue::Number(a), ArithOp::Mul, JqValue::Number(b)) => Ok(JqValue::Number(a * b)),
-        (JqValue::Number(a), ArithOp::Div, JqValue::Number(b)) => {
-            if *b == 0.0 {
+    if let (JqValue::Number(a), JqValue::Number(b)) = (left, right) {
+        return arith_op_numbers(*a, op, *b);
+    }
+    if matches!(op, ArithOp::Add) {
+        return arith_op_add(left, right);
+    }
+    Err(arith_type_error(op, left, right))
+}
+
+fn arith_op_numbers(a: f64, op: &ArithOp, b: f64) -> Result<JqValue, String> {
+    match op {
+        ArithOp::Add => Ok(JqValue::Number(a + b)),
+        ArithOp::Sub => Ok(JqValue::Number(a - b)),
+        ArithOp::Mul => Ok(JqValue::Number(a * b)),
+        ArithOp::Div => {
+            if b == 0.0 {
                 Err("division by zero".into())
             } else {
                 Ok(JqValue::Number(a / b))
             }
         }
-        (JqValue::Number(a), ArithOp::Mod, JqValue::Number(b)) => {
-            if *b == 0.0 {
+        ArithOp::Mod => {
+            if b == 0.0 {
                 Err("modulo by zero".into())
             } else {
                 Ok(JqValue::Number(a % b))
             }
         }
-        (JqValue::String(a), ArithOp::Add, JqValue::String(b)) => {
-            Ok(JqValue::String(format!("{a}{b}")))
-        }
-        (JqValue::Array(a), ArithOp::Add, JqValue::Array(b)) => {
+    }
+}
+
+fn arith_op_add(left: &JqValue, right: &JqValue) -> Result<JqValue, String> {
+    match (left, right) {
+        (JqValue::String(a), JqValue::String(b)) => Ok(JqValue::String(format!("{a}{b}"))),
+        (JqValue::Array(a), JqValue::Array(b)) => {
             let mut result = a.clone();
             result.extend(b.iter().cloned());
             Ok(JqValue::Array(result))
         }
-        (JqValue::Object(a), ArithOp::Add, JqValue::Object(b)) => {
-            let mut result = a.clone();
-            for (k, v) in b {
-                if let Some(existing) = result.iter_mut().find(|(ek, _)| ek == k) {
-                    existing.1 = v.clone();
-                } else {
-                    result.push((k.clone(), v.clone()));
-                }
-            }
-            Ok(JqValue::Object(result))
-        }
-        (JqValue::Null, ArithOp::Add, other) | (other, ArithOp::Add, JqValue::Null) => {
-            Ok(other.clone())
-        }
-        _ => Err(format!(
-            "cannot {} {} and {}",
-            match op {
-                ArithOp::Add => "add",
-                ArithOp::Sub => "subtract",
-                ArithOp::Mul => "multiply",
-                ArithOp::Div => "divide",
-                ArithOp::Mod => "modulo",
-            },
-            left.type_name(),
-            right.type_name()
-        )),
+        (JqValue::Object(a), JqValue::Object(b)) => Ok(JqValue::Object(merge_objects(a, b))),
+        (JqValue::Null, other) | (other, JqValue::Null) => Ok(other.clone()),
+        _ => Err(arith_type_error(&ArithOp::Add, left, right)),
     }
+}
+
+fn merge_objects(
+    base: &[(String, JqValue)],
+    overlay: &[(String, JqValue)],
+) -> Vec<(String, JqValue)> {
+    let mut result = base.to_vec();
+    for (k, v) in overlay {
+        if let Some(existing) = result.iter_mut().find(|(ek, _)| ek == k) {
+            existing.1 = v.clone();
+        } else {
+            result.push((k.clone(), v.clone()));
+        }
+    }
+    result
+}
+
+fn arith_type_error(op: &ArithOp, left: &JqValue, right: &JqValue) -> String {
+    let op_name = match op {
+        ArithOp::Add => "add",
+        ArithOp::Sub => "subtract",
+        ArithOp::Mul => "multiply",
+        ArithOp::Div => "divide",
+        ArithOp::Mod => "modulo",
+    };
+    format!(
+        "cannot {op_name} {} and {}",
+        left.type_name(),
+        right.type_name()
+    )
 }
 
 fn build_object(
@@ -2505,24 +2605,45 @@ fn dispatch_func(
     env: &JqEnv,
     depth: usize,
 ) -> Result<Vec<JqValue>, String> {
-    // Check user-defined functions first
-    if let Some((param_names, body)) = env.funcs.get(name) {
-        if args.len() != param_names.len() {
-            return Err(format!(
-                "{name}: expected {} args, got {}",
-                param_names.len(),
-                args.len()
-            ));
-        }
-        let mut new_env = env.clone();
-        for (pname, arg) in param_names.iter().zip(args) {
-            let val = apply_filter(arg, input, &new_env, depth + 1)?;
-            let v = val.into_iter().next().unwrap_or(JqValue::Null);
-            new_env.vars.insert(pname.clone(), v);
-        }
-        return apply_filter(&body.clone(), input, &new_env, depth + 1);
+    if let Some(result) = dispatch_user_func(name, args, input, env, depth)? {
+        return Ok(result);
     }
+    dispatch_builtin_func(name, args, input, env, depth)
+}
 
+fn dispatch_user_func(
+    name: &str,
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Option<Vec<JqValue>>, String> {
+    let Some((param_names, body)) = env.funcs.get(name) else {
+        return Ok(None);
+    };
+    if args.len() != param_names.len() {
+        return Err(format!(
+            "{name}: expected {} args, got {}",
+            param_names.len(),
+            args.len()
+        ));
+    }
+    let mut new_env = env.clone();
+    for (pname, arg) in param_names.iter().zip(args) {
+        let val = apply_filter(arg, input, &new_env, depth + 1)?;
+        let v = val.into_iter().next().unwrap_or(JqValue::Null);
+        new_env.vars.insert(pname.clone(), v);
+    }
+    apply_filter(&body.clone(), input, &new_env, depth + 1).map(Some)
+}
+
+fn dispatch_builtin_func(
+    name: &str,
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
     match name {
         // Type and identity operations
         "type" | "length" | "utf8bytelength" | "empty" | "error" | "not" | "debug" | "builtins"
@@ -2602,36 +2723,42 @@ fn dispatch_type_ops(
 ) -> Result<Vec<JqValue>, String> {
     match name {
         "empty" => Err(EMPTY_SIGNAL.into()),
-
-        "error" => {
-            if let Some(arg) = args.first() {
-                let vals = apply_filter(arg, input, env, depth + 1)?;
-                let msg = vals.first().map_or("error".into(), JqValue::to_string_repr);
-                Err(msg)
-            } else {
-                let msg = match input {
-                    JqValue::String(s) => s.clone(),
-                    _ => input.to_string_repr(),
-                };
-                Err(msg)
-            }
-        }
-
+        "error" => apply_error(args, input, env, depth),
         "type" => Ok(vec![JqValue::String(input.type_name().to_string())]),
         "length" => Ok(vec![input.length()]),
-
-        "utf8bytelength" => match input {
-            JqValue::String(s) => Ok(vec![JqValue::Number(s.len() as f64)]),
-            _ => Ok(vec![input.length()]),
-        },
-
+        "utf8bytelength" => apply_utf8bytelength(input),
         "not" => Ok(vec![JqValue::Bool(!input.is_truthy())]),
         "debug" => Ok(vec![input.clone()]),
         "builtins" => Ok(vec![JqValue::Array(builtin_names())]),
         "input" => Ok(vec![JqValue::Null]),
         "inputs" => Ok(vec![]),
-
         _ => dispatch_type_selectors(name, input),
+    }
+}
+
+fn apply_error(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if let Some(arg) = args.first() {
+        let vals = apply_filter(arg, input, env, depth + 1)?;
+        let msg = vals.first().map_or("error".into(), JqValue::to_string_repr);
+        return Err(msg);
+    }
+    let msg = match input {
+        JqValue::String(s) => s.clone(),
+        _ => input.to_string_repr(),
+    };
+    Err(msg)
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn apply_utf8bytelength(input: &JqValue) -> Result<Vec<JqValue>, String> {
+    match input {
+        JqValue::String(s) => Ok(vec![JqValue::Number(s.len() as f64)]),
+        _ => Ok(vec![input.length()]),
     }
 }
 
@@ -2779,39 +2906,45 @@ fn apply_recurse(
 
 fn dispatch_entry_ops(name: &str, input: &JqValue) -> Result<Vec<JqValue>, String> {
     match name {
-        "tostring" => {
-            let s = match input {
-                JqValue::String(s) => s.clone(),
-                _ => json_to_string(input, true),
-            };
-            Ok(vec![JqValue::String(s)])
-        }
-
-        "tonumber" => match input {
-            JqValue::Number(_) => Ok(vec![input.clone()]),
-            JqValue::String(s) => {
-                let n: f64 = s
-                    .trim()
-                    .parse()
-                    .map_err(|_| format!("cannot convert \"{s}\" to number"))?;
-                Ok(vec![JqValue::Number(n)])
-            }
-            _ => Err(format!("cannot convert {} to number", input.type_name())),
-        },
-
+        "tostring" => apply_tostring(input),
+        "tonumber" => apply_tonumber(input),
         "tojson" => Ok(vec![JqValue::String(json_to_string(input, true))]),
-
-        "fromjson" => match input {
-            JqValue::String(s) => {
-                let val = parse_json(s)?;
-                Ok(vec![val])
-            }
-            _ => Err(format!("cannot fromjson on {}", input.type_name())),
-        },
-
+        "fromjson" => apply_fromjson(input),
         "env" => Ok(vec![JqValue::Object(vec![])]),
-
         _ => Err(format!("{name}/0 is not defined")),
+    }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn apply_tostring(input: &JqValue) -> Result<Vec<JqValue>, String> {
+    let s = match input {
+        JqValue::String(s) => s.clone(),
+        _ => json_to_string(input, true),
+    };
+    Ok(vec![JqValue::String(s)])
+}
+
+fn apply_tonumber(input: &JqValue) -> Result<Vec<JqValue>, String> {
+    match input {
+        JqValue::Number(_) => Ok(vec![input.clone()]),
+        JqValue::String(s) => {
+            let n: f64 = s
+                .trim()
+                .parse()
+                .map_err(|_| format!("cannot convert \"{s}\" to number"))?;
+            Ok(vec![JqValue::Number(n)])
+        }
+        _ => Err(format!("cannot convert {} to number", input.type_name())),
+    }
+}
+
+fn apply_fromjson(input: &JqValue) -> Result<Vec<JqValue>, String> {
+    match input {
+        JqValue::String(s) => {
+            let val = parse_json(s)?;
+            Ok(vec![val])
+        }
+        _ => Err(format!("cannot fromjson on {}", input.type_name())),
     }
 }
 
@@ -3053,32 +3186,26 @@ fn apply_sub_gsub(
     if args.len() < 2 {
         return Err(format!("{name} requires at least 2 arguments"));
     }
-    let pat_vals = apply_filter(&args[0], input, env, depth + 1)?;
-    let pat = pat_vals
-        .first()
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let repl_vals = apply_filter(&args[1], input, env, depth + 1)?;
-    let repl = repl_vals
-        .first()
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let flags = if args.len() > 2 {
-        let f = apply_filter(&args[2], input, env, depth + 1)?;
-        f.first().and_then(|v| v.as_str()).unwrap_or("").to_string()
-    } else {
-        String::new()
+    let pat = eval_filter_string(&args[0], input, env, depth)?;
+    let repl = eval_filter_string(&args[1], input, env, depth)?;
+    let flags = eval_optional_flags(args, input, env, depth)?;
+    let JqValue::String(s) = input else {
+        return Err(format!("{name} requires string input"));
     };
-    let ci = flags.contains('i');
-    match input {
-        JqValue::String(s) => {
-            let result = simple_regex_replace(s, &pat, &repl, ci, name == "gsub");
-            Ok(vec![JqValue::String(result)])
-        }
-        _ => Err(format!("{name} requires string input")),
+    let result = simple_regex_replace(s, &pat, &repl, flags.contains('i'), name == "gsub");
+    Ok(vec![JqValue::String(result)])
+}
+
+fn eval_optional_flags(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<String, String> {
+    if args.len() <= 2 {
+        return Ok(String::new());
     }
+    eval_filter_string(&args[2], input, env, depth)
 }
 
 /// Helper for test/match/capture regex operations on a string input.
@@ -3089,23 +3216,26 @@ fn apply_regex_op(
     case_insensitive: bool,
 ) -> Result<Vec<JqValue>, String> {
     let matched = simple_regex_match(s, pat, case_insensitive);
-    if name == "test" {
-        Ok(vec![JqValue::Bool(!matched.is_empty())])
-    } else if name == "match" {
-        if matched.is_empty() {
-            Err(format!("null (no match for pattern \"{pat}\")"))
-        } else {
-            let m = &matched[0];
-            Ok(vec![JqValue::Object(vec![
-                ("offset".into(), JqValue::Number(m.0 as f64)),
-                ("length".into(), JqValue::Number(m.1.len() as f64)),
-                ("string".into(), JqValue::String(m.1.clone())),
-                ("captures".into(), JqValue::Array(vec![])),
-            ])])
-        }
-    } else {
-        Ok(vec![JqValue::Object(vec![])])
+    match name {
+        "test" => Ok(vec![JqValue::Bool(!matched.is_empty())]),
+        "match" => apply_regex_match_result(&matched, pat),
+        _ => Ok(vec![JqValue::Object(vec![])]),
     }
+}
+
+fn apply_regex_match_result(
+    matched: &[(usize, String)],
+    pat: &str,
+) -> Result<Vec<JqValue>, String> {
+    let Some(m) = matched.first() else {
+        return Err(format!("null (no match for pattern \"{pat}\")"));
+    };
+    Ok(vec![JqValue::Object(vec![
+        ("offset".into(), JqValue::Number(m.0 as f64)),
+        ("length".into(), JqValue::Number(m.1.len() as f64)),
+        ("string".into(), JqValue::String(m.1.clone())),
+        ("captures".into(), JqValue::Array(vec![])),
+    ])])
 }
 
 fn dispatch_sort_group(
@@ -3387,36 +3517,55 @@ fn dispatch_range(
     if args.is_empty() {
         return Err("range requires at least 1 argument".into());
     }
-    let first_vals = apply_filter(&args[0], input, env, depth + 1)?;
-    let first_num = first_vals.first().and_then(JqValue::as_f64).unwrap_or(0.0);
-    let (start, end, step) = if args.len() >= 2 {
-        let second_vals = apply_filter(&args[1], input, env, depth + 1)?;
-        let second_num = second_vals.first().and_then(JqValue::as_f64).unwrap_or(0.0);
-        let step_val = if args.len() >= 3 {
-            let sv = apply_filter(&args[2], input, env, depth + 1)?;
-            sv.first().and_then(JqValue::as_f64).unwrap_or(1.0)
-        } else {
-            1.0
-        };
-        (first_num, second_num, step_val)
+    let (start, end, step) = eval_range_params(args, input, env, depth)?;
+    Ok(generate_range(start, end, step))
+}
+
+fn eval_range_params(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<(f64, f64, f64), String> {
+    let first_num = eval_filter_f64(&args[0], input, env, depth, 0.0)?;
+    if args.len() < 2 {
+        return Ok((0.0, first_num, 1.0));
+    }
+    let second_num = eval_filter_f64(&args[1], input, env, depth, 0.0)?;
+    let step_val = if args.len() >= 3 {
+        eval_filter_f64(&args[2], input, env, depth, 1.0)?
     } else {
-        (0.0, first_num, 1.0)
+        1.0
     };
+    Ok((first_num, second_num, step_val))
+}
+
+fn eval_filter_f64(
+    filter: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+    default: f64,
+) -> Result<f64, String> {
+    let vals = apply_filter(filter, input, env, depth + 1)?;
+    Ok(vals.first().and_then(JqValue::as_f64).unwrap_or(default))
+}
+
+fn generate_range(start: f64, end: f64, step: f64) -> Vec<JqValue> {
     let mut out = Vec::new();
+    let mut i = start;
     if step > 0.0 {
-        let mut i = start;
         while i < end && out.len() < 10_000_000 {
             out.push(JqValue::Number(i));
             i += step;
         }
     } else if step < 0.0 {
-        let mut i = start;
         while i > end && out.len() < 10_000_000 {
             out.push(JqValue::Number(i));
             i += step;
         }
     }
-    Ok(out)
+    out
 }
 
 fn dispatch_array_reduce(
@@ -3721,67 +3870,70 @@ fn dispatch_object_entries(
     depth: usize,
 ) -> Result<Vec<JqValue>, String> {
     match name {
-        "to_entries" => match input {
-            JqValue::Object(pairs) => {
-                let entries: Vec<JqValue> = pairs
-                    .iter()
-                    .map(|(k, v)| {
-                        JqValue::Object(vec![
-                            ("key".into(), JqValue::String(k.clone())),
-                            ("value".into(), v.clone()),
-                        ])
-                    })
-                    .collect();
-                Ok(vec![JqValue::Array(entries)])
-            }
-            _ => Err(format!("{} has no entries", input.type_name())),
-        },
-
+        "to_entries" => to_entries_impl(input),
         "from_entries" => from_entries_impl(input),
-
         "with_entries" => {
             if args.len() != 1 {
                 return Err("with_entries requires 1 argument".into());
             }
             with_entries_impl(args, input, env, depth)
         }
-
         _ => Err(format!("{name}/0 is not defined")),
     }
 }
 
+fn to_entries_impl(input: &JqValue) -> Result<Vec<JqValue>, String> {
+    let JqValue::Object(pairs) = input else {
+        return Err(format!("{} has no entries", input.type_name()));
+    };
+    let entries = pairs.iter().map(|(k, v)| make_entry(k, v)).collect();
+    Ok(vec![JqValue::Array(entries)])
+}
+
+fn make_entry(key: &str, value: &JqValue) -> JqValue {
+    JqValue::Object(vec![
+        ("key".into(), JqValue::String(key.to_string())),
+        ("value".into(), value.clone()),
+    ])
+}
+
 fn from_entries_impl(input: &JqValue) -> Result<Vec<JqValue>, String> {
-    match input {
-        JqValue::Array(arr) => {
-            let mut pairs = Vec::new();
-            for item in arr {
-                let key = match item {
-                    JqValue::Object(p) => {
-                        let k = p
-                            .iter()
-                            .find(|(k, _)| k == "key" || k == "name")
-                            .map_or(JqValue::Null, |(_, v)| v.clone());
-                        match k {
-                            JqValue::String(s) => s,
-                            JqValue::Number(n) => format_number(n),
-                            _ => k.to_string_repr(),
-                        }
-                    }
-                    _ => continue,
-                };
-                let val = match item {
-                    JqValue::Object(p) => p
-                        .iter()
-                        .find(|(k, _)| k == "value")
-                        .map_or(JqValue::Null, |(_, v)| v.clone()),
-                    _ => JqValue::Null,
-                };
-                pairs.push((key, val));
-            }
-            Ok(vec![JqValue::Object(pairs)])
-        }
-        _ => Err(format!("cannot from_entries on {}", input.type_name())),
+    let JqValue::Array(arr) = input else {
+        return Err(format!("cannot from_entries on {}", input.type_name()));
+    };
+    let mut pairs = Vec::new();
+    for item in arr {
+        let JqValue::Object(p) = item else {
+            continue;
+        };
+        let key = extract_entry_key(p);
+        let val = extract_entry_value(p);
+        pairs.push((key, val));
     }
+    Ok(vec![JqValue::Object(pairs)])
+}
+
+fn extract_entry_key(pairs: &[(String, JqValue)]) -> String {
+    let k = pairs
+        .iter()
+        .find(|(k, _)| k == "key" || k == "name")
+        .map_or(JqValue::Null, |(_, v)| v.clone());
+    jq_value_to_key_string(k)
+}
+
+fn jq_value_to_key_string(v: JqValue) -> String {
+    match v {
+        JqValue::String(s) => s,
+        JqValue::Number(n) => format_number(n),
+        other => other.to_string_repr(),
+    }
+}
+
+fn extract_entry_value(pairs: &[(String, JqValue)]) -> JqValue {
+    pairs
+        .iter()
+        .find(|(k, _)| k == "value")
+        .map_or(JqValue::Null, |(_, v)| v.clone())
 }
 
 fn with_entries_impl(
@@ -3790,52 +3942,44 @@ fn with_entries_impl(
     env: &JqEnv,
     depth: usize,
 ) -> Result<Vec<JqValue>, String> {
-    match input {
-        JqValue::Object(pairs) => {
-            let entries: Vec<JqValue> = pairs
-                .iter()
-                .map(|(k, v)| {
-                    JqValue::Object(vec![
-                        ("key".into(), JqValue::String(k.clone())),
-                        ("value".into(), v.clone()),
-                    ])
-                })
-                .collect();
-            let mut mapped = Vec::new();
-            for entry in &entries {
-                match apply_filter(&args[0], entry, env, depth + 1) {
-                    Ok(vals) => mapped.extend(vals),
-                    Err(e) if e == EMPTY_SIGNAL => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            let result_pairs = collect_entry_pairs(&mapped);
-            Ok(vec![JqValue::Object(result_pairs)])
+    let JqValue::Object(pairs) = input else {
+        return Err(format!("cannot with_entries on {}", input.type_name()));
+    };
+    let entries: Vec<JqValue> = pairs.iter().map(|(k, v)| make_entry(k, v)).collect();
+    let mapped = map_entries_filter(&entries, &args[0], env, depth)?;
+    let result_pairs = collect_entry_pairs(&mapped);
+    Ok(vec![JqValue::Object(result_pairs)])
+}
+
+fn map_entries_filter(
+    entries: &[JqValue],
+    filter: &JqFilter,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let mut mapped = Vec::new();
+    for entry in entries {
+        match apply_filter(filter, entry, env, depth + 1) {
+            Ok(vals) => mapped.extend(vals),
+            Err(e) if e == EMPTY_SIGNAL => {}
+            Err(e) => return Err(e),
         }
-        _ => Err(format!("cannot with_entries on {}", input.type_name())),
     }
+    Ok(mapped)
 }
 
 fn collect_entry_pairs(mapped: &[JqValue]) -> Vec<(String, JqValue)> {
-    let mut result_pairs = Vec::new();
-    for item in mapped {
-        if let JqValue::Object(p) = item {
-            let k = p
-                .iter()
-                .find(|(k, _)| k == "key" || k == "name")
-                .map_or(JqValue::Null, |(_, v)| v.clone());
-            let key = match k {
-                JqValue::String(s) => s,
-                other => other.to_string_repr(),
+    mapped
+        .iter()
+        .filter_map(|item| {
+            let JqValue::Object(p) = item else {
+                return None;
             };
-            let val = p
-                .iter()
-                .find(|(k, _)| k == "value")
-                .map_or(JqValue::Null, |(_, v)| v.clone());
-            result_pairs.push((key, val));
-        }
-    }
-    result_pairs
+            let key = extract_entry_key(p);
+            let val = extract_entry_value(p);
+            Some((key, val))
+        })
+        .collect()
 }
 
 fn dispatch_path_access(
@@ -3846,40 +3990,57 @@ fn dispatch_path_access(
     depth: usize,
 ) -> Result<Vec<JqValue>, String> {
     match name {
-        "path" => {
-            if args.len() != 1 {
-                return Err("path requires 1 argument".into());
-            }
-            let paths = compute_paths(&args[0], input, env, depth)?;
-            Ok(paths.into_iter().map(path_segs_to_value).collect())
-        }
-
-        "getpath" => {
-            if args.len() != 1 {
-                return Err("getpath requires 1 argument".into());
-            }
-            let path_vals = apply_filter(&args[0], input, env, depth + 1)?;
-            let path_arr = path_vals.into_iter().next().unwrap_or(JqValue::Null);
-            Ok(resolve_getpath(input, &path_arr))
-        }
-
-        "setpath" => {
-            if args.len() != 2 {
-                return Err("setpath requires 2 arguments".into());
-            }
-            let path_vals = apply_filter(&args[0], input, env, depth + 1)?;
-            let path_arr = path_vals.into_iter().next().unwrap_or(JqValue::Null);
-            let val_vals = apply_filter(&args[1], input, env, depth + 1)?;
-            let val = val_vals.into_iter().next().unwrap_or(JqValue::Null);
-            if let JqValue::Array(segments) = path_arr {
-                Ok(vec![set_path(input, &segments, &val)])
-            } else {
-                Ok(vec![input.clone()])
-            }
-        }
-
+        "path" => apply_path_func(args, input, env, depth),
+        "getpath" => apply_getpath(args, input, env, depth),
+        "setpath" => apply_setpath(args, input, env, depth),
         _ => Err(format!("{name}/0 is not defined")),
     }
+}
+
+fn apply_path_func(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.len() != 1 {
+        return Err("path requires 1 argument".into());
+    }
+    let paths = compute_paths(&args[0], input, env, depth)?;
+    Ok(paths.into_iter().map(path_segs_to_value).collect())
+}
+
+fn apply_getpath(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.len() != 1 {
+        return Err("getpath requires 1 argument".into());
+    }
+    let path_vals = apply_filter(&args[0], input, env, depth + 1)?;
+    let path_arr = path_vals.into_iter().next().unwrap_or(JqValue::Null);
+    Ok(resolve_getpath(input, &path_arr))
+}
+
+fn apply_setpath(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.len() != 2 {
+        return Err("setpath requires 2 arguments".into());
+    }
+    let path_vals = apply_filter(&args[0], input, env, depth + 1)?;
+    let path_arr = path_vals.into_iter().next().unwrap_or(JqValue::Null);
+    let val_vals = apply_filter(&args[1], input, env, depth + 1)?;
+    let val = val_vals.into_iter().next().unwrap_or(JqValue::Null);
+    let JqValue::Array(segments) = path_arr else {
+        return Ok(vec![input.clone()]);
+    };
+    Ok(vec![set_path(input, &segments, &val)])
 }
 
 fn resolve_getpath(input: &JqValue, path_arr: &JqValue) -> Vec<JqValue> {
@@ -3957,29 +4118,26 @@ fn path_segs_to_value(segs: Vec<PathSeg>) -> JqValue {
 }
 
 fn dispatch_math_basic(name: &str, input: &JqValue) -> Result<Vec<JqValue>, String> {
-    match name {
-        "floor" => match input {
-            JqValue::Number(n) => Ok(vec![JqValue::Number(n.floor())]),
-            _ => Err(format!("cannot floor {}", input.type_name())),
-        },
-        "ceil" => match input {
-            JqValue::Number(n) => Ok(vec![JqValue::Number(n.ceil())]),
-            _ => Err(format!("cannot ceil {}", input.type_name())),
-        },
-        "round" => match input {
-            JqValue::Number(n) => Ok(vec![JqValue::Number(n.round())]),
-            _ => Err(format!("cannot round {}", input.type_name())),
-        },
-        "fabs" => match input {
-            JqValue::Number(n) => Ok(vec![JqValue::Number(n.abs())]),
-            _ => Err(format!("cannot fabs {}", input.type_name())),
-        },
-        "sqrt" => match input {
-            JqValue::Number(n) => Ok(vec![JqValue::Number(n.sqrt())]),
-            _ => Err(format!("cannot sqrt {}", input.type_name())),
-        },
-        _ => Err(format!("{name}/0 is not defined")),
-    }
+    let op: fn(f64) -> f64 = match name {
+        "floor" => f64::floor,
+        "ceil" => f64::ceil,
+        "round" => f64::round,
+        "fabs" => f64::abs,
+        "sqrt" => f64::sqrt,
+        _ => return Err(format!("{name}/0 is not defined")),
+    };
+    apply_num_unary(name, input, op)
+}
+
+fn apply_num_unary(
+    name: &str,
+    input: &JqValue,
+    op: fn(f64) -> f64,
+) -> Result<Vec<JqValue>, String> {
+    let JqValue::Number(n) = input else {
+        return Err(format!("cannot {name} {}", input.type_name()));
+    };
+    Ok(vec![JqValue::Number(op(*n))])
 }
 
 fn dispatch_math_advanced(
@@ -3992,40 +4150,41 @@ fn dispatch_math_advanced(
     match name {
         "infinite" => Ok(vec![JqValue::Number(f64::INFINITY)]),
         "nan" => Ok(vec![JqValue::Number(f64::NAN)]),
-
-        "isinfinite" => match input {
-            JqValue::Number(n) => Ok(vec![JqValue::Bool(n.is_infinite())]),
-            _ => Ok(vec![JqValue::Bool(false)]),
-        },
-        "isnan" => match input {
-            JqValue::Number(n) => Ok(vec![JqValue::Bool(n.is_nan())]),
-            _ => Ok(vec![JqValue::Bool(false)]),
-        },
-        "isnormal" => match input {
-            JqValue::Number(n) => Ok(vec![JqValue::Bool(n.is_normal())]),
-            _ => Ok(vec![JqValue::Bool(false)]),
-        },
-        "isfinite" => match input {
-            JqValue::Number(n) => Ok(vec![JqValue::Bool(n.is_finite())]),
-            _ => Ok(vec![JqValue::Bool(false)]),
-        },
-
-        "pow" => {
-            if args.len() != 2 {
-                return Err("pow requires 2 arguments".into());
-            }
-            let base_vals = apply_filter(&args[0], input, env, depth + 1)?;
-            let exp_vals = apply_filter(&args[1], input, env, depth + 1)?;
-            let base = base_vals.first().and_then(JqValue::as_f64).unwrap_or(0.0);
-            let exp = exp_vals.first().and_then(JqValue::as_f64).unwrap_or(0.0);
-            Ok(vec![JqValue::Number(base.powf(exp))])
-        }
-
+        "isinfinite" | "isnan" | "isnormal" | "isfinite" => dispatch_math_predicate(name, input),
+        "pow" => apply_pow(args, input, env, depth),
         "log" | "log2" | "log10" => apply_log_op(name, input),
         "exp" | "exp2" | "exp10" => apply_exp_op(name, input),
-
         _ => Err(format!("{name}/0 is not defined")),
     }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn dispatch_math_predicate(name: &str, input: &JqValue) -> Result<Vec<JqValue>, String> {
+    let JqValue::Number(n) = input else {
+        return Ok(vec![JqValue::Bool(false)]);
+    };
+    let result = match name {
+        "isinfinite" => n.is_infinite(),
+        "isnan" => n.is_nan(),
+        "isnormal" => n.is_normal(),
+        "isfinite" => n.is_finite(),
+        _ => false,
+    };
+    Ok(vec![JqValue::Bool(result)])
+}
+
+fn apply_pow(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.len() != 2 {
+        return Err("pow requires 2 arguments".into());
+    }
+    let base = eval_filter_f64(&args[0], input, env, depth, 0.0)?;
+    let exp = eval_filter_f64(&args[1], input, env, depth, 0.0)?;
+    Ok(vec![JqValue::Number(base.powf(exp))])
 }
 
 fn apply_log_op(name: &str, input: &JqValue) -> Result<Vec<JqValue>, String> {
@@ -4238,29 +4397,27 @@ fn search_regex_match(text: &str, pat: &str, anchored_end: bool) -> Vec<(usize, 
 
 fn regex_match_at(text: &str, pattern: &str, pos: usize) -> Option<usize> {
     let pat_bytes = pattern.as_bytes();
-
     if pos >= pat_bytes.len() {
         return Some(0);
     }
-
     let (element, element_len) = parse_regex_element(pat_bytes, pos);
-    let has_quantifier = pos + element_len < pat_bytes.len();
-    let quantifier = if has_quantifier {
-        pat_bytes[pos + element_len]
-    } else {
-        0
-    };
-
-    let is_quantifier = quantifier == b'*' || quantifier == b'+' || quantifier == b'?';
-    let rest_pos = if is_quantifier {
-        pos + element_len + 1
-    } else {
-        pos + element_len
-    };
-    if is_quantifier {
+    let (quantifier, rest_pos) = detect_quantifier(pat_bytes, pos + element_len);
+    if quantifier != 0 {
         return regex_match_quantified(text, pattern, rest_pos, &element, quantifier);
     }
     regex_match_single(text, pattern, rest_pos, &element)
+}
+
+fn detect_quantifier(pat_bytes: &[u8], after_elem: usize) -> (u8, usize) {
+    if after_elem >= pat_bytes.len() {
+        return (0, after_elem);
+    }
+    let c = pat_bytes[after_elem];
+    if c == b'*' || c == b'+' || c == b'?' {
+        (c, after_elem + 1)
+    } else {
+        (0, after_elem)
+    }
 }
 
 fn regex_match_quantified(
@@ -4270,18 +4427,36 @@ fn regex_match_quantified(
     element: &RegexElement,
     quantifier: u8,
 ) -> Option<usize> {
-    let text_bytes = text.as_bytes();
     let min = usize::from(quantifier == b'+');
     let max = if quantifier == b'?' { 1 } else { usize::MAX };
+    let (count, text_pos) = greedy_consume(text, element, max);
+    backtrack_match(text, pattern, rest_pos, count, text_pos, min)
+}
+
+/// Greedily consume as many characters as possible matching `element`.
+fn greedy_consume(text: &str, element: &RegexElement, max: usize) -> (usize, usize) {
+    let text_bytes = text.as_bytes();
     let mut count = 0;
-    let mut text_pos = 0;
-    while count < max && text_pos < text_bytes.len() {
-        if !matches_element(element, text_bytes, text_pos) {
+    let mut pos = 0;
+    while count < max && pos < text_bytes.len() {
+        if !matches_element(element, text_bytes, pos) {
             break;
         }
-        text_pos += char_len_at(text, text_pos);
+        pos += char_len_at(text, pos);
         count += 1;
     }
+    (count, pos)
+}
+
+/// Backtrack from the greedy match to find a valid match for the rest of the pattern.
+fn backtrack_match(
+    text: &str,
+    pattern: &str,
+    rest_pos: usize,
+    mut count: usize,
+    mut text_pos: usize,
+    min: usize,
+) -> Option<usize> {
     while count >= min {
         if let Some(rest_len) = regex_match_at(&text[text_pos..], pattern, rest_pos) {
             return Some(text_pos + rest_len);
@@ -4398,26 +4573,33 @@ fn matches_element(elem: &RegexElement, text: &[u8], pos: usize) -> bool {
     if pos >= text.len() {
         return matches!(elem, RegexElement::Empty);
     }
-    let c = text[pos];
+    matches_element_char(elem, text[pos])
+}
+
+fn matches_element_char(elem: &RegexElement, c: u8) -> bool {
     match elem {
         RegexElement::Literal(expected) => c == *expected,
         RegexElement::Dot => c != b'\n',
+        RegexElement::CharClass(ranges, negated) => matches_char_class(c, ranges, *negated),
+        _ => matches_element_class(elem, c),
+    }
+}
+
+fn matches_element_class(elem: &RegexElement, c: u8) -> bool {
+    match elem {
         RegexElement::Digit => c.is_ascii_digit(),
         RegexElement::Word => c.is_ascii_alphanumeric() || c == b'_',
         RegexElement::Space => c.is_ascii_whitespace(),
         RegexElement::NotDigit => !c.is_ascii_digit(),
         RegexElement::NotWord => !(c.is_ascii_alphanumeric() || c == b'_'),
         RegexElement::NotSpace => !c.is_ascii_whitespace(),
-        RegexElement::CharClass(ranges, negated) => {
-            let in_class = ranges.iter().any(|(lo, hi)| c >= *lo && c <= *hi);
-            if *negated {
-                !in_class
-            } else {
-                in_class
-            }
-        }
-        RegexElement::Empty => false,
+        _ => false,
     }
+}
+
+fn matches_char_class(c: u8, ranges: &[(u8, u8)], negated: bool) -> bool {
+    let in_class = ranges.iter().any(|(lo, hi)| c >= *lo && c <= *hi);
+    in_class != negated
 }
 
 fn char_len_at(text: &str, byte_pos: usize) -> usize {
@@ -4426,6 +4608,18 @@ fn char_len_at(text: &str, byte_pos: usize) -> usize {
 
 fn char_len_back(text: &str, byte_pos: usize) -> usize {
     text[..byte_pos].chars().last().map_or(1, char::len_utf8)
+}
+
+struct RegexReplaceState<'a> {
+    text: &'a str,
+    search_text: String,
+    clean_pat: &'a str,
+    replacement: &'a str,
+    anchored_start: bool,
+    anchored_end: bool,
+    global: bool,
+    result: String,
+    pos: usize,
 }
 
 fn simple_regex_replace(
@@ -4438,39 +4632,61 @@ fn simple_regex_replace(
     let (search_text, pat) = regex_case_inputs(text, pattern, case_insensitive);
     let (clean_pat, anchored_start, anchored_end) = split_regex_anchors(&pat);
 
-    let mut result = String::new();
-    let mut pos = 0;
+    let mut state = RegexReplaceState {
+        text,
+        search_text,
+        clean_pat,
+        replacement,
+        anchored_start,
+        anchored_end,
+        global,
+        result: String::new(),
+        pos: 0,
+    };
 
+    regex_replace_loop(&mut state);
+    state.result
+}
+
+fn regex_replace_loop(state: &mut RegexReplaceState<'_>) {
     loop {
-        if pos > text.len() {
+        if state.pos > state.text.len() {
             break;
         }
-
-        if anchored_start && pos > 0 {
-            result.push_str(&text[pos..]);
+        if state.anchored_start && state.pos > 0 {
+            state.result.push_str(&state.text[state.pos..]);
             break;
         }
-
-        let found =
-            find_next_regex_replace_match(&search_text, clean_pat, pos, anchored_end, text.len());
-
-        if let Some((match_start, match_len)) = found {
-            result.push_str(&text[pos..match_start]);
-            result.push_str(replacement);
-            pos = match_start + match_len;
-            if !advance_zero_length_regex_match(&mut result, text, &mut pos, match_len) {
-                break;
-            }
-            if !global {
-                result.push_str(&text[pos..]);
-                return result;
-            }
-        } else {
-            result.push_str(&text[pos..]);
+        if !regex_replace_step(state) {
             break;
         }
     }
-    result
+}
+
+/// Process one replacement step. Returns `false` to stop the loop.
+fn regex_replace_step(state: &mut RegexReplaceState<'_>) -> bool {
+    let found = find_next_regex_replace_match(
+        &state.search_text,
+        state.clean_pat,
+        state.pos,
+        state.anchored_end,
+        state.text.len(),
+    );
+    let Some((match_start, match_len)) = found else {
+        state.result.push_str(&state.text[state.pos..]);
+        return false;
+    };
+    state.result.push_str(&state.text[state.pos..match_start]);
+    state.result.push_str(state.replacement);
+    state.pos = match_start + match_len;
+    if !advance_zero_length_regex_match(&mut state.result, state.text, &mut state.pos, match_len) {
+        return false;
+    }
+    if !state.global {
+        state.result.push_str(&state.text[state.pos..]);
+        return false;
+    }
+    true
 }
 
 fn find_next_regex_replace_match(
@@ -4617,32 +4833,30 @@ fn collect_all_paths(val: &JqValue, prefix: &[PathSeg], out: &mut Vec<Vec<PathSe
 
 fn gather_leaf_paths(val: &JqValue, prefix: &[PathSeg]) -> Vec<Vec<PathSeg>> {
     match val {
-        JqValue::Array(arr) => {
-            if arr.is_empty() {
-                return vec![prefix.to_vec()];
-            }
-            let mut out = Vec::new();
-            for (i, v) in arr.iter().enumerate() {
-                let mut p = prefix.to_vec();
-                p.push(PathSeg::Index(i));
-                out.extend(gather_leaf_paths(v, &p));
-            }
-            out
-        }
-        JqValue::Object(pairs) => {
-            if pairs.is_empty() {
-                return vec![prefix.to_vec()];
-            }
-            let mut out = Vec::new();
-            for (k, v) in pairs {
-                let mut p = prefix.to_vec();
-                p.push(PathSeg::Key(k.clone()));
-                out.extend(gather_leaf_paths(v, &p));
-            }
-            out
-        }
+        JqValue::Array(arr) if !arr.is_empty() => gather_leaf_paths_indexed(arr, prefix),
+        JqValue::Object(pairs) if !pairs.is_empty() => gather_leaf_paths_keyed(pairs, prefix),
         _ => vec![prefix.to_vec()],
     }
+}
+
+fn gather_leaf_paths_indexed(arr: &[JqValue], prefix: &[PathSeg]) -> Vec<Vec<PathSeg>> {
+    let mut out = Vec::new();
+    for (i, v) in arr.iter().enumerate() {
+        let mut p = prefix.to_vec();
+        p.push(PathSeg::Index(i));
+        out.extend(gather_leaf_paths(v, &p));
+    }
+    out
+}
+
+fn gather_leaf_paths_keyed(pairs: &[(String, JqValue)], prefix: &[PathSeg]) -> Vec<Vec<PathSeg>> {
+    let mut out = Vec::new();
+    for (k, v) in pairs {
+        let mut p = prefix.to_vec();
+        p.push(PathSeg::Key(k.clone()));
+        out.extend(gather_leaf_paths(v, &p));
+    }
+    out
 }
 
 fn set_path(val: &JqValue, path: &[JqValue], new_val: &JqValue) -> JqValue {
@@ -4652,41 +4866,42 @@ fn set_path(val: &JqValue, path: &[JqValue], new_val: &JqValue) -> JqValue {
     let seg = &path[0];
     let rest = &path[1..];
     match seg {
-        JqValue::String(key) => {
-            let mut pairs = if let JqValue::Object(p) = val {
-                p.clone()
-            } else {
-                Vec::new()
-            };
-            let existing = pairs.iter().position(|(k, _)| k == key);
-            let inner = existing.map_or(JqValue::Null, |i| pairs[i].1.clone());
-            let new_inner = set_path(&inner, rest, new_val);
-            if let Some(i) = existing {
-                pairs[i].1 = new_inner;
-            } else {
-                pairs.push((key.clone(), new_inner));
-            }
-            JqValue::Object(pairs)
-        }
-        JqValue::Number(n) => {
-            let idx = *n as usize;
-            if idx > 1_000_000 {
-                return val.clone(); // Refuse to allocate huge arrays
-            }
-            let mut arr = if let JqValue::Array(a) = val {
-                a.clone()
-            } else {
-                Vec::new()
-            };
-            while arr.len() <= idx {
-                arr.push(JqValue::Null);
-            }
-            let inner = arr[idx].clone();
-            arr[idx] = set_path(&inner, rest, new_val);
-            JqValue::Array(arr)
-        }
+        JqValue::String(key) => set_path_object(val, key, rest, new_val),
+        JqValue::Number(n) => set_path_array(val, *n as usize, rest, new_val),
         _ => val.clone(),
     }
+}
+
+fn set_path_object(val: &JqValue, key: &str, rest: &[JqValue], new_val: &JqValue) -> JqValue {
+    let mut pairs = match val {
+        JqValue::Object(p) => p.clone(),
+        _ => Vec::new(),
+    };
+    let existing = pairs.iter().position(|(k, _)| k == key);
+    let inner = existing.map_or(JqValue::Null, |i| pairs[i].1.clone());
+    let new_inner = set_path(&inner, rest, new_val);
+    if let Some(i) = existing {
+        pairs[i].1 = new_inner;
+    } else {
+        pairs.push((key.to_string(), new_inner));
+    }
+    JqValue::Object(pairs)
+}
+
+fn set_path_array(val: &JqValue, idx: usize, rest: &[JqValue], new_val: &JqValue) -> JqValue {
+    if idx > 1_000_000 {
+        return val.clone();
+    }
+    let mut arr = match val {
+        JqValue::Array(a) => a.clone(),
+        _ => Vec::new(),
+    };
+    while arr.len() <= idx {
+        arr.push(JqValue::Null);
+    }
+    let inner = arr[idx].clone();
+    arr[idx] = set_path(&inner, rest, new_val);
+    JqValue::Array(arr)
 }
 
 fn del_path(val: &JqValue, path: &[JqValue]) -> JqValue {
@@ -4777,40 +4992,43 @@ fn apply_csv_format(input: &JqValue) -> Result<Vec<JqValue>, String> {
     let JqValue::Array(arr) = input else {
         return Err("@csv requires array input".into());
     };
-    let mut out = String::new();
-    for (i, v) in arr.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        match v {
-            JqValue::String(s) => {
-                out.push('"');
-                out.push_str(&s.replace('"', "\"\""));
-                out.push('"');
-            }
-            JqValue::Null => {}
-            other => out.push_str(&other.to_string_repr()),
-        }
-    }
-    Ok(vec![JqValue::String(out)])
+    let formatted = format_delimited(arr, ',', csv_format_value);
+    Ok(vec![JqValue::String(formatted)])
 }
 
 fn apply_tsv_format(input: &JqValue) -> Result<Vec<JqValue>, String> {
     let JqValue::Array(arr) = input else {
         return Err("@tsv requires array input".into());
     };
+    let formatted = format_delimited(arr, '\t', tsv_format_value);
+    Ok(vec![JqValue::String(formatted)])
+}
+
+fn format_delimited(arr: &[JqValue], sep: char, fmt: fn(&JqValue) -> String) -> String {
     let mut out = String::new();
     for (i, v) in arr.iter().enumerate() {
         if i > 0 {
-            out.push('\t');
+            out.push(sep);
         }
-        match v {
-            JqValue::String(s) => out.push_str(&tsv_escape(s)),
-            JqValue::Null => {}
-            other => out.push_str(&other.to_string_repr()),
-        }
+        out.push_str(&fmt(v));
     }
-    Ok(vec![JqValue::String(out)])
+    out
+}
+
+fn csv_format_value(v: &JqValue) -> String {
+    match v {
+        JqValue::String(s) => format!("\"{}\"", s.replace('"', "\"\"")),
+        JqValue::Null => String::new(),
+        other => other.to_string_repr(),
+    }
+}
+
+fn tsv_format_value(v: &JqValue) -> String {
+    match v {
+        JqValue::String(s) => tsv_escape(s),
+        JqValue::Null => String::new(),
+        other => other.to_string_repr(),
+    }
 }
 
 fn tsv_escape(s: &str) -> String {
@@ -4960,43 +5178,42 @@ fn b64_val(c: u8) -> Option<u8> {
 // Main entry point
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::struct_excessive_bools)]
+struct JqOpts {
+    raw_output: bool,
+    exit_status: bool,
+    compact: bool,
+    null_input: bool,
+    slurp: bool,
+    jq_vars: Vec<(String, JqValue)>,
+}
+
+impl JqOpts {
+    fn new() -> Self {
+        Self {
+            raw_output: false,
+            exit_status: false,
+            compact: false,
+            null_input: false,
+            slurp: false,
+            jq_vars: Vec::new(),
+        }
+    }
+}
+
 pub(crate) fn util_jq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut args = &argv[1..];
-    let mut raw_output = false;
-    let mut exit_status = false;
-    let mut compact = false;
-    let mut null_input = false;
-    let mut slurp = false;
-    let mut jq_vars: Vec<(String, JqValue)> = Vec::new();
-    let mut filter_str = None;
+    let mut opts = JqOpts::new();
 
     while let Some(&arg) = args.first() {
-        let parsed = match parse_jq_option(
-            ctx,
-            &mut args,
-            &mut raw_output,
-            &mut exit_status,
-            &mut compact,
-            &mut null_input,
-            &mut slurp,
-            &mut jq_vars,
-            arg,
-        ) {
-            Ok(parsed) => parsed,
+        match parse_jq_option(ctx, &mut args, &mut opts, arg) {
+            Ok(true) => {}
+            Ok(false) => break,
             Err(code) => return code,
-        };
-        if !parsed {
-            break;
         }
     }
 
-    if let Some(&f) = args.first() {
-        filter_str = Some(f);
-        args = &args[1..];
-    }
-
-    let Some(filter_str) = filter_str else {
+    let Some((filter_str, file_args)) = extract_filter_arg(&mut args) else {
         ctx.output.stderr(b"jq: no filter provided\n");
         return 1;
     };
@@ -5010,86 +5227,86 @@ pub(crate) fn util_jq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     };
 
+    run_jq_pipeline(ctx, &opts, &filter, file_args)
+}
+
+fn extract_filter_arg<'a>(args: &mut &'a [&'a str]) -> Option<(&'a str, &'a [&'a str])> {
+    let &f = args.first()?;
+    *args = &args[1..];
+    Some((f, args))
+}
+
+fn run_jq_pipeline(
+    ctx: &mut UtilContext<'_>,
+    opts: &JqOpts,
+    filter: &JqFilter,
+    file_args: &[&str],
+) -> i32 {
     let mut env = JqEnv::new();
-    for (name, val) in &jq_vars {
+    for (name, val) in &opts.jq_vars {
         env.vars.insert(name.clone(), val.clone());
     }
 
-    let file_args = args;
-    let input_texts = match collect_jq_input_texts(ctx, file_args, null_input) {
+    let input_texts = match collect_jq_input_texts(ctx, file_args, opts.null_input) {
         Ok(texts) => texts,
         Err(code) => return code,
     };
 
-    let json_values = match parse_jq_input_values(ctx, &input_texts, null_input) {
+    let json_values = match parse_jq_input_values(ctx, &input_texts, opts.null_input) {
         Ok(values) => values,
         Err(code) => return code,
     };
 
-    let inputs = if slurp {
+    let inputs = if opts.slurp {
         vec![JqValue::Array(json_values)]
     } else {
         json_values
     };
 
     let (status, had_output, last_value) =
-        execute_jq_inputs(ctx, &inputs, &filter, &env, raw_output, compact);
-    finalize_jq_status(exit_status, status, had_output, last_value.as_ref())
+        execute_jq_inputs(ctx, &inputs, filter, &env, opts.raw_output, opts.compact);
+    finalize_jq_status(opts.exit_status, status, had_output, last_value.as_ref())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn parse_jq_option(
     ctx: &mut UtilContext<'_>,
     args: &mut &[&str],
-    raw_output: &mut bool,
-    exit_status: &mut bool,
-    compact: &mut bool,
-    null_input: &mut bool,
-    slurp: &mut bool,
-    jq_vars: &mut Vec<(String, JqValue)>,
+    opts: &mut JqOpts,
     arg: &str,
 ) -> Result<bool, i32> {
     match arg {
         "-r" | "--raw-output" | "-j" | "--join-output" => {
-            *raw_output = true;
+            opts.raw_output = true;
             *args = &args[1..];
             Ok(true)
         }
         "-e" | "--exit-status" => {
-            *exit_status = true;
+            opts.exit_status = true;
             *args = &args[1..];
             Ok(true)
         }
         "-c" | "--compact-output" => {
-            *compact = true;
+            opts.compact = true;
             *args = &args[1..];
             Ok(true)
         }
         "-n" | "--null-input" => {
-            *null_input = true;
+            opts.null_input = true;
             *args = &args[1..];
             Ok(true)
         }
         "-s" | "--slurp" => {
-            *slurp = true;
+            opts.slurp = true;
             *args = &args[1..];
             Ok(true)
         }
-        "--arg" => parse_jq_named_arg(ctx, args, jq_vars),
-        "--argjson" => parse_jq_named_json_arg(ctx, args, jq_vars),
+        "--arg" => parse_jq_named_arg(ctx, args, &mut opts.jq_vars),
+        "--argjson" => parse_jq_named_json_arg(ctx, args, &mut opts.jq_vars),
         "--" => {
             *args = &args[1..];
             Ok(false)
         }
-        _ if arg.starts_with('-') && arg.len() > 1 => Ok(parse_jq_short_flags(
-            args,
-            raw_output,
-            exit_status,
-            compact,
-            null_input,
-            slurp,
-            arg,
-        )),
+        _ if arg.starts_with('-') && arg.len() > 1 => Ok(parse_jq_short_flags(args, opts, arg)),
         _ => Ok(false),
     }
 }
@@ -5130,22 +5347,14 @@ fn parse_jq_named_json_arg(
     Ok(true)
 }
 
-fn parse_jq_short_flags(
-    args: &mut &[&str],
-    raw_output: &mut bool,
-    exit_status: &mut bool,
-    compact: &mut bool,
-    null_input: &mut bool,
-    slurp: &mut bool,
-    arg: &str,
-) -> bool {
+fn parse_jq_short_flags(args: &mut &[&str], opts: &mut JqOpts, arg: &str) -> bool {
     for c in arg[1..].chars() {
         match c {
-            'e' => *exit_status = true,
-            'c' => *compact = true,
-            'n' => *null_input = true,
-            's' => *slurp = true,
-            'r' | 'j' => *raw_output = true,
+            'e' => opts.exit_status = true,
+            'c' => opts.compact = true,
+            'n' => opts.null_input = true,
+            's' => opts.slurp = true,
+            'r' | 'j' => opts.raw_output = true,
             _ => return false,
         }
     }
