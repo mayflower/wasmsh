@@ -1770,357 +1770,549 @@ fn apply_filter(
     }
     match filter {
         JqFilter::Identity => Ok(vec![input.clone()]),
-
         JqFilter::Field(name) => Ok(vec![field_access(input, name)]),
-
-        JqFilter::OptionalField(name) => match input {
-            JqValue::Object(_) | JqValue::Null => Ok(vec![field_access(input, name)]),
-            _ => Ok(vec![]),
-        },
-
-        JqFilter::Index(idx_filter) => {
-            let indices = apply_filter(idx_filter, input, env, depth + 1)?;
-            let mut out = Vec::new();
-            for idx in &indices {
-                out.push(index_access(input, idx)?);
-            }
-            Ok(out)
-        }
-
-        JqFilter::OptionalIndex(idx_filter) => {
-            let indices = apply_filter(idx_filter, input, env, depth + 1)?;
-            let mut out = Vec::new();
-            for idx in &indices {
-                if let Ok(v) = index_access(input, idx) {
-                    out.push(v);
-                }
-            }
-            Ok(out)
-        }
-
-        JqFilter::Slice(from, to) => {
-            let from_val = match from {
-                Some(f) => {
-                    let vals = apply_filter(f, input, env, depth + 1)?;
-                    vals.first().and_then(JqValue::as_i64).unwrap_or(0)
-                }
-                None => 0,
-            };
-            let arr = match input {
-                JqValue::Array(a) => a,
-                JqValue::String(s) => {
-                    let len = s.chars().count() as i64;
-                    let f = normalize_index(from_val, len as usize) as usize;
-                    let t = match to {
-                        Some(t_f) => {
-                            let vals = apply_filter(t_f, input, env, depth + 1)?;
-                            let tv = vals.first().and_then(JqValue::as_i64).unwrap_or(len);
-                            normalize_index(tv, len as usize) as usize
-                        }
-                        None => len as usize,
-                    };
-                    let chars: Vec<char> = s.chars().collect();
-                    let f = f.min(chars.len());
-                    let t = t.min(chars.len());
-                    if f >= t {
-                        return Ok(vec![JqValue::String(String::new())]);
-                    }
-                    let sliced: String = chars[f..t].iter().collect();
-                    return Ok(vec![JqValue::String(sliced)]);
-                }
-                _ => return Err(format!("cannot slice {}", input.type_name())),
-            };
-            let len = arr.len();
-            let f = normalize_index(from_val, len) as usize;
-            let t = match to {
-                Some(t_f) => {
-                    let vals = apply_filter(t_f, input, env, depth + 1)?;
-                    let tv = vals.first().and_then(JqValue::as_i64).unwrap_or(len as i64);
-                    normalize_index(tv, len) as usize
-                }
-                None => len,
-            };
-            let f = f.min(len);
-            let t = t.min(len);
-            if f >= t {
-                return Ok(vec![JqValue::Array(vec![])]);
-            }
-            Ok(vec![JqValue::Array(arr[f..t].to_vec())])
-        }
-
-        JqFilter::Iterate => match input {
-            JqValue::Array(arr) => Ok(arr.clone()),
-            JqValue::Object(pairs) => Ok(pairs.iter().map(|(_, v)| v.clone()).collect()),
-            JqValue::Null => Ok(vec![]),
-            _ => Err(format!("cannot iterate over {}", input.type_name())),
-        },
-
-        JqFilter::OptionalIterate => match input {
-            JqValue::Array(arr) => Ok(arr.clone()),
-            JqValue::Object(pairs) => Ok(pairs.iter().map(|(_, v)| v.clone()).collect()),
-            _ => Ok(vec![]),
-        },
-
-        JqFilter::Pipe(left, right) => {
-            let left_vals = apply_filter(left, input, env, depth + 1)?;
-            let mut out = Vec::new();
-            for v in &left_vals {
-                let right_vals = apply_filter(right, v, env, depth + 1)?;
-                out.extend(right_vals);
-            }
-            Ok(out)
-        }
-
-        JqFilter::Comma(left, right) => {
-            let mut out = apply_filter(left, input, env, depth + 1)?;
-            out.extend(apply_filter(right, input, env, depth + 1)?);
-            Ok(out)
-        }
-
+        JqFilter::OptionalField(name) => apply_optional_field(name, input),
+        JqFilter::Index(idx_filter) => apply_index(idx_filter, input, env, depth),
+        JqFilter::OptionalIndex(idx_filter) => apply_optional_index(idx_filter, input, env, depth),
+        JqFilter::Slice(from, to) => apply_slice(from.as_deref(), to.as_deref(), input, env, depth),
+        JqFilter::Iterate => apply_iterate(input),
+        JqFilter::OptionalIterate => apply_optional_iterate(input),
+        JqFilter::Pipe(left, right) => apply_pipe(left, right, input, env, depth),
+        JqFilter::Comma(left, right) => apply_comma(left, right, input, env, depth),
         JqFilter::Literal(val) => Ok(vec![val.clone()]),
-
         JqFilter::Comparison(left, op, right) => {
-            let lvals = apply_filter(left, input, env, depth + 1)?;
-            let rvals = apply_filter(right, input, env, depth + 1)?;
-            let mut out = Vec::new();
-            for lv in &lvals {
-                for rv in &rvals {
-                    let result = match op {
-                        CompOp::Eq => lv.equals(rv),
-                        CompOp::Ne => !lv.equals(rv),
-                        CompOp::Lt => lv.compare(rv) == Some(std::cmp::Ordering::Less),
-                        CompOp::Le => {
-                            matches!(
-                                lv.compare(rv),
-                                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-                            )
-                        }
-                        CompOp::Gt => lv.compare(rv) == Some(std::cmp::Ordering::Greater),
-                        CompOp::Ge => {
-                            matches!(
-                                lv.compare(rv),
-                                Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-                            )
-                        }
-                    };
-                    out.push(JqValue::Bool(result));
-                }
-            }
-            Ok(out)
+            apply_comparison(left, op, right, input, env, depth)
         }
-
         JqFilter::Arithmetic(left, op, right) => {
-            let lvals = apply_filter(left, input, env, depth + 1)?;
-            let rvals = apply_filter(right, input, env, depth + 1)?;
-            let mut out = Vec::new();
-            for lv in &lvals {
-                for rv in &rvals {
-                    out.push(arith_op(lv, op, rv)?);
-                }
-            }
-            Ok(out)
+            apply_arithmetic(left, op, right, input, env, depth)
         }
-
         JqFilter::Not => Ok(vec![JqValue::Bool(!input.is_truthy())]),
-
-        JqFilter::And(left, right) => {
-            let lvals = apply_filter(left, input, env, depth + 1)?;
-            let mut out = Vec::new();
-            for lv in &lvals {
-                if !lv.is_truthy() {
-                    out.push(JqValue::Bool(false));
-                } else {
-                    let rvals = apply_filter(right, input, env, depth + 1)?;
-                    for rv in &rvals {
-                        out.push(JqValue::Bool(rv.is_truthy()));
-                    }
-                }
-            }
-            Ok(out)
-        }
-
-        JqFilter::Or(left, right) => {
-            let lvals = apply_filter(left, input, env, depth + 1)?;
-            let mut out = Vec::new();
-            for lv in &lvals {
-                if lv.is_truthy() {
-                    out.push(JqValue::Bool(true));
-                } else {
-                    let rvals = apply_filter(right, input, env, depth + 1)?;
-                    for rv in &rvals {
-                        out.push(JqValue::Bool(rv.is_truthy()));
-                    }
-                }
-            }
-            Ok(out)
-        }
-
+        JqFilter::And(left, right) => apply_and(left, right, input, env, depth),
+        JqFilter::Or(left, right) => apply_or(left, right, input, env, depth),
         JqFilter::If {
             cond,
             then_,
             elifs,
             else_,
-        } => {
-            let cond_vals = apply_filter(cond, input, env, depth + 1)?;
-            let mut out = Vec::new();
-            for cv in &cond_vals {
-                if cv.is_truthy() {
-                    out.extend(apply_filter(then_, input, env, depth + 1)?);
-                } else {
-                    let mut handled = false;
-                    for (econd, ebody) in elifs {
-                        let evals = apply_filter(econd, input, env, depth + 1)?;
-                        if evals.first().is_some_and(JqValue::is_truthy) {
-                            out.extend(apply_filter(ebody, input, env, depth + 1)?);
-                            handled = true;
-                            break;
-                        }
-                    }
-                    if !handled {
-                        if let Some(else_) = else_ {
-                            out.extend(apply_filter(else_, input, env, depth + 1)?);
-                        } else {
-                            out.push(input.clone());
-                        }
-                    }
-                }
-            }
-            Ok(out)
+        } => apply_if(cond, then_, elifs, else_.as_deref(), input, env, depth),
+        JqFilter::TryCatch { try_, catch } => {
+            apply_try_catch(try_, catch.as_deref(), input, env, depth)
         }
-
-        JqFilter::TryCatch { try_, catch } => match apply_filter(try_, input, env, depth + 1) {
-            Ok(vals) => Ok(vals),
-            Err(e) => {
-                if let Some(catch_f) = catch {
-                    let err_val = JqValue::String(e);
-                    apply_filter(catch_f, &err_val, env, depth + 1)
-                } else {
-                    Ok(vec![])
-                }
-            }
-        },
-
-        JqFilter::Alternative(left, right) => {
-            let lvals = apply_filter(left, input, env, depth + 1)?;
-            let mut out = Vec::new();
-            let mut had_truthy = false;
-            for lv in &lvals {
-                if lv.is_truthy() {
-                    out.push(lv.clone());
-                    had_truthy = true;
-                }
-            }
-            if had_truthy {
-                Ok(out)
-            } else {
-                apply_filter(right, input, env, depth + 1)
-            }
-        }
-
+        JqFilter::Alternative(left, right) => apply_alternative(left, right, input, env, depth),
         JqFilter::Reduce {
             iter,
             var,
             init,
             update,
-        } => {
-            let init_vals = apply_filter(init, input, env, depth + 1)?;
-            let mut accum = init_vals.into_iter().next().unwrap_or(JqValue::Null);
-            let items = apply_filter(iter, input, env, depth + 1)?;
-            for item in &items {
-                let new_env = env.with_var(var, item.clone());
-                let update_vals = apply_filter(update, &accum, &new_env, depth + 1)?;
-                accum = update_vals.into_iter().next().unwrap_or(JqValue::Null);
-            }
-            Ok(vec![accum])
-        }
-
+        } => apply_reduce(iter, var, init, update, input, env, depth),
         JqFilter::Foreach {
             iter,
             var,
             init,
             update,
             extract,
-        } => {
-            let init_vals = apply_filter(init, input, env, depth + 1)?;
-            let mut state = init_vals.into_iter().next().unwrap_or(JqValue::Null);
-            let items = apply_filter(iter, input, env, depth + 1)?;
-            let mut out = Vec::new();
-            for item in &items {
-                let new_env = env.with_var(var, item.clone());
-                let update_vals = apply_filter(update, &state, &new_env, depth + 1)?;
-                state = update_vals.into_iter().next().unwrap_or(JqValue::Null);
-                if let Some(ext) = extract {
-                    let ext_vals = apply_filter(ext, &state, &new_env, depth + 1)?;
-                    out.extend(ext_vals);
-                } else {
-                    out.push(state.clone());
-                }
-            }
-            Ok(out)
-        }
-
-        JqFilter::Binding { expr, var, body } => {
-            let vals = apply_filter(expr, input, env, depth + 1)?;
-            let mut out = Vec::new();
-            for v in &vals {
-                let new_env = env.with_var(var, v.clone());
-                out.extend(apply_filter(body, input, &new_env, depth + 1)?);
-            }
-            Ok(out)
-        }
-
+        } => apply_foreach(
+            iter,
+            var,
+            init,
+            update,
+            extract.as_deref(),
+            input,
+            env,
+            depth,
+        ),
+        JqFilter::Binding { expr, var, body } => apply_binding(expr, var, body, input, env, depth),
         JqFilter::FuncDef {
             name,
             args,
             body,
             rest,
-        } => {
-            let new_env = env.with_func(name, args.clone(), (**body).clone());
-            apply_filter(rest, input, &new_env, depth + 1)
-        }
-
+        } => apply_funcdef(name, args, body, rest, input, env, depth),
         JqFilter::FuncCall(name, args) => dispatch_func(name, args, input, env, depth),
-
-        JqFilter::ArrayConstruct(inner) => match apply_filter(inner, input, env, depth + 1) {
-            Ok(vals) => Ok(vec![JqValue::Array(vals)]),
-            Err(e) if e == EMPTY_SIGNAL => Ok(vec![JqValue::Array(vec![])]),
-            Err(e) => Err(e),
-        },
-
+        JqFilter::ArrayConstruct(inner) => apply_array_construct(inner, input, env, depth),
         JqFilter::ObjectConstruct(pairs) => build_object(pairs, input, env, depth),
-
-        JqFilter::Variable(name) => {
-            if name == "ENV" {
-                Ok(vec![JqValue::Object(vec![])])
-            } else if let Some(val) = env.vars.get(name) {
-                Ok(vec![val.clone()])
-            } else {
-                Err(format!("${name} is not defined"))
-            }
-        }
-
+        JqFilter::Variable(name) => apply_variable(name, env),
         JqFilter::Recurse => Ok(input.recurse_values()),
-
-        JqFilter::Label(_name, body) => match apply_filter(body, input, env, depth + 1) {
-            Ok(vals) => Ok(vals),
-            Err(e) if e == BREAK_SIGNAL => Ok(vec![]),
-            Err(e) => Err(e),
-        },
-
-        JqFilter::Negate(inner) => {
-            let vals = apply_filter(inner, input, env, depth + 1)?;
-            let mut out = Vec::new();
-            for v in &vals {
-                match v {
-                    JqValue::Number(n) => out.push(JqValue::Number(-n)),
-                    _ => return Err(format!("cannot negate {}", v.type_name())),
-                }
-            }
-            Ok(out)
-        }
-
+        JqFilter::Label(_name, body) => apply_label(body, input, env, depth),
+        JqFilter::Negate(inner) => apply_negate(inner, input, env, depth),
         JqFilter::Format(name) => apply_format(name, input),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Extracted helpers for apply_filter arms
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::unnecessary_wraps)]
+fn apply_optional_field(name: &str, input: &JqValue) -> Result<Vec<JqValue>, String> {
+    match input {
+        JqValue::Object(_) | JqValue::Null => Ok(vec![field_access(input, name)]),
+        _ => Ok(vec![]),
+    }
+}
+
+fn apply_index(
+    idx_filter: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let indices = apply_filter(idx_filter, input, env, depth + 1)?;
+    let mut out = Vec::new();
+    for idx in &indices {
+        out.push(index_access(input, idx)?);
+    }
+    Ok(out)
+}
+
+fn apply_optional_index(
+    idx_filter: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let indices = apply_filter(idx_filter, input, env, depth + 1)?;
+    let mut out = Vec::new();
+    for idx in &indices {
+        if let Ok(v) = index_access(input, idx) {
+            out.push(v);
+        }
+    }
+    Ok(out)
+}
+
+#[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+fn apply_slice(
+    from: Option<&JqFilter>,
+    to: Option<&JqFilter>,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let from_val = match from {
+        Some(f) => {
+            let vals = apply_filter(f, input, env, depth + 1)?;
+            vals.first().and_then(JqValue::as_i64).unwrap_or(0)
+        }
+        None => 0,
+    };
+    match input {
+        JqValue::String(s) => apply_slice_string(s, from_val, to, input, env, depth),
+        JqValue::Array(a) => apply_slice_array(a, from_val, to, input, env, depth),
+        _ => Err(format!("cannot slice {}", input.type_name())),
+    }
+}
+
+#[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+fn apply_slice_string(
+    s: &str,
+    from_val: i64,
+    to: Option<&JqFilter>,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let len = s.chars().count() as i64;
+    let f = normalize_index(from_val, len as usize) as usize;
+    let t = match to {
+        Some(t_f) => {
+            let vals = apply_filter(t_f, input, env, depth + 1)?;
+            let tv = vals.first().and_then(JqValue::as_i64).unwrap_or(len);
+            normalize_index(tv, len as usize) as usize
+        }
+        None => len as usize,
+    };
+    let chars: Vec<char> = s.chars().collect();
+    let f = f.min(chars.len());
+    let t = t.min(chars.len());
+    if f >= t {
+        return Ok(vec![JqValue::String(String::new())]);
+    }
+    let sliced: String = chars[f..t].iter().collect();
+    Ok(vec![JqValue::String(sliced)])
+}
+
+#[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+fn apply_slice_array(
+    arr: &[JqValue],
+    from_val: i64,
+    to: Option<&JqFilter>,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let len = arr.len();
+    let f = normalize_index(from_val, len) as usize;
+    let t = match to {
+        Some(t_f) => {
+            let vals = apply_filter(t_f, input, env, depth + 1)?;
+            let tv = vals.first().and_then(JqValue::as_i64).unwrap_or(len as i64);
+            normalize_index(tv, len) as usize
+        }
+        None => len,
+    };
+    let f = f.min(len);
+    let t = t.min(len);
+    if f >= t {
+        return Ok(vec![JqValue::Array(vec![])]);
+    }
+    Ok(vec![JqValue::Array(arr[f..t].to_vec())])
+}
+
+fn apply_iterate(input: &JqValue) -> Result<Vec<JqValue>, String> {
+    match input {
+        JqValue::Array(arr) => Ok(arr.clone()),
+        JqValue::Object(pairs) => Ok(pairs.iter().map(|(_, v)| v.clone()).collect()),
+        JqValue::Null => Ok(vec![]),
+        _ => Err(format!("cannot iterate over {}", input.type_name())),
+    }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn apply_optional_iterate(input: &JqValue) -> Result<Vec<JqValue>, String> {
+    match input {
+        JqValue::Array(arr) => Ok(arr.clone()),
+        JqValue::Object(pairs) => Ok(pairs.iter().map(|(_, v)| v.clone()).collect()),
+        _ => Ok(vec![]),
+    }
+}
+
+fn apply_pipe(
+    left: &JqFilter,
+    right: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let left_vals = apply_filter(left, input, env, depth + 1)?;
+    let mut out = Vec::new();
+    for v in &left_vals {
+        let right_vals = apply_filter(right, v, env, depth + 1)?;
+        out.extend(right_vals);
+    }
+    Ok(out)
+}
+
+fn apply_comma(
+    left: &JqFilter,
+    right: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let mut out = apply_filter(left, input, env, depth + 1)?;
+    out.extend(apply_filter(right, input, env, depth + 1)?);
+    Ok(out)
+}
+
+fn apply_comparison(
+    left: &JqFilter,
+    op: &CompOp,
+    right: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let lvals = apply_filter(left, input, env, depth + 1)?;
+    let rvals = apply_filter(right, input, env, depth + 1)?;
+    let mut out = Vec::new();
+    for lv in &lvals {
+        for rv in &rvals {
+            out.push(JqValue::Bool(eval_comparison(lv, op, rv)));
+        }
+    }
+    Ok(out)
+}
+
+fn eval_comparison(lv: &JqValue, op: &CompOp, rv: &JqValue) -> bool {
+    match op {
+        CompOp::Eq => lv.equals(rv),
+        CompOp::Ne => !lv.equals(rv),
+        CompOp::Lt => lv.compare(rv) == Some(std::cmp::Ordering::Less),
+        CompOp::Le => matches!(
+            lv.compare(rv),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        ),
+        CompOp::Gt => lv.compare(rv) == Some(std::cmp::Ordering::Greater),
+        CompOp::Ge => matches!(
+            lv.compare(rv),
+            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+        ),
+    }
+}
+
+fn apply_arithmetic(
+    left: &JqFilter,
+    op: &ArithOp,
+    right: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let lvals = apply_filter(left, input, env, depth + 1)?;
+    let rvals = apply_filter(right, input, env, depth + 1)?;
+    let mut out = Vec::new();
+    for lv in &lvals {
+        for rv in &rvals {
+            out.push(arith_op(lv, op, rv)?);
+        }
+    }
+    Ok(out)
+}
+
+fn apply_and(
+    left: &JqFilter,
+    right: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let lvals = apply_filter(left, input, env, depth + 1)?;
+    let mut out = Vec::new();
+    for lv in &lvals {
+        if !lv.is_truthy() {
+            out.push(JqValue::Bool(false));
+        } else {
+            let rvals = apply_filter(right, input, env, depth + 1)?;
+            for rv in &rvals {
+                out.push(JqValue::Bool(rv.is_truthy()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn apply_or(
+    left: &JqFilter,
+    right: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let lvals = apply_filter(left, input, env, depth + 1)?;
+    let mut out = Vec::new();
+    for lv in &lvals {
+        if lv.is_truthy() {
+            out.push(JqValue::Bool(true));
+        } else {
+            let rvals = apply_filter(right, input, env, depth + 1)?;
+            for rv in &rvals {
+                out.push(JqValue::Bool(rv.is_truthy()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn apply_if(
+    cond: &JqFilter,
+    then_: &JqFilter,
+    elifs: &[(JqFilter, JqFilter)],
+    else_: Option<&JqFilter>,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let cond_vals = apply_filter(cond, input, env, depth + 1)?;
+    let mut out = Vec::new();
+    for cv in &cond_vals {
+        if cv.is_truthy() {
+            out.extend(apply_filter(then_, input, env, depth + 1)?);
+        } else {
+            apply_if_else(elifs, else_, input, env, depth, &mut out)?;
+        }
+    }
+    Ok(out)
+}
+
+fn apply_if_else(
+    elifs: &[(JqFilter, JqFilter)],
+    else_: Option<&JqFilter>,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+    out: &mut Vec<JqValue>,
+) -> Result<(), String> {
+    for (econd, ebody) in elifs {
+        let evals = apply_filter(econd, input, env, depth + 1)?;
+        if evals.first().is_some_and(JqValue::is_truthy) {
+            out.extend(apply_filter(ebody, input, env, depth + 1)?);
+            return Ok(());
+        }
+    }
+    if let Some(else_) = else_ {
+        out.extend(apply_filter(else_, input, env, depth + 1)?);
+    } else {
+        out.push(input.clone());
+    }
+    Ok(())
+}
+
+fn apply_try_catch(
+    try_: &JqFilter,
+    catch: Option<&JqFilter>,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    match apply_filter(try_, input, env, depth + 1) {
+        Ok(vals) => Ok(vals),
+        Err(e) => {
+            if let Some(catch_f) = catch {
+                let err_val = JqValue::String(e);
+                apply_filter(catch_f, &err_val, env, depth + 1)
+            } else {
+                Ok(vec![])
+            }
+        }
+    }
+}
+
+fn apply_alternative(
+    left: &JqFilter,
+    right: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let lvals = apply_filter(left, input, env, depth + 1)?;
+    let out: Vec<JqValue> = lvals.into_iter().filter(JqValue::is_truthy).collect();
+    if out.is_empty() {
+        apply_filter(right, input, env, depth + 1)
+    } else {
+        Ok(out)
+    }
+}
+
+fn apply_reduce(
+    iter: &JqFilter,
+    var: &str,
+    init: &JqFilter,
+    update: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let init_vals = apply_filter(init, input, env, depth + 1)?;
+    let mut accum = init_vals.into_iter().next().unwrap_or(JqValue::Null);
+    let items = apply_filter(iter, input, env, depth + 1)?;
+    for item in &items {
+        let new_env = env.with_var(var, item.clone());
+        let update_vals = apply_filter(update, &accum, &new_env, depth + 1)?;
+        accum = update_vals.into_iter().next().unwrap_or(JqValue::Null);
+    }
+    Ok(vec![accum])
+}
+
+fn apply_foreach(
+    iter: &JqFilter,
+    var: &str,
+    init: &JqFilter,
+    update: &JqFilter,
+    extract: Option<&JqFilter>,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let init_vals = apply_filter(init, input, env, depth + 1)?;
+    let mut state = init_vals.into_iter().next().unwrap_or(JqValue::Null);
+    let items = apply_filter(iter, input, env, depth + 1)?;
+    let mut out = Vec::new();
+    for item in &items {
+        let new_env = env.with_var(var, item.clone());
+        let update_vals = apply_filter(update, &state, &new_env, depth + 1)?;
+        state = update_vals.into_iter().next().unwrap_or(JqValue::Null);
+        if let Some(ext) = extract {
+            let ext_vals = apply_filter(ext, &state, &new_env, depth + 1)?;
+            out.extend(ext_vals);
+        } else {
+            out.push(state.clone());
+        }
+    }
+    Ok(out)
+}
+
+fn apply_binding(
+    expr: &JqFilter,
+    var: &str,
+    body: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let vals = apply_filter(expr, input, env, depth + 1)?;
+    let mut out = Vec::new();
+    for v in &vals {
+        let new_env = env.with_var(var, v.clone());
+        out.extend(apply_filter(body, input, &new_env, depth + 1)?);
+    }
+    Ok(out)
+}
+
+fn apply_funcdef(
+    name: &str,
+    args: &[String],
+    body: &JqFilter,
+    rest: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let new_env = env.with_func(name, args.to_vec(), body.clone());
+    apply_filter(rest, input, &new_env, depth + 1)
+}
+
+fn apply_array_construct(
+    inner: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    match apply_filter(inner, input, env, depth + 1) {
+        Ok(vals) => Ok(vec![JqValue::Array(vals)]),
+        Err(e) if e == EMPTY_SIGNAL => Ok(vec![JqValue::Array(vec![])]),
+        Err(e) => Err(e),
+    }
+}
+
+fn apply_variable(name: &str, env: &JqEnv) -> Result<Vec<JqValue>, String> {
+    if name == "ENV" {
+        Ok(vec![JqValue::Object(vec![])])
+    } else if let Some(val) = env.vars.get(name) {
+        Ok(vec![val.clone()])
+    } else {
+        Err(format!("${name} is not defined"))
+    }
+}
+
+fn apply_label(
+    body: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    match apply_filter(body, input, env, depth + 1) {
+        Ok(vals) => Ok(vals),
+        Err(e) if e == BREAK_SIGNAL => Ok(vec![]),
+        Err(e) => Err(e),
+    }
+}
+
+fn apply_negate(
+    inner: &JqFilter,
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let vals = apply_filter(inner, input, env, depth + 1)?;
+    let mut out = Vec::new();
+    for v in &vals {
+        match v {
+            JqValue::Number(n) => out.push(JqValue::Number(-n)),
+            _ => return Err(format!("cannot negate {}", v.type_name())),
+        }
+    }
+    Ok(out)
 }
 
 fn field_access(input: &JqValue, name: &str) -> JqValue {
@@ -2458,95 +2650,119 @@ fn dispatch_select_map(
     depth: usize,
 ) -> Result<Vec<JqValue>, String> {
     match name {
-        "select" => {
-            if args.len() != 1 {
-                return Err("select requires 1 argument".into());
-            }
-            let cond_vals = apply_filter(&args[0], input, env, depth + 1)?;
-            if cond_vals.first().is_some_and(JqValue::is_truthy) {
-                Ok(vec![input.clone()])
-            } else {
-                Ok(vec![])
-            }
-        }
-
-        "map" => {
-            if args.len() != 1 {
-                return Err("map requires 1 argument".into());
-            }
-            match input {
-                JqValue::Array(arr) => {
-                    let mut out = Vec::new();
-                    for item in arr {
-                        match apply_filter(&args[0], item, env, depth + 1) {
-                            Ok(vals) => out.extend(vals),
-                            Err(e) if e == EMPTY_SIGNAL => {}
-                            Err(e) => return Err(e),
-                        }
-                    }
-                    Ok(vec![JqValue::Array(out)])
-                }
-                _ => Err(format!("cannot map over {}", input.type_name())),
-            }
-        }
-
-        "map_values" => {
-            if args.len() != 1 {
-                return Err("map_values requires 1 argument".into());
-            }
-            match input {
-                JqValue::Object(pairs) => {
-                    let mut out = Vec::new();
-                    for (k, v) in pairs {
-                        let vals = apply_filter(&args[0], v, env, depth + 1)?;
-                        let new_v = vals.into_iter().next().unwrap_or(JqValue::Null);
-                        out.push((k.clone(), new_v));
-                    }
-                    Ok(vec![JqValue::Object(out)])
-                }
-                JqValue::Array(arr) => {
-                    let mut out = Vec::new();
-                    for v in arr {
-                        let vals = apply_filter(&args[0], v, env, depth + 1)?;
-                        let new_v = vals.into_iter().next().unwrap_or(JqValue::Null);
-                        out.push(new_v);
-                    }
-                    Ok(vec![JqValue::Array(out)])
-                }
-                _ => Err(format!("cannot map_values over {}", input.type_name())),
-            }
-        }
-
-        "recurse" | "recurse_down" => {
-            if args.is_empty() {
-                Ok(input.recurse_values())
-            } else {
-                let mut results = vec![input.clone()];
-                let mut queue = vec![input.clone()];
-                let max_iter = 10_000;
-                let mut count = 0;
-                while let Some(item) = queue.pop() {
-                    count += 1;
-                    if count > max_iter {
-                        break;
-                    }
-                    match apply_filter(&args[0], &item, env, depth + 1) {
-                        Ok(vals) => {
-                            for v in vals {
-                                results.push(v.clone());
-                                queue.push(v);
-                            }
-                        }
-                        Err(e) if e == EMPTY_SIGNAL => {}
-                        Err(_) => break,
-                    }
-                }
-                Ok(results)
-            }
-        }
-
+        "select" => apply_select(args, input, env, depth),
+        "map" => apply_map(args, input, env, depth),
+        "map_values" => apply_map_values(args, input, env, depth),
+        "recurse" | "recurse_down" => apply_recurse(args, input, env, depth),
         _ => Err(format!("{name}/0 is not defined")),
     }
+}
+
+fn apply_select(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.len() != 1 {
+        return Err("select requires 1 argument".into());
+    }
+    let cond_vals = apply_filter(&args[0], input, env, depth + 1)?;
+    if cond_vals.first().is_some_and(JqValue::is_truthy) {
+        Ok(vec![input.clone()])
+    } else {
+        Ok(vec![])
+    }
+}
+
+fn apply_map(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.len() != 1 {
+        return Err("map requires 1 argument".into());
+    }
+    match input {
+        JqValue::Array(arr) => {
+            let mut out = Vec::new();
+            for item in arr {
+                match apply_filter(&args[0], item, env, depth + 1) {
+                    Ok(vals) => out.extend(vals),
+                    Err(e) if e == EMPTY_SIGNAL => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(vec![JqValue::Array(out)])
+        }
+        _ => Err(format!("cannot map over {}", input.type_name())),
+    }
+}
+
+fn apply_map_values(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.len() != 1 {
+        return Err("map_values requires 1 argument".into());
+    }
+    match input {
+        JqValue::Object(pairs) => {
+            let mut out = Vec::new();
+            for (k, v) in pairs {
+                let vals = apply_filter(&args[0], v, env, depth + 1)?;
+                let new_v = vals.into_iter().next().unwrap_or(JqValue::Null);
+                out.push((k.clone(), new_v));
+            }
+            Ok(vec![JqValue::Object(out)])
+        }
+        JqValue::Array(arr) => {
+            let mut out = Vec::new();
+            for v in arr {
+                let vals = apply_filter(&args[0], v, env, depth + 1)?;
+                let new_v = vals.into_iter().next().unwrap_or(JqValue::Null);
+                out.push(new_v);
+            }
+            Ok(vec![JqValue::Array(out)])
+        }
+        _ => Err(format!("cannot map_values over {}", input.type_name())),
+    }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn apply_recurse(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.is_empty() {
+        return Ok(input.recurse_values());
+    }
+    let mut results = vec![input.clone()];
+    let mut queue = vec![input.clone()];
+    let max_iter = 10_000;
+    let mut count = 0;
+    while let Some(item) = queue.pop() {
+        count += 1;
+        if count > max_iter {
+            break;
+        }
+        match apply_filter(&args[0], &item, env, depth + 1) {
+            Ok(vals) => {
+                for v in vals {
+                    results.push(v.clone());
+                    queue.push(v);
+                }
+            }
+            Err(e) if e == EMPTY_SIGNAL => {}
+            Err(_) => break,
+        }
+    }
+    Ok(results)
 }
 
 fn dispatch_entry_ops(name: &str, input: &JqValue) -> Result<Vec<JqValue>, String> {
@@ -2681,143 +2897,166 @@ fn dispatch_string_match(
     depth: usize,
 ) -> Result<Vec<JqValue>, String> {
     match name {
-        "test" | "match" | "capture" => {
-            if args.is_empty() {
-                return Err(format!("{name} requires at least 1 argument"));
-            }
-            let pat_vals = apply_filter(&args[0], input, env, depth + 1)?;
-            let pat = pat_vals
-                .first()
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let flags = if args.len() > 1 {
-                let flag_vals = apply_filter(&args[1], input, env, depth + 1)?;
-                flag_vals
-                    .first()
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string()
-            } else {
-                String::new()
-            };
-            let case_insensitive = flags.contains('i');
-            match input {
-                JqValue::String(s) => apply_regex_op(name, s, &pat, case_insensitive),
-                _ => Err(format!("{name} requires string input")),
-            }
-        }
-
-        "startswith" => {
-            if args.len() != 1 {
-                return Err("startswith requires 1 argument".into());
-            }
-            let prefix_vals = apply_filter(&args[0], input, env, depth + 1)?;
-            let prefix = prefix_vals
-                .first()
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            match input {
-                JqValue::String(s) => Ok(vec![JqValue::Bool(s.starts_with(prefix.as_str()))]),
-                _ => Err("startswith requires string input".into()),
-            }
-        }
-
-        "endswith" => {
-            if args.len() != 1 {
-                return Err("endswith requires 1 argument".into());
-            }
-            let suffix_vals = apply_filter(&args[0], input, env, depth + 1)?;
-            let suffix = suffix_vals
-                .first()
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            match input {
-                JqValue::String(s) => Ok(vec![JqValue::Bool(s.ends_with(suffix.as_str()))]),
-                _ => Err("endswith requires string input".into()),
-            }
-        }
-
-        "split" => {
-            if args.len() != 1 {
-                return Err("split requires 1 argument".into());
-            }
-            let sep_vals = apply_filter(&args[0], input, env, depth + 1)?;
-            let sep = sep_vals
-                .first()
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            match input {
-                JqValue::String(s) => {
-                    let parts: Vec<JqValue> = s
-                        .split(&sep)
-                        .map(|p| JqValue::String(p.to_string()))
-                        .collect();
-                    Ok(vec![JqValue::Array(parts)])
-                }
-                _ => Err(format!("cannot split {}", input.type_name())),
-            }
-        }
-
-        "join" => {
-            if args.len() != 1 {
-                return Err("join requires 1 argument".into());
-            }
-            let sep_vals = apply_filter(&args[0], input, env, depth + 1)?;
-            let sep = sep_vals
-                .first()
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            match input {
-                JqValue::Array(arr) => {
-                    let parts: Vec<String> = arr.iter().map(JqValue::to_string_repr).collect();
-                    Ok(vec![JqValue::String(parts.join(&sep))])
-                }
-                _ => Err(format!("cannot join {}", input.type_name())),
-            }
-        }
-
-        "gsub" | "sub" => {
-            if args.len() < 2 {
-                return Err(format!("{name} requires at least 2 arguments"));
-            }
-            let pat_vals = apply_filter(&args[0], input, env, depth + 1)?;
-            let pat = pat_vals
-                .first()
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let repl_vals = apply_filter(&args[1], input, env, depth + 1)?;
-            let repl = repl_vals
-                .first()
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let flags = if args.len() > 2 {
-                let f = apply_filter(&args[2], input, env, depth + 1)?;
-                f.first().and_then(|v| v.as_str()).unwrap_or("").to_string()
-            } else {
-                String::new()
-            };
-            let ci = flags.contains('i');
-            match input {
-                JqValue::String(s) => {
-                    let result = if name == "gsub" {
-                        simple_regex_replace(s, &pat, &repl, ci, true)
-                    } else {
-                        simple_regex_replace(s, &pat, &repl, ci, false)
-                    };
-                    Ok(vec![JqValue::String(result)])
-                }
-                _ => Err(format!("{name} requires string input")),
-            }
-        }
-
+        "test" | "match" | "capture" => apply_regex_dispatch(name, args, input, env, depth),
+        "startswith" => apply_str_prefix_check(args, input, env, depth, true),
+        "endswith" => apply_str_prefix_check(args, input, env, depth, false),
+        "split" => apply_split(args, input, env, depth),
+        "join" => apply_join(args, input, env, depth),
+        "gsub" | "sub" => apply_sub_gsub(name, args, input, env, depth),
         _ => Err(format!("{name}/0 is not defined")),
+    }
+}
+
+fn apply_regex_dispatch(
+    name: &str,
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.is_empty() {
+        return Err(format!("{name} requires at least 1 argument"));
+    }
+    let pat_vals = apply_filter(&args[0], input, env, depth + 1)?;
+    let pat = pat_vals
+        .first()
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let flags = if args.len() > 1 {
+        let flag_vals = apply_filter(&args[1], input, env, depth + 1)?;
+        flag_vals
+            .first()
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        String::new()
+    };
+    let case_insensitive = flags.contains('i');
+    match input {
+        JqValue::String(s) => apply_regex_op(name, s, &pat, case_insensitive),
+        _ => Err(format!("{name} requires string input")),
+    }
+}
+
+/// Helper for `startswith` (when `is_prefix` is true) and `endswith` (when false).
+fn apply_str_prefix_check(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+    is_prefix: bool,
+) -> Result<Vec<JqValue>, String> {
+    let func_name = if is_prefix { "startswith" } else { "endswith" };
+    if args.len() != 1 {
+        return Err(format!("{func_name} requires 1 argument"));
+    }
+    let fix_vals = apply_filter(&args[0], input, env, depth + 1)?;
+    let fix = fix_vals
+        .first()
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    match input {
+        JqValue::String(s) => {
+            let result = if is_prefix {
+                s.starts_with(fix.as_str())
+            } else {
+                s.ends_with(fix.as_str())
+            };
+            Ok(vec![JqValue::Bool(result)])
+        }
+        _ => Err(format!("{func_name} requires string input")),
+    }
+}
+
+fn apply_split(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.len() != 1 {
+        return Err("split requires 1 argument".into());
+    }
+    let sep_vals = apply_filter(&args[0], input, env, depth + 1)?;
+    let sep = sep_vals
+        .first()
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    match input {
+        JqValue::String(s) => {
+            let parts: Vec<JqValue> = s
+                .split(&sep)
+                .map(|p| JqValue::String(p.to_string()))
+                .collect();
+            Ok(vec![JqValue::Array(parts)])
+        }
+        _ => Err(format!("cannot split {}", input.type_name())),
+    }
+}
+
+fn apply_join(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.len() != 1 {
+        return Err("join requires 1 argument".into());
+    }
+    let sep_vals = apply_filter(&args[0], input, env, depth + 1)?;
+    let sep = sep_vals
+        .first()
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    match input {
+        JqValue::Array(arr) => {
+            let parts: Vec<String> = arr.iter().map(JqValue::to_string_repr).collect();
+            Ok(vec![JqValue::String(parts.join(&sep))])
+        }
+        _ => Err(format!("cannot join {}", input.type_name())),
+    }
+}
+
+fn apply_sub_gsub(
+    name: &str,
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.len() < 2 {
+        return Err(format!("{name} requires at least 2 arguments"));
+    }
+    let pat_vals = apply_filter(&args[0], input, env, depth + 1)?;
+    let pat = pat_vals
+        .first()
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let repl_vals = apply_filter(&args[1], input, env, depth + 1)?;
+    let repl = repl_vals
+        .first()
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let flags = if args.len() > 2 {
+        let f = apply_filter(&args[2], input, env, depth + 1)?;
+        f.first().and_then(|v| v.as_str()).unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+    let ci = flags.contains('i');
+    match input {
+        JqValue::String(s) => {
+            let result = simple_regex_replace(s, &pat, &repl, ci, name == "gsub");
+            Ok(vec![JqValue::String(result)])
+        }
+        _ => Err(format!("{name} requires string input")),
     }
 }
 
@@ -2973,87 +3212,117 @@ fn dispatch_array_access(
     depth: usize,
 ) -> Result<Vec<JqValue>, String> {
     match name {
-        "first" => {
-            if args.is_empty() {
-                match input {
-                    JqValue::Array(arr) => Ok(vec![arr.first().cloned().unwrap_or(JqValue::Null)]),
-                    _ => Ok(vec![input.clone()]),
-                }
-            } else {
-                let vals = apply_filter(&args[0], input, env, depth + 1)?;
-                Ok(vec![vals.into_iter().next().unwrap_or(JqValue::Null)])
-            }
-        }
-
-        "last" => {
-            if args.is_empty() {
-                match input {
-                    JqValue::Array(arr) => Ok(vec![arr.last().cloned().unwrap_or(JqValue::Null)]),
-                    _ => Ok(vec![input.clone()]),
-                }
-            } else {
-                let vals = apply_filter(&args[0], input, env, depth + 1)?;
-                Ok(vec![vals.into_iter().last().unwrap_or(JqValue::Null)])
-            }
-        }
-
-        "nth" => {
-            if args.is_empty() {
-                return Err("nth requires at least 1 argument".into());
-            }
-            let n_vals = apply_filter(&args[0], input, env, depth + 1)?;
-            let n = n_vals.first().and_then(JqValue::as_i64).unwrap_or(0) as usize;
-            if args.len() > 1 {
-                let vals = apply_filter(&args[1], input, env, depth + 1)?;
-                Ok(vec![vals.into_iter().nth(n).unwrap_or(JqValue::Null)])
-            } else {
-                match input {
-                    JqValue::Array(arr) => Ok(vec![arr.get(n).cloned().unwrap_or(JqValue::Null)]),
-                    _ => Ok(vec![input.clone()]),
-                }
-            }
-        }
-
+        "first" => apply_first(args, input, env, depth),
+        "last" => apply_last(args, input, env, depth),
+        "nth" => apply_nth(args, input, env, depth),
         "range" => dispatch_range(args, input, env, depth),
-
-        "limit" => {
-            if args.len() != 2 {
-                return Err("limit requires 2 arguments".into());
-            }
-            let n_vals = apply_filter(&args[0], input, env, depth + 1)?;
-            let n = n_vals.first().and_then(JqValue::as_i64).unwrap_or(0) as usize;
-            let vals = apply_filter(&args[1], input, env, depth + 1)?;
-            Ok(vals.into_iter().take(n).collect())
-        }
-
-        "reverse" => match input {
-            JqValue::Array(arr) => {
-                let mut rev = arr.clone();
-                rev.reverse();
-                Ok(vec![JqValue::Array(rev)])
-            }
-            JqValue::String(s) => Ok(vec![JqValue::String(s.chars().rev().collect())]),
-            _ => Err(format!("cannot reverse {}", input.type_name())),
-        },
-
-        "flatten" => {
-            let max_depth = if args.is_empty() {
-                i64::MAX
-            } else {
-                let vals = apply_filter(&args[0], input, env, depth + 1)?;
-                vals.first().and_then(JqValue::as_i64).unwrap_or(i64::MAX)
-            };
-            match input {
-                JqValue::Array(arr) => {
-                    let mut out = Vec::new();
-                    flatten_array(arr, max_depth, 0, &mut out);
-                    Ok(vec![JqValue::Array(out)])
-                }
-                _ => Err(format!("cannot flatten {}", input.type_name())),
-            }
-        }
-
+        "limit" => apply_limit(args, input, env, depth),
+        "reverse" => apply_reverse(input),
+        "flatten" => apply_flatten(args, input, env, depth),
         _ => Err(format!("{name}/0 is not defined")),
+    }
+}
+
+fn apply_first(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.is_empty() {
+        return match input {
+            JqValue::Array(arr) => Ok(vec![arr.first().cloned().unwrap_or(JqValue::Null)]),
+            _ => Ok(vec![input.clone()]),
+        };
+    }
+    let vals = apply_filter(&args[0], input, env, depth + 1)?;
+    Ok(vec![vals.into_iter().next().unwrap_or(JqValue::Null)])
+}
+
+fn apply_last(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.is_empty() {
+        return match input {
+            JqValue::Array(arr) => Ok(vec![arr.last().cloned().unwrap_or(JqValue::Null)]),
+            _ => Ok(vec![input.clone()]),
+        };
+    }
+    let vals = apply_filter(&args[0], input, env, depth + 1)?;
+    Ok(vec![vals.into_iter().last().unwrap_or(JqValue::Null)])
+}
+
+fn apply_nth(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.is_empty() {
+        return Err("nth requires at least 1 argument".into());
+    }
+    let n_vals = apply_filter(&args[0], input, env, depth + 1)?;
+    let n = n_vals.first().and_then(JqValue::as_i64).unwrap_or(0) as usize;
+    if args.len() > 1 {
+        let vals = apply_filter(&args[1], input, env, depth + 1)?;
+        Ok(vec![vals.into_iter().nth(n).unwrap_or(JqValue::Null)])
+    } else {
+        match input {
+            JqValue::Array(arr) => Ok(vec![arr.get(n).cloned().unwrap_or(JqValue::Null)]),
+            _ => Ok(vec![input.clone()]),
+        }
+    }
+}
+
+fn apply_limit(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.len() != 2 {
+        return Err("limit requires 2 arguments".into());
+    }
+    let n_vals = apply_filter(&args[0], input, env, depth + 1)?;
+    let n = n_vals.first().and_then(JqValue::as_i64).unwrap_or(0) as usize;
+    let vals = apply_filter(&args[1], input, env, depth + 1)?;
+    Ok(vals.into_iter().take(n).collect())
+}
+
+fn apply_reverse(input: &JqValue) -> Result<Vec<JqValue>, String> {
+    match input {
+        JqValue::Array(arr) => {
+            let mut rev = arr.clone();
+            rev.reverse();
+            Ok(vec![JqValue::Array(rev)])
+        }
+        JqValue::String(s) => Ok(vec![JqValue::String(s.chars().rev().collect())]),
+        _ => Err(format!("cannot reverse {}", input.type_name())),
+    }
+}
+
+fn apply_flatten(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    let max_depth = if args.is_empty() {
+        i64::MAX
+    } else {
+        let vals = apply_filter(&args[0], input, env, depth + 1)?;
+        vals.first().and_then(JqValue::as_i64).unwrap_or(i64::MAX)
+    };
+    match input {
+        JqValue::Array(arr) => {
+            let mut out = Vec::new();
+            flatten_array(arr, max_depth, 0, &mut out);
+            Ok(vec![JqValue::Array(out)])
+        }
+        _ => Err(format!("cannot flatten {}", input.type_name())),
     }
 }
 
@@ -3106,62 +3375,65 @@ fn dispatch_array_reduce(
     depth: usize,
 ) -> Result<Vec<JqValue>, String> {
     match name {
-        "add" => match input {
-            JqValue::Array(arr) => {
-                if arr.is_empty() {
-                    return Ok(vec![JqValue::Null]);
-                }
-                let mut accum = arr[0].clone();
-                for item in &arr[1..] {
-                    accum = arith_op(&accum, &ArithOp::Add, item)?;
-                }
-                Ok(vec![accum])
-            }
-            JqValue::Null => Ok(vec![JqValue::Null]),
-            _ => Err(format!("cannot add {}", input.type_name())),
-        },
-
-        "any" | "all" => {
-            let is_any = name == "any";
-            match input {
-                JqValue::Array(arr) => {
-                    if args.is_empty() {
-                        let result = if is_any {
-                            arr.iter().any(JqValue::is_truthy)
-                        } else {
-                            arr.iter().all(JqValue::is_truthy)
-                        };
-                        Ok(vec![JqValue::Bool(result)])
-                    } else {
-                        let result = if is_any {
-                            arr.iter().any(|v| {
-                                apply_filter(&args[0], v, env, depth + 1)
-                                    .ok()
-                                    .and_then(|vals| vals.into_iter().next())
-                                    .is_some_and(|v| v.is_truthy())
-                            })
-                        } else {
-                            arr.iter().all(|v| {
-                                apply_filter(&args[0], v, env, depth + 1)
-                                    .ok()
-                                    .and_then(|vals| vals.into_iter().next())
-                                    .is_some_and(|v| v.is_truthy())
-                            })
-                        };
-                        Ok(vec![JqValue::Bool(result)])
-                    }
-                }
-                _ => Err(format!("cannot {name} over {}", input.type_name())),
-            }
-        }
-
+        "add" => apply_add(input),
+        "any" => apply_any_all(args, input, env, depth, true),
+        "all" => apply_any_all(args, input, env, depth, false),
         "min" | "min_by" => dispatch_extremum(name, args, input, env, depth, true),
         "max" | "max_by" => dispatch_extremum(name, args, input, env, depth, false),
-
         "indices" | "index" | "rindex" => dispatch_indices(name, args, input, env, depth),
-
         _ => Err(format!("{name}/0 is not defined")),
     }
+}
+
+fn apply_add(input: &JqValue) -> Result<Vec<JqValue>, String> {
+    match input {
+        JqValue::Array(arr) => {
+            if arr.is_empty() {
+                return Ok(vec![JqValue::Null]);
+            }
+            let mut accum = arr[0].clone();
+            for item in &arr[1..] {
+                accum = arith_op(&accum, &ArithOp::Add, item)?;
+            }
+            Ok(vec![accum])
+        }
+        JqValue::Null => Ok(vec![JqValue::Null]),
+        _ => Err(format!("cannot add {}", input.type_name())),
+    }
+}
+
+/// Helper for `any` (when `is_any` is true) and `all` (when false).
+fn apply_any_all(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+    is_any: bool,
+) -> Result<Vec<JqValue>, String> {
+    let name = if is_any { "any" } else { "all" };
+    let JqValue::Array(arr) = input else {
+        return Err(format!("cannot {name} over {}", input.type_name()));
+    };
+    if args.is_empty() {
+        let result = if is_any {
+            arr.iter().any(JqValue::is_truthy)
+        } else {
+            arr.iter().all(JqValue::is_truthy)
+        };
+        return Ok(vec![JqValue::Bool(result)]);
+    }
+    let test_fn = |v: &JqValue| -> bool {
+        apply_filter(&args[0], v, env, depth + 1)
+            .ok()
+            .and_then(|vals| vals.into_iter().next())
+            .is_some_and(|v| v.is_truthy())
+    };
+    let result = if is_any {
+        arr.iter().any(test_fn)
+    } else {
+        arr.iter().all(test_fn)
+    };
+    Ok(vec![JqValue::Bool(result)])
 }
 
 /// Helper for `min`/`min_by`/`max`/`max_by` to reduce cognitive complexity.
@@ -3271,86 +3543,116 @@ fn dispatch_object_keys(
     depth: usize,
 ) -> Result<Vec<JqValue>, String> {
     match name {
-        "keys" | "keys_unsorted" => match input {
-            JqValue::Object(pairs) => {
-                let mut keys: Vec<String> = pairs.iter().map(|(k, _)| k.clone()).collect();
-                if name == "keys" {
-                    keys.sort();
-                }
-                Ok(vec![JqValue::Array(
-                    keys.into_iter().map(JqValue::String).collect(),
-                )])
-            }
-            JqValue::Array(arr) => Ok(vec![JqValue::Array(
-                (0..arr.len()).map(|i| JqValue::Number(i as f64)).collect(),
-            )]),
-            _ => Err(format!("{} has no keys", input.type_name())),
-        },
-
-        "values" => match input {
-            JqValue::Object(pairs) => Ok(vec![JqValue::Array(
-                pairs.iter().map(|(_, v)| v.clone()).collect(),
-            )]),
-            JqValue::Array(arr) => Ok(vec![JqValue::Array(arr.clone())]),
-            _ => Err(format!("{} has no values", input.type_name())),
-        },
-
-        "has" => {
-            if args.len() != 1 {
-                return Err("has requires 1 argument".into());
-            }
-            let key_vals = apply_filter(&args[0], input, env, depth + 1)?;
-            let key = key_vals.into_iter().next().unwrap_or(JqValue::Null);
-            match (input, &key) {
-                (JqValue::Object(pairs), JqValue::String(k)) => {
-                    Ok(vec![JqValue::Bool(pairs.iter().any(|(pk, _)| pk == k))])
-                }
-                (JqValue::Array(arr), JqValue::Number(n)) => {
-                    let idx = *n as usize;
-                    Ok(vec![JqValue::Bool(idx < arr.len())])
-                }
-                _ => Ok(vec![JqValue::Bool(false)]),
-            }
-        }
-
-        "in" => {
-            if args.len() != 1 {
-                return Err("in requires 1 argument".into());
-            }
-            let obj_vals = apply_filter(&args[0], input, env, depth + 1)?;
-            let obj = obj_vals.into_iter().next().unwrap_or(JqValue::Null);
-            match (&obj, input) {
-                (JqValue::Object(pairs), JqValue::String(k)) => {
-                    Ok(vec![JqValue::Bool(pairs.iter().any(|(pk, _)| pk == k))])
-                }
-                (JqValue::Array(arr), JqValue::Number(n)) => {
-                    let idx = *n as usize;
-                    Ok(vec![JqValue::Bool(idx < arr.len())])
-                }
-                _ => Ok(vec![JqValue::Bool(false)]),
-            }
-        }
-
-        "contains" => {
-            if args.len() != 1 {
-                return Err("contains requires 1 argument".into());
-            }
-            let other_vals = apply_filter(&args[0], input, env, depth + 1)?;
-            let other = other_vals.into_iter().next().unwrap_or(JqValue::Null);
-            Ok(vec![JqValue::Bool(input.contains_value(&other))])
-        }
-
-        "inside" => {
-            if args.len() != 1 {
-                return Err("inside requires 1 argument".into());
-            }
-            let other_vals = apply_filter(&args[0], input, env, depth + 1)?;
-            let other = other_vals.into_iter().next().unwrap_or(JqValue::Null);
-            Ok(vec![JqValue::Bool(other.contains_value(input))])
-        }
-
+        "keys" | "keys_unsorted" => apply_keys(name, input),
+        "values" => apply_values(input),
+        "has" => apply_has(args, input, env, depth),
+        "in" => apply_in(args, input, env, depth),
+        "contains" => apply_contains(args, input, env, depth),
+        "inside" => apply_inside(args, input, env, depth),
         _ => Err(format!("{name}/0 is not defined")),
     }
+}
+
+fn apply_keys(name: &str, input: &JqValue) -> Result<Vec<JqValue>, String> {
+    match input {
+        JqValue::Object(pairs) => {
+            let mut keys: Vec<String> = pairs.iter().map(|(k, _)| k.clone()).collect();
+            if name == "keys" {
+                keys.sort();
+            }
+            Ok(vec![JqValue::Array(
+                keys.into_iter().map(JqValue::String).collect(),
+            )])
+        }
+        JqValue::Array(arr) => Ok(vec![JqValue::Array(
+            (0..arr.len()).map(|i| JqValue::Number(i as f64)).collect(),
+        )]),
+        _ => Err(format!("{} has no keys", input.type_name())),
+    }
+}
+
+fn apply_values(input: &JqValue) -> Result<Vec<JqValue>, String> {
+    match input {
+        JqValue::Object(pairs) => Ok(vec![JqValue::Array(
+            pairs.iter().map(|(_, v)| v.clone()).collect(),
+        )]),
+        JqValue::Array(arr) => Ok(vec![JqValue::Array(arr.clone())]),
+        _ => Err(format!("{} has no values", input.type_name())),
+    }
+}
+
+fn apply_has(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.len() != 1 {
+        return Err("has requires 1 argument".into());
+    }
+    let key_vals = apply_filter(&args[0], input, env, depth + 1)?;
+    let key = key_vals.into_iter().next().unwrap_or(JqValue::Null);
+    match (input, &key) {
+        (JqValue::Object(pairs), JqValue::String(k)) => {
+            Ok(vec![JqValue::Bool(pairs.iter().any(|(pk, _)| pk == k))])
+        }
+        (JqValue::Array(arr), JqValue::Number(n)) => {
+            let idx = *n as usize;
+            Ok(vec![JqValue::Bool(idx < arr.len())])
+        }
+        _ => Ok(vec![JqValue::Bool(false)]),
+    }
+}
+
+fn apply_in(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.len() != 1 {
+        return Err("in requires 1 argument".into());
+    }
+    let obj_vals = apply_filter(&args[0], input, env, depth + 1)?;
+    let obj = obj_vals.into_iter().next().unwrap_or(JqValue::Null);
+    match (&obj, input) {
+        (JqValue::Object(pairs), JqValue::String(k)) => {
+            Ok(vec![JqValue::Bool(pairs.iter().any(|(pk, _)| pk == k))])
+        }
+        (JqValue::Array(arr), JqValue::Number(n)) => {
+            let idx = *n as usize;
+            Ok(vec![JqValue::Bool(idx < arr.len())])
+        }
+        _ => Ok(vec![JqValue::Bool(false)]),
+    }
+}
+
+fn apply_contains(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.len() != 1 {
+        return Err("contains requires 1 argument".into());
+    }
+    let other_vals = apply_filter(&args[0], input, env, depth + 1)?;
+    let other = other_vals.into_iter().next().unwrap_or(JqValue::Null);
+    Ok(vec![JqValue::Bool(input.contains_value(&other))])
+}
+
+fn apply_inside(
+    args: &[JqFilter],
+    input: &JqValue,
+    env: &JqEnv,
+    depth: usize,
+) -> Result<Vec<JqValue>, String> {
+    if args.len() != 1 {
+        return Err("inside requires 1 argument".into());
+    }
+    let other_vals = apply_filter(&args[0], input, env, depth + 1)?;
+    let other = other_vals.into_iter().next().unwrap_or(JqValue::Null);
+    Ok(vec![JqValue::Bool(other.contains_value(input))])
 }
 
 fn dispatch_object_entries(
