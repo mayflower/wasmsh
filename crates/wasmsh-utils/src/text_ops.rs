@@ -81,29 +81,24 @@ pub(crate) fn util_tail(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 }
 
 pub(crate) fn util_wc(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    if argv.len() < 2 {
+    let (flags, file_args) = parse_wc_flags(&argv[1..]);
+
+    if file_args.is_empty() {
         if let Some(data) = ctx.stdin {
             let text = String::from_utf8_lossy(data);
-            let lines = text.lines().count();
-            let words = text.split_whitespace().count();
-            let bytes = data.len();
-            let out = format!("{lines:>7} {words:>7} {bytes:>7}\n");
-            ctx.output.stdout(out.as_bytes());
+            wc_emit(ctx, &text, data.len(), None, &flags);
             return 0;
         }
         ctx.output.stderr(b"wc: missing operand\n");
         return 1;
     }
     let mut status = 0;
-    for path in &argv[1..] {
+    for path in &file_args {
         let full = resolve_path(ctx.cwd, path);
         match read_text(ctx.fs, &full) {
             Ok(text) => {
-                let lines = text.lines().count();
-                let words = text.split_whitespace().count();
                 let bytes = text.len();
-                let out = format!("{lines:>7} {words:>7} {bytes:>7} {path}\n");
-                ctx.output.stdout(out.as_bytes());
+                wc_emit(ctx, &text, bytes, Some(path), &flags);
             }
             Err(e) => {
                 emit_error(ctx.output, "wc", path, &e);
@@ -112,6 +107,81 @@ pub(crate) fn util_wc(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     }
     status
+}
+
+struct WcFlags {
+    lines: bool,
+    words: bool,
+    bytes: bool,
+}
+
+fn parse_wc_flags<'a>(args: &[&'a str]) -> (WcFlags, Vec<&'a str>) {
+    let mut show_lines = false;
+    let mut show_words = false;
+    let mut show_bytes = false;
+    let mut file_args = Vec::new();
+    let mut parsing_flags = true;
+
+    for arg in args {
+        if parsing_flags && arg.starts_with('-') && arg.len() > 1 && *arg != "--" {
+            for ch in arg[1..].chars() {
+                match ch {
+                    'l' => show_lines = true,
+                    'w' => show_words = true,
+                    'c' | 'm' => show_bytes = true,
+                    _ => {}
+                }
+            }
+        } else {
+            if *arg == "--" {
+                parsing_flags = false;
+                continue;
+            }
+            file_args.push(*arg);
+        }
+    }
+
+    // If no flags specified, show all
+    if !show_lines && !show_words && !show_bytes {
+        show_lines = true;
+        show_words = true;
+        show_bytes = true;
+    }
+
+    (
+        WcFlags {
+            lines: show_lines,
+            words: show_words,
+            bytes: show_bytes,
+        },
+        file_args,
+    )
+}
+
+fn wc_emit(
+    ctx: &mut UtilContext<'_>,
+    text: &str,
+    bytes: usize,
+    path: Option<&str>,
+    flags: &WcFlags,
+) {
+    let mut parts = Vec::new();
+    if flags.lines {
+        parts.push(format!("{:>7}", text.lines().count()));
+    }
+    if flags.words {
+        parts.push(format!("{:>7}", text.split_whitespace().count()));
+    }
+    if flags.bytes {
+        parts.push(format!("{:>7}", bytes));
+    }
+    let mut out = parts.join("");
+    if let Some(p) = path {
+        out.push(' ');
+        out.push_str(p);
+    }
+    out.push('\n');
+    ctx.output.stdout(out.as_bytes());
 }
 
 pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
