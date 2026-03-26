@@ -454,6 +454,18 @@ pub(crate) fn util_cmp(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         return 2;
     };
 
+    cmp_data(ctx, &data1, &data2, args[0], args[1], silent, verbose)
+}
+
+fn cmp_data(
+    ctx: &mut UtilContext<'_>,
+    data1: &[u8],
+    data2: &[u8],
+    name1: &str,
+    name2: &str,
+    silent: bool,
+    verbose: bool,
+) -> i32 {
     let min_len = data1.len().min(data2.len());
     let mut differ = false;
 
@@ -467,16 +479,7 @@ pub(crate) fn util_cmp(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                 let out = format!("{:>4} {:>3} {:>3}\n", i + 1, data1[i], data2[i]);
                 ctx.output.stdout(out.as_bytes());
             } else {
-                #[allow(clippy::naive_bytecount)]
-                let line_num = data1[..i].iter().filter(|&&b| b == b'\n').count() + 1;
-                let out = format!(
-                    "{} {} differ: byte {}, line {line_num}\n",
-                    args[0],
-                    args[1],
-                    i + 1
-                );
-                ctx.output.stdout(out.as_bytes());
-                return 1;
+                return cmp_report_first_diff(ctx, data1, i, name1, name2);
             }
         }
     }
@@ -484,9 +487,9 @@ pub(crate) fn util_cmp(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     if data1.len() != data2.len() {
         if !silent {
             let shorter = if data1.len() < data2.len() {
-                args[0]
+                name1
             } else {
-                args[1]
+                name2
             };
             let msg = format!("cmp: EOF on {shorter}\n");
             ctx.output.stderr(msg.as_bytes());
@@ -495,6 +498,20 @@ pub(crate) fn util_cmp(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     }
 
     i32::from(differ)
+}
+
+fn cmp_report_first_diff(
+    ctx: &mut UtilContext<'_>,
+    data1: &[u8],
+    i: usize,
+    name1: &str,
+    name2: &str,
+) -> i32 {
+    #[allow(clippy::naive_bytecount)]
+    let line_num = data1[..i].iter().filter(|&&b| b == b'\n').count() + 1;
+    let out = format!("{name1} {name2} differ: byte {}, line {line_num}\n", i + 1);
+    ctx.output.stdout(out.as_bytes());
+    1
 }
 
 fn read_file_bytes(ctx: &mut UtilContext<'_>, full: &str, display: &str) -> Option<Vec<u8>> {
@@ -572,71 +589,59 @@ pub(crate) fn util_comm(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     let lines1: Vec<&str> = text1.lines().collect();
     let lines2: Vec<&str> = text2.lines().collect();
+    comm_merge(ctx, &lines1, &lines2, suppress1, suppress2, suppress3);
+    0
+}
+
+fn comm_merge(
+    ctx: &mut UtilContext<'_>,
+    lines1: &[&str],
+    lines2: &[&str],
+    suppress1: bool,
+    suppress2: bool,
+    suppress3: bool,
+) {
+    let col2_prefix = if suppress1 { "" } else { "\t" };
+    let col3_prefix = match (suppress1, suppress2) {
+        (true, true) => "",
+        (true, _) | (_, true) => "\t",
+        _ => "\t\t",
+    };
     let mut i = 0;
     let mut j = 0;
-
-    // Compute column prefixes based on suppression flags
-    // Column 1 (only in file1): no prefix / suppressed
-    // Column 2 (only in file2): one tab / suppressed
-    // Column 3 (both): two tabs / suppressed
-    let col2_prefix = if suppress1 { "" } else { "\t" };
-    let col3_prefix = if suppress1 && suppress2 {
-        ""
-    } else if suppress1 || suppress2 {
-        "\t"
-    } else {
-        "\t\t"
-    };
-
     while i < lines1.len() && j < lines2.len() {
         match lines1[i].cmp(lines2[j]) {
             std::cmp::Ordering::Less => {
-                if !suppress1 {
-                    ctx.output.stdout(lines1[i].as_bytes());
-                    ctx.output.stdout(b"\n");
-                }
+                comm_emit(ctx, "", lines1[i], !suppress1);
                 i += 1;
             }
             std::cmp::Ordering::Greater => {
-                if !suppress2 {
-                    ctx.output.stdout(col2_prefix.as_bytes());
-                    ctx.output.stdout(lines2[j].as_bytes());
-                    ctx.output.stdout(b"\n");
-                }
+                comm_emit(ctx, col2_prefix, lines2[j], !suppress2);
                 j += 1;
             }
             std::cmp::Ordering::Equal => {
-                if !suppress3 {
-                    ctx.output.stdout(col3_prefix.as_bytes());
-                    ctx.output.stdout(lines1[i].as_bytes());
-                    ctx.output.stdout(b"\n");
-                }
+                comm_emit(ctx, col3_prefix, lines1[i], !suppress3);
                 i += 1;
                 j += 1;
             }
         }
     }
-
-    // Remaining lines in file1
     while i < lines1.len() {
-        if !suppress1 {
-            ctx.output.stdout(lines1[i].as_bytes());
-            ctx.output.stdout(b"\n");
-        }
+        comm_emit(ctx, "", lines1[i], !suppress1);
         i += 1;
     }
-
-    // Remaining lines in file2
     while j < lines2.len() {
-        if !suppress2 {
-            ctx.output.stdout(col2_prefix.as_bytes());
-            ctx.output.stdout(lines2[j].as_bytes());
-            ctx.output.stdout(b"\n");
-        }
+        comm_emit(ctx, col2_prefix, lines2[j], !suppress2);
         j += 1;
     }
+}
 
-    0
+fn comm_emit(ctx: &mut UtilContext<'_>, prefix: &str, line: &str, show: bool) {
+    if show {
+        ctx.output.stdout(prefix.as_bytes());
+        ctx.output.stdout(line.as_bytes());
+        ctx.output.stdout(b"\n");
+    }
 }
 
 // ---------------------------------------------------------------------------

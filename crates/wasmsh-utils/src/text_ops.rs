@@ -176,20 +176,14 @@ pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut found = false;
 
     for (i, line) in text.lines().enumerate() {
-        let matches = grep_matches(line, pattern, ignore_case);
-        let matches = if invert { !matches } else { matches };
-        if matches {
-            found = true;
-            match_count += 1;
-            if !count_only {
-                if show_line_numbers {
-                    let out = format!("{}:{}\n", i + 1, line);
-                    ctx.output.stdout(out.as_bytes());
-                } else {
-                    ctx.output.stdout(line.as_bytes());
-                    ctx.output.stdout(b"\n");
-                }
-            }
+        let matches = grep_matches(line, pattern, ignore_case) != invert;
+        if !matches {
+            continue;
+        }
+        found = true;
+        match_count += 1;
+        if !count_only {
+            grep_emit_line(ctx, line, i + 1, show_line_numbers);
         }
     }
 
@@ -199,6 +193,16 @@ pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     }
 
     i32::from(!found)
+}
+
+fn grep_emit_line(ctx: &mut UtilContext<'_>, line: &str, line_num: usize, show_num: bool) {
+    if show_num {
+        let out = format!("{line_num}:{line}\n");
+        ctx.output.stdout(out.as_bytes());
+    } else {
+        ctx.output.stdout(line.as_bytes());
+        ctx.output.stdout(b"\n");
+    }
 }
 
 pub(crate) fn util_sed(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {

@@ -76,7 +76,6 @@ fn expand_part(part: &WordPart, state: &mut ShellState, out: &mut String) {
 
 fn expand_part_depth(part: &WordPart, state: &mut ShellState, out: &mut String, depth: usize) {
     if depth > MAX_EXPAND_DEPTH {
-        // Push the raw text instead of silently returning nothing
         match part {
             WordPart::Literal(s) | WordPart::SingleQuoted(s) | WordPart::Parameter(s) => {
                 out.push_str(s);
@@ -92,250 +91,285 @@ fn expand_part_depth(part: &WordPart, state: &mut ShellState, out: &mut String, 
                 expand_part_depth(p, state, out, depth);
             }
         }
-        WordPart::Parameter(name) => {
-            // ── Array subscript expansions ──────────────────────────────
-            // ${#arr[@]} or ${#arr[*]} — array length
-            if let Some(var_name) = name.strip_prefix('#') {
-                if let Some(base) = var_name
-                    .strip_suffix("[@]")
-                    .or_else(|| var_name.strip_suffix("[*]"))
-                {
-                    if !base.is_empty() {
-                        let len = state.get_array_length(base);
-                        out.push_str(&len.to_string());
-                        return;
-                    }
-                }
-            }
-            // ${!arr[@]} or ${!arr[*]} — array keys
-            if let Some(var_name) = name.strip_prefix('!') {
-                if let Some(base) = var_name
-                    .strip_suffix("[@]")
-                    .or_else(|| var_name.strip_suffix("[*]"))
-                {
-                    if !base.is_empty() {
-                        let keys = state.get_array_keys(base);
-                        out.push_str(&keys.join(" "));
-                        return;
-                    }
-                }
-            }
-            // ${arr[@]} or ${arr[*]} — all array values
-            if let Some(base) = name
-                .strip_suffix("[@]")
-                .or_else(|| name.strip_suffix("[*]"))
-            {
-                if !base.is_empty() {
-                    let values = state.get_array_values(base);
-                    let joined: Vec<&str> = values.iter().map(SmolStr::as_str).collect();
-                    out.push_str(&joined.join(" "));
-                    return;
-                }
-            }
-            // ${arr[N]} — single element access
-            if let Some(bracket_pos) = name.find('[') {
-                if let Some(end) = name[bracket_pos..].find(']') {
-                    let base = &name[..bracket_pos];
-                    let index = &name[bracket_pos + 1..bracket_pos + end];
-                    if !base.is_empty() && !index.is_empty() {
-                        // Expand variable references in the index (e.g. $key in ${arr[$key]})
-                        let expanded_index = if index.contains('$') {
-                            expand_string(index, state)
-                        } else {
-                            index.to_string()
-                        };
-                        if let Some(val) = state.get_array_element(base, &expanded_index) {
-                            out.push_str(&val);
-                        }
-                        return;
-                    }
-                }
-            }
-
-            // ${#var} — string length
-            if let Some(var_name) = name.strip_prefix('#') {
-                if !var_name.is_empty() {
-                    let len = state.get_var(var_name).map_or(0, |v| v.len());
-                    out.push_str(&len.to_string());
-                    return;
-                }
-                // Bare "#" is the special parameter $# (handled by get_var)
-            }
-
-            // ── Indirect expansion ${!name} and prefix expansion ${!prefix*}/${!prefix@} ──
-            if let Some(rest) = name.strip_prefix('!') {
-                // ${!prefix*} or ${!prefix@} — all variable names with prefix
-                if let Some(prefix) = rest.strip_suffix('*').or_else(|| rest.strip_suffix('@')) {
-                    if !prefix.is_empty()
-                        && prefix
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                    {
-                        let names = state.var_names_with_prefix(prefix);
-                        let joined: Vec<&str> = names.iter().map(SmolStr::as_str).collect();
-                        out.push_str(&joined.join(" "));
-                        return;
-                    }
-                }
-                // ${!name} — indirect expansion (simple variable name only)
-                if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                {
-                    if let Some(indirect_name) = state.get_var(rest) {
-                        if let Some(val) = state.get_var(&indirect_name) {
-                            out.push_str(&val);
-                        }
-                    }
-                    return;
-                }
-            }
-
-            // ── Case modification ${var^}, ${var^^}, ${var,}, ${var,,} ──
-            if let Some(case_result) = try_case_modification(name.as_str(), state) {
-                out.push_str(&case_result);
-                return;
-            }
-
-            // ── Transformation operators ${var@Q}, ${var@E}, ${var@U}, ${var@L}, etc. ──
-            if let Some(transform_result) = try_transform_operator(name.as_str(), state) {
-                out.push_str(&transform_result);
-                return;
-            }
-
-            // ${var/pat/rep} or ${var//pat/rep} — substitution (with glob and anchoring)
-            // Only match when '/' directly follows a valid variable name.
-            if let Some(slash_pos) = name.find('/') {
-                let var_name = &name[..slash_pos];
-                let is_valid_var = !var_name.is_empty()
-                    && var_name
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'_');
-                if is_valid_var {
-                    let rest = &name[slash_pos + 1..];
-                    let global = rest.starts_with('/');
-                    let rest = if global { &rest[1..] } else { rest };
-
-                    // Detect anchor: # = start, % = end
-                    let (anchor, pat_str) = if let Some(p) = rest.strip_prefix('#') {
-                        if let Some(sep) = p.find('/') {
-                            ('S', &p[..sep])
-                        } else {
-                            ('S', p)
-                        }
-                    } else if let Some(p) = rest.strip_prefix('%') {
-                        if let Some(sep) = p.find('/') {
-                            ('E', &p[..sep])
-                        } else {
-                            ('E', p)
-                        }
-                    } else {
-                        ('N', "") // no anchor; pat_str unused, computed below
-                    };
-
-                    let (pat, rep) = if anchor != 'N' {
-                        let after_anchor = if rest.starts_with('#') || rest.starts_with('%') {
-                            &rest[1..]
-                        } else {
-                            rest
-                        };
-                        if let Some(sep) = after_anchor.find('/') {
-                            (&after_anchor[..sep], &after_anchor[sep + 1..])
-                        } else {
-                            (after_anchor, "")
-                        }
-                    } else if let Some(sep) = rest.find('/') {
-                        (&rest[..sep], &rest[sep + 1..])
-                    } else {
-                        (rest, "")
-                    };
-
-                    if let Some(val) = state.get_var(var_name) {
-                        let result = match anchor {
-                            'S' => {
-                                if let Some(match_len) = glob_match_at_start(&val, pat_str) {
-                                    format!("{rep}{}", &val[match_len..])
-                                } else {
-                                    val.to_string()
-                                }
-                            }
-                            'E' => {
-                                if let Some(match_start) = glob_match_at_end(&val, pat_str) {
-                                    format!("{}{rep}", &val[..match_start])
-                                } else {
-                                    val.to_string()
-                                }
-                            }
-                            _ => {
-                                if global {
-                                    glob_replace_all(&val, pat, rep)
-                                } else {
-                                    glob_replace_first(&val, pat, rep)
-                                }
-                            }
-                        };
-                        out.push_str(&result);
-                    }
-                    return;
-                }
-            }
-            // ${var:offset} or ${var:offset:length} — substring
-            if let Some(colon_pos) = name.find(':') {
-                let var_name = &name[..colon_pos];
-                let rest = &name[colon_pos + 1..];
-                // Check it's a numeric offset, not an operator like :-, :+, :=, :?
-                if rest.starts_with(|c: char| c.is_ascii_digit())
-                    || (rest.starts_with('-')
-                        && rest.len() > 1
-                        && rest.as_bytes()[1].is_ascii_digit())
-                {
-                    if let Some(val) = state.get_var(var_name) {
-                        let (offset_str, length_str) = if let Some(sep) = rest.find(':') {
-                            (&rest[..sep], Some(&rest[sep + 1..]))
-                        } else {
-                            (rest, None)
-                        };
-                        let offset: usize = offset_str.parse().unwrap_or(0);
-                        let s = val.as_str();
-                        if offset <= s.len() {
-                            let substr = &s[offset..];
-                            if let Some(len_s) = length_str {
-                                let len: usize = len_s.parse().unwrap_or(substr.len());
-                                out.push_str(&substr[..len.min(substr.len())]);
-                            } else {
-                                out.push_str(substr);
-                            }
-                        }
-                        return;
-                    }
-                }
-            }
-            if let Some(op_pos) = find_param_operator(name) {
-                let var_name = &name[..op_pos];
-                let operator = &name[op_pos..op_pos + param_op_len(name, op_pos)];
-                let operand = &name[op_pos + operator.len()..];
-                expand_param_op_depth(var_name, operator, operand, state, out, depth);
-            } else if let Some(val) = state.get_var(name) {
-                out.push_str(&val);
-            } else if state.get_var("SHOPT_u").as_deref() == Some("1") {
-                // nounset: error on unset variable (skip special params)
-                let is_special =
-                    matches!(name.as_str(), "?" | "#" | "0" | "@" | "*" | "-" | "$" | "!")
-                        || name.parse::<usize>().is_ok();
-                if !is_special {
-                    state.set_var(
-                        SmolStr::from("_NOUNSET_ERROR"),
-                        SmolStr::from(name.as_str()),
-                    );
-                }
-            }
-        }
+        WordPart::Parameter(name) => expand_parameter(name, state, out, depth),
         WordPart::Arithmetic(expr) => {
             let result = eval_arithmetic(expr, state);
             out.push_str(&result.to_string());
         }
-        // CommandSubstitution is resolved at the runtime level before expand_word is called.
-        // Unknown future variants are silently ignored.
         _ => {}
     }
+}
+
+/// Expand a parameter reference (`$name` or `${...}`).
+fn expand_parameter(name: &SmolStr, state: &mut ShellState, out: &mut String, depth: usize) {
+    // Try each expansion type in order; return early when handled.
+    if try_expand_array_subscript(name, state, out) {
+        return;
+    }
+    if try_expand_string_length(name, state, out) {
+        return;
+    }
+    if try_expand_indirect_or_prefix(name, state, out) {
+        return;
+    }
+    if let Some(case_result) = try_case_modification(name.as_str(), state) {
+        out.push_str(&case_result);
+        return;
+    }
+    if let Some(transform_result) = try_transform_operator(name.as_str(), state) {
+        out.push_str(&transform_result);
+        return;
+    }
+    if try_expand_substitution(name, state, out) {
+        return;
+    }
+    if try_expand_substring(name, state, out) {
+        return;
+    }
+    if let Some(op_pos) = find_param_operator(name) {
+        let var_name = &name[..op_pos];
+        let operator = &name[op_pos..op_pos + param_op_len(name, op_pos)];
+        let operand = &name[op_pos + operator.len()..];
+        expand_param_op_depth(var_name, operator, operand, state, out, depth);
+    } else if let Some(val) = state.get_var(name) {
+        out.push_str(&val);
+    } else if state.get_var("SHOPT_u").as_deref() == Some("1") {
+        let is_special = matches!(name.as_str(), "?" | "#" | "0" | "@" | "*" | "-" | "$" | "!")
+            || name.parse::<usize>().is_ok();
+        if !is_special {
+            state.set_var(
+                SmolStr::from("_NOUNSET_ERROR"),
+                SmolStr::from(name.as_str()),
+            );
+        }
+    }
+}
+
+/// Check if `name` is a valid identifier (alphanumeric + underscore).
+fn is_valid_identifier(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Try to expand array subscript expressions. Returns true if handled.
+fn try_expand_array_subscript(name: &str, state: &mut ShellState, out: &mut String) -> bool {
+    // ${#arr[@]} or ${#arr[*]} — array length
+    if let Some(var_name) = name.strip_prefix('#') {
+        if let Some(base) = var_name
+            .strip_suffix("[@]")
+            .or_else(|| var_name.strip_suffix("[*]"))
+        {
+            if !base.is_empty() {
+                out.push_str(&state.get_array_length(base).to_string());
+                return true;
+            }
+        }
+    }
+    // ${!arr[@]} or ${!arr[*]} — array keys
+    if let Some(var_name) = name.strip_prefix('!') {
+        if let Some(base) = var_name
+            .strip_suffix("[@]")
+            .or_else(|| var_name.strip_suffix("[*]"))
+        {
+            if !base.is_empty() {
+                out.push_str(&state.get_array_keys(base).join(" "));
+                return true;
+            }
+        }
+    }
+    // ${arr[@]} or ${arr[*]} — all array values
+    if let Some(base) = name
+        .strip_suffix("[@]")
+        .or_else(|| name.strip_suffix("[*]"))
+    {
+        if !base.is_empty() {
+            let values = state.get_array_values(base);
+            let joined: Vec<&str> = values.iter().map(SmolStr::as_str).collect();
+            out.push_str(&joined.join(" "));
+            return true;
+        }
+    }
+    // ${arr[N]} — single element access
+    if let Some(bracket_pos) = name.find('[') {
+        if let Some(end) = name[bracket_pos..].find(']') {
+            let base = &name[..bracket_pos];
+            let index = &name[bracket_pos + 1..bracket_pos + end];
+            if !base.is_empty() && !index.is_empty() {
+                let expanded_index = if index.contains('$') {
+                    expand_string(index, state)
+                } else {
+                    index.to_string()
+                };
+                if let Some(val) = state.get_array_element(base, &expanded_index) {
+                    out.push_str(&val);
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Try to expand ${#var} (string length). Returns true if handled.
+fn try_expand_string_length(name: &str, state: &ShellState, out: &mut String) -> bool {
+    if let Some(var_name) = name.strip_prefix('#') {
+        if !var_name.is_empty() {
+            let len = state.get_var(var_name).map_or(0, |v| v.len());
+            out.push_str(&len.to_string());
+            return true;
+        }
+    }
+    false
+}
+
+/// Try to expand ${!name} (indirect) or ${!prefix*}/${!prefix@} (prefix). Returns true if handled.
+fn try_expand_indirect_or_prefix(name: &str, state: &ShellState, out: &mut String) -> bool {
+    let Some(rest) = name.strip_prefix('!') else {
+        return false;
+    };
+    // ${!prefix*} or ${!prefix@}
+    if let Some(prefix) = rest.strip_suffix('*').or_else(|| rest.strip_suffix('@')) {
+        if is_valid_identifier(prefix) {
+            let names = state.var_names_with_prefix(prefix);
+            let joined: Vec<&str> = names.iter().map(SmolStr::as_str).collect();
+            out.push_str(&joined.join(" "));
+            return true;
+        }
+    }
+    // ${!name} — indirect expansion
+    if is_valid_identifier(rest) {
+        if let Some(indirect_name) = state.get_var(rest) {
+            if let Some(val) = state.get_var(&indirect_name) {
+                out.push_str(&val);
+            }
+        }
+        return true;
+    }
+    false
+}
+
+/// Anchor type for substitution patterns.
+enum SubstAnchor {
+    Start,
+    End,
+    None,
+}
+
+/// Try to expand ${var/pat/rep} or ${var//pat/rep} (substitution). Returns true if handled.
+fn try_expand_substitution(name: &str, state: &mut ShellState, out: &mut String) -> bool {
+    let Some(slash_pos) = name.find('/') else {
+        return false;
+    };
+    let var_name = &name[..slash_pos];
+    if !is_valid_identifier(var_name) {
+        return false;
+    }
+    let rest = &name[slash_pos + 1..];
+    let global = rest.starts_with('/');
+    let rest = if global { &rest[1..] } else { rest };
+
+    let (anchor, pat_str) = parse_subst_anchor(rest);
+    let (pat, rep) = parse_subst_pat_rep(rest, &anchor);
+
+    if let Some(val) = state.get_var(var_name) {
+        let result = match anchor {
+            SubstAnchor::Start => {
+                if let Some(match_len) = glob_match_at_start(&val, pat_str) {
+                    format!("{rep}{}", &val[match_len..])
+                } else {
+                    val.to_string()
+                }
+            }
+            SubstAnchor::End => {
+                if let Some(match_start) = glob_match_at_end(&val, pat_str) {
+                    format!("{}{rep}", &val[..match_start])
+                } else {
+                    val.to_string()
+                }
+            }
+            SubstAnchor::None => {
+                if global {
+                    glob_replace_all(&val, pat, rep)
+                } else {
+                    glob_replace_first(&val, pat, rep)
+                }
+            }
+        };
+        out.push_str(&result);
+    }
+    true
+}
+
+/// Parse the anchor (#, %, or none) and pattern string from substitution rest.
+fn parse_subst_anchor<'a>(rest: &'a str) -> (SubstAnchor, &'a str) {
+    if let Some(p) = rest.strip_prefix('#') {
+        let pat = p.split('/').next().unwrap_or(p);
+        (SubstAnchor::Start, pat)
+    } else if let Some(p) = rest.strip_prefix('%') {
+        let pat = p.split('/').next().unwrap_or(p);
+        (SubstAnchor::End, pat)
+    } else {
+        (SubstAnchor::None, "")
+    }
+}
+
+/// Parse pattern and replacement from substitution rest, accounting for anchor.
+fn parse_subst_pat_rep<'a>(rest: &'a str, anchor: &SubstAnchor) -> (&'a str, &'a str) {
+    match anchor {
+        SubstAnchor::Start | SubstAnchor::End => {
+            let after_anchor = if rest.starts_with('#') || rest.starts_with('%') {
+                &rest[1..]
+            } else {
+                rest
+            };
+            if let Some(sep) = after_anchor.find('/') {
+                (&after_anchor[..sep], &after_anchor[sep + 1..])
+            } else {
+                (after_anchor, "")
+            }
+        }
+        SubstAnchor::None => {
+            if let Some(sep) = rest.find('/') {
+                (&rest[..sep], &rest[sep + 1..])
+            } else {
+                (rest, "")
+            }
+        }
+    }
+}
+
+/// Try to expand ${var:offset} or ${var:offset:length} (substring). Returns true if handled.
+fn try_expand_substring(name: &str, state: &ShellState, out: &mut String) -> bool {
+    let Some(colon_pos) = name.find(':') else {
+        return false;
+    };
+    let var_name = &name[..colon_pos];
+    let rest = &name[colon_pos + 1..];
+    // Check it's a numeric offset, not an operator like :-, :+, :=, :?
+    let is_numeric = rest.starts_with(|c: char| c.is_ascii_digit())
+        || (rest.starts_with('-') && rest.len() > 1 && rest.as_bytes()[1].is_ascii_digit());
+    if !is_numeric {
+        return false;
+    }
+    let Some(val) = state.get_var(var_name) else {
+        return true; // Handled but empty
+    };
+    let (offset_str, length_str) = if let Some(sep) = rest.find(':') {
+        (&rest[..sep], Some(&rest[sep + 1..]))
+    } else {
+        (rest, None)
+    };
+    let offset: usize = offset_str.parse().unwrap_or(0);
+    let s = val.as_str();
+    if offset <= s.len() {
+        let substr = &s[offset..];
+        if let Some(len_s) = length_str {
+            let len: usize = len_s.parse().unwrap_or(substr.len());
+            out.push_str(&substr[..len.min(substr.len())]);
+        } else {
+            out.push_str(substr);
+        }
+    }
+    true
 }
 
 /// Find the position of a parameter expansion operator (`:−`, `:-`, `:+`, `:=`, etc.).
@@ -1016,266 +1050,273 @@ fn arith_tokenize(input: &str) -> Vec<ArithToken> {
 
     while pos < bytes.len() {
         let b = bytes[pos];
-
-        // Skip whitespace
         if b.is_ascii_whitespace() {
             pos += 1;
-            continue;
+        } else if b.is_ascii_digit() {
+            arith_tokenize_number(input, bytes, &mut pos, &mut tokens);
+        } else if b.is_ascii_alphabetic() || b == b'_' {
+            arith_tokenize_ident(input, bytes, &mut pos, &mut tokens);
+        } else {
+            arith_tokenize_operator(bytes, &mut pos, &mut tokens);
         }
+    }
+    tokens
+}
 
-        // Numbers: decimal, hex (0x/0X), binary (0b/0B), octal (0 prefix)
-        if b.is_ascii_digit() {
-            let start = pos;
-            if b == b'0' && pos + 1 < bytes.len() {
-                let next = bytes[pos + 1];
-                if next == b'x' || next == b'X' {
-                    // Hex
-                    pos += 2;
-                    while pos < bytes.len() && bytes[pos].is_ascii_hexdigit() {
-                        pos += 1;
-                    }
-                    let s = &input[start + 2..pos];
-                    tokens.push(ArithToken::Number(i64::from_str_radix(s, 16).unwrap_or(0)));
-                    continue;
-                } else if next == b'b' || next == b'B' {
-                    // Binary
-                    pos += 2;
-                    while pos < bytes.len() && (bytes[pos] == b'0' || bytes[pos] == b'1') {
-                        pos += 1;
-                    }
-                    let s = &input[start + 2..pos];
-                    tokens.push(ArithToken::Number(i64::from_str_radix(s, 2).unwrap_or(0)));
-                    continue;
-                } else if next.is_ascii_digit() {
-                    // Octal (leading zero)
-                    pos += 1;
-                    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
-                        pos += 1;
-                    }
-                    let s = &input[start + 1..pos];
-                    tokens.push(ArithToken::Number(i64::from_str_radix(s, 8).unwrap_or(0)));
-                    continue;
-                }
+/// Tokenize a numeric literal (decimal, hex, binary, octal, or base#value).
+fn arith_tokenize_number(input: &str, bytes: &[u8], pos: &mut usize, tokens: &mut Vec<ArithToken>) {
+    let start = *pos;
+    let b = bytes[*pos];
+    if b == b'0' && *pos + 1 < bytes.len() {
+        let next = bytes[*pos + 1];
+        if next == b'x' || next == b'X' {
+            *pos += 2;
+            while *pos < bytes.len() && bytes[*pos].is_ascii_hexdigit() {
+                *pos += 1;
             }
-            // Regular decimal
-            pos += 1;
-            while pos < bytes.len() && bytes[pos].is_ascii_digit() {
-                pos += 1;
+            tokens.push(ArithToken::Number(
+                i64::from_str_radix(&input[start + 2..*pos], 16).unwrap_or(0),
+            ));
+            return;
+        } else if next == b'b' || next == b'B' {
+            *pos += 2;
+            while *pos < bytes.len() && (bytes[*pos] == b'0' || bytes[*pos] == b'1') {
+                *pos += 1;
             }
-            // Check for base#value syntax: e.g. 16#ff
-            if pos < bytes.len() && bytes[pos] == b'#' {
-                let base_str = &input[start..pos];
-                if let Ok(base) = base_str.parse::<u32>() {
-                    if (2..=64).contains(&base) {
-                        pos += 1; // skip #
-                        let val_start = pos;
-                        while pos < bytes.len()
-                            && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_')
-                        {
-                            pos += 1;
-                        }
-                        let val_str = &input[val_start..pos];
-                        tokens.push(ArithToken::Number(
-                            i64::from_str_radix(val_str, base).unwrap_or(0),
-                        ));
-                        continue;
-                    }
-                }
+            tokens.push(ArithToken::Number(
+                i64::from_str_radix(&input[start + 2..*pos], 2).unwrap_or(0),
+            ));
+            return;
+        } else if next.is_ascii_digit() {
+            *pos += 1;
+            while *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
+                *pos += 1;
             }
-            let s = &input[start..pos];
-            tokens.push(ArithToken::Number(s.parse::<i64>().unwrap_or(0)));
-            continue;
+            tokens.push(ArithToken::Number(
+                i64::from_str_radix(&input[start + 1..*pos], 8).unwrap_or(0),
+            ));
+            return;
         }
-
-        // Identifiers (variable names)
-        if b.is_ascii_alphabetic() || b == b'_' {
-            let start = pos;
-            pos += 1;
-            while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
-                pos += 1;
-            }
-            tokens.push(ArithToken::Ident(input[start..pos].to_string()));
-            continue;
-        }
-
-        // Multi-character and single-character operators
-        let remaining = bytes.len() - pos;
-        match b {
-            b'+' => {
-                if remaining > 1 && bytes[pos + 1] == b'+' {
-                    tokens.push(ArithToken::PlusPlus);
-                    pos += 2;
-                } else if remaining > 1 && bytes[pos + 1] == b'=' {
-                    tokens.push(ArithToken::PlusEq);
-                    pos += 2;
-                } else {
-                    tokens.push(ArithToken::Plus);
-                    pos += 1;
+    }
+    *pos += 1;
+    while *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
+        *pos += 1;
+    }
+    // Check for base#value syntax
+    if *pos < bytes.len() && bytes[*pos] == b'#' {
+        if let Ok(base) = input[start..*pos].parse::<u32>() {
+            if (2..=64).contains(&base) {
+                *pos += 1;
+                let val_start = *pos;
+                while *pos < bytes.len()
+                    && (bytes[*pos].is_ascii_alphanumeric() || bytes[*pos] == b'_')
+                {
+                    *pos += 1;
                 }
-            }
-            b'-' => {
-                if remaining > 1 && bytes[pos + 1] == b'-' {
-                    tokens.push(ArithToken::MinusMinus);
-                    pos += 2;
-                } else if remaining > 1 && bytes[pos + 1] == b'=' {
-                    tokens.push(ArithToken::MinusEq);
-                    pos += 2;
-                } else {
-                    tokens.push(ArithToken::Minus);
-                    pos += 1;
-                }
-            }
-            b'*' => {
-                if remaining > 2 && bytes[pos + 1] == b'*' && bytes[pos + 2] == b'=' {
-                    // **= is not standard bash, treat as ** then =
-                    tokens.push(ArithToken::StarStar);
-                    pos += 2;
-                } else if remaining > 1 && bytes[pos + 1] == b'*' {
-                    tokens.push(ArithToken::StarStar);
-                    pos += 2;
-                } else if remaining > 1 && bytes[pos + 1] == b'=' {
-                    tokens.push(ArithToken::StarEq);
-                    pos += 2;
-                } else {
-                    tokens.push(ArithToken::Star);
-                    pos += 1;
-                }
-            }
-            b'/' => {
-                if remaining > 1 && bytes[pos + 1] == b'=' {
-                    tokens.push(ArithToken::SlashEq);
-                    pos += 2;
-                } else {
-                    tokens.push(ArithToken::Slash);
-                    pos += 1;
-                }
-            }
-            b'%' => {
-                if remaining > 1 && bytes[pos + 1] == b'=' {
-                    tokens.push(ArithToken::PercentEq);
-                    pos += 2;
-                } else {
-                    tokens.push(ArithToken::Percent);
-                    pos += 1;
-                }
-            }
-            b'<' => {
-                if remaining > 2 && bytes[pos + 1] == b'<' && bytes[pos + 2] == b'=' {
-                    tokens.push(ArithToken::LShiftEq);
-                    pos += 3;
-                } else if remaining > 1 && bytes[pos + 1] == b'<' {
-                    tokens.push(ArithToken::LShift);
-                    pos += 2;
-                } else if remaining > 1 && bytes[pos + 1] == b'=' {
-                    tokens.push(ArithToken::Le);
-                    pos += 2;
-                } else {
-                    tokens.push(ArithToken::Lt);
-                    pos += 1;
-                }
-            }
-            b'>' => {
-                if remaining > 2 && bytes[pos + 1] == b'>' && bytes[pos + 2] == b'=' {
-                    tokens.push(ArithToken::RShiftEq);
-                    pos += 3;
-                } else if remaining > 1 && bytes[pos + 1] == b'>' {
-                    tokens.push(ArithToken::RShift);
-                    pos += 2;
-                } else if remaining > 1 && bytes[pos + 1] == b'=' {
-                    tokens.push(ArithToken::Ge);
-                    pos += 2;
-                } else {
-                    tokens.push(ArithToken::Gt);
-                    pos += 1;
-                }
-            }
-            b'=' => {
-                if remaining > 1 && bytes[pos + 1] == b'=' {
-                    tokens.push(ArithToken::EqEq);
-                    pos += 2;
-                } else {
-                    tokens.push(ArithToken::Eq);
-                    pos += 1;
-                }
-            }
-            b'!' => {
-                if remaining > 1 && bytes[pos + 1] == b'=' {
-                    tokens.push(ArithToken::Ne);
-                    pos += 2;
-                } else {
-                    tokens.push(ArithToken::Bang);
-                    pos += 1;
-                }
-            }
-            b'&' => {
-                if remaining > 1 && bytes[pos + 1] == b'&' {
-                    tokens.push(ArithToken::AmpAmp);
-                    pos += 2;
-                } else if remaining > 1 && bytes[pos + 1] == b'=' {
-                    tokens.push(ArithToken::AmpEq);
-                    pos += 2;
-                } else {
-                    tokens.push(ArithToken::Amp);
-                    pos += 1;
-                }
-            }
-            b'|' => {
-                if remaining > 1 && bytes[pos + 1] == b'|' {
-                    tokens.push(ArithToken::PipePipe);
-                    pos += 2;
-                } else if remaining > 1 && bytes[pos + 1] == b'=' {
-                    tokens.push(ArithToken::PipeEq);
-                    pos += 2;
-                } else {
-                    tokens.push(ArithToken::Pipe);
-                    pos += 1;
-                }
-            }
-            b'^' => {
-                if remaining > 1 && bytes[pos + 1] == b'=' {
-                    tokens.push(ArithToken::CaretEq);
-                    pos += 2;
-                } else {
-                    tokens.push(ArithToken::Caret);
-                    pos += 1;
-                }
-            }
-            b'~' => {
-                tokens.push(ArithToken::Tilde);
-                pos += 1;
-            }
-            b'?' => {
-                tokens.push(ArithToken::Question);
-                pos += 1;
-            }
-            b':' => {
-                tokens.push(ArithToken::Colon);
-                pos += 1;
-            }
-            b',' => {
-                tokens.push(ArithToken::Comma);
-                pos += 1;
-            }
-            b'(' => {
-                tokens.push(ArithToken::LParen);
-                pos += 1;
-            }
-            b')' => {
-                tokens.push(ArithToken::RParen);
-                pos += 1;
-            }
-            b'$' => {
-                // Skip $ before variable names (bash allows $var in arithmetic)
-                pos += 1;
-            }
-            _ => {
-                // Skip unknown characters
-                pos += 1;
+                tokens.push(ArithToken::Number(
+                    i64::from_str_radix(&input[val_start..*pos], base).unwrap_or(0),
+                ));
+                return;
             }
         }
     }
+    tokens.push(ArithToken::Number(
+        input[start..*pos].parse::<i64>().unwrap_or(0),
+    ));
+}
 
-    tokens
+/// Tokenize an identifier (variable name).
+fn arith_tokenize_ident(input: &str, bytes: &[u8], pos: &mut usize, tokens: &mut Vec<ArithToken>) {
+    let start = *pos;
+    *pos += 1;
+    while *pos < bytes.len() && (bytes[*pos].is_ascii_alphanumeric() || bytes[*pos] == b'_') {
+        *pos += 1;
+    }
+    tokens.push(ArithToken::Ident(input[start..*pos].to_string()));
+}
+
+/// Helper: check if a second byte matches and push a 2-char or 1-char token accordingly.
+fn arith_push_op2(
+    bytes: &[u8],
+    pos: &mut usize,
+    next: u8,
+    tok2: ArithToken,
+    tok1: ArithToken,
+    tokens: &mut Vec<ArithToken>,
+) {
+    let remaining = bytes.len() - *pos;
+    if remaining > 1 && bytes[*pos + 1] == next {
+        tokens.push(tok2);
+        *pos += 2;
+    } else {
+        tokens.push(tok1);
+        *pos += 1;
+    }
+}
+
+/// Tokenize an operator (single or multi-character).
+fn arith_tokenize_operator(bytes: &[u8], pos: &mut usize, tokens: &mut Vec<ArithToken>) {
+    let b = bytes[*pos];
+    let remaining = bytes.len() - *pos;
+    let next = if remaining > 1 {
+        Some(bytes[*pos + 1])
+    } else {
+        None
+    };
+
+    match b {
+        b'+' => match next {
+            Some(b'+') => {
+                tokens.push(ArithToken::PlusPlus);
+                *pos += 2;
+            }
+            Some(b'=') => {
+                tokens.push(ArithToken::PlusEq);
+                *pos += 2;
+            }
+            _ => {
+                tokens.push(ArithToken::Plus);
+                *pos += 1;
+            }
+        },
+        b'-' => match next {
+            Some(b'-') => {
+                tokens.push(ArithToken::MinusMinus);
+                *pos += 2;
+            }
+            Some(b'=') => {
+                tokens.push(ArithToken::MinusEq);
+                *pos += 2;
+            }
+            _ => {
+                tokens.push(ArithToken::Minus);
+                *pos += 1;
+            }
+        },
+        b'*' => {
+            if remaining > 1 && bytes[*pos + 1] == b'*' {
+                tokens.push(ArithToken::StarStar);
+                *pos += 2;
+            } else if next == Some(b'=') {
+                tokens.push(ArithToken::StarEq);
+                *pos += 2;
+            } else {
+                tokens.push(ArithToken::Star);
+                *pos += 1;
+            }
+        }
+        b'/' => arith_push_op2(
+            bytes,
+            pos,
+            b'=',
+            ArithToken::SlashEq,
+            ArithToken::Slash,
+            tokens,
+        ),
+        b'%' => arith_push_op2(
+            bytes,
+            pos,
+            b'=',
+            ArithToken::PercentEq,
+            ArithToken::Percent,
+            tokens,
+        ),
+        b'<' => {
+            if remaining > 2 && bytes[*pos + 1] == b'<' && bytes[*pos + 2] == b'=' {
+                tokens.push(ArithToken::LShiftEq);
+                *pos += 3;
+            } else if next == Some(b'<') {
+                tokens.push(ArithToken::LShift);
+                *pos += 2;
+            } else if next == Some(b'=') {
+                tokens.push(ArithToken::Le);
+                *pos += 2;
+            } else {
+                tokens.push(ArithToken::Lt);
+                *pos += 1;
+            }
+        }
+        b'>' => {
+            if remaining > 2 && bytes[*pos + 1] == b'>' && bytes[*pos + 2] == b'=' {
+                tokens.push(ArithToken::RShiftEq);
+                *pos += 3;
+            } else if next == Some(b'>') {
+                tokens.push(ArithToken::RShift);
+                *pos += 2;
+            } else if next == Some(b'=') {
+                tokens.push(ArithToken::Ge);
+                *pos += 2;
+            } else {
+                tokens.push(ArithToken::Gt);
+                *pos += 1;
+            }
+        }
+        b'=' => arith_push_op2(bytes, pos, b'=', ArithToken::EqEq, ArithToken::Eq, tokens),
+        b'!' => arith_push_op2(bytes, pos, b'=', ArithToken::Ne, ArithToken::Bang, tokens),
+        b'&' => match next {
+            Some(b'&') => {
+                tokens.push(ArithToken::AmpAmp);
+                *pos += 2;
+            }
+            Some(b'=') => {
+                tokens.push(ArithToken::AmpEq);
+                *pos += 2;
+            }
+            _ => {
+                tokens.push(ArithToken::Amp);
+                *pos += 1;
+            }
+        },
+        b'|' => match next {
+            Some(b'|') => {
+                tokens.push(ArithToken::PipePipe);
+                *pos += 2;
+            }
+            Some(b'=') => {
+                tokens.push(ArithToken::PipeEq);
+                *pos += 2;
+            }
+            _ => {
+                tokens.push(ArithToken::Pipe);
+                *pos += 1;
+            }
+        },
+        b'^' => arith_push_op2(
+            bytes,
+            pos,
+            b'=',
+            ArithToken::CaretEq,
+            ArithToken::Caret,
+            tokens,
+        ),
+        b'~' => {
+            tokens.push(ArithToken::Tilde);
+            *pos += 1;
+        }
+        b'?' => {
+            tokens.push(ArithToken::Question);
+            *pos += 1;
+        }
+        b':' => {
+            tokens.push(ArithToken::Colon);
+            *pos += 1;
+        }
+        b',' => {
+            tokens.push(ArithToken::Comma);
+            *pos += 1;
+        }
+        b'(' => {
+            tokens.push(ArithToken::LParen);
+            *pos += 1;
+        }
+        b')' => {
+            tokens.push(ArithToken::RParen);
+            *pos += 1;
+        }
+        _ => {
+            *pos += 1;
+        } // Skip $ and unknown characters
+    }
 }
 
 /// Parser state for the arithmetic evaluator.

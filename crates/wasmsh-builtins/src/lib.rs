@@ -258,168 +258,8 @@ fn builtin_printf(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     let bytes = format.as_bytes();
 
     loop {
-        let mut i = 0;
         let start_arg_idx = arg_idx;
-
-        while i < bytes.len() {
-            if bytes[i] == b'%' && i + 1 < bytes.len() {
-                if bytes[i + 1] == b'%' {
-                    output.push('%');
-                    i += 2;
-                    continue;
-                }
-                // Parse format specifier: %[-0][width][.precision][sdxofcbq]
-                i += 1; // skip '%'
-                let mut left_align = false;
-                let mut zero_pad = false;
-                // Parse flags
-                loop {
-                    if i < bytes.len() && bytes[i] == b'-' {
-                        left_align = true;
-                        i += 1;
-                    } else if i < bytes.len() && bytes[i] == b'0' && !left_align {
-                        zero_pad = true;
-                        i += 1;
-                    } else {
-                        break;
-                    }
-                }
-                // Parse width
-                let mut width: usize = 0;
-                while i < bytes.len() && bytes[i].is_ascii_digit() {
-                    width = width * 10 + (bytes[i] - b'0') as usize;
-                    i += 1;
-                }
-                // Parse precision
-                let mut precision: Option<usize> = None;
-                if i < bytes.len() && bytes[i] == b'.' {
-                    i += 1;
-                    let mut prec: usize = 0;
-                    while i < bytes.len() && bytes[i].is_ascii_digit() {
-                        prec = prec * 10 + (bytes[i] - b'0') as usize;
-                        i += 1;
-                    }
-                    precision = Some(prec);
-                }
-                // Parse conversion character
-                if i >= bytes.len() {
-                    output.push('%');
-                    break;
-                }
-                let conv = bytes[i];
-                i += 1;
-                let arg_str = args.get(arg_idx).copied().unwrap_or("");
-                let formatted = match conv {
-                    b's' => {
-                        arg_idx += 1;
-                        let s = if let Some(prec) = precision {
-                            if prec < arg_str.len() {
-                                &arg_str[..prec]
-                            } else {
-                                arg_str
-                            }
-                        } else {
-                            arg_str
-                        };
-                        s.to_string()
-                    }
-                    b'd' => {
-                        arg_idx += 1;
-                        let val: i64 = arg_str.parse().unwrap_or(0);
-                        val.to_string()
-                    }
-                    b'x' => {
-                        arg_idx += 1;
-                        let val: i64 = arg_str.parse().unwrap_or(0);
-                        format!("{val:x}")
-                    }
-                    b'o' => {
-                        arg_idx += 1;
-                        let val: i64 = arg_str.parse().unwrap_or(0);
-                        format!("{val:o}")
-                    }
-                    b'f' => {
-                        arg_idx += 1;
-                        let val: f64 = arg_str.parse().unwrap_or(0.0);
-                        let prec = precision.unwrap_or(6);
-                        format!("{val:.prec$}")
-                    }
-                    b'c' => {
-                        arg_idx += 1;
-                        arg_str
-                            .chars()
-                            .next()
-                            .map_or(String::new(), |c| c.to_string())
-                    }
-                    b'b' => {
-                        arg_idx += 1;
-                        process_printf_backslash_escapes(arg_str)
-                    }
-                    b'q' => {
-                        arg_idx += 1;
-                        shell_quote(arg_str)
-                    }
-                    _ => {
-                        // Unknown specifier, output literally
-                        format!("%{}", conv as char)
-                    }
-                };
-                // Apply width and alignment
-                if width > 0 && formatted.len() < width {
-                    let pad_char = if zero_pad && !left_align { '0' } else { ' ' };
-                    let padding = width - formatted.len();
-                    if left_align {
-                        output.push_str(&formatted);
-                        for _ in 0..padding {
-                            output.push(' ');
-                        }
-                    } else {
-                        for _ in 0..padding {
-                            output.push(pad_char);
-                        }
-                        output.push_str(&formatted);
-                    }
-                } else {
-                    output.push_str(&formatted);
-                }
-            } else if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                match bytes[i + 1] {
-                    b'n' => {
-                        output.push('\n');
-                        i += 2;
-                    }
-                    b't' => {
-                        output.push('\t');
-                        i += 2;
-                    }
-                    b'\\' => {
-                        output.push('\\');
-                        i += 2;
-                    }
-                    b'r' => {
-                        output.push('\r');
-                        i += 2;
-                    }
-                    b'a' => {
-                        output.push('\x07');
-                        i += 2;
-                    }
-                    b'b' => {
-                        output.push('\x08');
-                        i += 2;
-                    }
-                    _ => {
-                        output.push('\\');
-                        i += 1;
-                    }
-                }
-            } else {
-                output.push(bytes[i] as char);
-                i += 1;
-            }
-        }
-
-        // If no format specifiers consumed args, or all args consumed, stop
+        printf_format_once(bytes, args, &mut arg_idx, &mut output);
         if arg_idx == start_arg_idx || arg_idx >= args.len() {
             break;
         }
@@ -427,6 +267,193 @@ fn builtin_printf(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 
     ctx.output.stdout(output.as_bytes());
     0
+}
+
+/// Process one pass of a printf format string.
+fn printf_format_once(bytes: &[u8], args: &[&str], arg_idx: &mut usize, output: &mut String) {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 1 < bytes.len() {
+            if bytes[i + 1] == b'%' {
+                output.push('%');
+                i += 2;
+                continue;
+            }
+            i += 1;
+            i = printf_format_spec(bytes, i, args, arg_idx, output);
+        } else if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i = printf_escape(bytes, i, output);
+        } else {
+            output.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+}
+
+/// Parse and apply a single printf format specifier starting after the `%`.
+/// Returns the new position in the format byte string.
+fn printf_format_spec(
+    bytes: &[u8],
+    mut i: usize,
+    args: &[&str],
+    arg_idx: &mut usize,
+    output: &mut String,
+) -> usize {
+    let mut left_align = false;
+    let mut zero_pad = false;
+    loop {
+        if i < bytes.len() && bytes[i] == b'-' {
+            left_align = true;
+            i += 1;
+        } else if i < bytes.len() && bytes[i] == b'0' && !left_align {
+            zero_pad = true;
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    let mut width: usize = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        width = width * 10 + (bytes[i] - b'0') as usize;
+        i += 1;
+    }
+    let mut precision: Option<usize> = None;
+    if i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        let mut prec: usize = 0;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            prec = prec * 10 + (bytes[i] - b'0') as usize;
+            i += 1;
+        }
+        precision = Some(prec);
+    }
+    if i >= bytes.len() {
+        output.push('%');
+        return i;
+    }
+    let conv = bytes[i];
+    i += 1;
+    let arg_str = args.get(*arg_idx).copied().unwrap_or("");
+    let formatted = printf_convert(conv, arg_str, precision, arg_idx);
+    printf_apply_width(output, &formatted, width, left_align, zero_pad);
+    i
+}
+
+/// Convert a single printf format conversion character.
+fn printf_convert(
+    conv: u8,
+    arg_str: &str,
+    precision: Option<usize>,
+    arg_idx: &mut usize,
+) -> String {
+    match conv {
+        b's' => {
+            *arg_idx += 1;
+            let s = precision.map_or(arg_str, |prec| {
+                if prec < arg_str.len() {
+                    &arg_str[..prec]
+                } else {
+                    arg_str
+                }
+            });
+            s.to_string()
+        }
+        b'd' => {
+            *arg_idx += 1;
+            arg_str.parse::<i64>().unwrap_or(0).to_string()
+        }
+        b'x' => {
+            *arg_idx += 1;
+            format!("{:x}", arg_str.parse::<i64>().unwrap_or(0))
+        }
+        b'o' => {
+            *arg_idx += 1;
+            format!("{:o}", arg_str.parse::<i64>().unwrap_or(0))
+        }
+        b'f' => {
+            *arg_idx += 1;
+            let val: f64 = arg_str.parse().unwrap_or(0.0);
+            let prec = precision.unwrap_or(6);
+            format!("{val:.prec$}")
+        }
+        b'c' => {
+            *arg_idx += 1;
+            arg_str
+                .chars()
+                .next()
+                .map_or(String::new(), |c| c.to_string())
+        }
+        b'b' => {
+            *arg_idx += 1;
+            process_printf_backslash_escapes(arg_str)
+        }
+        b'q' => {
+            *arg_idx += 1;
+            shell_quote(arg_str)
+        }
+        _ => format!("%{}", conv as char),
+    }
+}
+
+/// Apply width and alignment to a formatted string.
+fn printf_apply_width(
+    output: &mut String,
+    formatted: &str,
+    width: usize,
+    left_align: bool,
+    zero_pad: bool,
+) {
+    if width > 0 && formatted.len() < width {
+        let pad_char = if zero_pad && !left_align { '0' } else { ' ' };
+        let padding = width - formatted.len();
+        if left_align {
+            output.push_str(formatted);
+            for _ in 0..padding {
+                output.push(' ');
+            }
+        } else {
+            for _ in 0..padding {
+                output.push(pad_char);
+            }
+            output.push_str(formatted);
+        }
+    } else {
+        output.push_str(formatted);
+    }
+}
+
+/// Process a backslash escape in a printf format string. Returns new position.
+fn printf_escape(bytes: &[u8], i: usize, output: &mut String) -> usize {
+    match bytes[i + 1] {
+        b'n' => {
+            output.push('\n');
+            i + 2
+        }
+        b't' => {
+            output.push('\t');
+            i + 2
+        }
+        b'\\' => {
+            output.push('\\');
+            i + 2
+        }
+        b'r' => {
+            output.push('\r');
+            i + 2
+        }
+        b'a' => {
+            output.push('\x07');
+            i + 2
+        }
+        b'b' => {
+            output.push('\x08');
+            i + 2
+        }
+        _ => {
+            output.push('\\');
+            i + 1
+        }
+    }
 }
 
 /// Process backslash escape sequences for `%b` in printf.
@@ -825,47 +852,45 @@ fn set_long_option_var(name: &str) -> Option<&'static str> {
 fn builtin_set(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     let args = &argv[1..];
     if args.is_empty() {
-        // Print all variables
         return 0;
     }
     if args[0] == "--" {
-        // set -- arg1 arg2 ... → set positional parameters
         ctx.state.positional = args[1..].iter().map(|s| SmolStr::from(*s)).collect();
         return 0;
     }
-    // Parse options like -e, -u, +e, -o pipefail, +o pipefail, etc.
-    // Store as shell option variables for runtime to check
     let mut i = 0;
     while i < args.len() {
         let arg = args[i];
         if (arg.starts_with('-') || arg.starts_with('+')) && arg.len() > 1 {
             let enable = arg.starts_with('-');
-            let flags = &arg[1..];
-            if flags == "o" {
-                // -o optname / +o optname
-                i += 1;
-                if i < args.len() {
-                    let opt_name = args[i];
-                    let val = if enable { "1" } else { "0" };
-                    if let Some(var) = set_long_option_var(opt_name) {
-                        ctx.state.set_var(SmolStr::from(var), SmolStr::from(val));
-                    } else {
-                        let msg = format!("set: unrecognized option: {opt_name}\n");
-                        ctx.output.stderr(msg.as_bytes());
-                    }
-                }
-            } else {
-                for c in flags.chars() {
-                    let opt_name = format!("SHOPT_{c}");
-                    let val = if enable { "1" } else { "0" };
-                    ctx.state
-                        .set_var(SmolStr::from(opt_name.as_str()), SmolStr::from(val));
-                }
-            }
+            set_parse_option(ctx, args, &mut i, enable);
         }
         i += 1;
     }
     0
+}
+
+/// Parse a single `set` option flag and apply it.
+fn set_parse_option(ctx: &mut BuiltinContext<'_>, args: &[&str], i: &mut usize, enable: bool) {
+    let flags = &args[*i][1..];
+    let val = if enable { "1" } else { "0" };
+    if flags == "o" {
+        *i += 1;
+        if *i < args.len() {
+            if let Some(var) = set_long_option_var(args[*i]) {
+                ctx.state.set_var(SmolStr::from(var), SmolStr::from(val));
+            } else {
+                let msg = format!("set: unrecognized option: {}\n", args[*i]);
+                ctx.output.stderr(msg.as_bytes());
+            }
+        }
+    } else {
+        for c in flags.chars() {
+            let opt_name = format!("SHOPT_{c}");
+            ctx.state
+                .set_var(SmolStr::from(opt_name.as_str()), SmolStr::from(val));
+        }
+    }
 }
 
 /// `getopts` — parse positional parameters for options.
@@ -907,34 +932,33 @@ fn builtin_getopts(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     0
 }
 
-/// `read` — read a line from stdin into variable(s).
-/// Supports: `-r` (no backslash interpretation), `-p prompt`, `-d delim`,
-/// `-n nchars`, `-N nchars`, `-a array`, `-t timeout`, `-s` (silent).
-fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
-    let mut _raw = false;
-    let mut prompt: Option<&str> = None;
-    let mut delimiter: char = '\n';
-    let mut nchars: Option<usize> = None;
-    let mut exact_nchars: Option<usize> = None;
-    let mut array_name: Option<&str> = None;
-    let mut _timeout: Option<f64> = None;
-    let mut _silent = false;
+/// Parsed options for the `read` builtin.
+struct ReadOpts<'a> {
+    prompt: Option<&'a str>,
+    delimiter: char,
+    nchars: Option<usize>,
+    exact_nchars: Option<usize>,
+    array_name: Option<&'a str>,
+    remaining_args: &'a [&'a str],
+}
 
-    // Parse flags
+/// Parse `read` builtin flags, returning parsed options.
+fn parse_read_opts<'a>(argv: &'a [&'a str]) -> ReadOpts<'a> {
+    let mut args = &argv[1..];
+    let mut opts = ReadOpts {
+        prompt: None,
+        delimiter: '\n',
+        nchars: None,
+        exact_nchars: None,
+        array_name: None,
+        remaining_args: &[],
+    };
     while let Some(arg) = args.first() {
         match *arg {
-            "-r" => {
-                _raw = true;
-                args = &args[1..];
-            }
-            "-s" => {
-                _silent = true;
-                args = &args[1..];
-            }
+            "-r" | "-s" => args = &args[1..],
             "-p" => {
                 if args.len() > 1 {
-                    prompt = Some(args[1]);
+                    opts.prompt = Some(args[1]);
                     args = &args[2..];
                 } else {
                     args = &args[1..];
@@ -942,7 +966,7 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
             }
             "-d" => {
                 if args.len() > 1 {
-                    delimiter = args[1].chars().next().unwrap_or('\n');
+                    opts.delimiter = args[1].chars().next().unwrap_or('\n');
                     args = &args[2..];
                 } else {
                     args = &args[1..];
@@ -950,7 +974,7 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
             }
             "-n" => {
                 if args.len() > 1 {
-                    nchars = args[1].parse().ok();
+                    opts.nchars = args[1].parse().ok();
                     args = &args[2..];
                 } else {
                     args = &args[1..];
@@ -958,7 +982,7 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
             }
             "-N" => {
                 if args.len() > 1 {
-                    exact_nchars = args[1].parse().ok();
+                    opts.exact_nchars = args[1].parse().ok();
                     args = &args[2..];
                 } else {
                     args = &args[1..];
@@ -966,7 +990,7 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
             }
             "-a" => {
                 if args.len() > 1 {
-                    array_name = Some(args[1]);
+                    opts.array_name = Some(args[1]);
                     args = &args[2..];
                 } else {
                     args = &args[1..];
@@ -974,7 +998,6 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
             }
             "-t" => {
                 if args.len() > 1 {
-                    _timeout = args[1].parse().ok();
                     args = &args[2..];
                 } else {
                     args = &args[1..];
@@ -983,33 +1006,39 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
             _ => break,
         }
     }
+    opts.remaining_args = args;
+    opts
+}
 
-    // Output prompt to stderr
-    if let Some(p) = prompt {
+/// `read` — read a line from stdin into variable(s).
+/// Supports: `-r` (no backslash interpretation), `-p prompt`, `-d delim`,
+/// `-n nchars`, `-N nchars`, `-a array`, `-t timeout`, `-s` (silent).
+fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
+    let opts = parse_read_opts(argv);
+
+    if let Some(p) = opts.prompt {
         ctx.output.stderr(p.as_bytes());
     }
 
-    // Get variable names (default: REPLY)
-    let var_names: Vec<&str> = if array_name.is_some() || args.is_empty() {
+    let var_names: Vec<&str> = if opts.array_name.is_some() || opts.remaining_args.is_empty() {
         vec!["REPLY"]
     } else {
-        args.to_vec()
+        opts.remaining_args.to_vec()
     };
 
-    // Read input from stdin or _STDIN_REMAINING
     let input_text = if let Some(data) = ctx.stdin {
         String::from_utf8_lossy(data).to_string()
     } else if let Some(rem) = ctx.state.get_var("_STDIN_REMAINING") {
         if rem.is_empty() {
-            return 1; // EOF
+            return 1;
         }
         rem.to_string()
     } else {
-        return 1; // EOF / no stdin
+        return 1;
     };
 
-    // Handle -N (exact nchars, ignores delimiter)
-    let (line, remaining) = if let Some(n) = exact_nchars {
+    let delimiter = opts.delimiter;
+    let (line, remaining) = if let Some(n) = opts.exact_nchars {
         let chars: String = input_text.chars().take(n).collect();
         let rest_start = chars.len();
         let rest = if rest_start < input_text.len() {
@@ -1018,7 +1047,7 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
             ""
         };
         (chars, rest.to_string())
-    } else if let Some(n) = nchars {
+    } else if let Some(n) = opts.nchars {
         // -n: read at most N characters, but stop at delimiter too
         let mut chars = String::new();
         let mut rest_start = 0;
@@ -1056,7 +1085,7 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     );
 
     // Handle -a (read into array)
-    if let Some(arr_name) = array_name {
+    if let Some(arr_name) = opts.array_name {
         let ifs = ctx
             .state
             .get_var("IFS")

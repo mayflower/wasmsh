@@ -501,571 +501,32 @@ impl WorkerRuntime {
 
     fn execute_command(&mut self, cmd: &HirCommand) {
         match cmd {
-            HirCommand::Exec(exec) => {
-                // Resolve command substitutions first, then expand
-                let resolved = self.resolve_command_subst(&exec.argv);
-                let argv = expand_words(&resolved, &mut self.vm.state);
-
-                // Check for nounset errors from expansion
-                if let Some(var_name) = self.vm.state.get_var("_NOUNSET_ERROR") {
-                    if !var_name.is_empty() {
-                        let msg = format!("wasmsh: {var_name}: unbound variable\n");
-                        self.vm.stderr.extend_from_slice(msg.as_bytes());
-                        self.vm.state.set_var(
-                            smol_str::SmolStr::from("_NOUNSET_ERROR"),
-                            smol_str::SmolStr::default(),
-                        );
-                        self.vm.state.last_status = 1;
-                        return;
-                    }
-                }
-
-                if argv.is_empty() {
-                    return;
-                }
-
-                // Brace expansion: expand {a,b,c} and {1..10} patterns
-                let argv: Vec<String> = argv
-                    .into_iter()
-                    .flat_map(|arg| wasmsh_expand::expand_braces(&arg))
-                    .collect();
-
-                // Glob/pathname expansion
-                let argv = self.expand_globs(argv);
-
-                // Set env vars for the duration of the command
-                for assignment in &exec.env {
-                    self.execute_assignment(&assignment.name, assignment.value.as_ref());
-                }
-
-                // Collect stdin from here-doc bodies or input redirections
-                for redir in &exec.redirections {
-                    match redir.op {
-                        RedirectionOp::HereDoc | RedirectionOp::HereDocStrip => {
-                            if let Some(body) = &redir.here_doc_body {
-                                // Expand $var references in unquoted here-doc bodies
-                                let expanded =
-                                    wasmsh_expand::expand_string(&body.content, &mut self.vm.state);
-                                self.pending_stdin = Some(expanded.into_bytes());
-                            }
-                        }
-                        RedirectionOp::HereString => {
-                            let content =
-                                wasmsh_expand::expand_word(&redir.target, &mut self.vm.state);
-                            // Here-strings append a trailing newline
-                            let mut data = content.into_bytes();
-                            data.push(b'\n');
-                            self.pending_stdin = Some(data);
-                        }
-                        RedirectionOp::Input => {
-                            let target =
-                                wasmsh_expand::expand_word(&redir.target, &mut self.vm.state);
-                            let path = self.resolve_cwd_path(&target);
-                            if let Ok(h) = self.fs.open(&path, OpenOptions::read()) {
-                                match self.fs.read_file(h) {
-                                    Ok(data) => {
-                                        self.pending_stdin = Some(data);
-                                    }
-                                    Err(e) => {
-                                        let msg = format!("wasmsh: {target}: read error: {e}\n");
-                                        self.vm.stderr.extend_from_slice(msg.as_bytes());
-                                        self.vm.state.last_status = 1;
-                                        self.fs.close(h);
-                                        return;
-                                    }
-                                }
-                                self.fs.close(h);
-                            } else {
-                                let msg = format!("wasmsh: {target}: No such file or directory\n");
-                                self.vm.stderr.extend_from_slice(msg.as_bytes());
-                                self.vm.state.last_status = 1;
-                                return;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                // Alias expansion: if the command name is an alias, substitute it.
-                // Re-parse and re-execute the expanded text.
-                if let Some(alias_val) = self.aliases.get(&argv[0]).cloned() {
-                    let rest = if argv.len() > 1 {
-                        format!(" {}", argv[1..].join(" "))
-                    } else {
-                        String::new()
-                    };
-                    let expanded = format!("{alias_val}{rest}");
-                    let sub_events = self.execute_input_inner(&expanded);
-                    for e in sub_events {
-                        match e {
-                            WorkerEvent::Stdout(d) => self.vm.stdout.extend_from_slice(&d),
-                            WorkerEvent::Stderr(d) => self.vm.stderr.extend_from_slice(&d),
-                            _ => {}
-                        }
-                    }
-                    return;
-                }
-
-                // Snapshot stdout position so we can capture this command's output
-                let stdout_before = self.vm.stdout.len();
-
-                let cmd_name = &argv[0];
-
-                // xtrace: print expanded command to stderr
-                if self.vm.state.get_var("SHOPT_x").as_deref() == Some("1") {
-                    let ps4 = self
-                        .vm
-                        .state
-                        .get_var("PS4")
-                        .unwrap_or_else(|| smol_str::SmolStr::from("+ "));
-                    let trace_line = format!("{}{}\n", ps4, argv.join(" "));
-                    self.vm.stderr.extend_from_slice(trace_line.as_bytes());
-                }
-
-                // Runtime-level commands that affect control flow
-                match cmd_name.as_str() {
-                    CMD_LOCAL => {
-                        // Save old values for restoration on function return
-                        for arg in &argv[1..] {
-                            let (name, value) = if let Some(eq) = arg.find('=') {
-                                (&arg[..eq], Some(&arg[eq + 1..]))
-                            } else {
-                                (arg.as_str(), None)
-                            };
-                            let old = self.vm.state.get_var(name);
-                            self.exec
-                                .local_save_stack
-                                .push((smol_str::SmolStr::from(name), old));
-                            if let Some(val) = value {
-                                self.vm.state.set_var(
-                                    smol_str::SmolStr::from(name),
-                                    smol_str::SmolStr::from(val),
-                                );
-                            } else {
-                                self.vm.state.set_var(
-                                    smol_str::SmolStr::from(name),
-                                    smol_str::SmolStr::default(),
-                                );
-                            }
-                        }
-                        self.vm.state.last_status = 0;
-                        return;
-                    }
-                    CMD_BREAK => {
-                        self.exec.break_depth =
-                            argv.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
-                        self.vm.state.last_status = 0;
-                        return;
-                    }
-                    CMD_CONTINUE => {
-                        self.exec.loop_continue = true;
-                        self.vm.state.last_status = 0;
-                        return;
-                    }
-                    CMD_EXIT => {
-                        let code = argv
-                            .get(1)
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(self.vm.state.last_status);
-                        self.exec.exit_requested = Some(code);
-                        self.vm.state.last_status = code;
-                        return;
-                    }
-                    CMD_EVAL => {
-                        let code = argv[1..].join(" ");
-                        let sub_events = self.execute_input_inner(&code);
-                        for e in sub_events {
-                            match e {
-                                WorkerEvent::Stdout(d) => self.vm.stdout.extend_from_slice(&d),
-                                WorkerEvent::Stderr(d) => self.vm.stderr.extend_from_slice(&d),
-                                WorkerEvent::Diagnostic(level, msg) => {
-                                    self.vm.diagnostics.push(wasmsh_vm::DiagnosticEvent {
-                                        level: match level {
-                                            DiagnosticLevel::Trace => wasmsh_vm::DiagLevel::Trace,
-                                            DiagnosticLevel::Warning => {
-                                                wasmsh_vm::DiagLevel::Warning
-                                            }
-                                            DiagnosticLevel::Error => wasmsh_vm::DiagLevel::Error,
-                                            _ => wasmsh_vm::DiagLevel::Info,
-                                        },
-                                        category: wasmsh_vm::DiagCategory::Runtime,
-                                        message: msg,
-                                    });
-                                }
-                                _ => {}
-                            }
-                        }
-                        return;
-                    }
-                    CMD_SOURCE | CMD_DOT => {
-                        if let Some(path) = argv.get(1) {
-                            // Resolve path: if no '/', search PATH directories in VFS
-                            let resolved = if path.contains('/') {
-                                Some(self.resolve_cwd_path(path))
-                            } else {
-                                let direct = self.resolve_cwd_path(path);
-                                if self.fs.stat(&direct).is_ok() {
-                                    Some(direct)
-                                } else {
-                                    // Search PATH
-                                    self.search_path_for_file(path)
-                                }
-                            };
-                            if let Some(full) = resolved {
-                                if let Ok(h) = self.fs.open(&full, OpenOptions::read()) {
-                                    match self.fs.read_file(h) {
-                                        Ok(data) => {
-                                            self.fs.close(h);
-                                            // Push source stack for $BASH_SOURCE
-                                            self.vm
-                                                .state
-                                                .source_stack
-                                                .push(smol_str::SmolStr::from(full.as_str()));
-                                            let code = String::from_utf8_lossy(&data).to_string();
-                                            let sub_events = self.execute_input_inner(&code);
-                                            self.vm.state.source_stack.pop();
-                                            for e in sub_events {
-                                                match e {
-                                                    WorkerEvent::Stdout(d) => {
-                                                        self.vm.stdout.extend_from_slice(&d);
-                                                    }
-                                                    WorkerEvent::Stderr(d) => {
-                                                        self.vm.stderr.extend_from_slice(&d);
-                                                    }
-                                                    WorkerEvent::Diagnostic(level, msg) => {
-                                                        self.vm
-                                                            .diagnostics
-                                                            .push(wasmsh_vm::DiagnosticEvent {
-                                                            level: match level {
-                                                                DiagnosticLevel::Trace => {
-                                                                    wasmsh_vm::DiagLevel::Trace
-                                                                }
-                                                                DiagnosticLevel::Info => {
-                                                                    wasmsh_vm::DiagLevel::Info
-                                                                }
-                                                                DiagnosticLevel::Warning => {
-                                                                    wasmsh_vm::DiagLevel::Warning
-                                                                }
-                                                                DiagnosticLevel::Error => {
-                                                                    wasmsh_vm::DiagLevel::Error
-                                                                }
-                                                                _ => wasmsh_vm::DiagLevel::Info,
-                                                            },
-                                                            category:
-                                                                wasmsh_vm::DiagCategory::Runtime,
-                                                            message: msg,
-                                                        });
-                                                    }
-                                                    _ => {}
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            self.fs.close(h);
-                                            let msg = format!("source: {path}: read error: {e}\n");
-                                            self.vm.stderr.extend_from_slice(msg.as_bytes());
-                                            self.vm.state.last_status = 1;
-                                        }
-                                    }
-                                } else {
-                                    let msg = format!("source: {path}: not found\n");
-                                    self.vm.stderr.extend_from_slice(msg.as_bytes());
-                                    self.vm.state.last_status = 1;
-                                }
-                            } else {
-                                let msg = format!("source: {path}: not found\n");
-                                self.vm.stderr.extend_from_slice(msg.as_bytes());
-                                self.vm.state.last_status = 1;
-                            }
-                        }
-                        return;
-                    }
-                    CMD_DECLARE | CMD_TYPESET => {
-                        self.execute_declare(&argv);
-                        return;
-                    }
-                    CMD_LET => {
-                        self.execute_let(&argv);
-                        return;
-                    }
-                    CMD_SHOPT => {
-                        self.execute_shopt(&argv);
-                        return;
-                    }
-                    CMD_ALIAS => {
-                        self.execute_alias(&argv);
-                        return;
-                    }
-                    CMD_UNALIAS => {
-                        self.execute_unalias(&argv);
-                        return;
-                    }
-                    CMD_BUILTIN => {
-                        self.execute_builtin_keyword(&argv);
-                        return;
-                    }
-                    CMD_MAPFILE | CMD_READARRAY => {
-                        self.execute_mapfile(&argv);
-                        return;
-                    }
-                    CMD_TYPE => {
-                        self.execute_type(&argv);
-                        return;
-                    }
-                    _ => {}
-                }
-
-                // Functions take precedence over regular builtins (bash semantics).
-                if let Some(body) = self.functions.get(cmd_name).cloned() {
-                    // Shell function call — set positional params and execute body
-                    let old_positional = std::mem::take(&mut self.vm.state.positional);
-                    self.vm.state.positional = argv[1..]
-                        .iter()
-                        .map(|s| smol_str::SmolStr::from(s.as_str()))
-                        .collect();
-                    // Push function name onto $FUNCNAME stack
-                    self.vm
-                        .state
-                        .func_stack
-                        .push(smol_str::SmolStr::from(cmd_name.as_str()));
-                    // Bash functions share parent scope. `local` saves/restores.
-                    let locals_before = self.exec.local_save_stack.len();
-                    self.execute_command(&body);
-                    // Restore variables declared `local` during this function call
-                    let new_locals: Vec<_> =
-                        self.exec.local_save_stack.drain(locals_before..).collect();
-                    for (name, old_val) in new_locals.into_iter().rev() {
-                        if let Some(val) = old_val {
-                            self.vm.state.set_var(name, val);
-                        } else {
-                            self.vm.state.unset_var(&name).ok();
-                        }
-                    }
-                    self.vm.state.func_stack.pop();
-                    self.vm.state.positional = old_positional;
-                } else if self.builtins.is_builtin(cmd_name) {
-                    let builtin_fn = self.builtins.get(cmd_name).unwrap();
-                    let stdin_data = self.pending_stdin.take();
-                    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-                    let mut sink = wasmsh_builtins::VecSink::default();
-                    let status = {
-                        let mut ctx = wasmsh_builtins::BuiltinContext {
-                            state: &mut self.vm.state,
-                            output: &mut sink,
-                            fs: Some(&self.fs),
-                            stdin: stdin_data.as_deref(),
-                        };
-                        builtin_fn(&mut ctx, &argv_refs)
-                    };
-                    self.vm.stdout.extend_from_slice(&sink.stdout);
-                    self.vm.stderr.extend_from_slice(&sink.stderr);
-                    self.vm.output_bytes += (sink.stdout.len() + sink.stderr.len()) as u64;
-                    self.vm.state.last_status = status;
-                    self.pending_stdin = None;
-                } else if self.utils.is_utility(cmd_name) {
-                    let stdin_data = self.pending_stdin.take();
-                    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-                    let mut output = UtilOutput::default();
-                    let cwd = self.vm.state.cwd.clone();
-                    let status = {
-                        let util_fn = self.utils.get(cmd_name).unwrap();
-                        let mut ctx = UtilContext {
-                            fs: &mut self.fs,
-                            output: &mut output,
-                            cwd: &cwd,
-                            stdin: stdin_data.as_deref(),
-                            state: Some(&self.vm.state),
-                        };
-                        util_fn(&mut ctx, &argv_refs)
-                    };
-                    self.vm.stdout.extend_from_slice(&output.stdout);
-                    self.vm.stderr.extend_from_slice(&output.stderr);
-                    self.vm.output_bytes += (output.stdout.len() + output.stderr.len()) as u64;
-                    self.vm.state.last_status = status;
-                } else {
-                    let msg = format!("wasmsh: {cmd_name}: command not found\n");
-                    self.vm.stderr.extend_from_slice(msg.as_bytes());
-                    self.vm.state.last_status = 127;
-                }
-
-                // Apply output redirections: divert captured stdout to files
-                self.apply_redirections(&exec.redirections, stdout_before);
-            }
+            HirCommand::Exec(exec) => self.execute_exec(exec),
             HirCommand::Assign(assign) => {
                 for a in &assign.assignments {
                     self.execute_assignment(&a.name, a.value.as_ref());
                 }
-                // Apply any redirections (e.g. `VAR=x > /file`)
                 let stdout_before = self.vm.stdout.len();
                 self.apply_redirections(&assign.redirections, stdout_before);
                 self.vm.state.last_status = 0;
             }
-            HirCommand::If(if_cmd) => {
-                let saved_suppress = self.exec.errexit_suppressed;
-                self.exec.errexit_suppressed = true;
-                self.execute_body(&if_cmd.condition);
-                self.exec.errexit_suppressed = saved_suppress;
-                if self.vm.state.last_status == 0 {
-                    self.execute_body(&if_cmd.then_body);
-                } else {
-                    let mut handled = false;
-                    for elif in &if_cmd.elifs {
-                        let saved = self.exec.errexit_suppressed;
-                        self.exec.errexit_suppressed = true;
-                        self.execute_body(&elif.condition);
-                        self.exec.errexit_suppressed = saved;
-                        if self.vm.state.last_status == 0 {
-                            self.execute_body(&elif.then_body);
-                            handled = true;
-                            break;
-                        }
-                    }
-                    if !handled {
-                        if let Some(else_body) = &if_cmd.else_body {
-                            self.execute_body(else_body);
-                        }
-                    }
-                }
-            }
-            HirCommand::While(loop_cmd) => loop {
-                let saved = self.exec.errexit_suppressed;
-                self.exec.errexit_suppressed = true;
-                self.execute_body(&loop_cmd.condition);
-                self.exec.errexit_suppressed = saved;
-                if self.vm.state.last_status != 0 {
-                    break;
-                }
-                self.execute_body(&loop_cmd.body);
-                if self.exec.break_depth > 0 {
-                    self.exec.break_depth -= 1;
-                    break;
-                }
-                if self.exec.loop_continue {
-                    self.exec.loop_continue = false;
-                }
-                if self.exec.exit_requested.is_some() {
-                    break;
-                }
-            },
-            HirCommand::Until(loop_cmd) => loop {
-                let saved = self.exec.errexit_suppressed;
-                self.exec.errexit_suppressed = true;
-                self.execute_body(&loop_cmd.condition);
-                self.exec.errexit_suppressed = saved;
-                if self.vm.state.last_status == 0 {
-                    break;
-                }
-                self.execute_body(&loop_cmd.body);
-                if self.exec.break_depth > 0 {
-                    self.exec.break_depth -= 1;
-                    break;
-                }
-                if self.exec.loop_continue {
-                    self.exec.loop_continue = false;
-                }
-                if self.exec.exit_requested.is_some() {
-                    break;
-                }
-            },
-            HirCommand::For(for_cmd) => {
-                // Expand words, apply field splitting and glob expansion
-                let words: Vec<String> = if let Some(ws) = &for_cmd.words {
-                    let resolved = self.resolve_command_subst(ws);
-                    let mut result = Vec::new();
-                    for w in &resolved {
-                        let expanded = wasmsh_expand::expand_word_split(w, &mut self.vm.state);
-                        result.extend(expanded.fields);
-                    }
-                    // Apply brace expansion and glob expansion
-                    let result: Vec<String> = result
-                        .into_iter()
-                        .flat_map(|arg| wasmsh_expand::expand_braces(&arg))
-                        .collect();
-                    self.expand_globs(result)
-                } else {
-                    self.vm
-                        .state
-                        .positional
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect()
-                };
-                for word in words {
-                    self.vm.state.set_var(for_cmd.var_name.clone(), word.into());
-                    self.execute_body(&for_cmd.body);
-                    if self.exec.break_depth > 0 {
-                        self.exec.break_depth -= 1;
-                        break;
-                    }
-                    if self.exec.loop_continue {
-                        self.exec.loop_continue = false;
-                        continue;
-                    }
-                    if self.exec.exit_requested.is_some() {
-                        break;
-                    }
-                }
-            }
-            HirCommand::Group(block) => {
-                self.execute_body(&block.body);
-            }
+            HirCommand::If(if_cmd) => self.execute_if(if_cmd),
+            HirCommand::While(loop_cmd) => self.execute_while_loop(loop_cmd),
+            HirCommand::Until(loop_cmd) => self.execute_until_loop(loop_cmd),
+            HirCommand::For(for_cmd) => self.execute_for_loop(for_cmd),
+            HirCommand::Group(block) => self.execute_body(&block.body),
             HirCommand::Subshell(block) => {
-                // Subshells get an isolated variable scope
                 self.vm.state.env.push_scope();
                 self.execute_body(&block.body);
                 self.vm.state.env.pop_scope();
             }
-            HirCommand::Case(case_cmd) => {
-                let nocasematch =
-                    self.vm.state.get_var("SHOPT_nocasematch").as_deref() == Some("1");
-                let value = wasmsh_expand::expand_word(&case_cmd.word, &mut self.vm.state);
-                let mut i = 0;
-                let mut fallthrough = false;
-                while i < case_cmd.items.len() {
-                    let item = &case_cmd.items[i];
-                    let pattern_matched = if fallthrough {
-                        // ;&: execute unconditionally without pattern check
-                        true
-                    } else {
-                        item.patterns.iter().any(|pattern| {
-                            let pat = wasmsh_expand::expand_word(pattern, &mut self.vm.state);
-                            if nocasematch {
-                                glob_match_inner(
-                                    pat.to_lowercase().as_bytes(),
-                                    value.to_lowercase().as_bytes(),
-                                )
-                            } else {
-                                glob_match_inner(pat.as_bytes(), value.as_bytes())
-                            }
-                        })
-                    };
-
-                    if pattern_matched {
-                        self.execute_body(&item.body);
-                        match item.terminator {
-                            CaseTerminator::Break => break,
-                            CaseTerminator::Fallthrough => {
-                                fallthrough = true;
-                                i += 1;
-                            }
-                            CaseTerminator::ContinueTesting => {
-                                fallthrough = false;
-                                i += 1;
-                            }
-                        }
-                    } else {
-                        fallthrough = false;
-                        i += 1;
-                    }
-                }
-            }
+            HirCommand::Case(case_cmd) => self.execute_case(case_cmd),
             HirCommand::FunctionDef(fd) => {
                 self.functions
                     .insert(fd.name.to_string(), (*fd.body).clone());
                 self.vm.state.last_status = 0;
             }
             HirCommand::RedirectOnly(ro) => {
-                // Redirection-only: e.g. `> file` creates/truncates a file
                 let stdout_before = self.vm.stdout.len();
                 self.apply_redirections(&ro.redirections, stdout_before);
                 self.vm.state.last_status = 0;
@@ -1076,135 +537,638 @@ impl WorkerRuntime {
             }
             HirCommand::ArithCommand(ac) => {
                 let result = wasmsh_expand::eval_arithmetic(&ac.expr, &mut self.vm.state);
-                // (( )) returns 0 if non-zero (true), 1 if zero (false) — like bash
                 self.vm.state.last_status = i32::from(result == 0);
             }
-            HirCommand::ArithFor(af) => {
-                // Evaluate init expression once
-                if !af.init.is_empty() {
-                    wasmsh_expand::eval_arithmetic(&af.init, &mut self.vm.state);
-                }
-                loop {
-                    // Evaluate condition — if empty, treat as always true
-                    if !af.cond.is_empty() {
-                        let cond_val = wasmsh_expand::eval_arithmetic(&af.cond, &mut self.vm.state);
-                        if cond_val == 0 {
-                            break;
-                        }
-                    }
-                    // Execute body
-                    self.execute_body(&af.body);
-                    if self.exec.break_depth > 0 {
-                        self.exec.break_depth -= 1;
-                        break;
-                    }
-                    if self.exec.loop_continue {
-                        self.exec.loop_continue = false;
-                    }
-                    if self.exec.exit_requested.is_some() {
-                        break;
-                    }
-                    // Evaluate step expression
-                    if !af.step.is_empty() {
-                        wasmsh_expand::eval_arithmetic(&af.step, &mut self.vm.state);
-                    }
-                }
-            }
-            HirCommand::Select(sel) => {
-                // Process redirections (e.g., `done <<< "input"`)
-                for redir in &sel.redirections {
-                    match redir.op {
-                        RedirectionOp::HereDoc | RedirectionOp::HereDocStrip => {
-                            if let Some(body) = &redir.here_doc_body {
-                                let expanded =
-                                    wasmsh_expand::expand_string(&body.content, &mut self.vm.state);
-                                self.pending_stdin = Some(expanded.into_bytes());
-                            }
-                        }
-                        RedirectionOp::HereString => {
-                            let content =
-                                wasmsh_expand::expand_word(&redir.target, &mut self.vm.state);
-                            let mut data = content.into_bytes();
-                            data.push(b'\n');
-                            self.pending_stdin = Some(data);
-                        }
-                        RedirectionOp::Input => {
-                            let target =
-                                wasmsh_expand::expand_word(&redir.target, &mut self.vm.state);
-                            let path = self.resolve_cwd_path(&target);
-                            if let Ok(h) = self.fs.open(&path, OpenOptions::read()) {
-                                if let Ok(data) = self.fs.read_file(h) {
-                                    self.pending_stdin = Some(data);
-                                }
-                                self.fs.close(h);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                // Expand the word list
-                let words: Vec<String> = if let Some(ws) = &sel.words {
-                    let resolved = self.resolve_command_subst(ws);
-                    let mut result = Vec::new();
-                    for w in &resolved {
-                        let expanded = wasmsh_expand::expand_word_split(w, &mut self.vm.state);
-                        result.extend(expanded.fields);
-                    }
-                    result
-                } else {
-                    self.vm
-                        .state
-                        .positional
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect()
-                };
-
-                if !words.is_empty() {
-                    // Print numbered menu to stderr
-                    for (idx, w) in words.iter().enumerate() {
-                        let line = format!("{}) {}\n", idx + 1, w);
-                        self.vm.stderr.extend_from_slice(line.as_bytes());
-                    }
-
-                    // Read from pending stdin (sandbox: use first line)
-                    let stdin_data = self.pending_stdin.take().unwrap_or_default();
-                    let input = String::from_utf8_lossy(&stdin_data);
-                    let first_line = input.lines().next().unwrap_or("");
-
-                    // Set REPLY to the raw input
-                    self.vm.state.set_var(
-                        smol_str::SmolStr::from("REPLY"),
-                        smol_str::SmolStr::from(first_line.trim()),
-                    );
-
-                    // Parse input as a number and set the variable
-                    let selected = first_line.trim().parse::<usize>().ok().and_then(|n| {
-                        if n >= 1 && n <= words.len() {
-                            Some(&words[n - 1])
-                        } else {
-                            None
-                        }
-                    });
-
-                    if let Some(word) = selected {
-                        self.vm
-                            .state
-                            .set_var(sel.var_name.clone(), smol_str::SmolStr::from(word.as_str()));
-                    } else {
-                        self.vm
-                            .state
-                            .set_var(sel.var_name.clone(), smol_str::SmolStr::default());
-                    }
-
-                    // Execute body once (in a sandbox we do one iteration)
-                    self.execute_body(&sel.body);
-                }
-            }
-            // Unknown future variants are ignored.
+            HirCommand::ArithFor(af) => self.execute_arith_for(af),
+            HirCommand::Select(sel) => self.execute_select(sel),
             _ => {}
         }
+    }
+
+    /// Execute a simple command (`HirCommand::Exec`).
+    fn execute_exec(&mut self, exec: &wasmsh_hir::HirExec) {
+        let resolved = self.resolve_command_subst(&exec.argv);
+        let argv = expand_words(&resolved, &mut self.vm.state);
+
+        if self.check_nounset_error() {
+            return;
+        }
+        if argv.is_empty() {
+            return;
+        }
+
+        let argv: Vec<String> = argv
+            .into_iter()
+            .flat_map(|arg| wasmsh_expand::expand_braces(&arg))
+            .collect();
+        let argv = self.expand_globs(argv);
+
+        for assignment in &exec.env {
+            self.execute_assignment(&assignment.name, assignment.value.as_ref());
+        }
+
+        if self.collect_stdin_from_redirections(&exec.redirections) {
+            return;
+        }
+
+        if self.try_alias_expansion(&argv) {
+            return;
+        }
+
+        let stdout_before = self.vm.stdout.len();
+        let cmd_name = &argv[0];
+        self.trace_command(&argv);
+
+        if self.try_runtime_command(cmd_name, &argv) {
+            return;
+        }
+
+        self.dispatch_command(cmd_name, &argv);
+        self.apply_redirections(&exec.redirections, stdout_before);
+    }
+
+    /// Check for nounset errors from expansion. Returns true if an error was found.
+    fn check_nounset_error(&mut self) -> bool {
+        if let Some(var_name) = self.vm.state.get_var("_NOUNSET_ERROR") {
+            if !var_name.is_empty() {
+                let msg = format!("wasmsh: {var_name}: unbound variable\n");
+                self.vm.stderr.extend_from_slice(msg.as_bytes());
+                self.vm.state.set_var(
+                    smol_str::SmolStr::from("_NOUNSET_ERROR"),
+                    smol_str::SmolStr::default(),
+                );
+                self.vm.state.last_status = 1;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Collect stdin from here-doc bodies or input redirections. Returns true if
+    /// an error occurred and execution should stop.
+    fn collect_stdin_from_redirections(&mut self, redirections: &[HirRedirection]) -> bool {
+        for redir in redirections {
+            match redir.op {
+                RedirectionOp::HereDoc | RedirectionOp::HereDocStrip => {
+                    if let Some(body) = &redir.here_doc_body {
+                        let expanded =
+                            wasmsh_expand::expand_string(&body.content, &mut self.vm.state);
+                        self.pending_stdin = Some(expanded.into_bytes());
+                    }
+                }
+                RedirectionOp::HereString => {
+                    let content = wasmsh_expand::expand_word(&redir.target, &mut self.vm.state);
+                    let mut data = content.into_bytes();
+                    data.push(b'\n');
+                    self.pending_stdin = Some(data);
+                }
+                RedirectionOp::Input => {
+                    let target = wasmsh_expand::expand_word(&redir.target, &mut self.vm.state);
+                    let path = self.resolve_cwd_path(&target);
+                    if let Ok(h) = self.fs.open(&path, OpenOptions::read()) {
+                        match self.fs.read_file(h) {
+                            Ok(data) => {
+                                self.pending_stdin = Some(data);
+                            }
+                            Err(e) => {
+                                let msg = format!("wasmsh: {target}: read error: {e}\n");
+                                self.vm.stderr.extend_from_slice(msg.as_bytes());
+                                self.vm.state.last_status = 1;
+                                self.fs.close(h);
+                                return true;
+                            }
+                        }
+                        self.fs.close(h);
+                    } else {
+                        let msg = format!("wasmsh: {target}: No such file or directory\n");
+                        self.vm.stderr.extend_from_slice(msg.as_bytes());
+                        self.vm.state.last_status = 1;
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Try alias expansion for the command. Returns true if an alias was expanded.
+    fn try_alias_expansion(&mut self, argv: &[String]) -> bool {
+        if let Some(alias_val) = self.aliases.get(&argv[0]).cloned() {
+            let rest = if argv.len() > 1 {
+                format!(" {}", argv[1..].join(" "))
+            } else {
+                String::new()
+            };
+            let expanded = format!("{alias_val}{rest}");
+            let sub_events = self.execute_input_inner(&expanded);
+            self.merge_sub_events(sub_events);
+            return true;
+        }
+        false
+    }
+
+    /// Print xtrace output if enabled.
+    fn trace_command(&mut self, argv: &[String]) {
+        if self.vm.state.get_var("SHOPT_x").as_deref() == Some("1") {
+            let ps4 = self
+                .vm
+                .state
+                .get_var("PS4")
+                .unwrap_or_else(|| smol_str::SmolStr::from("+ "));
+            let trace_line = format!("{}{}\n", ps4, argv.join(" "));
+            self.vm.stderr.extend_from_slice(trace_line.as_bytes());
+        }
+    }
+
+    /// Try to handle a runtime-level command (local, break, continue, exit, eval,
+    /// source, declare, etc.). Returns true if handled.
+    fn try_runtime_command(&mut self, cmd_name: &str, argv: &[String]) -> bool {
+        match cmd_name {
+            CMD_LOCAL => {
+                self.execute_local(argv);
+                true
+            }
+            CMD_BREAK => {
+                self.exec.break_depth = argv.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+                self.vm.state.last_status = 0;
+                true
+            }
+            CMD_CONTINUE => {
+                self.exec.loop_continue = true;
+                self.vm.state.last_status = 0;
+                true
+            }
+            CMD_EXIT => {
+                let code = argv
+                    .get(1)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(self.vm.state.last_status);
+                self.exec.exit_requested = Some(code);
+                self.vm.state.last_status = code;
+                true
+            }
+            CMD_EVAL => {
+                let code = argv[1..].join(" ");
+                let sub_events = self.execute_input_inner(&code);
+                self.merge_sub_events_with_diagnostics(sub_events);
+                true
+            }
+            CMD_SOURCE | CMD_DOT => {
+                self.execute_source(argv);
+                true
+            }
+            CMD_DECLARE | CMD_TYPESET => {
+                self.execute_declare(argv);
+                true
+            }
+            CMD_LET => {
+                self.execute_let(argv);
+                true
+            }
+            CMD_SHOPT => {
+                self.execute_shopt(argv);
+                true
+            }
+            CMD_ALIAS => {
+                self.execute_alias(argv);
+                true
+            }
+            CMD_UNALIAS => {
+                self.execute_unalias(argv);
+                true
+            }
+            CMD_BUILTIN => {
+                self.execute_builtin_keyword(argv);
+                true
+            }
+            CMD_MAPFILE | CMD_READARRAY => {
+                self.execute_mapfile(argv);
+                true
+            }
+            CMD_TYPE => {
+                self.execute_type(argv);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Execute `local` — save old variable values and set new ones.
+    fn execute_local(&mut self, argv: &[String]) {
+        for arg in &argv[1..] {
+            let (name, value) = if let Some(eq) = arg.find('=') {
+                (&arg[..eq], Some(&arg[eq + 1..]))
+            } else {
+                (arg.as_str(), None)
+            };
+            let old = self.vm.state.get_var(name);
+            self.exec
+                .local_save_stack
+                .push((smol_str::SmolStr::from(name), old));
+            let val = value.map_or(smol_str::SmolStr::default(), smol_str::SmolStr::from);
+            self.vm.state.set_var(smol_str::SmolStr::from(name), val);
+        }
+        self.vm.state.last_status = 0;
+    }
+
+    /// Execute `source`/`.` — read and execute a file.
+    fn execute_source(&mut self, argv: &[String]) {
+        let Some(path) = argv.get(1) else { return };
+        let resolved = if path.contains('/') {
+            Some(self.resolve_cwd_path(path))
+        } else {
+            let direct = self.resolve_cwd_path(path);
+            if self.fs.stat(&direct).is_ok() {
+                Some(direct)
+            } else {
+                self.search_path_for_file(path)
+            }
+        };
+        let Some(full) = resolved else {
+            let msg = format!("source: {path}: not found\n");
+            self.vm.stderr.extend_from_slice(msg.as_bytes());
+            self.vm.state.last_status = 1;
+            return;
+        };
+        let Ok(h) = self.fs.open(&full, OpenOptions::read()) else {
+            let msg = format!("source: {path}: not found\n");
+            self.vm.stderr.extend_from_slice(msg.as_bytes());
+            self.vm.state.last_status = 1;
+            return;
+        };
+        match self.fs.read_file(h) {
+            Ok(data) => {
+                self.fs.close(h);
+                self.vm
+                    .state
+                    .source_stack
+                    .push(smol_str::SmolStr::from(full.as_str()));
+                let code = String::from_utf8_lossy(&data).to_string();
+                let sub_events = self.execute_input_inner(&code);
+                self.vm.state.source_stack.pop();
+                self.merge_sub_events_with_diagnostics(sub_events);
+            }
+            Err(e) => {
+                self.fs.close(h);
+                let msg = format!("source: {path}: read error: {e}\n");
+                self.vm.stderr.extend_from_slice(msg.as_bytes());
+                self.vm.state.last_status = 1;
+            }
+        }
+    }
+
+    /// Merge sub-events (stdout/stderr only) into the current VM buffers.
+    fn merge_sub_events(&mut self, events: Vec<WorkerEvent>) {
+        for e in events {
+            match e {
+                WorkerEvent::Stdout(d) => self.vm.stdout.extend_from_slice(&d),
+                WorkerEvent::Stderr(d) => self.vm.stderr.extend_from_slice(&d),
+                _ => {}
+            }
+        }
+    }
+
+    /// Merge sub-events including diagnostics into the current VM buffers.
+    fn merge_sub_events_with_diagnostics(&mut self, events: Vec<WorkerEvent>) {
+        for e in events {
+            match e {
+                WorkerEvent::Stdout(d) => self.vm.stdout.extend_from_slice(&d),
+                WorkerEvent::Stderr(d) => self.vm.stderr.extend_from_slice(&d),
+                WorkerEvent::Diagnostic(level, msg) => {
+                    self.vm.diagnostics.push(wasmsh_vm::DiagnosticEvent {
+                        level: convert_diag_level(level),
+                        category: wasmsh_vm::DiagCategory::Runtime,
+                        message: msg,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Dispatch a command to a shell function, builtin, utility, or report not found.
+    fn dispatch_command(&mut self, cmd_name: &str, argv: &[String]) {
+        if let Some(body) = self.functions.get(cmd_name).cloned() {
+            self.call_shell_function(cmd_name, argv, &body);
+        } else if self.builtins.is_builtin(cmd_name) {
+            self.call_builtin(cmd_name, argv);
+        } else if self.utils.is_utility(cmd_name) {
+            self.call_utility(cmd_name, argv);
+        } else {
+            let msg = format!("wasmsh: {cmd_name}: command not found\n");
+            self.vm.stderr.extend_from_slice(msg.as_bytes());
+            self.vm.state.last_status = 127;
+        }
+    }
+
+    /// Invoke a shell function.
+    fn call_shell_function(&mut self, cmd_name: &str, argv: &[String], body: &HirCommand) {
+        let old_positional = std::mem::take(&mut self.vm.state.positional);
+        self.vm.state.positional = argv[1..]
+            .iter()
+            .map(|s| smol_str::SmolStr::from(s.as_str()))
+            .collect();
+        self.vm
+            .state
+            .func_stack
+            .push(smol_str::SmolStr::from(cmd_name));
+        let locals_before = self.exec.local_save_stack.len();
+        self.execute_command(body);
+        let new_locals: Vec<_> = self.exec.local_save_stack.drain(locals_before..).collect();
+        for (name, old_val) in new_locals.into_iter().rev() {
+            if let Some(val) = old_val {
+                self.vm.state.set_var(name, val);
+            } else {
+                self.vm.state.unset_var(&name).ok();
+            }
+        }
+        self.vm.state.func_stack.pop();
+        self.vm.state.positional = old_positional;
+    }
+
+    /// Invoke a builtin command.
+    fn call_builtin(&mut self, cmd_name: &str, argv: &[String]) {
+        let builtin_fn = self.builtins.get(cmd_name).unwrap();
+        let stdin_data = self.pending_stdin.take();
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let mut sink = wasmsh_builtins::VecSink::default();
+        let status = {
+            let mut ctx = wasmsh_builtins::BuiltinContext {
+                state: &mut self.vm.state,
+                output: &mut sink,
+                fs: Some(&self.fs),
+                stdin: stdin_data.as_deref(),
+            };
+            builtin_fn(&mut ctx, &argv_refs)
+        };
+        self.vm.stdout.extend_from_slice(&sink.stdout);
+        self.vm.stderr.extend_from_slice(&sink.stderr);
+        self.vm.output_bytes += (sink.stdout.len() + sink.stderr.len()) as u64;
+        self.vm.state.last_status = status;
+        self.pending_stdin = None;
+    }
+
+    /// Invoke a utility command.
+    fn call_utility(&mut self, cmd_name: &str, argv: &[String]) {
+        let stdin_data = self.pending_stdin.take();
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let mut output = UtilOutput::default();
+        let cwd = self.vm.state.cwd.clone();
+        let status = {
+            let util_fn = self.utils.get(cmd_name).unwrap();
+            let mut ctx = UtilContext {
+                fs: &mut self.fs,
+                output: &mut output,
+                cwd: &cwd,
+                stdin: stdin_data.as_deref(),
+                state: Some(&self.vm.state),
+            };
+            util_fn(&mut ctx, &argv_refs)
+        };
+        self.vm.stdout.extend_from_slice(&output.stdout);
+        self.vm.stderr.extend_from_slice(&output.stderr);
+        self.vm.output_bytes += (output.stdout.len() + output.stderr.len()) as u64;
+        self.vm.state.last_status = status;
+    }
+
+    /// Execute an `if` command.
+    fn execute_if(&mut self, if_cmd: &wasmsh_hir::HirIf) {
+        let saved_suppress = self.exec.errexit_suppressed;
+        self.exec.errexit_suppressed = true;
+        self.execute_body(&if_cmd.condition);
+        self.exec.errexit_suppressed = saved_suppress;
+        if self.vm.state.last_status == 0 {
+            self.execute_body(&if_cmd.then_body);
+            return;
+        }
+        for elif in &if_cmd.elifs {
+            let saved = self.exec.errexit_suppressed;
+            self.exec.errexit_suppressed = true;
+            self.execute_body(&elif.condition);
+            self.exec.errexit_suppressed = saved;
+            if self.vm.state.last_status == 0 {
+                self.execute_body(&elif.then_body);
+                return;
+            }
+        }
+        if let Some(else_body) = &if_cmd.else_body {
+            self.execute_body(else_body);
+        }
+    }
+
+    /// Execute a `while` loop.
+    fn execute_while_loop(&mut self, loop_cmd: &wasmsh_hir::HirLoop) {
+        loop {
+            let saved = self.exec.errexit_suppressed;
+            self.exec.errexit_suppressed = true;
+            self.execute_body(&loop_cmd.condition);
+            self.exec.errexit_suppressed = saved;
+            if self.vm.state.last_status != 0 {
+                break;
+            }
+            self.execute_body(&loop_cmd.body);
+            if self.handle_loop_control() {
+                break;
+            }
+        }
+    }
+
+    /// Execute an `until` loop.
+    fn execute_until_loop(&mut self, loop_cmd: &wasmsh_hir::HirLoop) {
+        loop {
+            let saved = self.exec.errexit_suppressed;
+            self.exec.errexit_suppressed = true;
+            self.execute_body(&loop_cmd.condition);
+            self.exec.errexit_suppressed = saved;
+            if self.vm.state.last_status == 0 {
+                break;
+            }
+            self.execute_body(&loop_cmd.body);
+            if self.handle_loop_control() {
+                break;
+            }
+        }
+    }
+
+    /// Handle loop control flow (break/continue/exit). Returns true if the loop should break.
+    fn handle_loop_control(&mut self) -> bool {
+        if self.exec.break_depth > 0 {
+            self.exec.break_depth -= 1;
+            return true;
+        }
+        if self.exec.loop_continue {
+            self.exec.loop_continue = false;
+        }
+        self.exec.exit_requested.is_some()
+    }
+
+    /// Execute a `for` loop.
+    fn execute_for_loop(&mut self, for_cmd: &wasmsh_hir::HirFor) {
+        let words = self.expand_for_words(for_cmd.words.as_deref());
+        for word in words {
+            self.vm.state.set_var(for_cmd.var_name.clone(), word.into());
+            self.execute_body(&for_cmd.body);
+            if self.exec.break_depth > 0 {
+                self.exec.break_depth -= 1;
+                break;
+            }
+            if self.exec.loop_continue {
+                self.exec.loop_continue = false;
+                continue;
+            }
+            if self.exec.exit_requested.is_some() {
+                break;
+            }
+        }
+    }
+
+    /// Expand word list for `for` and `select` commands.
+    fn expand_for_words(&mut self, words: Option<&[wasmsh_ast::Word]>) -> Vec<String> {
+        if let Some(ws) = words {
+            let resolved = self.resolve_command_subst(ws);
+            let mut result = Vec::new();
+            for w in &resolved {
+                let expanded = wasmsh_expand::expand_word_split(w, &mut self.vm.state);
+                result.extend(expanded.fields);
+            }
+            let result: Vec<String> = result
+                .into_iter()
+                .flat_map(|arg| wasmsh_expand::expand_braces(&arg))
+                .collect();
+            self.expand_globs(result)
+        } else {
+            self.vm
+                .state
+                .positional
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        }
+    }
+
+    /// Execute a `case` command.
+    fn execute_case(&mut self, case_cmd: &wasmsh_hir::HirCase) {
+        let nocasematch = self.vm.state.get_var("SHOPT_nocasematch").as_deref() == Some("1");
+        let value = wasmsh_expand::expand_word(&case_cmd.word, &mut self.vm.state);
+        let mut i = 0;
+        let mut fallthrough = false;
+        while i < case_cmd.items.len() {
+            let item = &case_cmd.items[i];
+            let pattern_matched = if fallthrough {
+                true
+            } else {
+                item.patterns.iter().any(|pattern| {
+                    let pat = wasmsh_expand::expand_word(pattern, &mut self.vm.state);
+                    if nocasematch {
+                        glob_match_inner(
+                            pat.to_lowercase().as_bytes(),
+                            value.to_lowercase().as_bytes(),
+                        )
+                    } else {
+                        glob_match_inner(pat.as_bytes(), value.as_bytes())
+                    }
+                })
+            };
+            if pattern_matched {
+                self.execute_body(&item.body);
+                match item.terminator {
+                    CaseTerminator::Break => break,
+                    CaseTerminator::Fallthrough => {
+                        fallthrough = true;
+                        i += 1;
+                    }
+                    CaseTerminator::ContinueTesting => {
+                        fallthrough = false;
+                        i += 1;
+                    }
+                }
+            } else {
+                fallthrough = false;
+                i += 1;
+            }
+        }
+    }
+
+    /// Execute a C-style `for (( init; cond; step ))` loop.
+    fn execute_arith_for(&mut self, af: &wasmsh_hir::HirArithFor) {
+        if !af.init.is_empty() {
+            wasmsh_expand::eval_arithmetic(&af.init, &mut self.vm.state);
+        }
+        loop {
+            if !af.cond.is_empty() {
+                let cond_val = wasmsh_expand::eval_arithmetic(&af.cond, &mut self.vm.state);
+                if cond_val == 0 {
+                    break;
+                }
+            }
+            self.execute_body(&af.body);
+            if self.handle_loop_control() {
+                break;
+            }
+            if !af.step.is_empty() {
+                wasmsh_expand::eval_arithmetic(&af.step, &mut self.vm.state);
+            }
+        }
+    }
+
+    /// Execute a `select` command.
+    fn execute_select(&mut self, sel: &wasmsh_hir::HirSelect) {
+        self.collect_stdin_from_redirections(&sel.redirections);
+
+        let words: Vec<String> = if let Some(ws) = &sel.words {
+            let resolved = self.resolve_command_subst(ws);
+            let mut result = Vec::new();
+            for w in &resolved {
+                let expanded = wasmsh_expand::expand_word_split(w, &mut self.vm.state);
+                result.extend(expanded.fields);
+            }
+            result
+        } else {
+            self.vm
+                .state
+                .positional
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+
+        if words.is_empty() {
+            return;
+        }
+        for (idx, w) in words.iter().enumerate() {
+            let line = format!("{}) {}\n", idx + 1, w);
+            self.vm.stderr.extend_from_slice(line.as_bytes());
+        }
+
+        let stdin_data = self.pending_stdin.take().unwrap_or_default();
+        let input = String::from_utf8_lossy(&stdin_data);
+        let first_line = input.lines().next().unwrap_or("");
+
+        self.vm.state.set_var(
+            smol_str::SmolStr::from("REPLY"),
+            smol_str::SmolStr::from(first_line.trim()),
+        );
+
+        let selected = first_line.trim().parse::<usize>().ok().and_then(|n| {
+            if n >= 1 && n <= words.len() {
+                Some(&words[n - 1])
+            } else {
+                None
+            }
+        });
+
+        if let Some(word) = selected {
+            self.vm
+                .state
+                .set_var(sel.var_name.clone(), smol_str::SmolStr::from(word.as_str()));
+        } else {
+            self.vm
+                .state
+                .set_var(sel.var_name.clone(), smol_str::SmolStr::default());
+        }
+
+        self.execute_body(&sel.body);
     }
 
     // ---- [[ ]] extended test evaluation ----
@@ -2172,6 +2136,32 @@ impl WorkerRuntime {
         }
     }
 
+    /// Write data to a file path, reporting errors to stderr.
+    fn write_to_file(&mut self, path: &str, target: &str, data: &[u8], opts: OpenOptions) {
+        match self.fs.open(path, opts) {
+            Ok(h) => {
+                if let Err(e) = self.fs.write_file(h, data) {
+                    self.vm
+                        .stderr
+                        .extend_from_slice(format!("wasmsh: write error: {e}\n").as_bytes());
+                }
+                self.fs.close(h);
+            }
+            Err(e) => {
+                self.vm
+                    .stderr
+                    .extend_from_slice(format!("wasmsh: {target}: {e}\n").as_bytes());
+            }
+        }
+    }
+
+    /// Capture stdout data from the given position, truncating the stdout buffer.
+    fn capture_stdout(&mut self, from: usize) -> Vec<u8> {
+        let data = self.vm.stdout[from..].to_vec();
+        self.vm.stdout.truncate(from);
+        data
+    }
+
     /// Apply redirections: for `>` and `>>`, write captured stdout/stderr to file.
     /// For `<`, read file content (handled pre-execution).
     /// Supports fd-specific redirections (2>, 2>>) and &> (both stdout and stderr).
@@ -2179,133 +2169,64 @@ impl WorkerRuntime {
         for redir in redirections {
             let target = wasmsh_expand::expand_word(&redir.target, &mut self.vm.state);
             let path = self.resolve_cwd_path(&target);
-
-            let fd = redir.fd.unwrap_or(1); // default fd for > is 1 (stdout)
+            let fd = redir.fd.unwrap_or(1);
 
             match redir.op {
                 RedirectionOp::Output => {
-                    if fd == FD_BOTH {
-                        // &> file: redirect both stdout and stderr to file
-                        let stdout_data = self.vm.stdout[stdout_before..].to_vec();
-                        self.vm.stdout.truncate(stdout_before);
-                        let stderr_data = std::mem::take(&mut self.vm.stderr);
-                        match self.fs.open(&path, OpenOptions::write()) {
-                            Ok(h) => {
-                                let mut combined = stdout_data;
-                                combined.extend_from_slice(&stderr_data);
-                                if let Err(e) = self.fs.write_file(h, &combined) {
-                                    self.vm.stderr.extend_from_slice(
-                                        format!("wasmsh: write error: {e}\n").as_bytes(),
-                                    );
-                                }
-                                self.fs.close(h);
-                            }
-                            Err(e) => {
-                                self.vm.stderr.extend_from_slice(
-                                    format!("wasmsh: {target}: {e}\n").as_bytes(),
-                                );
-                            }
-                        }
-                    } else if fd == 2 {
-                        // 2> file: redirect stderr to file
-                        let stderr_data = std::mem::take(&mut self.vm.stderr);
-                        match self.fs.open(&path, OpenOptions::write()) {
-                            Ok(h) => {
-                                if let Err(e) = self.fs.write_file(h, &stderr_data) {
-                                    self.vm.stderr.extend_from_slice(
-                                        format!("wasmsh: write error: {e}\n").as_bytes(),
-                                    );
-                                }
-                                self.fs.close(h);
-                            }
-                            Err(e) => {
-                                self.vm.stderr.extend_from_slice(
-                                    format!("wasmsh: {target}: {e}\n").as_bytes(),
-                                );
-                            }
-                        }
-                    } else {
-                        // > file or 1> file: redirect stdout to file
-                        let data = self.vm.stdout[stdout_before..].to_vec();
-                        self.vm.stdout.truncate(stdout_before);
-                        match self.fs.open(&path, OpenOptions::write()) {
-                            Ok(h) => {
-                                if let Err(e) = self.fs.write_file(h, &data) {
-                                    self.vm.stderr.extend_from_slice(
-                                        format!("wasmsh: write error: {e}\n").as_bytes(),
-                                    );
-                                }
-                                self.fs.close(h);
-                            }
-                            Err(e) => {
-                                self.vm.stderr.extend_from_slice(
-                                    format!("wasmsh: {target}: {e}\n").as_bytes(),
-                                );
-                            }
-                        }
-                    }
+                    self.apply_output_redir(&path, &target, fd, stdout_before);
                 }
                 RedirectionOp::Append => {
-                    if fd == 2 {
-                        // 2>> file: append stderr to file
-                        let stderr_data = std::mem::take(&mut self.vm.stderr);
-                        match self.fs.open(&path, OpenOptions::append()) {
-                            Ok(h) => {
-                                if let Err(e) = self.fs.write_file(h, &stderr_data) {
-                                    self.vm.stderr.extend_from_slice(
-                                        format!("wasmsh: write error: {e}\n").as_bytes(),
-                                    );
-                                }
-                                self.fs.close(h);
-                            }
-                            Err(e) => {
-                                self.vm.stderr.extend_from_slice(
-                                    format!("wasmsh: {target}: {e}\n").as_bytes(),
-                                );
-                            }
-                        }
-                    } else {
-                        // >> file: append stdout to file
-                        let data = self.vm.stdout[stdout_before..].to_vec();
-                        self.vm.stdout.truncate(stdout_before);
-                        match self.fs.open(&path, OpenOptions::append()) {
-                            Ok(h) => {
-                                if let Err(e) = self.fs.write_file(h, &data) {
-                                    self.vm.stderr.extend_from_slice(
-                                        format!("wasmsh: write error: {e}\n").as_bytes(),
-                                    );
-                                }
-                                self.fs.close(h);
-                            }
-                            Err(e) => {
-                                self.vm.stderr.extend_from_slice(
-                                    format!("wasmsh: {target}: {e}\n").as_bytes(),
-                                );
-                            }
-                        }
-                    }
+                    self.apply_append_redir(&path, &target, fd, stdout_before);
                 }
                 RedirectionOp::DupOutput => {
-                    // N>&M — duplicate fd. Most common: 2>&1 (merge stderr into stdout)
                     let target_fd: u32 = target.parse().unwrap_or(1);
                     let source_fd = redir.fd.unwrap_or(1);
                     if source_fd == 2 && target_fd == 1 {
-                        // 2>&1: merge stderr into stdout
                         let stderr_data = std::mem::take(&mut self.vm.stderr);
                         self.vm.stdout.extend_from_slice(&stderr_data);
                     } else if source_fd == 1 && target_fd == 2 {
-                        // 1>&2: merge stdout into stderr
-                        let stdout_data = self.vm.stdout[stdout_before..].to_vec();
-                        self.vm.stdout.truncate(stdout_before);
+                        let stdout_data = self.capture_stdout(stdout_before);
                         self.vm.stderr.extend_from_slice(&stdout_data);
                     }
                 }
-                // Input redirections are handled elsewhere (pre-execution stdin setup).
-                // The wildcard covers `RedirectionOp`'s future variants (#[non_exhaustive]).
                 #[allow(unreachable_patterns)]
                 _ => {}
             }
         }
+    }
+
+    /// Apply `>` output redirection for a specific fd.
+    fn apply_output_redir(&mut self, path: &str, target: &str, fd: u32, stdout_before: usize) {
+        let data = if fd == FD_BOTH {
+            let mut combined = self.capture_stdout(stdout_before);
+            combined.extend_from_slice(&std::mem::take(&mut self.vm.stderr));
+            combined
+        } else if fd == 2 {
+            std::mem::take(&mut self.vm.stderr)
+        } else {
+            self.capture_stdout(stdout_before)
+        };
+        self.write_to_file(path, target, &data, OpenOptions::write());
+    }
+
+    /// Apply `>>` append redirection for a specific fd.
+    fn apply_append_redir(&mut self, path: &str, target: &str, fd: u32, stdout_before: usize) {
+        let data = if fd == 2 {
+            std::mem::take(&mut self.vm.stderr)
+        } else {
+            self.capture_stdout(stdout_before)
+        };
+        self.write_to_file(path, target, &data, OpenOptions::append());
+    }
+}
+
+/// Convert a protocol diagnostic level to a VM diagnostic level.
+fn convert_diag_level(level: DiagnosticLevel) -> wasmsh_vm::DiagLevel {
+    match level {
+        DiagnosticLevel::Trace => wasmsh_vm::DiagLevel::Trace,
+        DiagnosticLevel::Warning => wasmsh_vm::DiagLevel::Warning,
+        DiagnosticLevel::Error => wasmsh_vm::DiagLevel::Error,
+        _ => wasmsh_vm::DiagLevel::Info,
     }
 }
 
@@ -2654,168 +2575,168 @@ fn regex_match_capturing(
     captures: &mut Vec<(usize, usize)>,
 ) -> Option<usize> {
     if pi >= pat.len() {
-        // Pattern exhausted — check anchoring
-        if must_end && ti < text.len() {
-            return None;
-        }
-        return Some(ti);
+        return if must_end && ti < text.len() {
+            None
+        } else {
+            Some(ti)
+        };
     }
 
-    // Handle parenthesized groups — capture start/end
+    // Handle parenthesized groups
     if pat[pi] == b'(' {
-        // Find matching close paren
-        if let Some(close) = find_matching_paren_bytes(pat, pi + 1) {
-            let inner = &pat[pi + 1..close];
-            let rest = &pat[close + 1..];
-
-            // Check for quantifier after the group
-            let (quant, after_quant_offset) = if close + 1 < pat.len() {
-                match pat[close + 1] {
-                    b'*' | b'+' | b'?' => (pat[close + 1], close + 2),
-                    _ => (0, close + 1),
-                }
-            } else {
-                (0, close + 1)
-            };
-            let after_quant = &pat[after_quant_offset..];
-
-            // Split alternatives within the group
-            let alternatives = split_alternatives_bytes(inner);
-
-            match quant {
-                b'+' => {
-                    // One or more repetitions
-                    let save = captures.len();
-                    let group_start = ti;
-                    for end_pos in (ti..=text.len()).rev() {
-                        captures.truncate(save);
-                        if regex_match_group_repeated(text, ti, end_pos, &alternatives, 1) {
-                            if let Some(final_end) = regex_match_capturing(
-                                text,
-                                end_pos,
-                                after_quant,
-                                0,
-                                must_end,
-                                captures,
-                            ) {
-                                captures.insert(save, (group_start, end_pos));
-                                return Some(final_end);
-                            }
-                        }
-                    }
-                    captures.truncate(save);
-                    return None;
-                }
-                b'*' => {
-                    // Zero or more
-                    let save = captures.len();
-                    let group_start = ti;
-                    for end_pos in (ti..=text.len()).rev() {
-                        captures.truncate(save);
-                        if regex_match_group_repeated(text, ti, end_pos, &alternatives, 0) {
-                            if let Some(final_end) = regex_match_capturing(
-                                text,
-                                end_pos,
-                                after_quant,
-                                0,
-                                must_end,
-                                captures,
-                            ) {
-                                captures.insert(save, (group_start, end_pos));
-                                return Some(final_end);
-                            }
-                        }
-                    }
-                    captures.truncate(save);
-                    return None;
-                }
-                b'?' => {
-                    // Zero or one
-                    let save = captures.len();
-                    let group_start = ti;
-                    // Try one
-                    for alt in &alternatives {
-                        captures.truncate(save);
-                        if let Some(end) = regex_try_match_at(text, ti, alt) {
-                            if let Some(final_end) =
-                                regex_match_capturing(text, end, after_quant, 0, must_end, captures)
-                            {
-                                captures.insert(save, (group_start, end));
-                                return Some(final_end);
-                            }
-                        }
-                        captures.truncate(save);
-                    }
-                    // Try zero
-                    captures.truncate(save);
-                    if let Some(final_end) =
-                        regex_match_capturing(text, ti, after_quant, 0, must_end, captures)
-                    {
-                        captures.insert(save, (group_start, group_start));
-                        return Some(final_end);
-                    }
-                    captures.truncate(save);
-                    return None;
-                }
-                _ => {
-                    // Exactly one match (no quantifier)
-                    let save = captures.len();
-                    let group_start = ti;
-                    for alt in &alternatives {
-                        captures.truncate(save);
-                        if let Some(end) = regex_try_match_at(text, ti, alt) {
-                            if let Some(final_end) =
-                                regex_match_capturing(text, end, rest, 0, must_end, captures)
-                            {
-                                captures.insert(save, (group_start, end));
-                                return Some(final_end);
-                            }
-                        }
-                        captures.truncate(save);
-                    }
-                    return None;
-                }
-            }
-        }
+        return regex_match_group(text, ti, pat, pi, must_end, captures);
     }
 
-    // Parse one element (not a group)
-    let (elem_end, matches_fn) = parse_regex_elem(pat, pi);
+    // Parse one element (not a group) and apply quantifier
+    regex_match_elem(text, ti, pat, pi, must_end, captures)
+}
 
-    // Check for quantifier
-    let (quant, after_quant) = if elem_end < pat.len() {
-        match pat[elem_end] {
-            b'*' => (b'*', elem_end + 1),
-            b'+' => (b'+', elem_end + 1),
-            b'?' => (b'?', elem_end + 1),
-            _ => (0, elem_end),
+/// Handle a parenthesized group in the regex, dispatching by quantifier.
+fn regex_match_group(
+    text: &[u8],
+    ti: usize,
+    pat: &[u8],
+    pi: usize,
+    must_end: bool,
+    captures: &mut Vec<(usize, usize)>,
+) -> Option<usize> {
+    let close = find_matching_paren_bytes(pat, pi + 1)?;
+    let inner = &pat[pi + 1..close];
+    let rest = &pat[close + 1..];
+    let (quant, after_quant_offset) = if close + 1 < pat.len() {
+        match pat[close + 1] {
+            b'*' | b'+' | b'?' => (pat[close + 1], close + 2),
+            _ => (0, close + 1),
         }
     } else {
-        (0, elem_end)
+        (0, close + 1)
     };
+    let after_quant = &pat[after_quant_offset..];
+    let alternatives = split_alternatives_bytes(inner);
 
     match quant {
-        b'*' => {
-            // Greedy: try max matches first
-            let mut count = 0;
-            while ti + count < text.len() && matches_fn(text[ti + count]) {
-                count += 1;
+        b'+' => regex_match_group_rep(text, ti, after_quant, must_end, captures, &alternatives, 1),
+        b'*' => regex_match_group_rep(text, ti, after_quant, must_end, captures, &alternatives, 0),
+        b'?' => regex_match_group_opt(text, ti, after_quant, must_end, captures, &alternatives),
+        _ => regex_match_group_exact(text, ti, rest, must_end, captures, &alternatives),
+    }
+}
+
+/// Match a group with repetition quantifier (+ or *).
+fn regex_match_group_rep(
+    text: &[u8],
+    ti: usize,
+    after: &[u8],
+    must_end: bool,
+    captures: &mut Vec<(usize, usize)>,
+    alternatives: &[Vec<u8>],
+    min_reps: usize,
+) -> Option<usize> {
+    let save = captures.len();
+    for end_pos in (ti..=text.len()).rev() {
+        captures.truncate(save);
+        if regex_match_group_repeated(text, ti, end_pos, alternatives, min_reps) {
+            if let Some(final_end) =
+                regex_match_capturing(text, end_pos, after, 0, must_end, captures)
+            {
+                captures.insert(save, (ti, end_pos));
+                return Some(final_end);
             }
-            for c in (0..=count).rev() {
-                if let Some(end) =
-                    regex_match_capturing(text, ti + c, pat, after_quant, must_end, captures)
-                {
-                    return Some(end);
-                }
-            }
-            None
         }
-        b'+' => {
+    }
+    captures.truncate(save);
+    None
+}
+
+/// Match a group with `?` quantifier (zero or one).
+fn regex_match_group_opt(
+    text: &[u8],
+    ti: usize,
+    after: &[u8],
+    must_end: bool,
+    captures: &mut Vec<(usize, usize)>,
+    alternatives: &[Vec<u8>],
+) -> Option<usize> {
+    let save = captures.len();
+    // Try one
+    for alt in alternatives {
+        captures.truncate(save);
+        if let Some(end) = regex_try_match_at(text, ti, alt) {
+            if let Some(final_end) = regex_match_capturing(text, end, after, 0, must_end, captures)
+            {
+                captures.insert(save, (ti, end));
+                return Some(final_end);
+            }
+        }
+        captures.truncate(save);
+    }
+    // Try zero
+    captures.truncate(save);
+    if let Some(final_end) = regex_match_capturing(text, ti, after, 0, must_end, captures) {
+        captures.insert(save, (ti, ti));
+        return Some(final_end);
+    }
+    captures.truncate(save);
+    None
+}
+
+/// Match a group exactly once (no quantifier).
+fn regex_match_group_exact(
+    text: &[u8],
+    ti: usize,
+    rest: &[u8],
+    must_end: bool,
+    captures: &mut Vec<(usize, usize)>,
+    alternatives: &[Vec<u8>],
+) -> Option<usize> {
+    let save = captures.len();
+    for alt in alternatives {
+        captures.truncate(save);
+        if let Some(end) = regex_try_match_at(text, ti, alt) {
+            if let Some(final_end) = regex_match_capturing(text, end, rest, 0, must_end, captures) {
+                captures.insert(save, (ti, end));
+                return Some(final_end);
+            }
+        }
+        captures.truncate(save);
+    }
+    None
+}
+
+/// Parse a quantifier after a regex element.
+fn parse_quantifier(pat: &[u8], pos: usize) -> (u8, usize) {
+    if pos < pat.len() {
+        match pat[pos] {
+            b'*' => (b'*', pos + 1),
+            b'+' => (b'+', pos + 1),
+            b'?' => (b'?', pos + 1),
+            _ => (0, pos),
+        }
+    } else {
+        (0, pos)
+    }
+}
+
+/// Match a single regex element (not a group) with optional quantifier.
+fn regex_match_elem(
+    text: &[u8],
+    ti: usize,
+    pat: &[u8],
+    pi: usize,
+    must_end: bool,
+    captures: &mut Vec<(usize, usize)>,
+) -> Option<usize> {
+    let (elem_end, matches_fn) = parse_regex_elem(pat, pi);
+    let (quant, after_quant) = parse_quantifier(pat, elem_end);
+
+    match quant {
+        b'*' | b'+' => {
+            let min = usize::from(quant == b'+');
             let mut count = 0;
             while ti + count < text.len() && matches_fn(text[ti + count]) {
                 count += 1;
             }
-            for c in (1..=count).rev() {
+            for c in (min..=count).rev() {
                 if let Some(end) =
                     regex_match_capturing(text, ti + c, pat, after_quant, must_end, captures)
                 {
@@ -2825,7 +2746,6 @@ fn regex_match_capturing(
             None
         }
         b'?' => {
-            // Try one, then zero
             if ti < text.len() && matches_fn(text[ti]) {
                 if let Some(end) =
                     regex_match_capturing(text, ti + 1, pat, after_quant, must_end, captures)
@@ -2836,7 +2756,6 @@ fn regex_match_capturing(
             regex_match_capturing(text, ti, pat, after_quant, must_end, captures)
         }
         _ => {
-            // Literal match (no quantifier)
             if ti < text.len() && matches_fn(text[ti]) {
                 regex_match_capturing(text, ti + 1, pat, elem_end, must_end, captures)
             } else {
@@ -2856,51 +2775,48 @@ fn regex_try_match_inner(text: &[u8], ti: usize, pat: &[u8], pi: usize) -> Optio
     if pi >= pat.len() {
         return Some(ti);
     }
-    if pi < pat.len() && pat[pi] == b'(' {
-        if let Some(close) = find_matching_paren_bytes(pat, pi + 1) {
-            let inner = &pat[pi + 1..close];
-            let rest = &pat[close + 1..];
-            let alternatives = split_alternatives_bytes(inner);
-            for alt in &alternatives {
-                if let Some(after_alt) = regex_try_match_inner(text, ti, alt, 0) {
-                    if let Some(end) = regex_try_match_inner(text, after_alt, rest, 0) {
-                        return Some(end);
-                    }
-                }
-            }
-            return None;
-        }
+    if pat[pi] == b'(' {
+        return regex_try_match_group(text, ti, pat, pi);
     }
     let (elem_end, matches_fn) = parse_regex_elem(pat, pi);
-    let (quant, after_quant) = if elem_end < pat.len() {
-        match pat[elem_end] {
-            b'*' => (b'*', elem_end + 1),
-            b'+' => (b'+', elem_end + 1),
-            b'?' => (b'?', elem_end + 1),
-            _ => (0, elem_end),
+    let (quant, after_quant) = parse_quantifier(pat, elem_end);
+    regex_try_apply_quant(text, ti, pat, elem_end, after_quant, quant, &matches_fn)
+}
+
+/// Handle a group in `regex_try_match_inner`.
+fn regex_try_match_group(text: &[u8], ti: usize, pat: &[u8], pi: usize) -> Option<usize> {
+    let close = find_matching_paren_bytes(pat, pi + 1)?;
+    let inner = &pat[pi + 1..close];
+    let rest = &pat[close + 1..];
+    let alternatives = split_alternatives_bytes(inner);
+    for alt in &alternatives {
+        if let Some(after_alt) = regex_try_match_inner(text, ti, alt, 0) {
+            if let Some(end) = regex_try_match_inner(text, after_alt, rest, 0) {
+                return Some(end);
+            }
         }
-    } else {
-        (0, elem_end)
-    };
+    }
+    None
+}
+
+/// Apply quantifier logic for `regex_try_match_inner`.
+fn regex_try_apply_quant(
+    text: &[u8],
+    ti: usize,
+    pat: &[u8],
+    elem_end: usize,
+    after_quant: usize,
+    quant: u8,
+    matches_fn: &dyn Fn(u8) -> bool,
+) -> Option<usize> {
     match quant {
-        b'*' => {
+        b'*' | b'+' => {
+            let min = usize::from(quant == b'+');
             let mut count = 0;
             while ti + count < text.len() && matches_fn(text[ti + count]) {
                 count += 1;
             }
-            for c in (0..=count).rev() {
-                if let Some(end) = regex_try_match_inner(text, ti + c, pat, after_quant) {
-                    return Some(end);
-                }
-            }
-            None
-        }
-        b'+' => {
-            let mut count = 0;
-            while ti + count < text.len() && matches_fn(text[ti + count]) {
-                count += 1;
-            }
-            for c in (1..=count).rev() {
+            for c in (min..=count).rev() {
                 if let Some(end) = regex_try_match_inner(text, ti + c, pat, after_quant) {
                     return Some(end);
                 }
@@ -3102,79 +3018,52 @@ fn regex_match_at(text: &str, start: usize, core: &str, must_end: bool) -> bool 
 /// Recursive backtracking regex matcher.
 #[allow(dead_code)]
 fn regex_backtrack(text: &[u8], ti: usize, pat: &[u8], pi: usize, must_end: bool) -> bool {
-    // Check for quantifiers after the current pattern element
-    if pi < pat.len() {
-        let (elem_end, matches_fn) = parse_regex_elem(pat, pi);
-        if elem_end <= pat.len() {
-            // Check for quantifier
-            let (quant, after_quant) = if elem_end < pat.len() {
-                match pat[elem_end] {
-                    b'*' => (b'*', elem_end + 1),
-                    b'+' => (b'+', elem_end + 1),
-                    b'?' => (b'?', elem_end + 1),
-                    _ => (0, elem_end),
-                }
-            } else {
-                (0, elem_end)
-            };
+    if pi >= pat.len() {
+        return if must_end { ti >= text.len() } else { true };
+    }
 
-            match quant {
-                b'*' => {
-                    // Zero or more: try consuming 0, 1, 2, ... chars
-                    let mut count = 0;
-                    loop {
-                        if regex_backtrack(text, ti + count, pat, after_quant, must_end) {
-                            return true;
-                        }
-                        if ti + count < text.len() && matches_fn(text[ti + count]) {
-                            count += 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    return false;
+    let (elem_end, matches_fn) = parse_regex_elem(pat, pi);
+    let (quant, after_quant) = parse_quantifier(pat, elem_end);
+
+    match quant {
+        b'*' => {
+            let mut count = 0;
+            loop {
+                if regex_backtrack(text, ti + count, pat, after_quant, must_end) {
+                    return true;
                 }
-                b'+' => {
-                    // One or more
-                    let mut count = 0;
-                    while ti + count < text.len() && matches_fn(text[ti + count]) {
-                        count += 1;
-                        if regex_backtrack(text, ti + count, pat, after_quant, must_end) {
-                            return true;
-                        }
-                    }
-                    return false;
-                }
-                b'?' => {
-                    // Zero or one
-                    if regex_backtrack(text, ti, pat, after_quant, must_end) {
-                        return true;
-                    }
-                    if ti < text.len() && matches_fn(text[ti]) {
-                        return regex_backtrack(text, ti + 1, pat, after_quant, must_end);
-                    }
-                    return false;
-                }
-                _ => {
-                    // No quantifier: must match exactly once
-                    if ti < text.len() && matches_fn(text[ti]) {
-                        return regex_backtrack(text, ti + 1, pat, elem_end, must_end);
-                    }
-                    return false;
+                if ti + count < text.len() && matches_fn(text[ti + count]) {
+                    count += 1;
+                } else {
+                    break;
                 }
             }
+            false
+        }
+        b'+' => {
+            let mut count = 0;
+            while ti + count < text.len() && matches_fn(text[ti + count]) {
+                count += 1;
+                if regex_backtrack(text, ti + count, pat, after_quant, must_end) {
+                    return true;
+                }
+            }
+            false
+        }
+        b'?' => {
+            if regex_backtrack(text, ti, pat, after_quant, must_end) {
+                return true;
+            }
+            ti < text.len()
+                && matches_fn(text[ti])
+                && regex_backtrack(text, ti + 1, pat, after_quant, must_end)
+        }
+        _ => {
+            ti < text.len()
+                && matches_fn(text[ti])
+                && regex_backtrack(text, ti + 1, pat, elem_end, must_end)
         }
     }
-
-    // End of pattern
-    if pi >= pat.len() {
-        if must_end {
-            return ti >= text.len();
-        }
-        return true; // unanchored end: pattern consumed is enough
-    }
-
-    false
 }
 
 /// Parse one regex element at position `pi`, return (`end_pos`, `match_fn`).
@@ -3335,92 +3224,85 @@ fn extglob_match(pattern: &str, name: &str) -> bool {
 
 fn extglob_match_recursive(pattern: &[u8], name: &[u8]) -> bool {
     // Find the first extglob operator
+    let Some((pi, op, close)) = find_extglob_operator(pattern) else {
+        return glob_match_inner(pattern, name);
+    };
+
+    let open = pi + 2;
+    let alternatives = split_alternatives(&pattern[open..close]);
+    let prefix = &pattern[..pi];
+    let suffix = &pattern[close + 1..];
+
+    match op {
+        b'@' | b'?' => extglob_match_at_or_opt(op, prefix, &alternatives, suffix, name),
+        b'*' => extglob_star(prefix, &alternatives, suffix, name, 0),
+        b'+' => extglob_plus(prefix, &alternatives, suffix, name, 0),
+        b'!' => extglob_match_negate(prefix, &alternatives, suffix, name),
+        _ => unreachable!(),
+    }
+}
+
+/// Find the first extglob operator in a pattern, returning (position, operator, `close_paren`).
+fn find_extglob_operator(pattern: &[u8]) -> Option<(usize, u8, usize)> {
     let mut pi = 0;
     while pi < pattern.len() {
         if pi + 1 < pattern.len()
             && pattern[pi + 1] == b'('
             && matches!(pattern[pi], b'?' | b'*' | b'+' | b'@' | b'!')
         {
-            // Found an extglob operator at pi
-            let op = pattern[pi];
-            let open = pi + 2;
-            // Find matching closing )
-            if let Some(close) = find_matching_paren(pattern, open) {
-                let alternatives = split_alternatives(&pattern[open..close]);
-                let prefix = &pattern[..pi];
-                let suffix = &pattern[close + 1..];
-
-                match op {
-                    b'@' => {
-                        // Exactly one of the alternatives
-                        for alt in &alternatives {
-                            let mut combined = Vec::new();
-                            combined.extend_from_slice(prefix);
-                            combined.extend_from_slice(alt);
-                            combined.extend_from_slice(suffix);
-                            if extglob_match_recursive(&combined, name) {
-                                return true;
-                            }
-                        }
-                        return false;
-                    }
-                    b'?' => {
-                        // Zero or one of the alternatives
-                        // Try zero: skip the extglob entirely
-                        let mut combined = Vec::new();
-                        combined.extend_from_slice(prefix);
-                        combined.extend_from_slice(suffix);
-                        if extglob_match_recursive(&combined, name) {
-                            return true;
-                        }
-                        // Try one
-                        for alt in &alternatives {
-                            let mut combined = Vec::new();
-                            combined.extend_from_slice(prefix);
-                            combined.extend_from_slice(alt);
-                            combined.extend_from_slice(suffix);
-                            if extglob_match_recursive(&combined, name) {
-                                return true;
-                            }
-                        }
-                        return false;
-                    }
-                    b'*' => {
-                        // Zero or more of the alternatives
-                        return extglob_star(prefix, &alternatives, suffix, name, 0);
-                    }
-                    b'+' => {
-                        // One or more of the alternatives
-                        return extglob_plus(prefix, &alternatives, suffix, name, 0);
-                    }
-                    b'!' => {
-                        // Anything NOT matching any of the alternatives
-                        // The full pattern `prefix !(alts) suffix` matches if no alternative
-                        // combined with prefix+suffix would match.
-                        for alt in &alternatives {
-                            let mut combined = Vec::new();
-                            combined.extend_from_slice(prefix);
-                            combined.extend_from_slice(alt);
-                            combined.extend_from_slice(suffix);
-                            if extglob_match_recursive(&combined, name) {
-                                return false;
-                            }
-                        }
-                        // Still need to ensure the full name matches prefix + * + suffix
-                        let mut wildcard = Vec::new();
-                        wildcard.extend_from_slice(prefix);
-                        wildcard.push(b'*');
-                        wildcard.extend_from_slice(suffix);
-                        return glob_match_inner(&wildcard, name);
-                    }
-                    _ => unreachable!(),
-                }
+            if let Some(close) = find_matching_paren(pattern, pi + 2) {
+                return Some((pi, pattern[pi], close));
             }
         }
         pi += 1;
     }
-    // No extglob found, fall back to regular glob
-    glob_match_inner(pattern, name)
+    None
+}
+
+/// Build a combined pattern from prefix + alt + suffix.
+fn build_combined(prefix: &[u8], mid: &[u8], suffix: &[u8]) -> Vec<u8> {
+    let mut combined = Vec::with_capacity(prefix.len() + mid.len() + suffix.len());
+    combined.extend_from_slice(prefix);
+    combined.extend_from_slice(mid);
+    combined.extend_from_slice(suffix);
+    combined
+}
+
+/// Handle `@(...)` (exactly one) and `?(...)` (zero or one) extglob patterns.
+fn extglob_match_at_or_opt(
+    op: u8,
+    prefix: &[u8],
+    alternatives: &[Vec<u8>],
+    suffix: &[u8],
+    name: &[u8],
+) -> bool {
+    // For `?`, try zero first
+    if op == b'?' && extglob_match_recursive(&build_combined(prefix, &[], suffix), name) {
+        return true;
+    }
+    // Try each alternative exactly once
+    for alt in alternatives {
+        if extglob_match_recursive(&build_combined(prefix, alt, suffix), name) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Handle `!(...)` extglob pattern: matches if no alternative matches.
+fn extglob_match_negate(
+    prefix: &[u8],
+    alternatives: &[Vec<u8>],
+    suffix: &[u8],
+    name: &[u8],
+) -> bool {
+    for alt in alternatives {
+        if extglob_match_recursive(&build_combined(prefix, alt, suffix), name) {
+            return false;
+        }
+    }
+    let wildcard = build_combined(prefix, b"*", suffix);
+    glob_match_inner(&wildcard, name)
 }
 
 /// Try zero or more repetitions of alternatives for `*(...)`.
