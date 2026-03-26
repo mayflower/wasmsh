@@ -162,12 +162,7 @@ impl<'a> YamlParser<'a> {
 
         while self.pos < self.lines.len() {
             self.skip_blanks_and_comments();
-            if self.pos >= self.lines.len() {
-                break;
-            }
-
-            let indent = self.current_indent();
-            if indent != block_indent {
+            if self.pos >= self.lines.len() || self.current_indent() != block_indent {
                 break;
             }
 
@@ -178,41 +173,35 @@ impl<'a> YamlParser<'a> {
                 break;
             };
 
-            let key = trimmed[..colon_pos].trim().to_string();
-            let key = unquote_string(&key);
+            let key = unquote_string(trimmed[..colon_pos].trim());
             let after_colon = trimmed[colon_pos + 1..].trim();
-
-            if after_colon.is_empty() {
-                // Value is on next line(s)
-                self.pos += 1;
-                self.skip_blanks_and_comments();
-                if self.pos < self.lines.len() && self.current_indent() > block_indent {
-                    let val = self.parse_value(block_indent + 1)?;
-                    pairs.push((key, val));
-                } else {
-                    pairs.push((key, YamlValue::Null));
-                }
-            } else if after_colon == "|" || after_colon == ">" {
-                self.pos += 1;
-                let val = self.parse_multiline_string_body(after_colon == ">");
-                pairs.push((key, val));
-            } else {
-                // Inline value
-                let val = if after_colon.starts_with('[') {
-                    self.pos += 1;
-                    parse_inline_flow_sequence(after_colon)?
-                } else if after_colon.starts_with('{') {
-                    self.pos += 1;
-                    parse_inline_flow_mapping(after_colon)?
-                } else {
-                    self.pos += 1;
-                    parse_scalar(after_colon)
-                };
-                pairs.push((key, val));
-            }
+            let val = self.parse_mapping_value(after_colon, block_indent)?;
+            pairs.push((key, val));
         }
 
         Ok(YamlValue::Object(pairs))
+    }
+
+    /// Parse the value portion of a mapping entry (everything after the colon).
+    fn parse_mapping_value(
+        &mut self,
+        after_colon: &str,
+        block_indent: usize,
+    ) -> Result<YamlValue, String> {
+        if after_colon.is_empty() {
+            self.pos += 1;
+            self.skip_blanks_and_comments();
+            if self.pos < self.lines.len() && self.current_indent() > block_indent {
+                return self.parse_value(block_indent + 1);
+            }
+            return Ok(YamlValue::Null);
+        }
+        if after_colon == "|" || after_colon == ">" {
+            self.pos += 1;
+            return Ok(self.parse_multiline_string_body(after_colon == ">"));
+        }
+        self.pos += 1;
+        parse_inline_value(after_colon)
     }
 
     fn parse_block_list(&mut self, min_indent: usize) -> Result<YamlValue, String> {
@@ -225,12 +214,7 @@ impl<'a> YamlParser<'a> {
 
         while self.pos < self.lines.len() {
             self.skip_blanks_and_comments();
-            if self.pos >= self.lines.len() {
-                break;
-            }
-
-            let indent = self.current_indent();
-            if indent != block_indent {
+            if self.pos >= self.lines.len() || self.current_indent() != block_indent {
                 break;
             }
 
@@ -242,81 +226,102 @@ impl<'a> YamlParser<'a> {
             }
 
             let item_text = if trimmed == "-" { "" } else { &trimmed[2..] };
-
-            if item_text.is_empty() {
-                // Value on next line
-                self.pos += 1;
-                self.skip_blanks_and_comments();
-                if self.pos < self.lines.len() && self.current_indent() > block_indent {
-                    let val = self.parse_value(block_indent + 1)?;
-                    items.push(val);
-                } else {
-                    items.push(YamlValue::Null);
-                }
-            } else if item_text.starts_with('[') {
-                self.pos += 1;
-                items.push(parse_inline_flow_sequence(item_text)?);
-            } else if item_text.starts_with('{') {
-                self.pos += 1;
-                items.push(parse_inline_flow_mapping(item_text)?);
-            } else if find_colon_separator(item_text).is_some() {
-                // Inline mapping within list item
-                // We need to handle this specially: the "- key: val" case
-                // Create a temp parser-like state for this
-                self.pos += 1;
-                let first_val = parse_inline_mapping_item(item_text)?;
-
-                // Check if there are more keys at deeper indent
-                self.skip_blanks_and_comments();
-                if self.pos < self.lines.len() && self.current_indent() > block_indent {
-                    let deeper_indent = self.current_indent();
-                    let mut pairs = match first_val {
-                        YamlValue::Object(p) => p,
-                        _ => vec![],
-                    };
-                    // Parse remaining keys at this deeper indent
-                    while self.pos < self.lines.len() {
-                        self.skip_blanks_and_comments();
-                        if self.pos >= self.lines.len() {
-                            break;
-                        }
-                        if self.current_indent() != deeper_indent {
-                            break;
-                        }
-                        let sub_trimmed = self.lines[self.pos].trim();
-                        if let Some(cp) = find_colon_separator(sub_trimmed) {
-                            let k = unquote_string(sub_trimmed[..cp].trim());
-                            let v_text = sub_trimmed[cp + 1..].trim();
-                            if v_text.is_empty() {
-                                self.pos += 1;
-                                self.skip_blanks_and_comments();
-                                if self.pos < self.lines.len()
-                                    && self.current_indent() > deeper_indent
-                                {
-                                    let v = self.parse_value(deeper_indent + 1)?;
-                                    pairs.push((k, v));
-                                } else {
-                                    pairs.push((k, YamlValue::Null));
-                                }
-                            } else {
-                                self.pos += 1;
-                                pairs.push((k, parse_scalar(v_text)));
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    items.push(YamlValue::Object(pairs));
-                } else {
-                    items.push(first_val);
-                }
-            } else {
-                self.pos += 1;
-                items.push(parse_scalar(item_text));
-            }
+            items.push(self.parse_list_item(item_text, block_indent)?);
         }
 
         Ok(YamlValue::Array(items))
+    }
+
+    /// Parse a single list item value, dispatching by its textual shape.
+    fn parse_list_item(
+        &mut self,
+        item_text: &str,
+        block_indent: usize,
+    ) -> Result<YamlValue, String> {
+        if item_text.is_empty() {
+            return self.parse_list_item_next_line(block_indent);
+        }
+        if item_text.starts_with('[') {
+            self.pos += 1;
+            return parse_inline_flow_sequence(item_text);
+        }
+        if item_text.starts_with('{') {
+            self.pos += 1;
+            return parse_inline_flow_mapping(item_text);
+        }
+        if find_colon_separator(item_text).is_some() {
+            return self.parse_list_item_mapping(item_text, block_indent);
+        }
+        self.pos += 1;
+        Ok(parse_scalar(item_text))
+    }
+
+    /// Handle a list item whose value appears on the next line(s).
+    fn parse_list_item_next_line(&mut self, block_indent: usize) -> Result<YamlValue, String> {
+        self.pos += 1;
+        self.skip_blanks_and_comments();
+        if self.pos < self.lines.len() && self.current_indent() > block_indent {
+            self.parse_value(block_indent + 1)
+        } else {
+            Ok(YamlValue::Null)
+        }
+    }
+
+    /// Handle the `- key: val` case, possibly followed by deeper mapping keys.
+    fn parse_list_item_mapping(
+        &mut self,
+        item_text: &str,
+        block_indent: usize,
+    ) -> Result<YamlValue, String> {
+        self.pos += 1;
+        let first_val = parse_inline_mapping_item(item_text)?;
+
+        self.skip_blanks_and_comments();
+        if self.pos >= self.lines.len() || self.current_indent() <= block_indent {
+            return Ok(first_val);
+        }
+
+        let deeper_indent = self.current_indent();
+        let mut pairs = match first_val {
+            YamlValue::Object(p) => p,
+            _ => vec![],
+        };
+        self.collect_deeper_mapping_keys(&mut pairs, deeper_indent)?;
+        Ok(YamlValue::Object(pairs))
+    }
+
+    /// Collect additional `key: value` pairs at a fixed deeper indent level.
+    fn collect_deeper_mapping_keys(
+        &mut self,
+        pairs: &mut Vec<(String, YamlValue)>,
+        deeper_indent: usize,
+    ) -> Result<(), String> {
+        while self.pos < self.lines.len() {
+            self.skip_blanks_and_comments();
+            if self.pos >= self.lines.len() || self.current_indent() != deeper_indent {
+                break;
+            }
+            let sub_trimmed = self.lines[self.pos].trim();
+            let Some(cp) = find_colon_separator(sub_trimmed) else {
+                break;
+            };
+            let k = unquote_string(sub_trimmed[..cp].trim());
+            let v_text = sub_trimmed[cp + 1..].trim();
+            if v_text.is_empty() {
+                self.pos += 1;
+                self.skip_blanks_and_comments();
+                if self.pos < self.lines.len() && self.current_indent() > deeper_indent {
+                    let v = self.parse_value(deeper_indent + 1)?;
+                    pairs.push((k, v));
+                } else {
+                    pairs.push((k, YamlValue::Null));
+                }
+            } else {
+                self.pos += 1;
+                pairs.push((k, parse_scalar(v_text)));
+            }
+        }
+        Ok(())
     }
 
     fn parse_flow_sequence(&mut self) -> Result<YamlValue, String> {
@@ -490,6 +495,17 @@ fn find_inline_comment(s: &str) -> Option<usize> {
     None
 }
 
+/// Parse an inline value that starts with `[`, `{`, or is a plain scalar.
+fn parse_inline_value(s: &str) -> Result<YamlValue, String> {
+    if s.starts_with('[') {
+        parse_inline_flow_sequence(s)
+    } else if s.starts_with('{') {
+        parse_inline_flow_mapping(s)
+    } else {
+        Ok(parse_scalar(s))
+    }
+}
+
 fn parse_inline_flow_sequence(s: &str) -> Result<YamlValue, String> {
     let s = s.trim();
     if !s.starts_with('[') || !s.ends_with(']') {
@@ -503,14 +519,7 @@ fn parse_inline_flow_sequence(s: &str) -> Result<YamlValue, String> {
     let items = split_flow_items(inner);
     let mut result = Vec::new();
     for item in items {
-        let trimmed = item.trim();
-        if trimmed.starts_with('{') {
-            result.push(parse_inline_flow_mapping(trimmed)?);
-        } else if trimmed.starts_with('[') {
-            result.push(parse_inline_flow_sequence(trimmed)?);
-        } else {
-            result.push(parse_scalar(trimmed));
-        }
+        result.push(parse_inline_value(item.trim())?);
     }
 
     Ok(YamlValue::Array(result))
@@ -529,50 +538,47 @@ fn parse_inline_flow_mapping(s: &str) -> Result<YamlValue, String> {
     let items = split_flow_items(inner);
     let mut pairs = Vec::new();
     for item in items {
-        let trimmed = item.trim();
-        if let Some(colon_pos) = trimmed.find(": ") {
-            let key = unquote_string(&trimmed[..colon_pos]);
-            let val_str = trimmed[colon_pos + 2..].trim();
-            let val = if val_str.starts_with('[') {
-                parse_inline_flow_sequence(val_str)?
-            } else if val_str.starts_with('{') {
-                parse_inline_flow_mapping(val_str)?
-            } else {
-                parse_scalar(val_str)
-            };
-            pairs.push((key, val));
-        } else if let Some(colon_pos) = trimmed.find(':') {
-            // key:value without space (edge case)
-            let key = unquote_string(&trimmed[..colon_pos]);
-            let val_str = trimmed[colon_pos + 1..].trim();
-            if val_str.is_empty() {
-                pairs.push((key, YamlValue::Null));
-            } else {
-                pairs.push((key, parse_scalar(val_str)));
-            }
+        if let Some(pair) = parse_flow_mapping_pair(item.trim())? {
+            pairs.push(pair);
         }
     }
 
     Ok(YamlValue::Object(pairs))
 }
 
-fn parse_inline_mapping_item(s: &str) -> Result<YamlValue, String> {
-    if let Some(colon_pos) = find_colon_separator(s) {
-        let key = unquote_string(s[..colon_pos].trim());
-        let val_str = s[colon_pos + 1..].trim();
+/// Parse a single `key: value` pair inside a flow mapping.
+fn parse_flow_mapping_pair(trimmed: &str) -> Result<Option<(String, YamlValue)>, String> {
+    if let Some(colon_pos) = trimmed.find(": ") {
+        let key = unquote_string(&trimmed[..colon_pos]);
+        let val_str = trimmed[colon_pos + 2..].trim();
+        let val = parse_inline_value(val_str)?;
+        return Ok(Some((key, val)));
+    }
+    if let Some(colon_pos) = trimmed.find(':') {
+        let key = unquote_string(&trimmed[..colon_pos]);
+        let val_str = trimmed[colon_pos + 1..].trim();
         let val = if val_str.is_empty() {
             YamlValue::Null
-        } else if val_str.starts_with('[') {
-            parse_inline_flow_sequence(val_str)?
-        } else if val_str.starts_with('{') {
-            parse_inline_flow_mapping(val_str)?
         } else {
             parse_scalar(val_str)
         };
-        Ok(YamlValue::Object(vec![(key, val)]))
-    } else {
-        Ok(parse_scalar(s))
+        return Ok(Some((key, val)));
     }
+    Ok(None)
+}
+
+fn parse_inline_mapping_item(s: &str) -> Result<YamlValue, String> {
+    let Some(colon_pos) = find_colon_separator(s) else {
+        return Ok(parse_scalar(s));
+    };
+    let key = unquote_string(s[..colon_pos].trim());
+    let val_str = s[colon_pos + 1..].trim();
+    let val = if val_str.is_empty() {
+        YamlValue::Null
+    } else {
+        parse_inline_value(val_str)?
+    };
+    Ok(YamlValue::Object(vec![(key, val)]))
 }
 
 /// Split flow items by commas, respecting nesting of `[]` and `{}`.
@@ -652,85 +658,111 @@ fn parse_filter(input: &str) -> Result<Filter, String> {
         return Ok(Filter::Pipe(Box::new(lf), Box::new(rf)));
     }
 
-    // Built-in functions
-    match input {
-        "keys" => return Ok(Filter::Keys),
-        "values" => return Ok(Filter::Values),
-        "length" => return Ok(Filter::Length),
-        "type" => return Ok(Filter::Type),
-        "first" => return Ok(Filter::First),
-        "last" => return Ok(Filter::Last),
-        "flatten" => return Ok(Filter::Flatten),
-        "not" => return Ok(Filter::Not),
-        _ => {}
+    // Built-in named functions
+    if let Some(f) = parse_builtin_filter(input) {
+        return Ok(f);
     }
 
-    // select(...)
+    // Wrapper functions: select(...), map(...)
+    if let Some(f) = parse_wrapper_filter(input)? {
+        return Ok(f);
+    }
+
+    // Dot-prefixed access patterns
+    if let Some(f) = parse_dot_filter(input) {
+        return Ok(f);
+    }
+
+    Err(format!("unsupported filter: {input}"))
+}
+
+/// Match named built-in filter keywords.
+fn parse_builtin_filter(input: &str) -> Option<Filter> {
+    match input {
+        "keys" => Some(Filter::Keys),
+        "values" => Some(Filter::Values),
+        "length" => Some(Filter::Length),
+        "type" => Some(Filter::Type),
+        "first" => Some(Filter::First),
+        "last" => Some(Filter::Last),
+        "flatten" => Some(Filter::Flatten),
+        "not" => Some(Filter::Not),
+        _ => None,
+    }
+}
+
+/// Parse `select(...)` and `map(...)` wrapper filters.
+fn parse_wrapper_filter(input: &str) -> Result<Option<Filter>, String> {
     if let Some(inner) = input
         .strip_prefix("select(")
         .and_then(|s| s.strip_suffix(')'))
     {
         let f = parse_filter(inner)?;
-        return Ok(Filter::Select(Box::new(f)));
+        return Ok(Some(Filter::Select(Box::new(f))));
     }
-
-    // map(...)
     if let Some(inner) = input.strip_prefix("map(").and_then(|s| s.strip_suffix(')')) {
         let f = parse_filter(inner)?;
-        return Ok(Filter::Map(Box::new(f)));
+        return Ok(Some(Filter::Map(Box::new(f))));
     }
+    Ok(None)
+}
 
-    // .[] — iterate
+/// Parse dot-prefixed filters: `.[]`, `.[N]`, `.key`, `.key[]`, `.key[N]`, `.a.b.c`.
+fn parse_dot_filter(input: &str) -> Option<Filter> {
     if input == ".[]" {
-        return Ok(Filter::Iterate);
+        return Some(Filter::Iterate);
     }
 
     // .[N] — index
     if input.starts_with(".[") && input.ends_with(']') {
         let idx_str = &input[2..input.len() - 1];
         if let Ok(idx) = idx_str.parse::<i64>() {
-            return Ok(Filter::Index(idx));
+            return Some(Filter::Index(idx));
         }
     }
 
-    // .key or .key.subkey.subsubkey
-    if let Some(rest) = input.strip_prefix('.') {
-        // Check for chained field access: .a.b.c
-        let parts: Vec<&str> = rest.split('.').collect();
-        if parts.len() > 1 && parts.iter().all(|p| !p.is_empty() && !p.contains('[')) {
-            return Ok(Filter::FieldChain(
-                parts.iter().map(|s| (*s).to_string()).collect(),
+    let rest = input.strip_prefix('.')?;
+
+    // Chained field access: .a.b.c
+    let parts: Vec<&str> = rest.split('.').collect();
+    if parts.len() > 1 && parts.iter().all(|p| !p.is_empty() && !p.contains('[')) {
+        return Some(Filter::FieldChain(
+            parts.iter().map(|s| (*s).to_string()).collect(),
+        ));
+    }
+
+    // Simple field: .key
+    if !rest.is_empty() && !rest.contains('[') && !rest.contains('|') {
+        return Some(Filter::Field(rest.to_string()));
+    }
+
+    // .key[] — field then iterate
+    if let Some(field) = rest.strip_suffix("[]") {
+        if !field.is_empty() {
+            return Some(Filter::Pipe(
+                Box::new(Filter::Field(field.to_string())),
+                Box::new(Filter::Iterate),
             ));
         }
-        if !rest.is_empty() && !rest.contains('[') && !rest.contains('|') {
-            return Ok(Filter::Field(rest.to_string()));
-        }
-
-        // .key[] — field then iterate
-        if let Some(field) = rest.strip_suffix("[]") {
-            if !field.is_empty() {
-                return Ok(Filter::Pipe(
-                    Box::new(Filter::Field(field.to_string())),
-                    Box::new(Filter::Iterate),
-                ));
-            }
-        }
-
-        // .key[N]
-        if rest.contains('[') && rest.ends_with(']') {
-            let bracket = rest.find('[').unwrap();
-            let field = &rest[..bracket];
-            let idx_str = &rest[bracket + 1..rest.len() - 1];
-            if let Ok(idx) = idx_str.parse::<i64>() {
-                return Ok(Filter::Pipe(
-                    Box::new(Filter::Field(field.to_string())),
-                    Box::new(Filter::Index(idx)),
-                ));
-            }
-        }
     }
 
-    Err(format!("unsupported filter: {input}"))
+    // .key[N] — field then index
+    parse_field_index(rest)
+}
+
+/// Parse `.key[N]` patterns from the portion after the leading dot.
+fn parse_field_index(rest: &str) -> Option<Filter> {
+    if !rest.contains('[') || !rest.ends_with(']') {
+        return None;
+    }
+    let bracket = rest.find('[')?;
+    let field = &rest[..bracket];
+    let idx_str = &rest[bracket + 1..rest.len() - 1];
+    let idx = idx_str.parse::<i64>().ok()?;
+    Some(Filter::Pipe(
+        Box::new(Filter::Field(field.to_string())),
+        Box::new(Filter::Index(idx)),
+    ))
 }
 
 /// Split on the top-level `|` (not inside parens).
@@ -753,123 +785,135 @@ fn split_pipe(s: &str) -> Option<(&str, &str)> {
 fn eval_filter(val: &YamlValue, filter: &Filter) -> Result<Vec<YamlValue>, String> {
     match filter {
         Filter::Identity => Ok(vec![val.clone()]),
-
         Filter::Field(key) => Ok(vec![val.obj_get(key)]),
-
-        Filter::FieldChain(keys) => {
-            let mut current = val.clone();
-            for key in keys {
-                current = current.obj_get(key);
-            }
-            Ok(vec![current])
-        }
-
-        Filter::Index(idx) => {
-            if let YamlValue::Array(arr) = val {
-                let i = if *idx < 0 {
-                    arr.len().wrapping_add(*idx as usize)
-                } else {
-                    *idx as usize
-                };
-                Ok(vec![arr.get(i).cloned().unwrap_or(YamlValue::Null)])
-            } else {
-                Ok(vec![YamlValue::Null])
-            }
-        }
-
-        Filter::Iterate => match val {
-            YamlValue::Array(arr) => Ok(arr.clone()),
-            YamlValue::Object(pairs) => Ok(pairs.iter().map(|(_, v)| v.clone()).collect()),
-            _ => Err(format!("cannot iterate over {}", val.type_name())),
-        },
-
-        Filter::Pipe(left, right) => {
-            let intermediate = eval_filter(val, left)?;
-            let mut results = Vec::new();
-            for v in &intermediate {
-                results.extend(eval_filter(v, right)?);
-            }
-            Ok(results)
-        }
-
-        Filter::Keys => match val {
-            YamlValue::Object(pairs) => Ok(vec![YamlValue::Array(
-                pairs
-                    .iter()
-                    .map(|(k, _)| YamlValue::String(k.clone()))
-                    .collect(),
-            )]),
-            YamlValue::Array(arr) => Ok(vec![YamlValue::Array(
-                (0..arr.len())
-                    .map(|i| YamlValue::Number(i as f64))
-                    .collect(),
-            )]),
-            _ => Err("keys requires object or array".to_string()),
-        },
-
-        Filter::Values => match val {
-            YamlValue::Object(pairs) => Ok(vec![YamlValue::Array(
-                pairs.iter().map(|(_, v)| v.clone()).collect(),
-            )]),
-            YamlValue::Array(_) => Ok(vec![val.clone()]),
-            _ => Err("values requires object or array".to_string()),
-        },
-
+        Filter::FieldChain(keys) => Ok(vec![eval_field_chain(val, keys)]),
+        Filter::Index(idx) => Ok(vec![eval_index(val, *idx)]),
+        Filter::Iterate => eval_iterate(val),
+        Filter::Pipe(left, right) => eval_pipe(val, left, right),
+        Filter::Keys => eval_keys(val),
+        Filter::Values => eval_values(val),
         Filter::Length => Ok(vec![val.length()]),
-
         Filter::Type => Ok(vec![YamlValue::String(val.type_name().to_string())]),
+        Filter::Select(inner) => eval_select(val, inner),
+        Filter::First => Ok(eval_first(val)),
+        Filter::Last => Ok(eval_last(val)),
+        Filter::Flatten => Ok(eval_flatten(val)),
+        Filter::Map(inner) => eval_map(val, inner),
+        Filter::Not => Ok(vec![YamlValue::Bool(!val.is_truthy())]),
+    }
+}
 
-        Filter::Select(inner) => {
-            let results = eval_filter(val, inner)?;
-            if results.first().is_some_and(YamlValue::is_truthy) {
-                Ok(vec![val.clone()])
-            } else {
-                Ok(vec![])
-            }
-        }
+fn eval_field_chain(val: &YamlValue, keys: &[String]) -> YamlValue {
+    let mut current = val.clone();
+    for key in keys {
+        current = current.obj_get(key);
+    }
+    current
+}
 
-        Filter::First => match val {
-            YamlValue::Array(arr) => Ok(vec![arr.first().cloned().unwrap_or(YamlValue::Null)]),
-            _ => Ok(vec![val.clone()]),
-        },
+fn eval_index(val: &YamlValue, idx: i64) -> YamlValue {
+    let YamlValue::Array(arr) = val else {
+        return YamlValue::Null;
+    };
+    let i = if idx < 0 {
+        arr.len().wrapping_add(idx as usize)
+    } else {
+        idx as usize
+    };
+    arr.get(i).cloned().unwrap_or(YamlValue::Null)
+}
 
-        Filter::Last => match val {
-            YamlValue::Array(arr) => Ok(vec![arr.last().cloned().unwrap_or(YamlValue::Null)]),
-            _ => Ok(vec![val.clone()]),
-        },
+fn eval_iterate(val: &YamlValue) -> Result<Vec<YamlValue>, String> {
+    match val {
+        YamlValue::Array(arr) => Ok(arr.clone()),
+        YamlValue::Object(pairs) => Ok(pairs.iter().map(|(_, v)| v.clone()).collect()),
+        _ => Err(format!("cannot iterate over {}", val.type_name())),
+    }
+}
 
-        Filter::Flatten => match val {
-            YamlValue::Array(arr) => {
-                let mut out = Vec::new();
-                for item in arr {
-                    if let YamlValue::Array(inner) = item {
-                        out.extend(inner.clone());
-                    } else {
-                        out.push(item.clone());
-                    }
-                }
-                Ok(vec![YamlValue::Array(out)])
-            }
-            _ => Ok(vec![val.clone()]),
-        },
+fn eval_pipe(val: &YamlValue, left: &Filter, right: &Filter) -> Result<Vec<YamlValue>, String> {
+    let intermediate = eval_filter(val, left)?;
+    let mut results = Vec::new();
+    for v in &intermediate {
+        results.extend(eval_filter(v, right)?);
+    }
+    Ok(results)
+}
 
-        Filter::Map(inner) => match val {
-            YamlValue::Array(arr) => {
-                let mut out = Vec::new();
-                for item in arr {
-                    let results = eval_filter(item, inner)?;
-                    out.extend(results);
-                }
-                Ok(vec![YamlValue::Array(out)])
-            }
-            _ => Err("map requires array input".to_string()),
-        },
+fn eval_keys(val: &YamlValue) -> Result<Vec<YamlValue>, String> {
+    match val {
+        YamlValue::Object(pairs) => Ok(vec![YamlValue::Array(
+            pairs
+                .iter()
+                .map(|(k, _)| YamlValue::String(k.clone()))
+                .collect(),
+        )]),
+        YamlValue::Array(arr) => Ok(vec![YamlValue::Array(
+            (0..arr.len())
+                .map(|i| YamlValue::Number(i as f64))
+                .collect(),
+        )]),
+        _ => Err("keys requires object or array".to_string()),
+    }
+}
 
-        Filter::Not => {
-            let truthy = val.is_truthy();
-            Ok(vec![YamlValue::Bool(!truthy)])
+fn eval_values(val: &YamlValue) -> Result<Vec<YamlValue>, String> {
+    match val {
+        YamlValue::Object(pairs) => Ok(vec![YamlValue::Array(
+            pairs.iter().map(|(_, v)| v.clone()).collect(),
+        )]),
+        YamlValue::Array(_) => Ok(vec![val.clone()]),
+        _ => Err("values requires object or array".to_string()),
+    }
+}
+
+fn eval_select(val: &YamlValue, inner: &Filter) -> Result<Vec<YamlValue>, String> {
+    let results = eval_filter(val, inner)?;
+    if results.first().is_some_and(YamlValue::is_truthy) {
+        Ok(vec![val.clone()])
+    } else {
+        Ok(vec![])
+    }
+}
+
+fn eval_first(val: &YamlValue) -> Vec<YamlValue> {
+    match val {
+        YamlValue::Array(arr) => vec![arr.first().cloned().unwrap_or(YamlValue::Null)],
+        _ => vec![val.clone()],
+    }
+}
+
+fn eval_last(val: &YamlValue) -> Vec<YamlValue> {
+    match val {
+        YamlValue::Array(arr) => vec![arr.last().cloned().unwrap_or(YamlValue::Null)],
+        _ => vec![val.clone()],
+    }
+}
+
+fn eval_flatten(val: &YamlValue) -> Vec<YamlValue> {
+    let YamlValue::Array(arr) = val else {
+        return vec![val.clone()];
+    };
+    let mut out = Vec::new();
+    for item in arr {
+        if let YamlValue::Array(inner) = item {
+            out.extend(inner.clone());
+        } else {
+            out.push(item.clone());
         }
     }
+    vec![YamlValue::Array(out)]
+}
+
+fn eval_map(val: &YamlValue, inner: &Filter) -> Result<Vec<YamlValue>, String> {
+    let YamlValue::Array(arr) = val else {
+        return Err("map requires array input".to_string());
+    };
+    let mut out = Vec::new();
+    for item in arr {
+        out.extend(eval_filter(item, inner)?);
+    }
+    Ok(vec![YamlValue::Array(out)])
 }
 
 // ---------------------------------------------------------------------------
@@ -877,66 +921,65 @@ fn eval_filter(val: &YamlValue, filter: &Filter) -> Result<Vec<YamlValue>, Strin
 // ---------------------------------------------------------------------------
 
 fn yaml_to_string(val: &YamlValue, indent: usize) -> String {
-    let prefix = " ".repeat(indent);
     match val {
         YamlValue::Null => "null".to_string(),
         YamlValue::Bool(b) => b.to_string(),
         YamlValue::Number(n) => format_yaml_number(*n),
-        YamlValue::String(s) => {
-            if s.contains('\n') || s.contains(':') || s.contains('#') || s.is_empty() {
-                format!(
-                    "\"{}\"",
-                    s.replace('\\', "\\\\")
-                        .replace('"', "\\\"")
-                        .replace('\n', "\\n")
-                )
-            } else {
-                s.clone()
-            }
-        }
+        YamlValue::String(s) => yaml_format_string(s),
         YamlValue::Array(arr) if arr.is_empty() => "[]".to_string(),
-        YamlValue::Array(arr) => {
-            let mut out = String::new();
-            for (i, item) in arr.iter().enumerate() {
-                if i > 0 {
-                    out.push('\n');
-                    out.push_str(&prefix);
-                }
-                out.push_str("- ");
-                match item {
-                    YamlValue::Object(_) | YamlValue::Array(_) => {
-                        let sub = yaml_to_string(item, indent + 2);
-                        out.push_str(&sub);
-                    }
-                    _ => {
-                        out.push_str(&yaml_to_string(item, indent + 2));
-                    }
-                }
-            }
-            out
-        }
+        YamlValue::Array(arr) => yaml_format_array(arr, indent),
         YamlValue::Object(pairs) if pairs.is_empty() => "{}".to_string(),
-        YamlValue::Object(pairs) => {
-            let mut out = String::new();
-            for (i, (k, v)) in pairs.iter().enumerate() {
-                if i > 0 {
-                    out.push('\n');
-                    out.push_str(&prefix);
-                }
-                let _ = write!(out, "{k}:");
-                match v {
-                    YamlValue::Object(_) | YamlValue::Array(_) => {
-                        let sub = yaml_to_string(v, indent + 2);
-                        let _ = write!(out, "\n{prefix}  {sub}");
-                    }
-                    _ => {
-                        let _ = write!(out, " {}", yaml_to_string(v, indent));
-                    }
-                }
+        YamlValue::Object(pairs) => yaml_format_object(pairs, indent),
+    }
+}
+
+fn yaml_format_string(s: &str) -> String {
+    if s.contains('\n') || s.contains(':') || s.contains('#') || s.is_empty() {
+        format!(
+            "\"{}\"",
+            s.replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+        )
+    } else {
+        s.to_string()
+    }
+}
+
+fn yaml_format_array(arr: &[YamlValue], indent: usize) -> String {
+    let prefix = " ".repeat(indent);
+    let mut out = String::new();
+    for (i, item) in arr.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+            out.push_str(&prefix);
+        }
+        out.push_str("- ");
+        out.push_str(&yaml_to_string(item, indent + 2));
+    }
+    out
+}
+
+fn yaml_format_object(pairs: &[(String, YamlValue)], indent: usize) -> String {
+    let prefix = " ".repeat(indent);
+    let mut out = String::new();
+    for (i, (k, v)) in pairs.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+            out.push_str(&prefix);
+        }
+        let _ = write!(out, "{k}:");
+        match v {
+            YamlValue::Object(_) | YamlValue::Array(_) => {
+                let sub = yaml_to_string(v, indent + 2);
+                let _ = write!(out, "\n{prefix}  {sub}");
             }
-            out
+            _ => {
+                let _ = write!(out, " {}", yaml_to_string(v, indent));
+            }
         }
     }
+    out
 }
 
 fn json_to_string(val: &YamlValue, compact: bool) -> String {
@@ -944,66 +987,71 @@ fn json_to_string(val: &YamlValue, compact: bool) -> String {
 }
 
 fn json_to_string_inner(val: &YamlValue, indent: usize, compact: bool) -> String {
-    let nl = if compact { "" } else { "\n" };
-    let sp = if compact { "" } else { " " };
-    let ind = if compact {
-        String::new()
-    } else {
-        "  ".repeat(indent)
-    };
-    let ind1 = if compact {
-        String::new()
-    } else {
-        "  ".repeat(indent + 1)
-    };
-
     match val {
         YamlValue::Null => "null".to_string(),
         YamlValue::Bool(b) => b.to_string(),
         YamlValue::Number(n) => format_yaml_number(*n),
-        YamlValue::String(s) => {
-            format!(
-                "\"{}\"",
-                s.replace('\\', "\\\\")
-                    .replace('"', "\\\"")
-                    .replace('\n', "\\n")
-                    .replace('\t', "\\t")
-                    .replace('\r', "\\r")
-            )
-        }
+        YamlValue::String(s) => json_escape_string(s),
         YamlValue::Array(arr) if arr.is_empty() => "[]".to_string(),
-        YamlValue::Array(arr) => {
-            let mut out = format!("[{nl}");
-            for (i, item) in arr.iter().enumerate() {
-                if i > 0 {
-                    let _ = write!(out, ",{nl}");
-                }
-                let _ = write!(
-                    out,
-                    "{ind1}{}",
-                    json_to_string_inner(item, indent + 1, compact)
-                );
-            }
-            let _ = write!(out, "{nl}{ind}]");
-            out
-        }
+        YamlValue::Array(arr) => json_format_array(arr, indent, compact),
         YamlValue::Object(pairs) if pairs.is_empty() => "{}".to_string(),
-        YamlValue::Object(pairs) => {
-            let mut out = format!("{{{nl}");
-            for (i, (k, v)) in pairs.iter().enumerate() {
-                if i > 0 {
-                    let _ = write!(out, ",{nl}");
-                }
-                let key_escaped = k.replace('\\', "\\\\").replace('"', "\\\"");
-                let _ = write!(
-                    out,
-                    "{ind1}\"{key_escaped}\":{sp}{}",
-                    json_to_string_inner(v, indent + 1, compact)
-                );
-            }
-            let _ = write!(out, "{nl}{ind}}}");
-            out
+        YamlValue::Object(pairs) => json_format_object(pairs, indent, compact),
+    }
+}
+
+fn json_escape_string(s: &str) -> String {
+    format!(
+        "\"{}\"",
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\t', "\\t")
+            .replace('\r', "\\r")
+    )
+}
+
+fn json_format_array(arr: &[YamlValue], indent: usize, compact: bool) -> String {
+    let (nl, ind, ind1) = json_indent_parts(indent, compact);
+    let mut out = format!("[{nl}");
+    for (i, item) in arr.iter().enumerate() {
+        if i > 0 {
+            let _ = write!(out, ",{nl}");
         }
+        let _ = write!(
+            out,
+            "{ind1}{}",
+            json_to_string_inner(item, indent + 1, compact)
+        );
+    }
+    let _ = write!(out, "{nl}{ind}]");
+    out
+}
+
+fn json_format_object(pairs: &[(String, YamlValue)], indent: usize, compact: bool) -> String {
+    let (nl, ind, ind1) = json_indent_parts(indent, compact);
+    let sp = if compact { "" } else { " " };
+    let mut out = format!("{{{nl}");
+    for (i, (k, v)) in pairs.iter().enumerate() {
+        if i > 0 {
+            let _ = write!(out, ",{nl}");
+        }
+        let key_escaped = k.replace('\\', "\\\\").replace('"', "\\\"");
+        let _ = write!(
+            out,
+            "{ind1}\"{key_escaped}\":{sp}{}",
+            json_to_string_inner(v, indent + 1, compact)
+        );
+    }
+    let _ = write!(out, "{nl}{ind}}}");
+    out
+}
+
+/// Compute the newline, current-indent, and child-indent strings for JSON output.
+fn json_indent_parts(indent: usize, compact: bool) -> (&'static str, String, String) {
+    if compact {
+        ("", String::new(), String::new())
+    } else {
+        ("\n", "  ".repeat(indent), "  ".repeat(indent + 1))
     }
 }
 
@@ -1026,66 +1074,106 @@ fn raw_string(val: &YamlValue) -> String {
 // yq entry point
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_yq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
-    let mut raw_output = false;
-    let mut exit_status_mode = false;
-    let mut compact = false;
-    let mut json_output = false;
+/// Parsed yq command-line options.
+#[allow(clippy::struct_excessive_bools)]
+struct YqOptions {
+    raw_output: bool,
+    exit_status_mode: bool,
+    compact: bool,
+    json_output: bool,
+}
 
-    while let Some(arg) = args.first() {
-        match *arg {
-            "-r" | "--raw-output" => {
-                raw_output = true;
-                args = &args[1..];
-            }
-            "-e" | "--exit-status" => {
-                exit_status_mode = true;
-                args = &args[1..];
-            }
-            "-c" | "--compact-output" => {
-                compact = true;
-                args = &args[1..];
-            }
-            "-j" | "--json-output" => {
-                json_output = true;
-                args = &args[1..];
-            }
+/// Parse yq flags from the argument list, returning options and the remaining args index.
+fn parse_yq_flags(args: &[&str]) -> (YqOptions, usize) {
+    let mut opts = YqOptions {
+        raw_output: false,
+        exit_status_mode: false,
+        compact: false,
+        json_output: false,
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i];
+        match arg {
+            "-r" | "--raw-output" => opts.raw_output = true,
+            "-e" | "--exit-status" => opts.exit_status_mode = true,
+            "-c" | "--compact-output" => opts.compact = true,
+            "-j" | "--json-output" => opts.json_output = true,
             _ if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") => {
-                let flags = &arg[1..];
-                let mut recognized = true;
-                for ch in flags.chars() {
-                    match ch {
-                        'r' => raw_output = true,
-                        'e' => exit_status_mode = true,
-                        'c' => compact = true,
-                        'j' => json_output = true,
-                        _ => {
-                            recognized = false;
-                            break;
-                        }
-                    }
-                }
-                if recognized {
-                    args = &args[1..];
-                } else {
+                if !parse_combined_flags(&arg[1..], &mut opts) {
                     break;
                 }
             }
             _ => break,
         }
+        i += 1;
     }
+    (opts, i)
+}
+
+/// Apply single-char combined flags (e.g. `-rjc`). Returns `false` if an unknown flag is found.
+fn parse_combined_flags(flags: &str, opts: &mut YqOptions) -> bool {
+    for ch in flags.chars() {
+        match ch {
+            'r' => opts.raw_output = true,
+            'e' => opts.exit_status_mode = true,
+            'c' => opts.compact = true,
+            'j' => opts.json_output = true,
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Read yq input text from stdin or file arguments.
+fn read_yq_input(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> Result<String, i32> {
+    if file_args.is_empty() {
+        if let Some(data) = ctx.stdin {
+            return Ok(String::from_utf8_lossy(data).to_string());
+        }
+        ctx.output.stderr(b"yq: missing input\n");
+        return Err(1);
+    }
+    let mut combined = String::new();
+    for path in file_args {
+        let full = resolve_path(ctx.cwd, path);
+        match read_text(ctx.fs, &full) {
+            Ok(t) => {
+                if !combined.is_empty() {
+                    combined.push('\n');
+                }
+                combined.push_str(&t);
+            }
+            Err(e) => {
+                emit_error(ctx.output, "yq", path, &e);
+                return Err(1);
+            }
+        }
+    }
+    Ok(combined)
+}
+
+/// Format a single result value according to the output options.
+fn format_yq_result(val: &YamlValue, opts: &YqOptions) -> String {
+    if opts.json_output {
+        json_to_string(val, opts.compact)
+    } else if opts.raw_output {
+        raw_string(val)
+    } else {
+        yaml_to_string(val, 0)
+    }
+}
+
+pub(crate) fn util_yq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (opts, consumed) = parse_yq_flags(&argv[1..]);
+    let args = &argv[1 + consumed..];
 
     if args.is_empty() {
         ctx.output.stderr(b"yq: missing filter\n");
         return 1;
     }
 
-    let filter_str = args[0];
-    let file_args = &args[1..];
-
-    // Parse the filter
-    let filter = match parse_filter(filter_str) {
+    let filter = match parse_filter(args[0]) {
         Ok(f) => f,
         Err(e) => {
             let msg = format!("yq: {e}\n");
@@ -1094,35 +1182,11 @@ pub(crate) fn util_yq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     };
 
-    // Get input text
-    let text = if file_args.is_empty() {
-        if let Some(data) = ctx.stdin {
-            String::from_utf8_lossy(data).to_string()
-        } else {
-            ctx.output.stderr(b"yq: missing input\n");
-            return 1;
-        }
-    } else {
-        let mut combined = String::new();
-        for path in file_args {
-            let full = resolve_path(ctx.cwd, path);
-            match read_text(ctx.fs, &full) {
-                Ok(t) => {
-                    if !combined.is_empty() {
-                        combined.push('\n');
-                    }
-                    combined.push_str(&t);
-                }
-                Err(e) => {
-                    emit_error(ctx.output, "yq", path, &e);
-                    return 1;
-                }
-            }
-        }
-        combined
+    let text = match read_yq_input(ctx, &args[1..]) {
+        Ok(t) => t,
+        Err(code) => return code,
     };
 
-    // Parse YAML
     let mut parser = YamlParser::new(&text);
     let value = match parser.parse() {
         Ok(v) => v,
@@ -1133,7 +1197,6 @@ pub(crate) fn util_yq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     };
 
-    // Apply filter
     let results = match eval_filter(&value, &filter) {
         Ok(r) => r,
         Err(e) => {
@@ -1143,25 +1206,18 @@ pub(crate) fn util_yq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     };
 
-    if exit_status_mode && results.is_empty() {
+    if opts.exit_status_mode && results.is_empty() {
         return 1;
     }
 
     for result in &results {
-        let output_str = if json_output {
-            json_to_string(result, compact)
-        } else if raw_output {
-            raw_string(result)
-        } else {
-            yaml_to_string(result, 0)
-        };
+        let output_str = format_yq_result(result, &opts);
         ctx.output.stdout(output_str.as_bytes());
         ctx.output.stdout(b"\n");
     }
 
-    if exit_status_mode {
-        let all_truthy = results.iter().all(YamlValue::is_truthy);
-        i32::from(!all_truthy)
+    if opts.exit_status_mode {
+        i32::from(!results.iter().all(YamlValue::is_truthy))
     } else {
         0
     }
