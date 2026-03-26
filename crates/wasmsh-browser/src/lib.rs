@@ -1878,17 +1878,17 @@ impl WorkerRuntime {
         }
 
         if Self::is_assoc_array_assignment(inner, &elements) {
-            self.assign_assoc_array(name_key, inner);
+            self.assign_assoc_array(&name_key, inner);
             return;
         }
-        self.assign_indexed_array(name_key, &elements);
+        self.assign_indexed_array(&name_key, &elements);
     }
 
     fn is_assoc_array_assignment(inner: &str, elements: &[smol_str::SmolStr]) -> bool {
         !elements.is_empty() && inner.contains('[') && inner.contains("]=")
     }
 
-    fn assign_assoc_array(&mut self, name_key: smol_str::SmolStr, inner: &str) {
+    fn assign_assoc_array(&mut self, name_key: &smol_str::SmolStr, inner: &str) {
         self.vm.state.init_assoc_array(name_key.clone());
         for (key, value) in Self::parse_assoc_pairs(inner) {
             self.vm.state.set_array_element(
@@ -1901,7 +1901,7 @@ impl WorkerRuntime {
 
     fn assign_indexed_array(
         &mut self,
-        name_key: smol_str::SmolStr,
+        name_key: &smol_str::SmolStr,
         elements: &[smol_str::SmolStr],
     ) {
         self.vm.state.init_indexed_array(name_key.clone());
@@ -2082,6 +2082,7 @@ impl WorkerRuntime {
         result
     }
 
+    #[allow(clippy::fn_params_excessive_bools)]
     fn expand_glob_arg(
         &self,
         arg: String,
@@ -2178,6 +2179,7 @@ impl WorkerRuntime {
         matches
     }
 
+    #[allow(clippy::unused_self)]
     fn finalize_glob_matches(
         &self,
         arg: String,
@@ -3451,16 +3453,12 @@ fn glob_match_inner(pattern: &[u8], name: &[u8]) -> bool {
 
     while ni < name.len() {
         match glob_step(pattern, pi, name[ni]) {
-            GlobPatternStep::Consume(new_pi) => {
-                pi = new_pi;
-                ni += 1;
-            }
             GlobPatternStep::Star => {
                 star_pi = pi;
                 star_ni = ni;
                 pi += 1;
             }
-            GlobPatternStep::Class(new_pi, true) => {
+            GlobPatternStep::Consume(new_pi) | GlobPatternStep::Class(new_pi, true) => {
                 pi = new_pi;
                 ni += 1;
             }

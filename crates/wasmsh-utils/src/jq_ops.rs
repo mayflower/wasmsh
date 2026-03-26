@@ -1293,11 +1293,11 @@ impl FilterParser {
                 self.parse_object_construct()
             }
             Token::LParen => self.parse_grouped_primary(),
-            Token::StrLit(s) => self.parse_literal_primary(JqValue::String(s)),
-            Token::NumLit(n) => self.parse_literal_primary(JqValue::Number(n)),
-            Token::True => self.parse_literal_primary(JqValue::Bool(true)),
-            Token::False => self.parse_literal_primary(JqValue::Bool(false)),
-            Token::Null => self.parse_literal_primary(JqValue::Null),
+            Token::StrLit(s) => Ok(self.parse_literal_primary(JqValue::String(s))),
+            Token::NumLit(n) => Ok(self.parse_literal_primary(JqValue::Number(n))),
+            Token::True => Ok(self.parse_literal_primary(JqValue::Bool(true))),
+            Token::False => Ok(self.parse_literal_primary(JqValue::Bool(false))),
+            Token::Null => Ok(self.parse_literal_primary(JqValue::Null)),
             Token::Empty => {
                 self.advance();
                 Ok(JqFilter::FuncCall("empty".into(), vec![]))
@@ -1386,9 +1386,9 @@ impl FilterParser {
         Ok(inner)
     }
 
-    fn parse_literal_primary(&mut self, value: JqValue) -> Result<JqFilter, String> {
+    fn parse_literal_primary(&mut self, value: JqValue) -> JqFilter {
         self.advance();
-        Ok(JqFilter::Literal(value))
+        JqFilter::Literal(value)
     }
 
     fn parse_try_primary(&mut self) -> Result<JqFilter, String> {
@@ -2399,16 +2399,16 @@ fn build_object(
     let mut results: Vec<Vec<(String, JqValue)>> = vec![vec![]];
 
     for (key, val_filter) in pairs {
-        results = build_object_pairs(results, key, val_filter, input, env, depth)?;
+        results = build_object_pairs(&results, key, val_filter.as_ref(), input, env, depth)?;
     }
 
     Ok(results.into_iter().map(JqValue::Object).collect())
 }
 
 fn build_object_pairs(
-    results: Vec<Vec<(String, JqValue)>>,
+    results: &[Vec<(String, JqValue)>],
     key: &JqObjKey,
-    val_filter: &Option<JqFilter>,
+    val_filter: Option<&JqFilter>,
     input: &JqValue,
     env: &JqEnv,
     depth: usize,
@@ -2416,13 +2416,13 @@ fn build_object_pairs(
     match key {
         JqObjKey::Ident(name) => {
             let values = build_object_ident_values(name, val_filter, input, env, depth)?;
-            Ok(expand_object_results(&results, &[(name.clone(), values)]))
+            Ok(expand_object_results(results, &[(name.clone(), values)]))
         }
         JqObjKey::Dynamic(key_filter) => {
             let keys = build_object_dynamic_keys(key_filter, input, env, depth)?;
             let values = build_object_value_list(val_filter, input, env, depth, true)?;
             Ok(expand_object_results(
-                &results,
+                results,
                 &keys
                     .into_iter()
                     .map(|k| (k, values.clone()))
@@ -2434,7 +2434,7 @@ fn build_object_pairs(
 
 fn build_object_ident_values(
     name: &str,
-    val_filter: &Option<JqFilter>,
+    val_filter: Option<&JqFilter>,
     input: &JqValue,
     env: &JqEnv,
     depth: usize,
@@ -2462,7 +2462,7 @@ fn build_object_dynamic_keys(
 }
 
 fn build_object_value_list(
-    val_filter: &Option<JqFilter>,
+    val_filter: Option<&JqFilter>,
     input: &JqValue,
     env: &JqEnv,
     depth: usize,
@@ -4529,7 +4529,7 @@ fn compute_paths(
             Ok(vec![vec![PathSeg::Key(name.clone())]])
         }
         JqFilter::Index(idx) => compute_index_paths(idx, input, env, depth),
-        JqFilter::Iterate => compute_iterate_paths(input),
+        JqFilter::Iterate => Ok(compute_iterate_paths(input)),
         JqFilter::Pipe(left, right) => compute_pipe_paths(left, right, input, env, depth),
         JqFilter::Identity => Ok(vec![vec![]]),
         JqFilter::Recurse => {
@@ -4562,15 +4562,15 @@ fn path_seg_from_value(value: JqValue) -> Option<PathSeg> {
     }
 }
 
-fn compute_iterate_paths(input: &JqValue) -> Result<Vec<Vec<PathSeg>>, String> {
-    Ok(match input {
+fn compute_iterate_paths(input: &JqValue) -> Vec<Vec<PathSeg>> {
+    match input {
         JqValue::Array(arr) => (0..arr.len()).map(|i| vec![PathSeg::Index(i)]).collect(),
         JqValue::Object(pairs) => pairs
             .iter()
             .map(|(k, _)| vec![PathSeg::Key(k.clone())])
             .collect(),
         _ => vec![],
-    })
+    }
 }
 
 fn compute_pipe_paths(

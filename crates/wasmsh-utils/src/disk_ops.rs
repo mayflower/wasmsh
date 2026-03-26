@@ -212,14 +212,14 @@ fn du_should_print_file(
     summary: bool,
     all_files: bool,
 ) -> bool {
-    all_files && !summary && !max_depth.is_some_and(|md| depth > md)
+    all_files && !summary && max_depth.is_none_or(|md| depth <= md)
 }
 
 fn du_should_print_dir(depth: usize, max_depth: Option<usize>, summary: bool) -> bool {
     if summary {
         depth == 0
     } else {
-        !max_depth.is_some_and(|md| depth > md)
+        max_depth.is_none_or(|md| depth <= md)
     }
 }
 

@@ -134,6 +134,7 @@ pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     grep_process_lines(ctx, &text, pattern, &flags)
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct GrepFlags {
     ignore_case: bool,
     invert: bool,

@@ -1059,6 +1059,7 @@ impl<'src> Parser<'src> {
         }))
     }
 
+    #[allow(clippy::unused_self)]
     fn make_assignment_word(&self, tok: &Token, eq_pos: usize, val_str: &str) -> Word {
         let val_start = tok.span.start + eq_pos as u32 + 1;
         Word {
@@ -1205,6 +1206,7 @@ impl<'src> Parser<'src> {
         (line_start, line_end, &self.source[line_start..line_end])
     }
 
+    #[allow(clippy::unused_self)]
     fn heredoc_check_line<'a>(&self, line: &'a str, strip_tabs: bool) -> &'a str {
         if strip_tabs {
             line.trim_start_matches('\t')

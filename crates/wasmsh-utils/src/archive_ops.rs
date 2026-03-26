@@ -774,10 +774,7 @@ fn tar_extract_entry(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let (mut opts, args) = match parse_unzip_args(argv) {
-        Ok(result) => result,
-        Err(status) => return status,
-    };
+    let (mut opts, args) = parse_unzip_args(argv);
 
     if args.is_empty() {
         ctx.output.stderr(b"unzip: missing archive operand\n");
@@ -848,7 +845,7 @@ struct ParsedUnzipOpts {
     dest_dir: Option<String>,
 }
 
-fn parse_unzip_args<'a>(argv: &'a [&'a str]) -> Result<(ParsedUnzipOpts, &'a [&'a str]), i32> {
+fn parse_unzip_args<'a>(argv: &'a [&'a str]) -> (ParsedUnzipOpts, &'a [&'a str]) {
     let mut args = &argv[1..];
     let mut opts = ParsedUnzipOpts {
         list_only: false,
@@ -877,7 +874,7 @@ fn parse_unzip_args<'a>(argv: &'a [&'a str]) -> Result<(ParsedUnzipOpts, &'a [&'
         args = &args[1..];
     }
 
-    Ok((opts, args))
+    (opts, args)
 }
 
 fn apply_unzip_short_flags(arg: &str, opts: &mut ParsedUnzipOpts) -> bool {

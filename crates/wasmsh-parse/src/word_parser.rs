@@ -161,15 +161,15 @@ fn parse_dollar(text: &str, pos: &mut usize) -> Option<WordPart> {
     }
 
     match bytes[*pos] {
-        b'(' => parse_dollar_paren(text, bytes, pos),
-        b'{' => parse_dollar_brace(text, pos),
-        b if b.is_ascii_alphabetic() || b == b'_' => parse_named_parameter(text, bytes, pos),
-        b if is_special_param(b) => parse_special_parameter(text, pos),
+        b'(' => Some(parse_dollar_paren(text, bytes, pos)),
+        b'{' => Some(parse_dollar_brace(text, pos)),
+        b if b.is_ascii_alphabetic() || b == b'_' => Some(parse_named_parameter(text, bytes, pos)),
+        b if is_special_param(b) => Some(parse_special_parameter(text, pos)),
         _ => None,
     }
 }
 
-fn parse_dollar_paren(text: &str, bytes: &[u8], pos: &mut usize) -> Option<WordPart> {
+fn parse_dollar_paren(text: &str, bytes: &[u8], pos: &mut usize) -> WordPart {
     *pos += 1;
     if *pos < bytes.len() && bytes[*pos] == b'(' {
         parse_dollar_arith(text, pos)
@@ -178,18 +178,18 @@ fn parse_dollar_paren(text: &str, bytes: &[u8], pos: &mut usize) -> Option<WordP
     }
 }
 
-fn parse_named_parameter(text: &str, bytes: &[u8], pos: &mut usize) -> Option<WordPart> {
+fn parse_named_parameter(text: &str, bytes: &[u8], pos: &mut usize) -> WordPart {
     let start = *pos;
     while *pos < bytes.len() && (bytes[*pos].is_ascii_alphanumeric() || bytes[*pos] == b'_') {
         *pos += 1;
     }
-    Some(WordPart::Parameter(text[start..*pos].into()))
+    WordPart::Parameter(text[start..*pos].into())
 }
 
-fn parse_special_parameter(text: &str, pos: &mut usize) -> Option<WordPart> {
+fn parse_special_parameter(text: &str, pos: &mut usize) -> WordPart {
     let start = *pos;
     *pos += 1;
-    Some(WordPart::Parameter(text[start..*pos].into()))
+    WordPart::Parameter(text[start..*pos].into())
 }
 
 /// Check if a byte is a special parameter character (`?`, `!`, `#`, `$`, `@`, `*`, `-`, digit).
@@ -198,7 +198,7 @@ fn is_special_param(b: u8) -> bool {
 }
 
 /// Parse `$(( ... ))` arithmetic expansion (pos is just past the second `(`).
-fn parse_dollar_arith(text: &str, pos: &mut usize) -> Option<WordPart> {
+fn parse_dollar_arith(text: &str, pos: &mut usize) -> WordPart {
     let bytes = text.as_bytes();
     *pos += 1; // skip second '('
     let start = *pos;
@@ -212,7 +212,7 @@ fn parse_dollar_arith(text: &str, pos: &mut usize) -> Option<WordPart> {
             if depth == 0 {
                 let expr = &text[start..*pos];
                 *pos += 2; // skip ))
-                return Some(WordPart::Arithmetic(expr.into()));
+                return WordPart::Arithmetic(expr.into());
             }
             *pos += 2;
         } else {
@@ -220,11 +220,11 @@ fn parse_dollar_arith(text: &str, pos: &mut usize) -> Option<WordPart> {
         }
     }
     // Fallback: unterminated (shouldn't happen -- lexer validates)
-    Some(WordPart::Arithmetic(text[start..*pos].into()))
+    WordPart::Arithmetic(text[start..*pos].into())
 }
 
 /// Parse `$( ... )` command substitution (pos is at first byte inside parens).
-fn parse_dollar_cmd_subst(text: &str, pos: &mut usize) -> Option<WordPart> {
+fn parse_dollar_cmd_subst(text: &str, pos: &mut usize) -> WordPart {
     let bytes = text.as_bytes();
     let start = *pos;
     let mut depth: u32 = 1;
@@ -239,7 +239,7 @@ fn parse_dollar_cmd_subst(text: &str, pos: &mut usize) -> Option<WordPart> {
                 if depth == 0 {
                     let inner = &text[start..*pos];
                     *pos += 1; // skip )
-                    return Some(WordPart::CommandSubstitution(inner.into()));
+                    return WordPart::CommandSubstitution(inner.into());
                 }
                 *pos += 1;
             }
@@ -248,11 +248,11 @@ fn parse_dollar_cmd_subst(text: &str, pos: &mut usize) -> Option<WordPart> {
             _ => *pos += 1,
         }
     }
-    Some(WordPart::CommandSubstitution(text[start..*pos].into()))
+    WordPart::CommandSubstitution(text[start..*pos].into())
 }
 
 /// Parse `${...}` parameter expansion (pos is at `{`).
-fn parse_dollar_brace(text: &str, pos: &mut usize) -> Option<WordPart> {
+fn parse_dollar_brace(text: &str, pos: &mut usize) -> WordPart {
     let bytes = text.as_bytes();
     *pos += 1; // skip '{'
     let start = *pos;
@@ -268,7 +268,7 @@ fn parse_dollar_brace(text: &str, pos: &mut usize) -> Option<WordPart> {
                 if depth == 0 {
                     let name = &text[start..*pos];
                     *pos += 1;
-                    return Some(WordPart::Parameter(name.into()));
+                    return WordPart::Parameter(name.into());
                 }
                 *pos += 1;
             }
@@ -281,7 +281,7 @@ fn parse_dollar_brace(text: &str, pos: &mut usize) -> Option<WordPart> {
             _ => *pos += 1,
         }
     }
-    Some(WordPart::Parameter(text[start..*pos].into()))
+    WordPart::Parameter(text[start..*pos].into())
 }
 
 /// Skip past a single-quoted string (pos is at the opening `'`).

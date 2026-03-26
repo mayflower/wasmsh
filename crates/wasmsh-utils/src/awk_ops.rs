@@ -1032,30 +1032,30 @@ impl Parser {
     }
 
     fn parse_c_style_for(&mut self) -> Result<Stmt, String> {
-        let init = self.parse_for_stmt_clause(Token::Semicolon)?;
-        let cond = self.parse_for_expr_clause(Token::Semicolon)?;
-        let incr = self.parse_for_stmt_clause(Token::RParen)?;
+        let init = self.parse_for_stmt_clause(&Token::Semicolon)?;
+        let cond = self.parse_for_expr_clause(&Token::Semicolon)?;
+        let incr = self.parse_for_stmt_clause(&Token::RParen)?;
         let body = self.parse_stmt_body()?;
         Ok(Stmt::For(init, cond, incr, body))
     }
 
-    fn parse_for_stmt_clause(&mut self, terminator: Token) -> Result<Option<Box<Stmt>>, String> {
-        let clause = if *self.peek() == terminator {
+    fn parse_for_stmt_clause(&mut self, terminator: &Token) -> Result<Option<Box<Stmt>>, String> {
+        let clause = if self.peek() == terminator {
             None
         } else {
             Some(Box::new(self.parse_stmt()?))
         };
-        self.expect(&terminator)?;
+        self.expect(terminator)?;
         Ok(clause)
     }
 
-    fn parse_for_expr_clause(&mut self, terminator: Token) -> Result<Option<Expr>, String> {
-        let clause = if *self.peek() == terminator {
+    fn parse_for_expr_clause(&mut self, terminator: &Token) -> Result<Option<Expr>, String> {
+        let clause = if self.peek() == terminator {
             None
         } else {
             Some(self.parse_expr()?)
         };
-        self.expect(&terminator)?;
+        self.expect(terminator)?;
         Ok(clause)
     }
 
@@ -1325,9 +1325,9 @@ impl Parser {
 
     fn parse_primary(&mut self) -> Result<Expr, String> {
         match self.peek().clone() {
-            Token::Number(n) => self.parse_literal_expr(Expr::Num(n)),
-            Token::StringLit(s) => self.parse_literal_expr(Expr::Str(s)),
-            Token::Regex(re) => self.parse_literal_expr(Expr::Regex(re)),
+            Token::Number(n) => Ok(self.parse_literal_expr(Expr::Num(n))),
+            Token::StringLit(s) => Ok(self.parse_literal_expr(Expr::Str(s))),
+            Token::Regex(re) => Ok(self.parse_literal_expr(Expr::Regex(re))),
             Token::Dollar => self.parse_field_ref(),
             Token::LParen => self.parse_grouped_expr(),
             Token::Ident(name) => self.parse_ident_primary(name),
@@ -1335,9 +1335,9 @@ impl Parser {
         }
     }
 
-    fn parse_literal_expr(&mut self, expr: Expr) -> Result<Expr, String> {
+    fn parse_literal_expr(&mut self, expr: Expr) -> Expr {
         self.advance();
-        Ok(expr)
+        expr
     }
 
     fn parse_field_ref(&mut self) -> Result<Expr, String> {
@@ -2010,6 +2010,7 @@ impl AwkInterpreter {
         }
     }
 
+    #[allow(clippy::unused_self)]
     fn apply_numeric_binop(&self, op: BinOp, l: &AwkValue, r: &AwkValue) -> AwkValue {
         let left = l.to_num();
         let right = r.to_num();
@@ -2051,6 +2052,7 @@ impl AwkInterpreter {
         AwkValue::Num(bool_to_num(result))
     }
 
+    #[allow(clippy::unused_self)]
     fn apply_logic_binop(&self, op: BinOp, l: &AwkValue, r: &AwkValue) -> AwkValue {
         let result = match op {
             BinOp::And => l.is_truthy() && r.is_truthy(),
@@ -2401,6 +2403,7 @@ impl AwkInterpreter {
         result
     }
 
+    #[allow(clippy::unused_self)]
     fn push_format_spec(
         &self,
         result: &mut String,
@@ -2432,6 +2435,7 @@ impl AwkInterpreter {
         true
     }
 
+    #[allow(clippy::unused_self)]
     fn push_escaped_format_char(&self, result: &mut String, chars: &[char], i: &mut usize) {
         *i += 1;
         if *i >= chars.len() {
@@ -3051,6 +3055,7 @@ fn format_g(n: f64, prec: usize, upper: bool) -> String {
 }
 
 fn format_g_fixed(n: f64, prec: usize, exp: i32) -> String {
+    #[allow(clippy::cast_possible_wrap)]
     let decimal_digits = ((prec as i32 - 1 - exp).max(0)) as usize;
     trim_decimal_zeros(format!("{n:.decimal_digits$}"))
 }
@@ -3101,7 +3106,7 @@ fn parse_awk_args<'a>(ctx: &mut UtilContext<'_>, argv: &'a [&'a str]) -> Result<
     let mut pre_vars: Vec<(String, String)> = Vec::new();
     let mut prog_file: Option<String> = None;
 
-    while args.first().is_some() {
+    while !args.is_empty() {
         if !parse_awk_option(ctx, &mut args, &mut fs, &mut pre_vars, &mut prog_file)? {
             break;
         }
@@ -3187,7 +3192,7 @@ fn parse_awk_option<'a>(
             *args = &args[2..];
             return Ok(true);
         }
-        let msg = format!("awk: invalid -v argument: '{}'\n", value);
+        let msg = format!("awk: invalid -v argument: '{value}'\n");
         ctx.output.stderr(msg.as_bytes());
         return Err(1);
     }

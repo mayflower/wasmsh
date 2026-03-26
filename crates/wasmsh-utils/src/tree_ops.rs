@@ -161,9 +161,8 @@ fn walk_tree(
         return;
     }
 
-    let visible = match tree_visible_entries(ctx, dir_path, opts) {
-        Ok(entries) => entries,
-        Err(()) => return,
+    let Ok(visible) = tree_visible_entries(ctx, dir_path, opts) else {
+        return;
     };
 
     for (idx, entry) in visible.iter().enumerate() {

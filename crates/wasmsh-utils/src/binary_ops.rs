@@ -150,7 +150,7 @@ fn xxd_write_hex(line: &mut String, chunk: &[u8], cols: usize) {
 
 fn xxd_pad_hex(line: &mut String, used: usize, cols: usize) {
     for i in 0..(cols - used) {
-        if (used + i) % 2 == 0 {
+        if (used + i).is_multiple_of(2) {
             line.push(' ');
         }
         line.push_str("  ");
@@ -926,7 +926,7 @@ fn detect_magic(data: &[u8]) -> Option<MagicKind> {
     None
 }
 
-fn magic_to_type(kind: &MagicKind) -> &'static str {
+fn magic_to_type(kind: MagicKind) -> &'static str {
     match kind {
         MagicKind::Png => "PNG image data",
         MagicKind::Gif => "GIF image data",
@@ -939,7 +939,7 @@ fn magic_to_type(kind: &MagicKind) -> &'static str {
     }
 }
 
-fn magic_to_mime(kind: &MagicKind) -> &'static str {
+fn magic_to_mime(kind: MagicKind) -> &'static str {
     match kind {
         MagicKind::Png => "image/png",
         MagicKind::Gif => "image/gif",
@@ -973,7 +973,7 @@ fn detect_text_format(data: &[u8]) -> Option<(&'static str, &'static str)> {
 
 fn detect_file_type(data: &[u8], path: &str) -> String {
     if let Some(kind) = detect_magic(data) {
-        return magic_to_type(&kind).to_string();
+        return magic_to_type(kind).to_string();
     }
 
     if data.len() >= 2 && &data[..2] == b"#!" {
@@ -1007,7 +1007,7 @@ fn detect_file_type(data: &[u8], path: &str) -> String {
 
 fn detect_mime_type(data: &[u8], path: &str) -> String {
     if let Some(kind) = detect_magic(data) {
-        return magic_to_mime(&kind).to_string();
+        return magic_to_mime(kind).to_string();
     }
 
     if let Some((_, mime)) = detect_text_format(data) {

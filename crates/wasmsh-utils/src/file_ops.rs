@@ -49,7 +49,7 @@ pub(crate) fn util_ls(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         .filter(|a| !a.starts_with('-'))
         .collect();
     if args.is_empty() {
-        return i32::from(ls_emit_dir(ctx, ctx.cwd, &resolve_path(ctx.cwd, ctx.cwd)).is_err());
+        i32::from(ls_emit_dir(ctx, ctx.cwd, &resolve_path(ctx.cwd, ctx.cwd)).is_err())
     } else {
         let mut status = 0;
         for path in &args {

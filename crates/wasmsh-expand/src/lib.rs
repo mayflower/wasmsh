@@ -309,15 +309,17 @@ fn substitution_result(
 }
 
 fn substitution_at_start(val: &str, pattern: &str, rep: &str) -> String {
-    glob_match_at_start(val, pattern)
-        .map(|match_len| format!("{rep}{}", &val[match_len..]))
-        .unwrap_or_else(|| val.to_string())
+    glob_match_at_start(val, pattern).map_or_else(
+        || val.to_string(),
+        |match_len| format!("{rep}{}", &val[match_len..]),
+    )
 }
 
 fn substitution_at_end(val: &str, pattern: &str, rep: &str) -> String {
-    glob_match_at_end(val, pattern)
-        .map(|match_start| format!("{}{rep}", &val[..match_start]))
-        .unwrap_or_else(|| val.to_string())
+    glob_match_at_end(val, pattern).map_or_else(
+        || val.to_string(),
+        |match_start| format!("{}{rep}", &val[..match_start]),
+    )
 }
 
 fn substitution_unanchored(val: &str, pat: &str, rep: &str, global: bool) -> String {
@@ -532,8 +534,8 @@ fn expand_param_default_op(
         ":=" => expand_param_assign_value(var_name, val, operand, state, out, depth, true),
         "=" => expand_param_assign_value(var_name, val, operand, state, out, depth, false),
         ":?" => expand_param_error_value(var_name, val, operand, out, true),
-        ":+" => expand_param_alt_value(val, operand, out, true),
-        _ => expand_param_alt_value(val, operand, out, false),
+        ":+" => expand_param_alt_value(val.as_ref(), operand, out, true),
+        _ => expand_param_alt_value(val.as_ref(), operand, out, false),
     }
 }
 
@@ -545,7 +547,7 @@ fn expand_param_default_value(
     depth: usize,
     require_non_empty: bool,
 ) {
-    if param_has_value(&val, require_non_empty) {
+    if param_has_value(val.as_ref(), require_non_empty) {
         if let Some(value) = val {
             out.push_str(&value);
         }
@@ -563,7 +565,7 @@ fn expand_param_assign_value(
     depth: usize,
     require_non_empty: bool,
 ) {
-    if param_has_value(&val, require_non_empty) {
+    if param_has_value(val.as_ref(), require_non_empty) {
         if let Some(value) = val {
             out.push_str(&value);
         }
@@ -581,7 +583,7 @@ fn expand_param_error_value(
     out: &mut String,
     require_non_empty: bool,
 ) {
-    if param_has_value(&val, require_non_empty) {
+    if param_has_value(val.as_ref(), require_non_empty) {
         if let Some(value) = val {
             out.push_str(&value);
         }
@@ -596,17 +598,17 @@ fn expand_param_error_value(
 }
 
 fn expand_param_alt_value(
-    val: Option<SmolStr>,
+    val: Option<&SmolStr>,
     operand: &str,
     out: &mut String,
     require_non_empty: bool,
 ) {
-    if param_has_value(&val, require_non_empty) {
+    if param_has_value(val, require_non_empty) {
         out.push_str(operand);
     }
 }
 
-fn param_has_value(val: &Option<SmolStr>, require_non_empty: bool) -> bool {
+fn param_has_value(val: Option<&SmolStr>, require_non_empty: bool) -> bool {
     match val {
         Some(value) if require_non_empty => !value.is_empty(),
         Some(_) => true,

@@ -213,8 +213,8 @@ impl ShellState {
             "RANDOM" => Some(SmolStr::from(self.next_random().to_string())),
             "LINENO" => Some(SmolStr::from(self.lineno.to_string())),
             "SECONDS" => Some(self.seconds_value()),
-            "FUNCNAME" => Some(self.stack_last_or_default(&self.func_stack)),
-            "BASH_SOURCE" => Some(self.stack_last_or_default(&self.source_stack)),
+            "FUNCNAME" => Some(stack_last_or_default(&self.func_stack)),
+            "BASH_SOURCE" => Some(stack_last_or_default(&self.source_stack)),
             _ => self.get_named_or_positional_var(name),
         }
     }
@@ -230,36 +230,19 @@ impl ShellState {
         }
     }
 
-    fn stack_last_or_default(&self, stack: &[SmolStr]) -> SmolStr {
-        stack.last().cloned().unwrap_or_default()
-    }
-
     fn get_named_or_positional_var(&self, name: &str) -> Option<SmolStr> {
-        if let Some(index) = self.positional_param_index(name) {
+        if let Some(index) = positional_param_index(name) {
             return self.positional.get(index).cloned();
         }
         self.get_env_var(name)
     }
 
-    fn positional_param_index(&self, name: &str) -> Option<usize> {
-        let n = name.parse::<usize>().ok()?;
-        (n >= 1).then_some(n - 1)
-    }
-
     fn get_env_var(&self, name: &str) -> Option<SmolStr> {
         let var = self.env.get(name)?;
-        if let Some(target) = self.nameref_target(var, name) {
+        if let Some(target) = nameref_target(var, name) {
             return self.env.get(&target).map(|v| v.value.as_scalar());
         }
         Some(var.value.as_scalar())
-    }
-
-    fn nameref_target(&self, var: &ShellVar, name: &str) -> Option<SmolStr> {
-        if !var.nameref {
-            return None;
-        }
-        let target = var.value.as_scalar();
-        (!target.is_empty() && target.as_str() != name).then_some(target)
     }
 
     /// Set a named variable (not a special parameter).
@@ -599,6 +582,23 @@ impl ShellState {
             },
         );
     }
+}
+
+fn stack_last_or_default(stack: &[SmolStr]) -> SmolStr {
+    stack.last().cloned().unwrap_or_default()
+}
+
+fn positional_param_index(name: &str) -> Option<usize> {
+    let n = name.parse::<usize>().ok()?;
+    (n >= 1).then_some(n - 1)
+}
+
+fn nameref_target(var: &ShellVar, name: &str) -> Option<SmolStr> {
+    if !var.nameref {
+        return None;
+    }
+    let target = var.value.as_scalar();
+    (!target.is_empty() && target.as_str() != name).then_some(target)
 }
 
 fn append_to_indexed_array(map: &mut IndexMap<usize, SmolStr>, values: Vec<SmolStr>) {
