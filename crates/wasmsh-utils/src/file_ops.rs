@@ -104,15 +104,52 @@ pub(crate) fn util_mkdir(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     if !require_args(argv, 2, ctx.output) {
         return 1;
     }
+    let mut parents = false;
+    let mut dirs = Vec::new();
+    for arg in &argv[1..] {
+        if *arg == "--" {
+            dirs.extend_from_slice(&argv[argv.iter().position(|a| *a == "--").unwrap() + 1..]);
+            break;
+        } else if *arg == "-p" || *arg == "--parents" {
+            parents = true;
+        } else if arg.starts_with('-') && arg.len() > 1 {
+            // Handle bundled flags like -pv (ignore v, accept p)
+            for ch in arg[1..].chars() {
+                if ch == 'p' {
+                    parents = true;
+                }
+            }
+        } else {
+            dirs.push(*arg);
+        }
+    }
     let mut status = 0;
-    for path in &argv[1..] {
+    for path in &dirs {
         let full = resolve_path(ctx.cwd, path);
-        if let Err(e) = ctx.fs.create_dir(&full) {
+        if parents {
+            if let Err(e) = mkdir_parents(ctx.fs, &full) {
+                emit_error(ctx.output, "mkdir", path, &e);
+                status = 1;
+            }
+        } else if let Err(e) = ctx.fs.create_dir(&full) {
             emit_error(ctx.output, "mkdir", path, &e);
             status = 1;
         }
     }
     status
+}
+
+fn mkdir_parents(fs: &mut wasmsh_fs::MemoryFs, path: &str) -> Result<(), wasmsh_fs::FsError> {
+    // Build each ancestor and create if missing
+    let mut current = String::new();
+    for component in path.split('/').filter(|c| !c.is_empty()) {
+        current.push('/');
+        current.push_str(component);
+        if fs.stat(&current).is_err() {
+            fs.create_dir(&current)?;
+        }
+    }
+    Ok(())
 }
 
 struct RmFlags {

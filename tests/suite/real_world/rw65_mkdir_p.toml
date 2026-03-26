@@ -1,0 +1,20 @@
+[test]
+name = "rw65-mkdir-p-creates-parents"
+tags = ["real-world", "bug-fix", "mkdir"]
+tier = "P1"
+requires = ["mkdir", "test"]
+
+[input]
+script = """
+mkdir -p /a/b/c/d
+test -d /a/b/c/d && echo "deep ok"
+mkdir -p /x/y /x/z
+test -d /x/y && test -d /x/z && echo "multi ok"
+mkdir -p /already
+mkdir -p /already
+echo "idempotent ok"
+"""
+
+[expect]
+stdout = "deep ok\nmulti ok\nidempotent ok\n"
+status = 0
