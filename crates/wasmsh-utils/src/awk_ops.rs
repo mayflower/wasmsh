@@ -260,6 +260,225 @@ impl Lexer {
         )
     }
 
+    fn lex_regex(&mut self) -> Result<Token, String> {
+        self.advance(); // consume opening /
+        let mut pat = String::new();
+        let mut escaped = false;
+        loop {
+            match self.advance() {
+                None => return Err("unterminated regex".to_string()),
+                Some('\\') if !escaped => {
+                    escaped = true;
+                    pat.push('\\');
+                }
+                Some('/') if !escaped => break,
+                Some(ch) => {
+                    escaped = false;
+                    pat.push(ch);
+                }
+            }
+        }
+        Ok(Token::Regex(pat))
+    }
+
+    fn lex_string(&mut self) -> Result<Token, String> {
+        self.advance(); // consume opening "
+        let mut s = String::new();
+        loop {
+            match self.advance() {
+                None => return Err("unterminated string".to_string()),
+                Some('"') => break,
+                Some('\\') => match self.advance() {
+                    Some('n') => s.push('\n'),
+                    Some('t') => s.push('\t'),
+                    Some('\\') => s.push('\\'),
+                    Some('"') => s.push('"'),
+                    Some('/') => s.push('/'),
+                    Some('a') => s.push('\x07'),
+                    Some('b') => s.push('\x08'),
+                    Some('r') => s.push('\r'),
+                    Some(ch) => {
+                        s.push('\\');
+                        s.push(ch);
+                    }
+                    None => return Err("unterminated string escape".to_string()),
+                },
+                Some(ch) => s.push(ch),
+            }
+        }
+        Ok(Token::StringLit(s))
+    }
+
+    fn lex_number(&mut self, first: char) -> Result<Token, String> {
+        let mut num = String::new();
+        // Handle hex
+        if first == '0' && matches!(self.peek_at(1), Some('x' | 'X')) {
+            num.push(self.advance().unwrap());
+            num.push(self.advance().unwrap());
+            while let Some(ch) = self.peek() {
+                if ch.is_ascii_hexdigit() {
+                    num.push(self.advance().unwrap());
+                } else {
+                    break;
+                }
+            }
+            let val = i64::from_str_radix(&num[2..], 16).map_err(|e| e.to_string())?;
+            #[allow(clippy::cast_precision_loss)]
+            return Ok(Token::Number(val as f64));
+        }
+        while let Some(ch) = self.peek() {
+            if ch.is_ascii_digit() || ch == '.' {
+                num.push(self.advance().unwrap());
+            } else {
+                break;
+            }
+        }
+        // Exponent
+        if matches!(self.peek(), Some('e' | 'E')) {
+            num.push(self.advance().unwrap());
+            if matches!(self.peek(), Some('+' | '-')) {
+                num.push(self.advance().unwrap());
+            }
+            while let Some(ch) = self.peek() {
+                if ch.is_ascii_digit() {
+                    num.push(self.advance().unwrap());
+                } else {
+                    break;
+                }
+            }
+        }
+        let val: f64 = num
+            .parse()
+            .map_err(|e: std::num::ParseFloatError| format!("bad number '{num}': {e}"))?;
+        Ok(Token::Number(val))
+    }
+
+    fn lex_ident_or_keyword(&mut self) -> Token {
+        let mut id = String::new();
+        while let Some(ch) = self.peek() {
+            if ch.is_alphanumeric() || ch == '_' {
+                id.push(self.advance().unwrap());
+            } else {
+                break;
+            }
+        }
+        match id.as_str() {
+            "BEGIN" => Token::Begin,
+            "END" => Token::End,
+            "if" => Token::If,
+            "else" => Token::Else,
+            "while" => Token::While,
+            "for" => Token::For,
+            "do" => Token::Do,
+            "break" => Token::Break,
+            "continue" => Token::Continue,
+            "next" => Token::Next,
+            "exit" => Token::Exit,
+            "delete" => Token::Delete,
+            "in" => Token::In,
+            "print" => Token::Print,
+            "printf" => Token::Printf,
+            "getline" => Token::Getline,
+            "function" => Token::Function,
+            "return" => Token::Return,
+            _ => Token::Ident(id),
+        }
+    }
+
+    fn lex_operator(&mut self, ch: char) -> Result<Token, String> {
+        self.advance();
+        match ch {
+            '+' => Ok(if self.peek() == Some('+') {
+                self.advance();
+                Token::Incr
+            } else if self.peek() == Some('=') {
+                self.advance();
+                Token::PlusAssign
+            } else {
+                Token::Plus
+            }),
+            '-' => Ok(if self.peek() == Some('-') {
+                self.advance();
+                Token::Decr
+            } else if self.peek() == Some('=') {
+                self.advance();
+                Token::MinusAssign
+            } else {
+                Token::Minus
+            }),
+            '*' => Ok(if self.peek() == Some('=') {
+                self.advance();
+                Token::StarAssign
+            } else {
+                Token::Star
+            }),
+            '/' => Ok(if self.peek() == Some('=') {
+                self.advance();
+                Token::SlashAssign
+            } else {
+                Token::Slash
+            }),
+            '%' => Ok(if self.peek() == Some('=') {
+                self.advance();
+                Token::PercentAssign
+            } else {
+                Token::Percent
+            }),
+            '^' => Ok(if self.peek() == Some('=') {
+                self.advance();
+                Token::CaretAssign
+            } else {
+                Token::Caret
+            }),
+            '=' => Ok(if self.peek() == Some('=') {
+                self.advance();
+                Token::Eq
+            } else {
+                Token::Assign
+            }),
+            '!' => Ok(if self.peek() == Some('=') {
+                self.advance();
+                Token::Ne
+            } else if self.peek() == Some('~') {
+                self.advance();
+                Token::NotMatch
+            } else {
+                Token::Not
+            }),
+            '<' => Ok(if self.peek() == Some('=') {
+                self.advance();
+                Token::Le
+            } else {
+                Token::Lt
+            }),
+            '>' => Ok(if self.peek() == Some('=') {
+                self.advance();
+                Token::Ge
+            } else if self.peek() == Some('>') {
+                self.advance();
+                Token::Append
+            } else {
+                Token::Gt
+            }),
+            '~' => Ok(Token::Match),
+            '&' => {
+                if self.peek() == Some('&') {
+                    self.advance();
+                    Ok(Token::And)
+                } else {
+                    Err("unexpected '&'".to_string())
+                }
+            }
+            '|' => Ok(if self.peek() == Some('|') {
+                self.advance();
+                Token::Or
+            } else {
+                Token::Pipe
+            }),
+            _ => Err(format!("unexpected character '{ch}'")),
+        }
+    }
+
     fn tokenize(&mut self) -> Result<Vec<Token>, String> {
         let mut tokens = Vec::new();
         let mut prev = Token::Eof;
@@ -274,264 +493,19 @@ impl Lexer {
             let tok = match c {
                 '\n' => {
                     self.advance();
-                    // Collapse multiple newlines
                     while self.peek() == Some('\n') {
                         self.advance();
                     }
                     Token::Newline
                 }
-                '/' if Lexer::can_start_regex(&prev) => {
-                    self.advance(); // consume opening /
-                    let mut pat = String::new();
-                    let mut escaped = false;
-                    loop {
-                        match self.advance() {
-                            None => return Err("unterminated regex".to_string()),
-                            Some('\\') if !escaped => {
-                                escaped = true;
-                                pat.push('\\');
-                            }
-                            Some('/') if !escaped => break,
-                            Some(ch) => {
-                                escaped = false;
-                                pat.push(ch);
-                            }
-                        }
-                    }
-                    Token::Regex(pat)
-                }
-                '"' => {
-                    self.advance();
-                    let mut s = String::new();
-                    loop {
-                        match self.advance() {
-                            None => return Err("unterminated string".to_string()),
-                            Some('"') => break,
-                            Some('\\') => match self.advance() {
-                                Some('n') => s.push('\n'),
-                                Some('t') => s.push('\t'),
-                                Some('\\') => s.push('\\'),
-                                Some('"') => s.push('"'),
-                                Some('/') => s.push('/'),
-                                Some('a') => s.push('\x07'),
-                                Some('b') => s.push('\x08'),
-                                Some('r') => s.push('\r'),
-                                Some(ch) => {
-                                    s.push('\\');
-                                    s.push(ch);
-                                }
-                                None => return Err("unterminated string escape".to_string()),
-                            },
-                            Some(ch) => s.push(ch),
-                        }
-                    }
-                    Token::StringLit(s)
-                }
+                '/' if Lexer::can_start_regex(&prev) => self.lex_regex()?,
+                '"' => self.lex_string()?,
                 '0'..='9' | '.' if c == '.' && !matches!(self.peek_at(1), Some('0'..='9')) => {
-                    // This is just a dot, not a number
                     self.advance();
                     Token::StringLit(".".to_string())
                 }
-                '0'..='9' | '.' => {
-                    let mut num = String::new();
-                    // Handle hex
-                    if c == '0' && matches!(self.peek_at(1), Some('x' | 'X')) {
-                        num.push(self.advance().unwrap());
-                        num.push(self.advance().unwrap());
-                        while let Some(ch) = self.peek() {
-                            if ch.is_ascii_hexdigit() {
-                                num.push(self.advance().unwrap());
-                            } else {
-                                break;
-                            }
-                        }
-                        let val = i64::from_str_radix(&num[2..], 16).map_err(|e| e.to_string())?;
-                        #[allow(clippy::cast_precision_loss)]
-                        Token::Number(val as f64)
-                    } else {
-                        while let Some(ch) = self.peek() {
-                            if ch.is_ascii_digit() || ch == '.' {
-                                num.push(self.advance().unwrap());
-                            } else {
-                                break;
-                            }
-                        }
-                        // Exponent
-                        if matches!(self.peek(), Some('e' | 'E')) {
-                            num.push(self.advance().unwrap());
-                            if matches!(self.peek(), Some('+' | '-')) {
-                                num.push(self.advance().unwrap());
-                            }
-                            while let Some(ch) = self.peek() {
-                                if ch.is_ascii_digit() {
-                                    num.push(self.advance().unwrap());
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                        let val: f64 = num.parse().map_err(|e: std::num::ParseFloatError| {
-                            format!("bad number '{num}': {e}")
-                        })?;
-                        Token::Number(val)
-                    }
-                }
-                'a'..='z' | 'A'..='Z' | '_' => {
-                    let mut id = String::new();
-                    while let Some(ch) = self.peek() {
-                        if ch.is_alphanumeric() || ch == '_' {
-                            id.push(self.advance().unwrap());
-                        } else {
-                            break;
-                        }
-                    }
-                    match id.as_str() {
-                        "BEGIN" => Token::Begin,
-                        "END" => Token::End,
-                        "if" => Token::If,
-                        "else" => Token::Else,
-                        "while" => Token::While,
-                        "for" => Token::For,
-                        "do" => Token::Do,
-                        "break" => Token::Break,
-                        "continue" => Token::Continue,
-                        "next" => Token::Next,
-                        "exit" => Token::Exit,
-                        "delete" => Token::Delete,
-                        "in" => Token::In,
-                        "print" => Token::Print,
-                        "printf" => Token::Printf,
-                        "getline" => Token::Getline,
-                        "function" => Token::Function,
-                        "return" => Token::Return,
-                        _ => Token::Ident(id),
-                    }
-                }
-                '+' => {
-                    self.advance();
-                    if self.peek() == Some('+') {
-                        self.advance();
-                        Token::Incr
-                    } else if self.peek() == Some('=') {
-                        self.advance();
-                        Token::PlusAssign
-                    } else {
-                        Token::Plus
-                    }
-                }
-                '-' => {
-                    self.advance();
-                    if self.peek() == Some('-') {
-                        self.advance();
-                        Token::Decr
-                    } else if self.peek() == Some('=') {
-                        self.advance();
-                        Token::MinusAssign
-                    } else {
-                        Token::Minus
-                    }
-                }
-                '*' => {
-                    self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        Token::StarAssign
-                    } else {
-                        Token::Star
-                    }
-                }
-                '/' => {
-                    self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        Token::SlashAssign
-                    } else {
-                        Token::Slash
-                    }
-                }
-                '%' => {
-                    self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        Token::PercentAssign
-                    } else {
-                        Token::Percent
-                    }
-                }
-                '^' => {
-                    self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        Token::CaretAssign
-                    } else {
-                        Token::Caret
-                    }
-                }
-                '=' => {
-                    self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        Token::Eq
-                    } else {
-                        Token::Assign
-                    }
-                }
-                '!' => {
-                    self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        Token::Ne
-                    } else if self.peek() == Some('~') {
-                        self.advance();
-                        Token::NotMatch
-                    } else {
-                        Token::Not
-                    }
-                }
-                '<' => {
-                    self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        Token::Le
-                    } else {
-                        Token::Lt
-                    }
-                }
-                '>' => {
-                    self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        Token::Ge
-                    } else if self.peek() == Some('>') {
-                        self.advance();
-                        Token::Append
-                    } else {
-                        Token::Gt
-                    }
-                }
-                '~' => {
-                    self.advance();
-                    Token::Match
-                }
-                '&' => {
-                    self.advance();
-                    if self.peek() == Some('&') {
-                        self.advance();
-                        Token::And
-                    } else {
-                        // Single & not used in awk expressions normally
-                        return Err("unexpected '&'".to_string());
-                    }
-                }
-                '|' => {
-                    self.advance();
-                    if self.peek() == Some('|') {
-                        self.advance();
-                        Token::Or
-                    } else {
-                        Token::Pipe
-                    }
-                }
+                '0'..='9' | '.' => self.lex_number(c)?,
+                'a'..='z' | 'A'..='Z' | '_' => self.lex_ident_or_keyword(),
                 '?' => {
                     self.advance();
                     Token::Question
@@ -575,6 +549,9 @@ impl Lexer {
                 ']' => {
                     self.advance();
                     Token::RBracket
+                }
+                '+' | '-' | '*' | '/' | '%' | '^' | '=' | '!' | '<' | '>' | '~' | '&' | '|' => {
+                    self.lex_operator(c)?
                 }
                 _ => {
                     return Err(format!("unexpected character '{c}'"));
@@ -740,6 +717,60 @@ impl Parser {
         }
     }
 
+    fn parse_function_def(&mut self) -> Result<(String, AwkFunction), String> {
+        self.advance(); // consume 'function'
+        let name = match self.advance() {
+            Token::Ident(n) => n,
+            t => return Err(format!("expected function name, got {t:?}")),
+        };
+        self.expect(&Token::LParen)?;
+        let mut params = Vec::new();
+        while *self.peek() != Token::RParen {
+            match self.advance() {
+                Token::Ident(p) => params.push(p),
+                t => return Err(format!("expected parameter name, got {t:?}")),
+            }
+            if *self.peek() == Token::Comma {
+                self.advance();
+            }
+        }
+        self.expect(&Token::RParen)?;
+        self.skip_terminators();
+        let body = self.parse_action()?;
+        Ok((name, AwkFunction { params, body }))
+    }
+
+    fn parse_rule(&mut self) -> Result<AwkRule, String> {
+        let pat = self.parse_pattern()?;
+        self.skip_terminators();
+        if *self.peek() == Token::Comma {
+            self.advance();
+            self.skip_terminators();
+            let pat2 = self.parse_pattern()?;
+            self.skip_terminators();
+            let action = if *self.peek() == Token::LBrace {
+                self.parse_action()?
+            } else {
+                vec![Stmt::Print(vec![], None)]
+            };
+            Ok(AwkRule {
+                pattern: AwkPattern::Range(Box::new(pat), Box::new(pat2)),
+                action,
+            })
+        } else if *self.peek() == Token::LBrace {
+            let action = self.parse_action()?;
+            Ok(AwkRule {
+                pattern: pat,
+                action,
+            })
+        } else {
+            Ok(AwkRule {
+                pattern: pat,
+                action: vec![Stmt::Print(vec![], None)],
+            })
+        }
+    }
+
     fn parse_program(&mut self) -> Result<AwkProgram, String> {
         let mut begin = Vec::new();
         let mut rules = Vec::new();
@@ -751,41 +782,20 @@ impl Parser {
         while *self.peek() != Token::Eof {
             match self.peek().clone() {
                 Token::Function => {
-                    self.advance();
-                    let name = match self.advance() {
-                        Token::Ident(n) => n,
-                        t => return Err(format!("expected function name, got {t:?}")),
-                    };
-                    self.expect(&Token::LParen)?;
-                    let mut params = Vec::new();
-                    while *self.peek() != Token::RParen {
-                        match self.advance() {
-                            Token::Ident(p) => params.push(p),
-                            t => return Err(format!("expected parameter name, got {t:?}")),
-                        }
-                        if *self.peek() == Token::Comma {
-                            self.advance();
-                        }
-                    }
-                    self.expect(&Token::RParen)?;
-                    self.skip_terminators();
-                    let body = self.parse_action()?;
-                    functions.insert(name, AwkFunction { params, body });
+                    let (name, func) = self.parse_function_def()?;
+                    functions.insert(name, func);
                 }
                 Token::Begin => {
                     self.advance();
                     self.skip_terminators();
-                    let stmts = self.parse_action()?;
-                    begin.extend(stmts);
+                    begin.extend(self.parse_action()?);
                 }
                 Token::End => {
                     self.advance();
                     self.skip_terminators();
-                    let stmts = self.parse_action()?;
-                    end.extend(stmts);
+                    end.extend(self.parse_action()?);
                 }
                 Token::LBrace => {
-                    // No pattern - matches all
                     let action = self.parse_action()?;
                     rules.push(AwkRule {
                         pattern: AwkPattern::All,
@@ -793,38 +803,7 @@ impl Parser {
                     });
                 }
                 _ => {
-                    // Pattern [, pattern] [{action}]
-                    let pat = self.parse_pattern()?;
-                    self.skip_terminators();
-                    if *self.peek() == Token::Comma {
-                        // Range pattern
-                        self.advance();
-                        self.skip_terminators();
-                        let pat2 = self.parse_pattern()?;
-                        self.skip_terminators();
-                        let action = if *self.peek() == Token::LBrace {
-                            self.parse_action()?
-                        } else {
-                            // Default: print $0
-                            vec![Stmt::Print(vec![], None)]
-                        };
-                        rules.push(AwkRule {
-                            pattern: AwkPattern::Range(Box::new(pat), Box::new(pat2)),
-                            action,
-                        });
-                    } else if *self.peek() == Token::LBrace {
-                        let action = self.parse_action()?;
-                        rules.push(AwkRule {
-                            pattern: pat,
-                            action,
-                        });
-                    } else {
-                        // Pattern only - default action is print $0
-                        rules.push(AwkRule {
-                            pattern: pat,
-                            action: vec![Stmt::Print(vec![], None)],
-                        });
-                    }
+                    rules.push(self.parse_rule()?);
                 }
             }
             self.skip_terminators();
@@ -880,27 +859,11 @@ impl Parser {
             }
             Token::Exit => {
                 self.advance();
-                let code = if !matches!(
-                    self.peek(),
-                    Token::Semicolon | Token::Newline | Token::RBrace | Token::Eof
-                ) {
-                    Some(self.parse_expr()?)
-                } else {
-                    None
-                };
-                Ok(Stmt::Exit(code))
+                Ok(Stmt::Exit(self.parse_optional_expr()?))
             }
             Token::Return => {
                 self.advance();
-                let val = if !matches!(
-                    self.peek(),
-                    Token::Semicolon | Token::Newline | Token::RBrace | Token::Eof
-                ) {
-                    Some(self.parse_expr()?)
-                } else {
-                    None
-                };
-                Ok(Stmt::Return(val))
+                Ok(Stmt::Return(self.parse_optional_expr()?))
             }
             Token::Delete => {
                 self.advance();
@@ -1092,6 +1055,18 @@ impl Parser {
 
     // ---- Expression parsing (precedence climbing) ----
 
+    /// Parse an optional expression (used after `exit` and `return`).
+    fn parse_optional_expr(&mut self) -> Result<Option<Expr>, String> {
+        if matches!(
+            self.peek(),
+            Token::Semicolon | Token::Newline | Token::RBrace | Token::Eof
+        ) {
+            Ok(None)
+        } else {
+            Ok(Some(self.parse_expr()?))
+        }
+    }
+
     fn parse_expr(&mut self) -> Result<Expr, String> {
         self.parse_assign()
     }
@@ -1099,43 +1074,21 @@ impl Parser {
     fn parse_assign(&mut self) -> Result<Expr, String> {
         let lhs = self.parse_ternary()?;
 
-        match self.peek().clone() {
-            Token::Assign => {
-                self.advance();
-                let rhs = self.parse_assign()?;
-                Ok(Expr::Assign(Box::new(lhs), Box::new(rhs)))
-            }
-            Token::PlusAssign => {
-                self.advance();
-                let rhs = self.parse_assign()?;
-                Ok(Expr::OpAssign(BinOp::Add, Box::new(lhs), Box::new(rhs)))
-            }
-            Token::MinusAssign => {
-                self.advance();
-                let rhs = self.parse_assign()?;
-                Ok(Expr::OpAssign(BinOp::Sub, Box::new(lhs), Box::new(rhs)))
-            }
-            Token::StarAssign => {
-                self.advance();
-                let rhs = self.parse_assign()?;
-                Ok(Expr::OpAssign(BinOp::Mul, Box::new(lhs), Box::new(rhs)))
-            }
-            Token::SlashAssign => {
-                self.advance();
-                let rhs = self.parse_assign()?;
-                Ok(Expr::OpAssign(BinOp::Div, Box::new(lhs), Box::new(rhs)))
-            }
-            Token::PercentAssign => {
-                self.advance();
-                let rhs = self.parse_assign()?;
-                Ok(Expr::OpAssign(BinOp::Mod, Box::new(lhs), Box::new(rhs)))
-            }
-            Token::CaretAssign => {
-                self.advance();
-                let rhs = self.parse_assign()?;
-                Ok(Expr::OpAssign(BinOp::Pow, Box::new(lhs), Box::new(rhs)))
-            }
-            _ => Ok(lhs),
+        let op = match self.peek() {
+            Token::Assign => None,
+            Token::PlusAssign => Some(BinOp::Add),
+            Token::MinusAssign => Some(BinOp::Sub),
+            Token::StarAssign => Some(BinOp::Mul),
+            Token::SlashAssign => Some(BinOp::Div),
+            Token::PercentAssign => Some(BinOp::Mod),
+            Token::CaretAssign => Some(BinOp::Pow),
+            _ => return Ok(lhs),
+        };
+        self.advance();
+        let rhs = self.parse_assign()?;
+        match op {
+            None => Ok(Expr::Assign(Box::new(lhs), Box::new(rhs))),
+            Some(binop) => Ok(Expr::OpAssign(binop, Box::new(lhs), Box::new(rhs))),
         }
     }
 
@@ -1408,89 +1361,65 @@ impl Parser {
 // Simple regex engine
 // ---------------------------------------------------------------------------
 
+/// Strip anchor characters from a pattern and return `(inner_pattern, anchored_start, anchored_end)`.
+fn strip_anchors(pattern: &str) -> (&str, bool, bool) {
+    let anchored_start = pattern.starts_with('^');
+    let anchored_end = pattern.ends_with('$') && !pattern.ends_with("\\$");
+    let pat = if anchored_start {
+        &pattern[1..]
+    } else {
+        pattern
+    };
+    let pat = if anchored_end && !pat.is_empty() {
+        &pat[..pat.len() - 1]
+    } else {
+        pat
+    };
+    (pat, anchored_start, anchored_end)
+}
+
 /// Simple regex matching supporting: literal chars, `.` (any), `*` (repeat prev),
 /// `+` (one or more), `?` (zero or one), `^` (start), `$` (end), `[...]` char classes,
 /// `[^...]` negated, `\d`, `\w`, `\s` and their negations, escape sequences.
 fn regex_match(text: &str, pattern: &str) -> bool {
-    let anchored_start = pattern.starts_with('^');
-    let anchored_end = pattern.ends_with('$') && !pattern.ends_with("\\$");
-
-    let pat = if anchored_start {
-        &pattern[1..]
-    } else {
-        pattern
-    };
-    let pat = if anchored_end && !pat.is_empty() {
-        &pat[..pat.len() - 1]
-    } else {
-        pat
-    };
-
+    let (pat, anchored_start, anchored_end) = strip_anchors(pattern);
     let compiled = compile_regex(pat);
 
-    if anchored_start && anchored_end {
-        regex_match_here(&compiled, text, 0, 0) == Some(text.len())
-    } else if anchored_start {
-        regex_match_here(&compiled, text, 0, 0).is_some()
-    } else if anchored_end {
-        // Try matching at each position and check that it consumes to end
-        for start in 0..=text.len() {
-            if let Some(end) = regex_match_here(&compiled, text, start, 0) {
-                if end == text.len() {
-                    return true;
-                }
-            }
-        }
-        false
+    let start_positions: Box<dyn Iterator<Item = usize>> = if anchored_start {
+        Box::new(std::iter::once(0))
     } else {
-        // Unanchored: try at each position
-        for start in 0..=text.len() {
-            if regex_match_here(&compiled, text, start, 0).is_some() {
+        Box::new(0..=text.len())
+    };
+
+    for start in start_positions {
+        if let Some(end) = regex_match_here(&compiled, text, start, 0) {
+            if !anchored_end || end == text.len() {
                 return true;
             }
         }
-        false
     }
+    false
 }
 
 /// Find the first match of `pattern` in `text`, returning (start, end) byte offsets.
 fn regex_find(text: &str, pattern: &str) -> Option<(usize, usize)> {
-    let anchored_start = pattern.starts_with('^');
-    let anchored_end = pattern.ends_with('$') && !pattern.ends_with("\\$");
-
-    let pat = if anchored_start {
-        &pattern[1..]
-    } else {
-        pattern
-    };
-    let pat = if anchored_end && !pat.is_empty() {
-        &pat[..pat.len() - 1]
-    } else {
-        pat
-    };
-
+    let (pat, anchored_start, anchored_end) = strip_anchors(pattern);
     let compiled = compile_regex(pat);
 
-    if anchored_start {
-        if let Some(end) = regex_match_here(&compiled, text, 0, 0) {
-            if !anchored_end || end == text.len() {
-                return Some((0, end));
-            }
-        }
-        None
+    let start_positions: Box<dyn Iterator<Item = usize>> = if anchored_start {
+        Box::new(std::iter::once(0))
     } else {
-        for start in 0..=text.len() {
-            if let Some(end) = regex_match_here(&compiled, text, start, 0) {
-                if !anchored_end || end == text.len() {
-                    // Prefer non-empty matches unless at end
-                    if start < end || start == text.len() {
-                        return Some((start, end));
-                    }
-                }
+        Box::new(0..=text.len())
+    };
+
+    for start in start_positions {
+        if let Some(end) = regex_match_here(&compiled, text, start, 0) {
+            if (!anchored_end || end == text.len()) && (start < end || start == text.len()) {
+                return Some((start, end));
             }
         }
-        None
     }
+    None
 }
 
 #[derive(Debug, Clone)]
@@ -1519,6 +1448,62 @@ enum CcRange {
     Range(char, char),
 }
 
+/// Parse a backslash escape sequence into a regex piece (e.g. `\d`, `\w`, `\n`).
+fn compile_escape(c: char) -> RePiece {
+    let word_ranges = vec![
+        CcRange::Range('a', 'z'),
+        CcRange::Range('A', 'Z'),
+        CcRange::Range('0', '9'),
+        CcRange::Single('_'),
+    ];
+    let space_ranges = vec![
+        CcRange::Single(' '),
+        CcRange::Single('\t'),
+        CcRange::Single('\n'),
+        CcRange::Single('\r'),
+    ];
+    match c {
+        'd' => RePiece::CharClass(vec![CcRange::Range('0', '9')], false),
+        'D' => RePiece::CharClass(vec![CcRange::Range('0', '9')], true),
+        'w' => RePiece::CharClass(word_ranges, false),
+        'W' => RePiece::CharClass(word_ranges, true),
+        's' => RePiece::CharClass(space_ranges, false),
+        'S' => RePiece::CharClass(space_ranges, true),
+        't' => RePiece::Literal('\t'),
+        'n' => RePiece::Literal('\n'),
+        'r' => RePiece::Literal('\r'),
+        _ => RePiece::Literal(c),
+    }
+}
+
+/// Parse a `[...]` character class from `chars` starting at position `i` (just past `[`).
+fn compile_char_class(chars: &[char], mut i: usize) -> (RePiece, usize) {
+    let negated = i < chars.len() && chars[i] == '^';
+    if negated {
+        i += 1;
+    }
+    let mut ranges = Vec::new();
+    if i < chars.len() && chars[i] == ']' {
+        ranges.push(CcRange::Single(']'));
+        i += 1;
+    }
+    while i < chars.len() && chars[i] != ']' {
+        let ch = chars[i];
+        i += 1;
+        if i + 1 < chars.len() && chars[i] == '-' && chars[i + 1] != ']' {
+            let end_ch = chars[i + 1];
+            ranges.push(CcRange::Range(ch, end_ch));
+            i += 2;
+        } else {
+            ranges.push(CcRange::Single(ch));
+        }
+    }
+    if i < chars.len() {
+        i += 1; // consume ]
+    }
+    (RePiece::CharClass(ranges, negated), i)
+}
+
 fn compile_regex(pat: &str) -> Vec<ReNode> {
     let chars: Vec<char> = pat.chars().collect();
     let mut nodes = Vec::new();
@@ -1534,78 +1519,13 @@ fn compile_regex(pat: &str) -> Vec<ReNode> {
                 i += 1;
                 let c = chars[i];
                 i += 1;
-                match c {
-                    'd' => RePiece::CharClass(vec![CcRange::Range('0', '9')], false),
-                    'D' => RePiece::CharClass(vec![CcRange::Range('0', '9')], true),
-                    'w' => RePiece::CharClass(
-                        vec![
-                            CcRange::Range('a', 'z'),
-                            CcRange::Range('A', 'Z'),
-                            CcRange::Range('0', '9'),
-                            CcRange::Single('_'),
-                        ],
-                        false,
-                    ),
-                    'W' => RePiece::CharClass(
-                        vec![
-                            CcRange::Range('a', 'z'),
-                            CcRange::Range('A', 'Z'),
-                            CcRange::Range('0', '9'),
-                            CcRange::Single('_'),
-                        ],
-                        true,
-                    ),
-                    's' => RePiece::CharClass(
-                        vec![
-                            CcRange::Single(' '),
-                            CcRange::Single('\t'),
-                            CcRange::Single('\n'),
-                            CcRange::Single('\r'),
-                        ],
-                        false,
-                    ),
-                    'S' => RePiece::CharClass(
-                        vec![
-                            CcRange::Single(' '),
-                            CcRange::Single('\t'),
-                            CcRange::Single('\n'),
-                            CcRange::Single('\r'),
-                        ],
-                        true,
-                    ),
-                    't' => RePiece::Literal('\t'),
-                    'n' => RePiece::Literal('\n'),
-                    'r' => RePiece::Literal('\r'),
-                    _ => RePiece::Literal(c),
-                }
+                compile_escape(c)
             }
             '[' => {
                 i += 1;
-                let negated = i < chars.len() && chars[i] == '^';
-                if negated {
-                    i += 1;
-                }
-                let mut ranges = Vec::new();
-                // Handle ] as first char in class
-                if i < chars.len() && chars[i] == ']' {
-                    ranges.push(CcRange::Single(']'));
-                    i += 1;
-                }
-                while i < chars.len() && chars[i] != ']' {
-                    let ch = chars[i];
-                    i += 1;
-                    if i + 1 < chars.len() && chars[i] == '-' && chars[i + 1] != ']' {
-                        let end_ch = chars[i + 1];
-                        ranges.push(CcRange::Range(ch, end_ch));
-                        i += 2;
-                    } else {
-                        ranges.push(CcRange::Single(ch));
-                    }
-                }
-                if i < chars.len() {
-                    i += 1; // consume ]
-                }
-                RePiece::CharClass(ranges, negated)
+                let (p, new_i) = compile_char_class(&chars, i);
+                i = new_i;
+                p
             }
             c => {
                 i += 1;
@@ -1614,28 +1534,18 @@ fn compile_regex(pat: &str) -> Vec<ReNode> {
         };
 
         // Check for quantifier
-        if i < chars.len() {
-            match chars[i] {
-                '*' => {
-                    i += 1;
-                    nodes.push(ReNode::Repeat(piece, RepeatKind::Star));
-                    continue;
-                }
-                '+' => {
-                    i += 1;
-                    nodes.push(ReNode::Repeat(piece, RepeatKind::Plus));
-                    continue;
-                }
-                '?' => {
-                    i += 1;
-                    nodes.push(ReNode::Repeat(piece, RepeatKind::Question));
-                    continue;
-                }
-                _ => {}
-            }
+        let repeat = i < chars.len() && matches!(chars[i], '*' | '+' | '?');
+        if repeat {
+            let kind = match chars[i] {
+                '*' => RepeatKind::Star,
+                '+' => RepeatKind::Plus,
+                _ => RepeatKind::Question,
+            };
+            i += 1;
+            nodes.push(ReNode::Repeat(piece, kind));
+        } else {
+            nodes.push(ReNode::Piece(piece));
         }
-
-        nodes.push(ReNode::Piece(piece));
     }
 
     nodes
@@ -1646,28 +1556,11 @@ fn piece_matches(piece: &RePiece, ch: char) -> bool {
         RePiece::Literal(c) => ch == *c,
         RePiece::Dot => true,
         RePiece::CharClass(ranges, negated) => {
-            let mut found = false;
-            for r in ranges {
-                match r {
-                    CcRange::Single(c) => {
-                        if ch == *c {
-                            found = true;
-                            break;
-                        }
-                    }
-                    CcRange::Range(lo, hi) => {
-                        if ch >= *lo && ch <= *hi {
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if *negated {
-                !found
-            } else {
-                found
-            }
+            let found = ranges.iter().any(|r| match r {
+                CcRange::Single(c) => ch == *c,
+                CcRange::Range(lo, hi) => ch >= *lo && ch <= *hi,
+            });
+            found != *negated
         }
     }
 }
@@ -2067,43 +1960,24 @@ impl AwkInterpreter {
             BinOp::Mul => AwkValue::Num(l.to_num() * r.to_num()),
             BinOp::Div => {
                 let d = r.to_num();
-                if d == 0.0 {
-                    AwkValue::Num(0.0)
-                } else {
-                    AwkValue::Num(l.to_num() / d)
-                }
+                AwkValue::Num(if d == 0.0 { 0.0 } else { l.to_num() / d })
             }
             BinOp::Mod => {
                 let d = r.to_num();
-                if d == 0.0 {
-                    AwkValue::Num(0.0)
-                } else {
-                    AwkValue::Num(l.to_num() % d)
-                }
+                AwkValue::Num(if d == 0.0 { 0.0 } else { l.to_num() % d })
             }
             BinOp::Pow => AwkValue::Num(l.to_num().powf(r.to_num())),
-            BinOp::Eq => {
-                let result = self.compare_values(l, r) == 0;
-                AwkValue::Num(if result { 1.0 } else { 0.0 })
-            }
-            BinOp::Ne => {
-                let result = self.compare_values(l, r) != 0;
-                AwkValue::Num(if result { 1.0 } else { 0.0 })
-            }
-            BinOp::Lt => {
-                let result = self.compare_values(l, r) < 0;
-                AwkValue::Num(if result { 1.0 } else { 0.0 })
-            }
-            BinOp::Gt => {
-                let result = self.compare_values(l, r) > 0;
-                AwkValue::Num(if result { 1.0 } else { 0.0 })
-            }
-            BinOp::Le => {
-                let result = self.compare_values(l, r) <= 0;
-                AwkValue::Num(if result { 1.0 } else { 0.0 })
-            }
-            BinOp::Ge => {
-                let result = self.compare_values(l, r) >= 0;
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+                let cmp = self.compare_values(l, r);
+                let result = match op {
+                    BinOp::Eq => cmp == 0,
+                    BinOp::Ne => cmp != 0,
+                    BinOp::Lt => cmp < 0,
+                    BinOp::Gt => cmp > 0,
+                    BinOp::Le => cmp <= 0,
+                    BinOp::Ge => cmp >= 0,
+                    _ => unreachable!(),
+                };
                 AwkValue::Num(if result { 1.0 } else { 0.0 })
             }
             BinOp::And => AwkValue::Num(if l.is_truthy() && r.is_truthy() {
@@ -2163,7 +2037,7 @@ impl AwkInterpreter {
 
     // ---- Built-in functions ----
 
-    fn call_function(&mut self, name: &str, args: &[Expr]) -> AwkValue {
+    fn call_string_builtin(&mut self, name: &str, args: &[Expr]) -> Option<AwkValue> {
         match name {
             "length" => {
                 let s = if args.is_empty() {
@@ -2172,11 +2046,11 @@ impl AwkInterpreter {
                     self.eval_expr(&args[0]).to_str()
                 };
                 #[allow(clippy::cast_precision_loss)]
-                AwkValue::Num(s.chars().count() as f64)
+                Some(AwkValue::Num(s.chars().count() as f64))
             }
             "substr" => {
                 if args.is_empty() {
-                    return AwkValue::Str(String::new());
+                    return Some(AwkValue::Str(String::new()));
                 }
                 let s = self.eval_expr(&args[0]).to_str();
                 let chars: Vec<char> = s.chars().collect();
@@ -2190,121 +2064,33 @@ impl AwkInterpreter {
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     let len = self.eval_expr(&args[2]).to_num().max(0.0) as usize;
                     let end = (start_idx + len).min(chars.len());
-                    AwkValue::Str(chars[start_idx..end].iter().collect())
+                    Some(AwkValue::Str(chars[start_idx..end].iter().collect()))
                 } else {
-                    AwkValue::Str(chars[start_idx..].iter().collect())
+                    Some(AwkValue::Str(chars[start_idx..].iter().collect()))
                 }
             }
             "index" => {
                 if args.len() < 2 {
-                    return AwkValue::Num(0.0);
+                    return Some(AwkValue::Num(0.0));
                 }
                 let s = self.eval_expr(&args[0]).to_str();
                 let t = self.eval_expr(&args[1]).to_str();
                 #[allow(clippy::cast_precision_loss)]
                 match s.find(&t) {
-                    Some(pos) => AwkValue::Num((pos + 1) as f64),
-                    None => AwkValue::Num(0.0),
+                    Some(pos) => Some(AwkValue::Num((pos + 1) as f64)),
+                    None => Some(AwkValue::Num(0.0)),
                 }
             }
-            "split" => {
-                if args.len() < 2 {
-                    return AwkValue::Num(0.0);
-                }
-                let s = self.eval_expr(&args[0]).to_str();
-                let arr_name = match &args[1] {
-                    Expr::Var(n) => n.clone(),
-                    _ => return AwkValue::Num(0.0),
-                };
-                let sep = if args.len() >= 3 {
-                    self.eval_expr(&args[2]).to_str()
-                } else {
-                    self.get_fs()
-                };
-                let parts: Vec<&str> = if sep == " " {
-                    s.split_whitespace().collect()
-                } else {
-                    s.split(&sep).collect()
-                };
-                // Clear existing array
-                self.arrays.insert(arr_name.clone(), HashMap::new());
-                let arr = self.arrays.get_mut(&arr_name).unwrap();
-                for (i, part) in parts.iter().enumerate() {
-                    arr.insert(format!("{}", i + 1), AwkValue::Str((*part).to_string()));
-                }
-                #[allow(clippy::cast_precision_loss)]
-                AwkValue::Num(parts.len() as f64)
-            }
-            "sub" | "gsub" => {
-                let global = name == "gsub";
-                if args.len() < 2 {
-                    return AwkValue::Num(0.0);
-                }
-                // First arg can be a regex literal /re/ or a string expression
-                let pattern = match &args[0] {
-                    Expr::Regex(re) => re.clone(),
-                    other => self.eval_expr(other).to_str(),
-                };
-                let replacement = self.eval_expr(&args[1]).to_str();
-
-                // Target defaults to $0
-                let (target_str, target_field) = if args.len() >= 3 {
-                    match &args[2] {
-                        Expr::Var(name) => (self.get_var(name).to_str(), None),
-                        Expr::FieldRef(idx) => {
-                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                            let n = self.eval_expr(idx).to_num().max(0.0) as usize;
-                            (self.get_field(n).to_str(), Some(n))
-                        }
-                        _ => (self.get_field(0).to_str(), Some(0)),
-                    }
-                } else {
-                    (self.get_field(0).to_str(), Some(0))
-                };
-
-                let (result, count) = regex_replace(&target_str, &pattern, &replacement, global);
-
-                // Assign back
-                if let Some(field_n) = target_field {
-                    self.set_field(field_n, result);
-                } else if args.len() >= 3 {
-                    if let Expr::Var(name) = &args[2] {
-                        self.set_var(name, AwkValue::Str(result));
-                    }
-                }
-
-                #[allow(clippy::cast_precision_loss)]
-                AwkValue::Num(count as f64)
-            }
-            "match" => {
-                if args.len() < 2 {
-                    return AwkValue::Num(0.0);
-                }
-                let s = self.eval_expr(&args[0]).to_str();
-                let re = match &args[1] {
-                    Expr::Regex(r) => r.clone(),
-                    other => self.eval_expr(other).to_str(),
-                };
-                if let Some((start, end)) = regex_find(&s, &re) {
-                    #[allow(clippy::cast_precision_loss)]
-                    {
-                        self.set_var("RSTART", AwkValue::Num((start + 1) as f64));
-                        self.set_var("RLENGTH", AwkValue::Num((end - start) as f64));
-                        AwkValue::Num((start + 1) as f64)
-                    }
-                } else {
-                    self.set_var("RSTART", AwkValue::Num(0.0));
-                    self.set_var("RLENGTH", AwkValue::Num(-1.0));
-                    AwkValue::Num(0.0)
-                }
-            }
+            "split" => Some(self.call_split(args)),
+            "sub" | "gsub" => Some(self.call_sub_gsub(name == "gsub", args)),
+            "match" => Some(self.call_match_builtin(args)),
             "sprintf" => {
                 if args.is_empty() {
-                    return AwkValue::Str(String::new());
+                    return Some(AwkValue::Str(String::new()));
                 }
                 let fmt = self.eval_expr(&args[0]).to_str();
                 let arg_vals: Vec<AwkValue> = args[1..].iter().map(|a| self.eval_expr(a)).collect();
-                AwkValue::Str(self.format_string(&fmt, &arg_vals))
+                Some(AwkValue::Str(self.format_string(&fmt, &arg_vals)))
             }
             "tolower" => {
                 let s = if args.is_empty() {
@@ -2312,7 +2098,7 @@ impl AwkInterpreter {
                 } else {
                     self.eval_expr(&args[0]).to_str()
                 };
-                AwkValue::Str(s.to_lowercase())
+                Some(AwkValue::Str(s.to_lowercase()))
             }
             "toupper" => {
                 let s = if args.is_empty() {
@@ -2320,87 +2106,150 @@ impl AwkInterpreter {
                 } else {
                     self.eval_expr(&args[0]).to_str()
                 };
-                AwkValue::Str(s.to_uppercase())
+                Some(AwkValue::Str(s.to_uppercase()))
             }
-            "int" => {
-                let n = if args.is_empty() {
-                    0.0
-                } else {
-                    self.eval_expr(&args[0]).to_num()
-                };
-                AwkValue::Num(n.trunc())
+            _ => None,
+        }
+    }
+
+    fn call_split(&mut self, args: &[Expr]) -> AwkValue {
+        if args.len() < 2 {
+            return AwkValue::Num(0.0);
+        }
+        let s = self.eval_expr(&args[0]).to_str();
+        let arr_name = match &args[1] {
+            Expr::Var(n) => n.clone(),
+            _ => return AwkValue::Num(0.0),
+        };
+        let sep = if args.len() >= 3 {
+            self.eval_expr(&args[2]).to_str()
+        } else {
+            self.get_fs()
+        };
+        let parts: Vec<&str> = if sep == " " {
+            s.split_whitespace().collect()
+        } else {
+            s.split(&sep).collect()
+        };
+        self.arrays.insert(arr_name.clone(), HashMap::new());
+        let arr = self.arrays.get_mut(&arr_name).unwrap();
+        for (i, part) in parts.iter().enumerate() {
+            arr.insert(format!("{}", i + 1), AwkValue::Str((*part).to_string()));
+        }
+        #[allow(clippy::cast_precision_loss)]
+        AwkValue::Num(parts.len() as f64)
+    }
+
+    fn call_sub_gsub(&mut self, global: bool, args: &[Expr]) -> AwkValue {
+        if args.len() < 2 {
+            return AwkValue::Num(0.0);
+        }
+        let pattern = match &args[0] {
+            Expr::Regex(re) => re.clone(),
+            other => self.eval_expr(other).to_str(),
+        };
+        let replacement = self.eval_expr(&args[1]).to_str();
+
+        let (target_str, target_field) = if args.len() >= 3 {
+            match &args[2] {
+                Expr::Var(name) => (self.get_var(name).to_str(), None),
+                Expr::FieldRef(idx) => {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let n = self.eval_expr(idx).to_num().max(0.0) as usize;
+                    (self.get_field(n).to_str(), Some(n))
+                }
+                _ => (self.get_field(0).to_str(), Some(0)),
             }
-            "sqrt" => {
-                let n = if args.is_empty() {
-                    0.0
-                } else {
-                    self.eval_expr(&args[0]).to_num()
-                };
-                AwkValue::Num(n.sqrt())
+        } else {
+            (self.get_field(0).to_str(), Some(0))
+        };
+
+        let (result, count) = regex_replace(&target_str, &pattern, &replacement, global);
+
+        if let Some(field_n) = target_field {
+            self.set_field(field_n, result);
+        } else if args.len() >= 3 {
+            if let Expr::Var(name) = &args[2] {
+                self.set_var(name, AwkValue::Str(result));
             }
-            "sin" => {
-                let n = if args.is_empty() {
-                    0.0
-                } else {
-                    self.eval_expr(&args[0]).to_num()
-                };
-                AwkValue::Num(n.sin())
+        }
+
+        #[allow(clippy::cast_precision_loss)]
+        AwkValue::Num(count as f64)
+    }
+
+    fn call_match_builtin(&mut self, args: &[Expr]) -> AwkValue {
+        if args.len() < 2 {
+            return AwkValue::Num(0.0);
+        }
+        let s = self.eval_expr(&args[0]).to_str();
+        let re = match &args[1] {
+            Expr::Regex(r) => r.clone(),
+            other => self.eval_expr(other).to_str(),
+        };
+        if let Some((start, end)) = regex_find(&s, &re) {
+            #[allow(clippy::cast_precision_loss)]
+            {
+                self.set_var("RSTART", AwkValue::Num((start + 1) as f64));
+                self.set_var("RLENGTH", AwkValue::Num((end - start) as f64));
+                AwkValue::Num((start + 1) as f64)
             }
-            "cos" => {
-                let n = if args.is_empty() {
-                    0.0
-                } else {
-                    self.eval_expr(&args[0]).to_num()
-                };
-                AwkValue::Num(n.cos())
+        } else {
+            self.set_var("RSTART", AwkValue::Num(0.0));
+            self.set_var("RLENGTH", AwkValue::Num(-1.0));
+            AwkValue::Num(0.0)
+        }
+    }
+
+    fn call_math_builtin(&mut self, name: &str, args: &[Expr]) -> Option<AwkValue> {
+        let num_arg = |interp: &mut Self| -> f64 {
+            if args.is_empty() {
+                0.0
+            } else {
+                interp.eval_expr(&args[0]).to_num()
             }
-            "log" => {
-                let n = if args.is_empty() {
-                    0.0
-                } else {
-                    self.eval_expr(&args[0]).to_num()
-                };
-                AwkValue::Num(n.ln())
-            }
-            "exp" => {
-                let n = if args.is_empty() {
-                    0.0
-                } else {
-                    self.eval_expr(&args[0]).to_num()
-                };
-                AwkValue::Num(n.exp())
-            }
-            "rand" => {
-                let r = self.next_rand();
-                AwkValue::Num(r)
-            }
+        };
+        match name {
+            "int" => Some(AwkValue::Num(num_arg(self).trunc())),
+            "sqrt" => Some(AwkValue::Num(num_arg(self).sqrt())),
+            "sin" => Some(AwkValue::Num(num_arg(self).sin())),
+            "cos" => Some(AwkValue::Num(num_arg(self).cos())),
+            "log" => Some(AwkValue::Num(num_arg(self).ln())),
+            "exp" => Some(AwkValue::Num(num_arg(self).exp())),
+            "rand" => Some(AwkValue::Num(self.next_rand())),
             "srand" => {
                 let old = self.rand_state;
                 if args.is_empty() {
-                    // Use a fixed but different seed
                     self.rand_state = 0xdead_beef_cafe_babe;
                 } else {
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     {
                         self.rand_state = self.eval_expr(&args[0]).to_num() as u64;
                     }
-                    // Ensure non-zero
                     if self.rand_state == 0 {
                         self.rand_state = 1;
                     }
                 }
                 #[allow(clippy::cast_precision_loss)]
-                AwkValue::Num(old as f64)
+                Some(AwkValue::Num(old as f64))
             }
-            _ => {
-                // Try user-defined function
-                if let Some(func) = self.functions.get(name).cloned() {
-                    let arg_vals: Vec<AwkValue> = args.iter().map(|a| self.eval_expr(a)).collect();
-                    self.call_user_function(&func, &arg_vals)
-                } else {
-                    AwkValue::Uninitialized
-                }
-            }
+            _ => None,
+        }
+    }
+
+    fn call_function(&mut self, name: &str, args: &[Expr]) -> AwkValue {
+        if let Some(val) = self.call_string_builtin(name, args) {
+            return val;
+        }
+        if let Some(val) = self.call_math_builtin(name, args) {
+            return val;
+        }
+        // Try user-defined function
+        if let Some(func) = self.functions.get(name).cloned() {
+            let arg_vals: Vec<AwkValue> = args.iter().map(|a| self.eval_expr(a)).collect();
+            self.call_user_function(&func, &arg_vals)
+        } else {
+            AwkValue::Uninitialized
         }
     }
 
@@ -2465,34 +2314,8 @@ impl AwkInterpreter {
                 }
 
                 // Parse flags
-                let mut left_align = false;
-                let mut zero_pad = false;
-                let mut plus_sign = false;
-                let mut space_sign = false;
-                loop {
-                    if i >= chars.len() {
-                        break;
-                    }
-                    match chars[i] {
-                        '-' => {
-                            left_align = true;
-                            i += 1;
-                        }
-                        '0' => {
-                            zero_pad = true;
-                            i += 1;
-                        }
-                        '+' => {
-                            plus_sign = true;
-                            i += 1;
-                        }
-                        ' ' => {
-                            space_sign = true;
-                            i += 1;
-                        }
-                        _ => break,
-                    }
-                }
+                let (flags, new_i) = parse_format_flags(&chars, i);
+                i = new_i;
 
                 // Parse width
                 let mut width = 0usize;
@@ -2544,107 +2367,7 @@ impl AwkInterpreter {
                     .unwrap_or(AwkValue::Uninitialized);
                 arg_idx += 1;
 
-                let formatted = match spec {
-                    'd' | 'i' => {
-                        #[allow(clippy::cast_possible_truncation)]
-                        let n = arg.to_num() as i64;
-                        let s = if plus_sign && n >= 0 {
-                            format!("+{n}")
-                        } else if space_sign && n >= 0 {
-                            format!(" {n}")
-                        } else {
-                            format!("{n}")
-                        };
-                        pad_string(&s, width, left_align, if zero_pad { '0' } else { ' ' })
-                    }
-                    'o' => {
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let n = arg.to_num() as u64;
-                        let s = format!("{n:o}");
-                        pad_string(&s, width, left_align, if zero_pad { '0' } else { ' ' })
-                    }
-                    'x' => {
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let n = arg.to_num() as u64;
-                        let s = format!("{n:x}");
-                        pad_string(&s, width, left_align, if zero_pad { '0' } else { ' ' })
-                    }
-                    'X' => {
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let n = arg.to_num() as u64;
-                        let s = format!("{n:X}");
-                        pad_string(&s, width, left_align, if zero_pad { '0' } else { ' ' })
-                    }
-                    'f' => {
-                        let n = arg.to_num();
-                        let prec = precision.unwrap_or(6);
-                        let s = if plus_sign && n >= 0.0 {
-                            format!("+{n:.prec$}")
-                        } else if space_sign && n >= 0.0 {
-                            format!(" {n:.prec$}")
-                        } else {
-                            format!("{n:.prec$}")
-                        };
-                        pad_string(&s, width, left_align, if zero_pad { '0' } else { ' ' })
-                    }
-                    'e' => {
-                        let n = arg.to_num();
-                        let prec = precision.unwrap_or(6);
-                        let s = format_scientific(n, prec, false);
-                        let s = if plus_sign && n >= 0.0 {
-                            format!("+{s}")
-                        } else if space_sign && n >= 0.0 {
-                            format!(" {s}")
-                        } else {
-                            s
-                        };
-                        pad_string(&s, width, left_align, if zero_pad { '0' } else { ' ' })
-                    }
-                    'E' => {
-                        let n = arg.to_num();
-                        let prec = precision.unwrap_or(6);
-                        let s = format_scientific(n, prec, true);
-                        let s = if plus_sign && n >= 0.0 {
-                            format!("+{s}")
-                        } else if space_sign && n >= 0.0 {
-                            format!(" {s}")
-                        } else {
-                            s
-                        };
-                        pad_string(&s, width, left_align, if zero_pad { '0' } else { ' ' })
-                    }
-                    'g' | 'G' => {
-                        let n = arg.to_num();
-                        let prec = precision.unwrap_or(6).max(1);
-                        let s = format_g(n, prec, spec == 'G');
-                        let s = if plus_sign && n >= 0.0 {
-                            format!("+{s}")
-                        } else if space_sign && n >= 0.0 {
-                            format!(" {s}")
-                        } else {
-                            s
-                        };
-                        pad_string(&s, width, left_align, if zero_pad { '0' } else { ' ' })
-                    }
-                    's' => {
-                        let mut s = arg.to_str();
-                        if let Some(prec) = precision {
-                            let truncated: String = s.chars().take(prec).collect();
-                            s = truncated;
-                        }
-                        pad_string(&s, width, left_align, ' ')
-                    }
-                    'c' => {
-                        let s = arg.to_str();
-                        let c = s.chars().next().map_or(String::new(), |c| c.to_string());
-                        pad_string(&c, width, left_align, ' ')
-                    }
-                    _ => {
-                        format!("%{spec}")
-                    }
-                };
-
-                result.push_str(&formatted);
+                result.push_str(&format_one_spec(spec, width, precision, &flags, &arg));
             } else if chars[i] == '\\' {
                 i += 1;
                 if i < chars.len() {
@@ -2687,35 +2410,133 @@ impl AwkInterpreter {
         ControlFlow::None
     }
 
+    fn exec_while(&mut self, cond: &Expr, body: &[Stmt]) -> ControlFlow {
+        let mut iteration = 0;
+        loop {
+            if !self.eval_expr(cond).is_truthy() {
+                break;
+            }
+            match self.exec_stmts(body) {
+                ControlFlow::Break => break,
+                ControlFlow::Continue | ControlFlow::None => {}
+                other => return other,
+            }
+            iteration += 1;
+            if iteration > 1_000_000 {
+                self.stderr_buf
+                    .extend_from_slice(b"awk: loop iteration limit (1000000) reached\n");
+                break;
+            }
+        }
+        ControlFlow::None
+    }
+
+    fn exec_do_while(&mut self, body: &[Stmt], cond: &Expr) -> ControlFlow {
+        let mut iteration = 0;
+        loop {
+            match self.exec_stmts(body) {
+                ControlFlow::Break => break,
+                ControlFlow::Continue | ControlFlow::None => {}
+                other => return other,
+            }
+            if !self.eval_expr(cond).is_truthy() {
+                break;
+            }
+            iteration += 1;
+            if iteration > 1_000_000 {
+                self.stderr_buf
+                    .extend_from_slice(b"awk: loop iteration limit (1000000) reached\n");
+                break;
+            }
+        }
+        ControlFlow::None
+    }
+
+    fn exec_for(
+        &mut self,
+        init: Option<&Stmt>,
+        cond: Option<&Expr>,
+        incr: Option<&Stmt>,
+        body: &[Stmt],
+    ) -> ControlFlow {
+        if let Some(init_stmt) = init {
+            let cf = self.exec_stmt(init_stmt);
+            if !matches!(cf, ControlFlow::None) {
+                return cf;
+            }
+        }
+        let mut iteration = 0;
+        loop {
+            if let Some(c) = cond {
+                if !self.eval_expr(c).is_truthy() {
+                    break;
+                }
+            }
+            match self.exec_stmts(body) {
+                ControlFlow::Break => break,
+                ControlFlow::Continue | ControlFlow::None => {}
+                other => return other,
+            }
+            if let Some(incr_stmt) = incr {
+                self.exec_stmt(incr_stmt);
+            }
+            iteration += 1;
+            if iteration > 1_000_000 {
+                self.stderr_buf
+                    .extend_from_slice(b"awk: loop iteration limit (1000000) reached\n");
+                break;
+            }
+        }
+        ControlFlow::None
+    }
+
+    fn exec_for_in(&mut self, var: &str, arr_name: &str, body: &[Stmt]) -> ControlFlow {
+        let keys: Vec<String> = self
+            .arrays
+            .get(arr_name)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        for key in keys {
+            self.set_var(var, AwkValue::Str(key));
+            match self.exec_stmts(body) {
+                ControlFlow::Break => break,
+                ControlFlow::Continue | ControlFlow::None => {}
+                other => return other,
+            }
+        }
+        ControlFlow::None
+    }
+
+    fn exec_print(&mut self, args: &[Expr]) -> ControlFlow {
+        if args.is_empty() {
+            let s = self.get_field(0).to_str();
+            let ors = self.get_ors();
+            self.write_output(s.as_bytes());
+            self.write_output(ors.as_bytes());
+        } else {
+            let ofs = self.get_ofs();
+            let ors = self.get_ors();
+            let mut first = true;
+            for arg in args {
+                if !first {
+                    self.write_output(ofs.as_bytes());
+                }
+                let val = self.eval_expr(arg);
+                self.write_output(val.to_str().as_bytes());
+                first = false;
+            }
+            self.write_output(ors.as_bytes());
+        }
+        ControlFlow::None
+    }
+
     fn exec_stmt(&mut self, stmt: &Stmt) -> ControlFlow {
         match stmt {
             Stmt::Expr(expr) => {
                 self.eval_expr(expr);
                 ControlFlow::None
             }
-            Stmt::Print(args, _redirect) => {
-                if args.is_empty() {
-                    // print $0
-                    let s = self.get_field(0).to_str();
-                    let ors = self.get_ors();
-                    self.write_output(s.as_bytes());
-                    self.write_output(ors.as_bytes());
-                } else {
-                    let ofs = self.get_ofs();
-                    let ors = self.get_ors();
-                    let mut first = true;
-                    for arg in args {
-                        if !first {
-                            self.write_output(ofs.as_bytes());
-                        }
-                        let val = self.eval_expr(arg);
-                        self.write_output(val.to_str().as_bytes());
-                        first = false;
-                    }
-                    self.write_output(ors.as_bytes());
-                }
-                ControlFlow::None
-            }
+            Stmt::Print(args, _redirect) => self.exec_print(args),
             Stmt::Printf(args, _redirect) => {
                 if args.is_empty() {
                     return ControlFlow::None;
@@ -2735,93 +2556,12 @@ impl AwkInterpreter {
                     ControlFlow::None
                 }
             }
-            Stmt::While(cond, body) => {
-                let mut iteration = 0;
-                loop {
-                    if !self.eval_expr(cond).is_truthy() {
-                        break;
-                    }
-                    match self.exec_stmts(body) {
-                        ControlFlow::Break => break,
-                        ControlFlow::Continue | ControlFlow::None => {}
-                        other => return other,
-                    }
-                    iteration += 1;
-                    if iteration > 1_000_000 {
-                        self.stderr_buf
-                            .extend_from_slice(b"awk: loop iteration limit (1000000) reached\n");
-                        break;
-                    }
-                }
-                ControlFlow::None
-            }
-            Stmt::DoWhile(body, cond) => {
-                let mut iteration = 0;
-                loop {
-                    match self.exec_stmts(body) {
-                        ControlFlow::Break => break,
-                        ControlFlow::Continue | ControlFlow::None => {}
-                        other => return other,
-                    }
-                    if !self.eval_expr(cond).is_truthy() {
-                        break;
-                    }
-                    iteration += 1;
-                    if iteration > 1_000_000 {
-                        self.stderr_buf
-                            .extend_from_slice(b"awk: loop iteration limit (1000000) reached\n");
-                        break;
-                    }
-                }
-                ControlFlow::None
-            }
+            Stmt::While(cond, body) => self.exec_while(cond, body),
+            Stmt::DoWhile(body, cond) => self.exec_do_while(body, cond),
             Stmt::For(init, cond, incr, body) => {
-                if let Some(init_stmt) = init {
-                    let cf = self.exec_stmt(init_stmt);
-                    if !matches!(cf, ControlFlow::None) {
-                        return cf;
-                    }
-                }
-                let mut iteration = 0;
-                loop {
-                    if let Some(c) = cond {
-                        if !self.eval_expr(c).is_truthy() {
-                            break;
-                        }
-                    }
-                    match self.exec_stmts(body) {
-                        ControlFlow::Break => break,
-                        ControlFlow::Continue | ControlFlow::None => {}
-                        other => return other,
-                    }
-                    if let Some(incr_stmt) = incr {
-                        self.exec_stmt(incr_stmt);
-                    }
-                    iteration += 1;
-                    if iteration > 1_000_000 {
-                        self.stderr_buf
-                            .extend_from_slice(b"awk: loop iteration limit (1000000) reached\n");
-                        break;
-                    }
-                }
-                ControlFlow::None
+                self.exec_for(init.as_deref(), cond.as_ref(), incr.as_deref(), body)
             }
-            Stmt::ForIn(var, arr_name, body) => {
-                let keys: Vec<String> = self
-                    .arrays
-                    .get(arr_name)
-                    .map(|m| m.keys().cloned().collect())
-                    .unwrap_or_default();
-                for key in keys {
-                    self.set_var(var, AwkValue::Str(key));
-                    match self.exec_stmts(body) {
-                        ControlFlow::Break => break,
-                        ControlFlow::Continue | ControlFlow::None => {}
-                        other => return other,
-                    }
-                }
-                ControlFlow::None
-            }
+            Stmt::ForIn(var, arr_name, body) => self.exec_for_in(var, arr_name, body),
             Stmt::Break => ControlFlow::Break,
             Stmt::Continue => ControlFlow::Continue,
             Stmt::Next => ControlFlow::Next,
@@ -2851,54 +2591,67 @@ impl AwkInterpreter {
         }
     }
 
-    /// Test whether a pattern matches the current record.
-    fn pattern_matches(&mut self, pattern: &AwkPattern, rule_idx: usize) -> bool {
+    /// Test a simple (non-range) pattern against the current record.
+    fn test_simple_pattern(&mut self, pattern: &AwkPattern) -> bool {
         match pattern {
-            AwkPattern::All => true,
-            AwkPattern::Expr(expr) => self.eval_expr(expr).is_truthy(),
             AwkPattern::Regex(re) => {
                 let line = self.get_field(0).to_str();
                 regex_match(&line, re)
             }
+            AwkPattern::Expr(expr) => self.eval_expr(expr).is_truthy(),
+            _ => false,
+        }
+    }
+
+    /// Test whether a pattern matches the current record.
+    fn pattern_matches(&mut self, pattern: &AwkPattern, rule_idx: usize) -> bool {
+        match pattern {
+            AwkPattern::All => true,
+            AwkPattern::Expr(_) | AwkPattern::Regex(_) => self.test_simple_pattern(pattern),
             AwkPattern::Range(start_pat, end_pat) => {
-                // Ensure range_active is big enough
                 while self.range_active.len() <= rule_idx {
                     self.range_active.push(false);
                 }
-
                 if self.range_active[rule_idx] {
-                    // Already in range; check if end pattern matches
-                    let end_matches = match end_pat.as_ref() {
-                        AwkPattern::Regex(re) => {
-                            let line = self.get_field(0).to_str();
-                            regex_match(&line, re)
-                        }
-                        AwkPattern::Expr(expr) => self.eval_expr(expr).is_truthy(),
-                        _ => false,
-                    };
-                    if end_matches {
+                    if self.test_simple_pattern(end_pat) {
                         self.range_active[rule_idx] = false;
                     }
                     true
                 } else {
-                    // Check if start pattern matches
-                    let start_matches = match start_pat.as_ref() {
-                        AwkPattern::Regex(re) => {
-                            let line = self.get_field(0).to_str();
-                            regex_match(&line, re)
-                        }
-                        AwkPattern::Expr(expr) => self.eval_expr(expr).is_truthy(),
-                        _ => false,
-                    };
+                    let start_matches = self.test_simple_pattern(start_pat);
                     if start_matches {
                         self.range_active[rule_idx] = true;
-                        true
-                    } else {
-                        false
                     }
+                    start_matches
                 }
             }
         }
+    }
+
+    /// Split input content into records based on the current RS.
+    fn split_into_records<'a>(&self, content: &'a str) -> Vec<&'a str> {
+        let rs = self.get_var("RS").to_str();
+        if rs.is_empty() || rs == "\n" {
+            content.lines().collect()
+        } else if rs.len() == 1 {
+            content.split(rs.chars().next().unwrap()).collect()
+        } else {
+            content.lines().collect()
+        }
+    }
+
+    /// Process one record against all rules, returning `true` if early exit requested.
+    fn process_record(&mut self, program: &AwkProgram) -> Option<i32> {
+        for (rule_idx, rule) in program.rules.iter().enumerate() {
+            if self.pattern_matches(&rule.pattern, rule_idx) {
+                match self.exec_stmts(&rule.action) {
+                    ControlFlow::Next => break,
+                    ControlFlow::Exit(code) => return Some(code),
+                    _ => {}
+                }
+            }
+        }
+        None
     }
 
     /// Run the full awk program on the given input.
@@ -2908,7 +2661,6 @@ impl AwkInterpreter {
         // BEGIN
         if let ControlFlow::Exit(code) = self.exec_stmts(&program.begin) {
             self.exit_code = code;
-            // Still run END
             self.exec_stmts(&program.end);
             return self.exit_code;
         }
@@ -2916,18 +2668,7 @@ impl AwkInterpreter {
         let mut nr: f64 = 0.0;
 
         for (filename, content) in inputs {
-            let rs = self.get_var("RS").to_str();
-            let records: Vec<&str> = if rs == "\n" {
-                content.lines().collect()
-            } else if rs.is_empty() {
-                // TODO: paragraph mode (RS="") — currently falls back to line-based
-                content.lines().collect()
-            } else if rs.len() == 1 {
-                content.split(rs.chars().next().unwrap()).collect()
-            } else {
-                content.lines().collect()
-            };
-
+            let records = self.split_into_records(content);
             let mut fnr: f64 = 0.0;
             self.set_var("FILENAME", AwkValue::Str(filename.clone()));
 
@@ -2938,21 +2679,10 @@ impl AwkInterpreter {
                 self.set_var("FNR", AwkValue::Num(fnr));
                 self.set_record(record);
 
-                for (rule_idx, rule) in program.rules.iter().enumerate() {
-                    if self.pattern_matches(&rule.pattern, rule_idx) {
-                        match self.exec_stmts(&rule.action) {
-                            ControlFlow::Next => {
-                                break;
-                            }
-                            ControlFlow::Exit(code) => {
-                                self.exit_code = code;
-                                // Run END block
-                                self.exec_stmts(&program.end);
-                                return self.exit_code;
-                            }
-                            _ => {}
-                        }
-                    }
+                if let Some(code) = self.process_record(program) {
+                    self.exit_code = code;
+                    self.exec_stmts(&program.end);
+                    return self.exit_code;
                 }
             }
         }
@@ -3017,6 +2747,136 @@ fn regex_replace(text: &str, pattern: &str, replacement: &str, global: bool) -> 
 // ---------------------------------------------------------------------------
 // Formatting helpers
 // ---------------------------------------------------------------------------
+
+#[allow(clippy::struct_excessive_bools)]
+struct FormatFlags {
+    left_align: bool,
+    zero_pad: bool,
+    plus_sign: bool,
+    space_sign: bool,
+}
+
+fn parse_format_flags(chars: &[char], mut i: usize) -> (FormatFlags, usize) {
+    let mut flags = FormatFlags {
+        left_align: false,
+        zero_pad: false,
+        plus_sign: false,
+        space_sign: false,
+    };
+    while i < chars.len() {
+        match chars[i] {
+            '-' => flags.left_align = true,
+            '0' => flags.zero_pad = true,
+            '+' => flags.plus_sign = true,
+            ' ' => flags.space_sign = true,
+            _ => break,
+        }
+        i += 1;
+    }
+    (flags, i)
+}
+
+fn format_one_spec(
+    spec: char,
+    width: usize,
+    precision: Option<usize>,
+    flags: &FormatFlags,
+    arg: &AwkValue,
+) -> String {
+    let pad = if flags.zero_pad { '0' } else { ' ' };
+    match spec {
+        'd' | 'i' => {
+            #[allow(clippy::cast_possible_truncation)]
+            let n = arg.to_num() as i64;
+            let s = apply_sign_prefix(&format!("{}", n.abs()), n < 0, flags);
+            pad_string(&s, width, flags.left_align, pad)
+        }
+        'o' => {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let n = arg.to_num() as u64;
+            let s = format!("{n:o}");
+            pad_string(&s, width, flags.left_align, pad)
+        }
+        'x' => {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let n = arg.to_num() as u64;
+            let s = format!("{n:x}");
+            pad_string(&s, width, flags.left_align, pad)
+        }
+        'X' => {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let n = arg.to_num() as u64;
+            let s = format!("{n:X}");
+            pad_string(&s, width, flags.left_align, pad)
+        }
+        'f' => {
+            let n = arg.to_num();
+            let prec = precision.unwrap_or(6);
+            let s = format_signed_float(n, &format!("{:.prec$}", n.abs()), flags);
+            pad_string(&s, width, flags.left_align, pad)
+        }
+        'e' | 'E' => {
+            let n = arg.to_num();
+            let prec = precision.unwrap_or(6);
+            let raw = format_scientific(n.abs(), prec, spec == 'E');
+            let s = format_signed_float(n, &raw, flags);
+            pad_string(&s, width, flags.left_align, pad)
+        }
+        'g' | 'G' => {
+            let n = arg.to_num();
+            let prec = precision.unwrap_or(6).max(1);
+            let raw = format_g(n, prec, spec == 'G');
+            let s = if flags.plus_sign && n >= 0.0 {
+                format!("+{raw}")
+            } else if flags.space_sign && n >= 0.0 {
+                format!(" {raw}")
+            } else {
+                raw
+            };
+            pad_string(&s, width, flags.left_align, pad)
+        }
+        's' => {
+            let mut s = arg.to_str();
+            if let Some(prec) = precision {
+                let truncated: String = s.chars().take(prec).collect();
+                s = truncated;
+            }
+            pad_string(&s, width, flags.left_align, ' ')
+        }
+        'c' => {
+            let s = arg.to_str();
+            let c = s.chars().next().map_or(String::new(), |c| c.to_string());
+            pad_string(&c, width, flags.left_align, ' ')
+        }
+        _ => format!("%{spec}"),
+    }
+}
+
+/// Apply sign prefix (+, space, or -) to a formatted number string.
+fn apply_sign_prefix(abs_str: &str, negative: bool, flags: &FormatFlags) -> String {
+    if negative {
+        format!("-{abs_str}")
+    } else if flags.plus_sign {
+        format!("+{abs_str}")
+    } else if flags.space_sign {
+        format!(" {abs_str}")
+    } else {
+        abs_str.to_string()
+    }
+}
+
+/// Format a signed float with optional +/space prefix.
+fn format_signed_float(n: f64, abs_formatted: &str, flags: &FormatFlags) -> String {
+    if n < 0.0 {
+        format!("-{abs_formatted}")
+    } else if flags.plus_sign {
+        format!("+{abs_formatted}")
+    } else if flags.space_sign {
+        format!(" {abs_formatted}")
+    } else {
+        abs_formatted.to_string()
+    }
+}
 
 fn pad_string(s: &str, width: usize, left_align: bool, pad_char: char) -> String {
     if s.len() >= width {
@@ -3103,19 +2963,26 @@ fn format_g(n: f64, prec: usize, upper: bool) -> String {
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub(crate) fn util_awk(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+struct AwkArgs<'a> {
+    fs: Option<String>,
+    pre_vars: Vec<(String, String)>,
+    prog_text: Option<String>,
+    file_args: Vec<&'a str>,
+}
+
+/// Parse command-line arguments for awk, returning structured args or an error code.
+fn parse_awk_args<'a>(ctx: &mut UtilContext<'_>, argv: &'a [&'a str]) -> Result<AwkArgs<'a>, i32> {
     let mut args = &argv[1..];
     let mut fs: Option<String> = None;
     let mut pre_vars: Vec<(String, String)> = Vec::new();
     let mut prog_text: Option<String> = None;
     let mut prog_file: Option<String> = None;
 
-    // Parse options
     while let Some(arg) = args.first() {
         if *arg == "-F" {
             if args.len() < 2 {
                 ctx.output.stderr(b"awk: -F requires an argument\n");
-                return 1;
+                return Err(1);
             }
             fs = Some(args[1].to_string());
             args = &args[2..];
@@ -3125,27 +2992,27 @@ pub(crate) fn util_awk(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         } else if *arg == "-v" {
             if args.len() < 2 {
                 ctx.output.stderr(b"awk: -v requires an argument\n");
-                return 1;
+                return Err(1);
             }
             if let Some((name, val)) = args[1].split_once('=') {
                 pre_vars.push((name.to_string(), val.to_string()));
             } else {
                 let msg = format!("awk: invalid -v argument: '{}'\n", args[1]);
                 ctx.output.stderr(msg.as_bytes());
-                return 1;
+                return Err(1);
             }
             args = &args[2..];
         } else if *arg == "-f" {
             if args.len() < 2 {
                 ctx.output.stderr(b"awk: -f requires an argument\n");
-                return 1;
+                return Err(1);
             }
             prog_file = Some(args[1].to_string());
             args = &args[2..];
         } else if arg.starts_with('-') && arg.len() > 1 {
             let msg = format!("awk: unknown option: '{arg}'\n");
             ctx.output.stderr(msg.as_bytes());
-            return 1;
+            return Err(1);
         } else {
             break;
         }
@@ -3158,7 +3025,7 @@ pub(crate) fn util_awk(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             Ok(text) => prog_text = Some(text),
             Err(e) => {
                 emit_error(ctx.output, "awk", &file_path, &e);
-                return 1;
+                return Err(1);
             }
         }
     } else if let Some(arg) = args.first() {
@@ -3166,10 +3033,74 @@ pub(crate) fn util_awk(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         args = &args[1..];
     }
 
-    let Some(program_src) = prog_text else {
+    if prog_text.is_none() {
         ctx.output.stderr(b"awk: no program text\n");
-        return 1;
+        return Err(1);
+    }
+
+    Ok(AwkArgs {
+        fs,
+        pre_vars,
+        prog_text,
+        file_args: args.to_vec(),
+    })
+}
+
+fn gather_inputs(
+    ctx: &mut UtilContext<'_>,
+    file_args: &[&str],
+    interp: &mut AwkInterpreter,
+) -> Result<Vec<(String, String)>, i32> {
+    if file_args.is_empty() {
+        let text = if let Some(data) = ctx.stdin {
+            String::from_utf8_lossy(data).to_string()
+        } else {
+            String::new()
+        };
+        return Ok(vec![(String::new(), text)]);
+    }
+
+    let mut v = Vec::new();
+    for path in file_args {
+        if let Some((name, val)) = path.split_once('=') {
+            if !name.is_empty()
+                && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                && name
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphabetic() || c == '_')
+            {
+                if let Ok(n) = val.parse::<f64>() {
+                    interp.set_var(name, AwkValue::Num(n));
+                } else {
+                    interp.set_var(name, AwkValue::Str(val.to_string()));
+                }
+                continue;
+            }
+        }
+        let full = resolve_path(ctx.cwd, path);
+        match read_text(ctx.fs, &full) {
+            Ok(text) => v.push(((*path).to_string(), text)),
+            Err(e) => {
+                emit_error(ctx.output, "awk", path, &e);
+                return Err(1);
+            }
+        }
+    }
+    if let (true, Some(stdin_data)) = (v.is_empty(), ctx.stdin) {
+        let text = String::from_utf8_lossy(stdin_data).to_string();
+        v.push((String::new(), text));
+    }
+    Ok(v)
+}
+
+pub(crate) fn util_awk(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let awk_args = match parse_awk_args(ctx, argv) {
+        Ok(a) => a,
+        Err(code) => return code,
     };
+
+    let program_src = awk_args.prog_text.unwrap();
 
     // Tokenize
     let mut lexer = Lexer::new(&program_src);
@@ -3196,14 +3127,11 @@ pub(crate) fn util_awk(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     // Build interpreter
     let mut interp = AwkInterpreter::new();
 
-    // Set FS if provided
-    if let Some(ref sep) = fs {
+    if let Some(ref sep) = awk_args.fs {
         interp.set_var("FS", AwkValue::Str(sep.clone()));
     }
 
-    // Set pre-assigned variables
-    for (name, val) in &pre_vars {
-        // Try to parse as number
+    for (name, val) in &awk_args.pre_vars {
         if let Ok(n) = val.parse::<f64>() {
             interp.set_var(name, AwkValue::Num(n));
         } else {
@@ -3211,49 +3139,9 @@ pub(crate) fn util_awk(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     }
 
-    // Gather input
-    let file_args: Vec<&str> = args.to_vec();
-    let inputs: Vec<(String, String)> = if file_args.is_empty() {
-        let text = if let Some(data) = ctx.stdin {
-            String::from_utf8_lossy(data).to_string()
-        } else {
-            String::new()
-        };
-        vec![(String::new(), text)]
-    } else {
-        let mut v = Vec::new();
-        for path in &file_args {
-            // Check for var=value assignments in file args
-            if let Some((name, val)) = path.split_once('=') {
-                if !name.is_empty()
-                    && name.chars().all(|c| c.is_alphanumeric() || c == '_')
-                    && name
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_alphabetic() || c == '_')
-                {
-                    if let Ok(n) = val.parse::<f64>() {
-                        interp.set_var(name, AwkValue::Num(n));
-                    } else {
-                        interp.set_var(name, AwkValue::Str(val.to_string()));
-                    }
-                    continue;
-                }
-            }
-            let full = resolve_path(ctx.cwd, path);
-            match read_text(ctx.fs, &full) {
-                Ok(text) => v.push(((*path).to_string(), text)),
-                Err(e) => {
-                    emit_error(ctx.output, "awk", path, &e);
-                    return 1;
-                }
-            }
-        }
-        if let (true, Some(stdin_data)) = (v.is_empty(), ctx.stdin) {
-            let text = String::from_utf8_lossy(stdin_data).to_string();
-            v.push((String::new(), text));
-        }
-        v
+    let inputs = match gather_inputs(ctx, &awk_args.file_args, &mut interp) {
+        Ok(v) => v,
+        Err(code) => return code,
     };
 
     // Run
