@@ -219,6 +219,7 @@ impl ShellState {
         }
     }
 
+    #[allow(clippy::unused_self)] // self.start_time used on non-wasm targets
     fn seconds_value(&self) -> SmolStr {
         #[cfg(not(target_arch = "wasm32"))]
         {
