@@ -150,63 +150,79 @@ fn is_valid_identifier(name: &str) -> bool {
     !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+/// Strip a `[@]` or `[*]` suffix and return the base name, if non-empty.
+fn strip_array_glob_suffix(s: &str) -> Option<&str> {
+    let base = s.strip_suffix("[@]").or_else(|| s.strip_suffix("[*]"))?;
+    if base.is_empty() {
+        None
+    } else {
+        Some(base)
+    }
+}
+
 /// Try to expand array subscript expressions. Returns true if handled.
 fn try_expand_array_subscript(name: &str, state: &mut ShellState, out: &mut String) -> bool {
-    // ${#arr[@]} or ${#arr[*]} — array length
-    if let Some(var_name) = name.strip_prefix('#') {
-        if let Some(base) = var_name
-            .strip_suffix("[@]")
-            .or_else(|| var_name.strip_suffix("[*]"))
-        {
-            if !base.is_empty() {
-                out.push_str(&state.get_array_length(base).to_string());
-                return true;
-            }
-        }
+    if try_expand_array_length_or_keys(name, state, out) {
+        return true;
     }
-    // ${!arr[@]} or ${!arr[*]} — array keys
-    if let Some(var_name) = name.strip_prefix('!') {
-        if let Some(base) = var_name
-            .strip_suffix("[@]")
-            .or_else(|| var_name.strip_suffix("[*]"))
-        {
-            if !base.is_empty() {
-                out.push_str(&state.get_array_keys(base).join(" "));
-                return true;
-            }
-        }
+    if try_expand_array_all_values(name, state, out) {
+        return true;
     }
-    // ${arr[@]} or ${arr[*]} — all array values
-    if let Some(base) = name
-        .strip_suffix("[@]")
-        .or_else(|| name.strip_suffix("[*]"))
-    {
-        if !base.is_empty() {
-            let values = state.get_array_values(base);
-            let joined: Vec<&str> = values.iter().map(SmolStr::as_str).collect();
-            out.push_str(&joined.join(" "));
+    try_expand_array_single_element(name, state, out)
+}
+
+/// Handle `${#arr[@]}` (array length) and `${!arr[@]}` (array keys).
+fn try_expand_array_length_or_keys(name: &str, state: &mut ShellState, out: &mut String) -> bool {
+    // ${#arr[@]} or ${#arr[*]} -- array length
+    if let Some(rest) = name.strip_prefix('#') {
+        if let Some(base) = strip_array_glob_suffix(rest) {
+            out.push_str(&state.get_array_length(base).to_string());
             return true;
         }
     }
-    // ${arr[N]} — single element access
-    if let Some(bracket_pos) = name.find('[') {
-        if let Some(end) = name[bracket_pos..].find(']') {
-            let base = &name[..bracket_pos];
-            let index = &name[bracket_pos + 1..bracket_pos + end];
-            if !base.is_empty() && !index.is_empty() {
-                let expanded_index = if index.contains('$') {
-                    expand_string(index, state)
-                } else {
-                    index.to_string()
-                };
-                if let Some(val) = state.get_array_element(base, &expanded_index) {
-                    out.push_str(&val);
-                }
-                return true;
-            }
+    // ${!arr[@]} or ${!arr[*]} -- array keys
+    if let Some(rest) = name.strip_prefix('!') {
+        if let Some(base) = strip_array_glob_suffix(rest) {
+            out.push_str(&state.get_array_keys(base).join(" "));
+            return true;
         }
     }
     false
+}
+
+/// Handle `${arr[@]}` or `${arr[*]}` -- all array values.
+fn try_expand_array_all_values(name: &str, state: &mut ShellState, out: &mut String) -> bool {
+    let Some(base) = strip_array_glob_suffix(name) else {
+        return false;
+    };
+    let values = state.get_array_values(base);
+    let joined: Vec<&str> = values.iter().map(SmolStr::as_str).collect();
+    out.push_str(&joined.join(" "));
+    true
+}
+
+/// Handle `${arr[N]}` -- single element access.
+fn try_expand_array_single_element(name: &str, state: &mut ShellState, out: &mut String) -> bool {
+    let Some(bracket_pos) = name.find('[') else {
+        return false;
+    };
+    let Some(end) = name[bracket_pos..].find(']') else {
+        return false;
+    };
+    let base = &name[..bracket_pos];
+    let index = &name[bracket_pos + 1..bracket_pos + end];
+    if base.is_empty() || index.is_empty() {
+        return false;
+    }
+    let expanded_index = if index.contains('$') {
+        expand_string(index, state)
+    } else {
+        index.to_string()
+    };
+    if let Some(val) = state.get_array_element(base, &expanded_index) {
+        out.push_str(&val);
+    }
+    true
 }
 
 /// Try to expand ${#var} (string length). Returns true if handled.
@@ -417,6 +433,37 @@ fn expand_operand(operand: &str, state: &mut ShellState) -> String {
     expand_operand_inner(operand, state, 0)
 }
 
+/// Scan a `${...}` braced parameter reference starting at `pos` (which should point
+/// just past the `{`). Returns `(content_end, new_pos)` where `new_pos` is past the
+/// closing `}`.
+fn scan_braced_param(bytes: &[u8], mut pos: usize) -> (usize, usize) {
+    let mut brace_depth: u32 = 1;
+    while pos < bytes.len() && brace_depth > 0 {
+        if bytes[pos] == b'{' {
+            brace_depth += 1;
+        }
+        if bytes[pos] == b'}' {
+            brace_depth -= 1;
+        }
+        if brace_depth > 0 {
+            pos += 1;
+        }
+    }
+    let end = pos;
+    if pos < bytes.len() {
+        pos += 1; // skip closing }
+    }
+    (end, pos)
+}
+
+/// Scan a bare `$name` (alphanumeric + underscore) starting at `pos`. Returns `(end, new_pos)`.
+fn scan_bare_var(bytes: &[u8], mut pos: usize) -> usize {
+    while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
+        pos += 1;
+    }
+    pos
+}
+
 /// Inner implementation with depth tracking.
 fn expand_operand_inner(operand: &str, state: &mut ShellState, depth: usize) -> String {
     if depth > MAX_EXPAND_DEPTH || !operand.contains('$') {
@@ -426,66 +473,46 @@ fn expand_operand_inner(operand: &str, state: &mut ShellState, depth: usize) -> 
     let bytes = operand.as_bytes();
     let mut pos = 0;
     while pos < bytes.len() {
-        if bytes[pos] == b'$' {
-            pos += 1;
-            if pos < bytes.len() && bytes[pos] == b'{' {
-                pos += 1; // skip {
-                let start = pos;
-                let mut brace_depth: u32 = 1;
-                while pos < bytes.len() && brace_depth > 0 {
-                    if bytes[pos] == b'{' {
-                        brace_depth += 1;
-                    }
-                    if bytes[pos] == b'}' {
-                        brace_depth -= 1;
-                    }
-                    if brace_depth > 0 {
-                        pos += 1;
-                    }
-                }
-                let inner = &operand[start..pos];
-                if pos < bytes.len() {
-                    pos += 1;
-                } // skip }
-                  // Recursively expand as a Parameter
-                expand_part_depth(
-                    &WordPart::Parameter(SmolStr::from(inner)),
-                    state,
-                    &mut out,
-                    depth + 1,
-                );
-            } else if pos < bytes.len() && (bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_')
-            {
-                let start = pos;
-                while pos < bytes.len()
-                    && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_')
-                {
-                    pos += 1;
-                }
-                let name = &operand[start..pos];
-                if let Some(val) = state.get_var(name) {
-                    out.push_str(&val);
-                }
-            } else {
-                out.push('$');
-            }
-        } else {
+        if bytes[pos] != b'$' {
             out.push(bytes[pos] as char);
             pos += 1;
+            continue;
+        }
+        pos += 1; // skip $
+        if pos < bytes.len() && bytes[pos] == b'{' {
+            pos += 1; // skip {
+            let (end, new_pos) = scan_braced_param(bytes, pos);
+            let inner = &operand[pos..end];
+            pos = new_pos;
+            expand_part_depth(
+                &WordPart::Parameter(SmolStr::from(inner)),
+                state,
+                &mut out,
+                depth + 1,
+            );
+        } else if pos < bytes.len() && (bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_') {
+            let start = pos;
+            pos = scan_bare_var(bytes, pos);
+            if let Some(val) = state.get_var(&operand[start..pos]) {
+                out.push_str(&val);
+            }
+        } else {
+            out.push('$');
         }
     }
     out
 }
 
-fn expand_param_op_depth(
+/// Handle default/assign/error/alternative operators (`:−`, `-`, `:=`, `=`, `:?`, `:+`, `+`).
+fn expand_param_default_op(
     var_name: &str,
     operator: &str,
     operand: &str,
+    val: Option<SmolStr>,
     state: &mut ShellState,
     out: &mut String,
     depth: usize,
 ) {
-    let val = state.get_var(var_name);
     match operator {
         ":-" => match val {
             Some(v) if !v.is_empty() => out.push_str(&v),
@@ -512,81 +539,72 @@ fn expand_param_op_depth(
                 out.push_str(&expanded);
             }
         }
-        ":?" => {
-            // Error if unset or empty
-            match val {
-                Some(v) if !v.is_empty() => out.push_str(&v),
-                _ => {
-                    // In a real shell this would abort. We just output the error message.
-                    let msg = if operand.is_empty() {
-                        format!("{var_name}: parameter null or not set")
-                    } else {
-                        format!("{var_name}: {operand}")
-                    };
-                    out.push_str(&msg);
-                }
+        ":?" => match val {
+            Some(v) if !v.is_empty() => out.push_str(&v),
+            _ => {
+                let msg = if operand.is_empty() {
+                    format!("{var_name}: parameter null or not set")
+                } else {
+                    format!("{var_name}: {operand}")
+                };
+                out.push_str(&msg);
             }
-        }
+        },
         ":+" => {
-            // Use alternative if set and non-empty
             if let Some(v) = val {
                 if !v.is_empty() {
                     out.push_str(operand);
                 }
             }
         }
-        "+" => {
-            // Use alternative if set
+        // "+"
+        _ => {
             if val.is_some() {
                 out.push_str(operand);
             }
         }
-        "#" => {
-            // ${var#pattern} — remove shortest prefix match
-            if let Some(val) = val {
-                let pat = expand_operand_inner(operand, state, depth + 1);
-                if let Some(rest) = strip_prefix_glob(&val, &pat, false) {
-                    out.push_str(rest);
-                } else {
-                    out.push_str(&val);
-                }
-            }
+    }
+}
+
+/// Handle prefix/suffix stripping operators (`#`, `##`, `%`, `%%`).
+fn expand_param_strip_op(
+    operator: &str,
+    operand: &str,
+    val: &SmolStr,
+    state: &mut ShellState,
+    out: &mut String,
+    depth: usize,
+) {
+    let pat = expand_operand_inner(operand, state, depth + 1);
+    let stripped = match operator {
+        "#" => strip_prefix_glob(val, &pat, false),
+        "##" => strip_prefix_glob(val, &pat, true),
+        "%" => strip_suffix_glob(val, &pat, false),
+        // "%%"
+        _ => strip_suffix_glob(val, &pat, true),
+    };
+    out.push_str(stripped.unwrap_or(val));
+}
+
+fn expand_param_op_depth(
+    var_name: &str,
+    operator: &str,
+    operand: &str,
+    state: &mut ShellState,
+    out: &mut String,
+    depth: usize,
+) {
+    let val = state.get_var(var_name);
+    match operator {
+        ":-" | "-" | ":=" | "=" | ":?" | ":+" | "+" => {
+            expand_param_default_op(var_name, operator, operand, val, state, out, depth);
         }
-        "##" => {
-            // ${var##pattern} — remove longest prefix match
+        "#" | "##" | "%" | "%%" => {
             if let Some(val) = val {
-                let pat = expand_operand_inner(operand, state, depth + 1);
-                if let Some(rest) = strip_prefix_glob(&val, &pat, true) {
-                    out.push_str(rest);
-                } else {
-                    out.push_str(&val);
-                }
-            }
-        }
-        "%" => {
-            // ${var%pattern} — remove shortest suffix match
-            if let Some(val) = val {
-                let pat = expand_operand_inner(operand, state, depth + 1);
-                if let Some(rest) = strip_suffix_glob(&val, &pat, false) {
-                    out.push_str(rest);
-                } else {
-                    out.push_str(&val);
-                }
-            }
-        }
-        "%%" => {
-            // ${var%%pattern} — remove longest suffix match
-            if let Some(val) = val {
-                let pat = expand_operand_inner(operand, state, depth + 1);
-                if let Some(rest) = strip_suffix_glob(&val, &pat, true) {
-                    out.push_str(rest);
-                } else {
-                    out.push_str(&val);
-                }
+                expand_param_strip_op(operator, operand, &val, state, out, depth);
             }
         }
         _ => {
-            // Unsupported operator — just output the raw value
             if let Some(v) = val {
                 out.push_str(&v);
             }
@@ -723,10 +741,35 @@ fn glob_match_at_end(text: &str, pattern: &str) -> Option<usize> {
 
 /// Try to parse and apply case modification. Returns `Some(result)` if the name
 /// contains a case modifier, `None` otherwise.
+/// Transform the first character of a string using the given function, leaving the rest.
+fn transform_first_char(s: &str, f: fn(char) -> String) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => {
+            let mut result = f(c);
+            result.extend(chars);
+            result
+        }
+        None => String::new(),
+    }
+}
+
+/// Parse a case modifier from the rest-of-name after the variable identifier.
+fn parse_case_modifier(rest: &str) -> Option<&str> {
+    if rest.starts_with("^^") {
+        Some("^^")
+    } else if rest.starts_with('^') {
+        Some("^")
+    } else if rest.starts_with(",,") {
+        Some(",,")
+    } else if rest.starts_with(',') {
+        Some(",")
+    } else {
+        None
+    }
+}
+
 fn try_case_modification(name: &str, state: &ShellState) -> Option<String> {
-    // Look for ^, ^^, ,, or , suffix on a variable name.
-    // We need to find where the variable name ends and the modifier begins.
-    // Variable names consist of alphanumeric chars and underscores.
     let bytes = name.as_bytes();
     let mut var_end = 0;
     while var_end < bytes.len()
@@ -739,51 +782,13 @@ fn try_case_modification(name: &str, state: &ShellState) -> Option<String> {
     }
 
     let var_name = &name[..var_end];
-    let rest = &name[var_end..];
-
-    let modifier = if rest.starts_with("^^") {
-        "^^"
-    } else if rest.starts_with('^') {
-        "^"
-    } else if rest.starts_with(",,") {
-        ",,"
-    } else if rest.starts_with(',') {
-        ","
-    } else {
-        return None;
-    };
-
-    // Pattern after modifier (optional, currently unused — default is `?` i.e. any char)
-    // Bash supports ${var^^pattern} but most common usage has no pattern.
-
+    let modifier = parse_case_modifier(&name[var_end..])?;
     let val = state.get_var(var_name)?;
 
     let result = match modifier {
-        "^" => {
-            // Uppercase first character
-            let mut chars = val.chars();
-            match chars.next() {
-                Some(c) => {
-                    let mut s = c.to_uppercase().to_string();
-                    s.extend(chars);
-                    s
-                }
-                None => String::new(),
-            }
-        }
+        "^" => transform_first_char(&val, |c| c.to_uppercase().to_string()),
         "^^" => val.to_uppercase(),
-        "," => {
-            // Lowercase first character
-            let mut chars = val.chars();
-            match chars.next() {
-                Some(c) => {
-                    let mut s = c.to_lowercase().to_string();
-                    s.extend(chars);
-                    s
-                }
-                None => String::new(),
-            }
-        }
+        "," => transform_first_char(&val, |c| c.to_lowercase().to_string()),
         ",," => val.to_lowercase(),
         _ => return None,
     };
@@ -839,18 +844,7 @@ fn try_transform_operator(name: &str, state: &ShellState) -> Option<String> {
         }
         b'U' => val.to_uppercase(),
         b'L' => val.to_lowercase(),
-        b'u' => {
-            // Uppercase first character only
-            let mut chars = val.chars();
-            match chars.next() {
-                Some(c) => {
-                    let mut s = c.to_uppercase().to_string();
-                    s.extend(chars);
-                    s
-                }
-                None => String::new(),
-            }
-        }
+        b'u' => transform_first_char(&val, |c| c.to_uppercase().to_string()),
         b'a' => {
             // Attribute flags — for now return empty (attributes not tracked in expand)
             String::new()
@@ -865,67 +859,85 @@ fn try_transform_operator(name: &str, state: &ShellState) -> Option<String> {
     Some(result)
 }
 
+/// Map a single-character escape code to its replacement character.
+fn simple_escape_char(b: u8) -> Option<char> {
+    match b {
+        b'n' => Some('\n'),
+        b't' => Some('\t'),
+        b'r' => Some('\r'),
+        b'a' => Some('\x07'),
+        b'b' => Some('\x08'),
+        b'e' | b'E' => Some('\x1b'),
+        b'f' => Some('\x0c'),
+        b'v' => Some('\x0b'),
+        b'\\' => Some('\\'),
+        b'\'' => Some('\''),
+        b'"' => Some('"'),
+        _ => None,
+    }
+}
+
+/// Parse an octal escape `\0NNN` starting at `i` (pointing at the `0`). Returns
+/// `(char, new_position)`.
+fn parse_octal_escape(s: &str, bytes: &[u8], i: usize) -> (char, usize) {
+    let start = i + 1;
+    let mut end = start;
+    while end < bytes.len() && end - start < 3 && bytes[end] >= b'0' && bytes[end] <= b'7' {
+        end += 1;
+    }
+    if end > start {
+        let val = u8::from_str_radix(&s[start..end], 8).unwrap_or(0);
+        (val as char, end)
+    } else {
+        ('\0', i + 1)
+    }
+}
+
+/// Parse a hex escape `\xNN` starting at `i` (pointing at the `x`). Returns
+/// `(replacement_string, new_position)`. Returns `"\\x"` when no hex digits follow.
+fn parse_hex_escape(s: &str, bytes: &[u8], i: usize) -> (char, usize, bool) {
+    let start = i + 1;
+    let mut end = start;
+    while end < bytes.len() && end - start < 2 && bytes[end].is_ascii_hexdigit() {
+        end += 1;
+    }
+    if end > start {
+        let val = u8::from_str_radix(&s[start..end], 16).unwrap_or(0);
+        (val as char, end, true)
+    } else {
+        ('\0', i + 1, false)
+    }
+}
+
 /// Expand backslash escape sequences in a string (for ${var@E}).
 fn expand_backslash_escapes(s: &str) -> String {
     let mut out = String::new();
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+        if bytes[i] != b'\\' || i + 1 >= bytes.len() {
+            out.push(bytes[i] as char);
             i += 1;
-            match bytes[i] {
-                b'n' => out.push('\n'),
-                b't' => out.push('\t'),
-                b'r' => out.push('\r'),
-                b'a' => out.push('\x07'),
-                b'b' => out.push('\x08'),
-                b'e' | b'E' => out.push('\x1b'),
-                b'f' => out.push('\x0c'),
-                b'v' => out.push('\x0b'),
-                b'\\' => out.push('\\'),
-                b'\'' => out.push('\''),
-                b'"' => out.push('"'),
-                b'0' => {
-                    // Octal: \0NNN (up to 3 octal digits)
-                    let start = i + 1;
-                    let mut end = start;
-                    while end < bytes.len()
-                        && end - start < 3
-                        && bytes[end] >= b'0'
-                        && bytes[end] <= b'7'
-                    {
-                        end += 1;
-                    }
-                    if end > start {
-                        let val = u8::from_str_radix(&s[start..end], 8).unwrap_or(0);
-                        out.push(val as char);
-                        i = end - 1; // will be incremented below
-                    } else {
-                        out.push('\0');
-                    }
-                }
-                b'x' => {
-                    // Hex: \xNN (up to 2 hex digits)
-                    let start = i + 1;
-                    let mut end = start;
-                    while end < bytes.len() && end - start < 2 && bytes[end].is_ascii_hexdigit() {
-                        end += 1;
-                    }
-                    if end > start {
-                        let val = u8::from_str_radix(&s[start..end], 16).unwrap_or(0);
-                        out.push(val as char);
-                        i = end - 1;
-                    } else {
-                        out.push_str("\\x");
-                    }
-                }
-                other => {
-                    out.push('\\');
-                    out.push(other as char);
-                }
+            continue;
+        }
+        i += 1;
+        if let Some(ch) = simple_escape_char(bytes[i]) {
+            out.push(ch);
+            i += 1;
+        } else if bytes[i] == b'0' {
+            let (ch, new_pos) = parse_octal_escape(s, bytes, i);
+            out.push(ch);
+            i = new_pos;
+        } else if bytes[i] == b'x' {
+            let (ch, new_pos, ok) = parse_hex_escape(s, bytes, i);
+            if ok {
+                out.push(ch);
+            } else {
+                out.push_str("\\x");
             }
-            i += 1;
+            i = new_pos;
         } else {
+            out.push('\\');
             out.push(bytes[i] as char);
             i += 1;
         }
@@ -1154,8 +1166,8 @@ fn arith_push_op2(
     }
 }
 
-/// Tokenize an operator (single or multi-character).
-fn arith_tokenize_operator(bytes: &[u8], pos: &mut usize, tokens: &mut Vec<ArithToken>) {
+/// Tokenize a `+`, `-`, or `*` operator (which each have three possible forms).
+fn arith_tokenize_plus_minus_star(bytes: &[u8], pos: &mut usize, tokens: &mut Vec<ArithToken>) {
     let b = bytes[*pos];
     let remaining = bytes.len() - *pos;
     let next = if remaining > 1 {
@@ -1193,7 +1205,8 @@ fn arith_tokenize_operator(bytes: &[u8], pos: &mut usize, tokens: &mut Vec<Arith
                 *pos += 1;
             }
         },
-        b'*' => {
+        // b'*'
+        _ => {
             if remaining > 1 && bytes[*pos + 1] == b'*' {
                 tokens.push(ArithToken::StarStar);
                 *pos += 2;
@@ -1205,6 +1218,110 @@ fn arith_tokenize_operator(bytes: &[u8], pos: &mut usize, tokens: &mut Vec<Arith
                 *pos += 1;
             }
         }
+    }
+}
+
+/// Tokenize `<` or `>` operators (which each have up to four forms including shift-assign).
+fn arith_tokenize_angle(bytes: &[u8], pos: &mut usize, tokens: &mut Vec<ArithToken>) {
+    let b = bytes[*pos];
+    let remaining = bytes.len() - *pos;
+    let next = if remaining > 1 {
+        Some(bytes[*pos + 1])
+    } else {
+        None
+    };
+    let third = if remaining > 2 {
+        Some(bytes[*pos + 2])
+    } else {
+        None
+    };
+
+    if b == b'<' {
+        if next == Some(b'<') && third == Some(b'=') {
+            tokens.push(ArithToken::LShiftEq);
+            *pos += 3;
+        } else if next == Some(b'<') {
+            tokens.push(ArithToken::LShift);
+            *pos += 2;
+        } else if next == Some(b'=') {
+            tokens.push(ArithToken::Le);
+            *pos += 2;
+        } else {
+            tokens.push(ArithToken::Lt);
+            *pos += 1;
+        }
+    } else {
+        // b'>'
+        if next == Some(b'>') && third == Some(b'=') {
+            tokens.push(ArithToken::RShiftEq);
+            *pos += 3;
+        } else if next == Some(b'>') {
+            tokens.push(ArithToken::RShift);
+            *pos += 2;
+        } else if next == Some(b'=') {
+            tokens.push(ArithToken::Ge);
+            *pos += 2;
+        } else {
+            tokens.push(ArithToken::Gt);
+            *pos += 1;
+        }
+    }
+}
+
+/// Tokenize `&` or `|` operators (which each have three forms).
+fn arith_tokenize_amp_pipe(bytes: &[u8], pos: &mut usize, tokens: &mut Vec<ArithToken>) {
+    let b = bytes[*pos];
+    let remaining = bytes.len() - *pos;
+    let next = if remaining > 1 {
+        Some(bytes[*pos + 1])
+    } else {
+        None
+    };
+
+    if b == b'&' {
+        match next {
+            Some(b'&') => {
+                tokens.push(ArithToken::AmpAmp);
+                *pos += 2;
+            }
+            Some(b'=') => {
+                tokens.push(ArithToken::AmpEq);
+                *pos += 2;
+            }
+            _ => {
+                tokens.push(ArithToken::Amp);
+                *pos += 1;
+            }
+        }
+    } else {
+        // b'|'
+        match next {
+            Some(b'|') => {
+                tokens.push(ArithToken::PipePipe);
+                *pos += 2;
+            }
+            Some(b'=') => {
+                tokens.push(ArithToken::PipeEq);
+                *pos += 2;
+            }
+            _ => {
+                tokens.push(ArithToken::Pipe);
+                *pos += 1;
+            }
+        }
+    }
+}
+
+/// Tokenize a single-character punctuation token.
+fn arith_tokenize_single(pos: &mut usize, tok: ArithToken, tokens: &mut Vec<ArithToken>) {
+    tokens.push(tok);
+    *pos += 1;
+}
+
+/// Tokenize an operator (single or multi-character).
+fn arith_tokenize_operator(bytes: &[u8], pos: &mut usize, tokens: &mut Vec<ArithToken>) {
+    match bytes[*pos] {
+        b'+' | b'-' | b'*' => arith_tokenize_plus_minus_star(bytes, pos, tokens),
         b'/' => arith_push_op2(
             bytes,
             pos,
@@ -1221,66 +1338,10 @@ fn arith_tokenize_operator(bytes: &[u8], pos: &mut usize, tokens: &mut Vec<Arith
             ArithToken::Percent,
             tokens,
         ),
-        b'<' => {
-            if remaining > 2 && bytes[*pos + 1] == b'<' && bytes[*pos + 2] == b'=' {
-                tokens.push(ArithToken::LShiftEq);
-                *pos += 3;
-            } else if next == Some(b'<') {
-                tokens.push(ArithToken::LShift);
-                *pos += 2;
-            } else if next == Some(b'=') {
-                tokens.push(ArithToken::Le);
-                *pos += 2;
-            } else {
-                tokens.push(ArithToken::Lt);
-                *pos += 1;
-            }
-        }
-        b'>' => {
-            if remaining > 2 && bytes[*pos + 1] == b'>' && bytes[*pos + 2] == b'=' {
-                tokens.push(ArithToken::RShiftEq);
-                *pos += 3;
-            } else if next == Some(b'>') {
-                tokens.push(ArithToken::RShift);
-                *pos += 2;
-            } else if next == Some(b'=') {
-                tokens.push(ArithToken::Ge);
-                *pos += 2;
-            } else {
-                tokens.push(ArithToken::Gt);
-                *pos += 1;
-            }
-        }
+        b'<' | b'>' => arith_tokenize_angle(bytes, pos, tokens),
         b'=' => arith_push_op2(bytes, pos, b'=', ArithToken::EqEq, ArithToken::Eq, tokens),
         b'!' => arith_push_op2(bytes, pos, b'=', ArithToken::Ne, ArithToken::Bang, tokens),
-        b'&' => match next {
-            Some(b'&') => {
-                tokens.push(ArithToken::AmpAmp);
-                *pos += 2;
-            }
-            Some(b'=') => {
-                tokens.push(ArithToken::AmpEq);
-                *pos += 2;
-            }
-            _ => {
-                tokens.push(ArithToken::Amp);
-                *pos += 1;
-            }
-        },
-        b'|' => match next {
-            Some(b'|') => {
-                tokens.push(ArithToken::PipePipe);
-                *pos += 2;
-            }
-            Some(b'=') => {
-                tokens.push(ArithToken::PipeEq);
-                *pos += 2;
-            }
-            _ => {
-                tokens.push(ArithToken::Pipe);
-                *pos += 1;
-            }
-        },
+        b'&' | b'|' => arith_tokenize_amp_pipe(bytes, pos, tokens),
         b'^' => arith_push_op2(
             bytes,
             pos,
@@ -1289,30 +1350,12 @@ fn arith_tokenize_operator(bytes: &[u8], pos: &mut usize, tokens: &mut Vec<Arith
             ArithToken::Caret,
             tokens,
         ),
-        b'~' => {
-            tokens.push(ArithToken::Tilde);
-            *pos += 1;
-        }
-        b'?' => {
-            tokens.push(ArithToken::Question);
-            *pos += 1;
-        }
-        b':' => {
-            tokens.push(ArithToken::Colon);
-            *pos += 1;
-        }
-        b',' => {
-            tokens.push(ArithToken::Comma);
-            *pos += 1;
-        }
-        b'(' => {
-            tokens.push(ArithToken::LParen);
-            *pos += 1;
-        }
-        b')' => {
-            tokens.push(ArithToken::RParen);
-            *pos += 1;
-        }
+        b'~' => arith_tokenize_single(pos, ArithToken::Tilde, tokens),
+        b'?' => arith_tokenize_single(pos, ArithToken::Question, tokens),
+        b':' => arith_tokenize_single(pos, ArithToken::Colon, tokens),
+        b',' => arith_tokenize_single(pos, ArithToken::Comma, tokens),
+        b'(' => arith_tokenize_single(pos, ArithToken::LParen, tokens),
+        b')' => arith_tokenize_single(pos, ArithToken::RParen, tokens),
         _ => {
             *pos += 1;
         } // Skip $ and unknown characters
@@ -1377,89 +1420,86 @@ impl<'a> ArithParser<'a> {
 
     // Assignment: right-associative
     fn parse_assign(&mut self) -> i64 {
-        // We need to check if the current token is an identifier followed by an
-        // assignment operator. Save position so we can backtrack.
+        // Check if the current token is an identifier followed by an assignment operator.
+        // Save position so we can backtrack.
         let save = self.pos;
 
         if let Some(ArithToken::Ident(name)) = self.peek().cloned() {
             self.pos += 1;
-            if let Some(op) = self.peek().cloned() {
-                match op {
-                    ArithToken::Eq => {
-                        self.pos += 1;
-                        let rhs = self.parse_assign();
-                        return self.var_set(&name, rhs);
-                    }
-                    ArithToken::PlusEq => {
-                        self.pos += 1;
-                        let rhs = self.parse_assign();
-                        let cur = self.var_get(&name);
-                        return self.var_set(&name, cur.wrapping_add(rhs));
-                    }
-                    ArithToken::MinusEq => {
-                        self.pos += 1;
-                        let rhs = self.parse_assign();
-                        let cur = self.var_get(&name);
-                        return self.var_set(&name, cur.wrapping_sub(rhs));
-                    }
-                    ArithToken::StarEq => {
-                        self.pos += 1;
-                        let rhs = self.parse_assign();
-                        let cur = self.var_get(&name);
-                        return self.var_set(&name, cur.wrapping_mul(rhs));
-                    }
-                    ArithToken::SlashEq => {
-                        self.pos += 1;
-                        let rhs = self.parse_assign();
-                        let cur = self.var_get(&name);
-                        let result = if rhs == 0 { 0 } else { cur.wrapping_div(rhs) };
-                        return self.var_set(&name, result);
-                    }
-                    ArithToken::PercentEq => {
-                        self.pos += 1;
-                        let rhs = self.parse_assign();
-                        let cur = self.var_get(&name);
-                        let result = if rhs == 0 { 0 } else { cur.wrapping_rem(rhs) };
-                        return self.var_set(&name, result);
-                    }
-                    ArithToken::LShiftEq => {
-                        self.pos += 1;
-                        let rhs = self.parse_assign();
-                        let cur = self.var_get(&name);
-                        return self.var_set(&name, cur.wrapping_shl(rhs as u32));
-                    }
-                    ArithToken::RShiftEq => {
-                        self.pos += 1;
-                        let rhs = self.parse_assign();
-                        let cur = self.var_get(&name);
-                        return self.var_set(&name, cur.wrapping_shr(rhs as u32));
-                    }
-                    ArithToken::AmpEq => {
-                        self.pos += 1;
-                        let rhs = self.parse_assign();
-                        let cur = self.var_get(&name);
-                        return self.var_set(&name, cur & rhs);
-                    }
-                    ArithToken::CaretEq => {
-                        self.pos += 1;
-                        let rhs = self.parse_assign();
-                        let cur = self.var_get(&name);
-                        return self.var_set(&name, cur ^ rhs);
-                    }
-                    ArithToken::PipeEq => {
-                        self.pos += 1;
-                        let rhs = self.parse_assign();
-                        let cur = self.var_get(&name);
-                        return self.var_set(&name, cur | rhs);
-                    }
-                    _ => {}
-                }
+            if let Some(result) = self.try_compound_assign(&name) {
+                return result;
             }
-            // Not an assignment — backtrack
+            // Not an assignment -- backtrack
             self.pos = save;
         }
 
         self.parse_ternary()
+    }
+
+    /// Try to parse a compound assignment operator after an identifier.
+    /// Returns `Some(result)` if an assignment operator was found, `None` otherwise.
+    fn try_compound_assign(&mut self, name: &str) -> Option<i64> {
+        let op = self.peek().cloned()?;
+        if !Self::is_assign_op(&op) {
+            return None;
+        }
+        self.pos += 1;
+        let rhs = self.parse_assign();
+
+        let result = if matches!(op, ArithToken::Eq) {
+            rhs
+        } else {
+            let cur = self.var_get(name);
+            Self::apply_compound_op(&op, cur, rhs)
+        };
+        Some(self.var_set(name, result))
+    }
+
+    /// Check whether a token is an assignment operator.
+    fn is_assign_op(tok: &ArithToken) -> bool {
+        matches!(
+            tok,
+            ArithToken::Eq
+                | ArithToken::PlusEq
+                | ArithToken::MinusEq
+                | ArithToken::StarEq
+                | ArithToken::SlashEq
+                | ArithToken::PercentEq
+                | ArithToken::LShiftEq
+                | ArithToken::RShiftEq
+                | ArithToken::AmpEq
+                | ArithToken::CaretEq
+                | ArithToken::PipeEq
+        )
+    }
+
+    /// Apply a compound assignment operation to `cur` and `rhs`.
+    fn apply_compound_op(op: &ArithToken, cur: i64, rhs: i64) -> i64 {
+        match op {
+            ArithToken::PlusEq => cur.wrapping_add(rhs),
+            ArithToken::MinusEq => cur.wrapping_sub(rhs),
+            ArithToken::StarEq => cur.wrapping_mul(rhs),
+            ArithToken::SlashEq => {
+                if rhs == 0 {
+                    0
+                } else {
+                    cur.wrapping_div(rhs)
+                }
+            }
+            ArithToken::PercentEq => {
+                if rhs == 0 {
+                    0
+                } else {
+                    cur.wrapping_rem(rhs)
+                }
+            }
+            ArithToken::LShiftEq => cur.wrapping_shl(rhs as u32),
+            ArithToken::RShiftEq => cur.wrapping_shr(rhs as u32),
+            ArithToken::AmpEq => cur & rhs,
+            ArithToken::CaretEq => cur ^ rhs,
+            ArithToken::PipeEq => cur | rhs,
+            _ => rhs,
+        }
     }
 
     // Ternary: expr ? expr : expr (right-associative)
@@ -1640,13 +1680,11 @@ impl<'a> ArithParser<'a> {
         match self.peek().cloned() {
             Some(ArithToken::Bang) => {
                 self.pos += 1;
-                let val = self.parse_unary();
-                i64::from(val == 0)
+                i64::from(self.parse_unary() == 0)
             }
             Some(ArithToken::Tilde) => {
                 self.pos += 1;
-                let val = self.parse_unary();
-                !val
+                !self.parse_unary()
             }
             Some(ArithToken::Plus) => {
                 self.pos += 1;
@@ -1654,32 +1692,23 @@ impl<'a> ArithParser<'a> {
             }
             Some(ArithToken::Minus) => {
                 self.pos += 1;
-                let val = self.parse_unary();
-                val.wrapping_neg()
+                self.parse_unary().wrapping_neg()
             }
-            Some(ArithToken::PlusPlus) => {
-                // Pre-increment: ++var
-                self.pos += 1;
-                if let Some(ArithToken::Ident(name)) = self.peek().cloned() {
-                    self.pos += 1;
-                    let cur = self.var_get(&name);
-                    self.var_set(&name, cur.wrapping_add(1))
-                } else {
-                    0
-                }
-            }
-            Some(ArithToken::MinusMinus) => {
-                // Pre-decrement: --var
-                self.pos += 1;
-                if let Some(ArithToken::Ident(name)) = self.peek().cloned() {
-                    self.pos += 1;
-                    let cur = self.var_get(&name);
-                    self.var_set(&name, cur.wrapping_sub(1))
-                } else {
-                    0
-                }
-            }
+            Some(ArithToken::PlusPlus) => self.parse_pre_incdec(1),
+            Some(ArithToken::MinusMinus) => self.parse_pre_incdec(-1),
             _ => self.parse_postfix(),
+        }
+    }
+
+    /// Parse a pre-increment (`++var`) or pre-decrement (`--var`) expression.
+    fn parse_pre_incdec(&mut self, delta: i64) -> i64 {
+        self.pos += 1; // skip ++ or --
+        if let Some(ArithToken::Ident(name)) = self.peek().cloned() {
+            self.pos += 1;
+            let cur = self.var_get(&name);
+            self.var_set(&name, cur.wrapping_add(delta))
+        } else {
+            0
         }
     }
 
@@ -1775,12 +1804,9 @@ pub fn expand_braces(word: &str) -> Vec<String> {
     let mut depth: u32 = 0;
 
     for (i, &b) in bytes.iter().enumerate() {
-        // Skip escaped characters
         if i > 0 && bytes[i - 1] == b'\\' {
             continue;
         }
-        // Skip characters inside single or double quotes
-        // (simple approach: if we find a quote char, skip to its pair)
         match b {
             b'{' => {
                 if depth == 0 {
@@ -1788,49 +1814,13 @@ pub fn expand_braces(word: &str) -> Vec<String> {
                 }
                 depth += 1;
             }
-            b'}' => {
-                if depth > 0 {
-                    depth -= 1;
-                    if depth == 0 {
-                        if let Some(start) = brace_start {
-                            let prefix = &word[..start];
-                            let inner = &word[start + 1..i];
-                            let suffix = &word[i + 1..];
-
-                            // Try range pattern: {N..M}
-                            if let Some(expansions) = try_brace_range(inner) {
-                                let mut result = Vec::new();
-                                for item in &expansions {
-                                    if result.len() >= MAX_BRACE_ITEMS {
-                                        break;
-                                    }
-                                    // Recursively expand suffix
-                                    let combined = format!("{prefix}{item}{suffix}");
-                                    result.extend(expand_braces(&combined));
-                                }
-                                result.truncate(MAX_BRACE_ITEMS);
-                                return result;
-                            }
-
-                            // Try comma list: {a,b,c}
-                            if let Some(items) = split_brace_items(inner) {
-                                if items.len() > 1 {
-                                    let mut result = Vec::new();
-                                    for item in &items {
-                                        if result.len() >= MAX_BRACE_ITEMS {
-                                            break;
-                                        }
-                                        let combined = format!("{prefix}{item}{suffix}");
-                                        result.extend(expand_braces(&combined));
-                                    }
-                                    result.truncate(MAX_BRACE_ITEMS);
-                                    return result;
-                                }
-                            }
-                        }
-                        // Not a valid brace expansion — reset and keep scanning
-                        brace_start = None;
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(result) = try_expand_brace_pair(word, brace_start.unwrap_or(0), i) {
+                        return result;
                     }
+                    brace_start = None;
                 }
             }
             _ => {}
@@ -1843,65 +1833,100 @@ pub fn expand_braces(word: &str) -> Vec<String> {
 /// Maximum number of items a single brace expansion can produce.
 const MAX_BRACE_ITEMS: usize = 10_000;
 
+/// Try to expand a matched brace pair at `(start, end)` within `word`.
+/// Returns `Some(results)` if the brace content was a valid range or comma list.
+fn try_expand_brace_pair(word: &str, start: usize, end: usize) -> Option<Vec<String>> {
+    let prefix = &word[..start];
+    let inner = &word[start + 1..end];
+    let suffix = &word[end + 1..];
+
+    // Try range pattern first, then comma list
+    if let Some(expansions) = try_brace_range(inner) {
+        return Some(brace_combine_and_recurse(prefix, &expansions, suffix));
+    }
+    if let Some(items) = split_brace_items(inner) {
+        if items.len() > 1 {
+            return Some(brace_combine_and_recurse(prefix, &items, suffix));
+        }
+    }
+    None
+}
+
+/// Combine prefix/suffix with each brace item and recursively expand.
+fn brace_combine_and_recurse(prefix: &str, items: &[String], suffix: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    for item in items {
+        if result.len() >= MAX_BRACE_ITEMS {
+            break;
+        }
+        let combined = format!("{prefix}{item}{suffix}");
+        result.extend(expand_braces(&combined));
+    }
+    result.truncate(MAX_BRACE_ITEMS);
+    result
+}
+
 /// Try to parse `inner` as a range pattern `N..M` or `N..M..S`.
 fn try_brace_range(inner: &str) -> Option<Vec<String>> {
     let parts: Vec<&str> = inner.splitn(3, "..").collect();
     if parts.len() < 2 {
         return None;
     }
-    // Integer ranges
     let start: i64 = parts[0].parse().ok()?;
     let end: i64 = parts[1].parse().ok()?;
-    let step: i64 = if parts.len() == 3 {
-        let s: i64 = parts[2].parse().ok()?;
-        if s == 0 {
-            return None;
-        }
-        s
-    } else if start <= end {
-        1
-    } else {
-        -1
-    };
+    let step: i64 = parse_brace_step(&parts, start, end)?;
 
-    // Detect zero-padding: if either endpoint has leading zeros
     let width = std::cmp::max(parts[0].len(), parts[1].len());
-    let needs_pad = parts[0].starts_with('0') && parts[0].len() > 1
-        || parts[1].starts_with('0') && parts[1].len() > 1;
+    let needs_pad = (parts[0].starts_with('0') && parts[0].len() > 1)
+        || (parts[1].starts_with('0') && parts[1].len() > 1);
 
-    let mut result = Vec::new();
-    let mut cur = start;
-    if step > 0 {
-        while cur <= end && result.len() < MAX_BRACE_ITEMS {
-            if needs_pad {
-                result.push(format!("{cur:0>width$}"));
-            } else {
-                result.push(cur.to_string());
-            }
-            cur = match cur.checked_add(step) {
-                Some(v) => v,
-                None => break,
-            };
-        }
-    } else {
-        while cur >= end && result.len() < MAX_BRACE_ITEMS {
-            if needs_pad {
-                result.push(format!("{cur:0>width$}"));
-            } else {
-                result.push(cur.to_string());
-            }
-            cur = match cur.checked_add(step) {
-                Some(v) => v,
-                None => break,
-            };
-        }
-    }
-
+    let result = generate_range(start, end, step, width, needs_pad);
     if result.is_empty() {
         None
     } else {
         Some(result)
     }
+}
+
+/// Parse the step value from brace range parts, defaulting to +1 or -1.
+fn parse_brace_step(parts: &[&str], start: i64, end: i64) -> Option<i64> {
+    if parts.len() == 3 {
+        let s: i64 = parts[2].parse().ok()?;
+        if s == 0 {
+            None
+        } else {
+            Some(s)
+        }
+    } else if start <= end {
+        Some(1)
+    } else {
+        Some(-1)
+    }
+}
+
+/// Generate the integer range items.
+fn generate_range(start: i64, end: i64, step: i64, width: usize, needs_pad: bool) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut cur = start;
+    let in_bounds = |c: i64| -> bool {
+        if step > 0 {
+            c <= end
+        } else {
+            c >= end
+        }
+    };
+    while in_bounds(cur) && result.len() < MAX_BRACE_ITEMS {
+        if needs_pad {
+            result.push(format!("{cur:0>width$}"));
+        } else {
+            result.push(cur.to_string());
+        }
+        cur = match cur.checked_add(step) {
+            Some(v) => v,
+            None => break,
+        };
+    }
+    result
 }
 
 /// Split brace content by top-level commas (respecting nested braces).
