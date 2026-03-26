@@ -66,14 +66,12 @@ jobs:
           -p wasmsh-browser
           -- -D warnings
 
-  # ── Tests (native, matrix) ─────────────────────────────────
+  # ── Tests (native) ──────────────────────────────────────────
+  # wasmsh targets wasm32-unknown-unknown — all code is OS-independent
+  # (no std::fs, no OS processes). Single-platform CI is sufficient.
   test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    name: test
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
