@@ -719,40 +719,44 @@ fn split_line_chunk(chunk: &[&str], ends_with_newline: bool) -> Vec<u8> {
 }
 
 pub(crate) fn util_split(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let split_args = match parse_split_args(ctx, argv) {
-        Ok(a) => a,
-        Err(status) => return status,
+    let Ok(split_args) = parse_split_args(ctx, argv) else {
+        return 1;
     };
     let args = &argv[split_args.file_args_start..];
-
-    let (input_data, prefix) = if !args.is_empty() && args[0] != "-" {
-        let data = match read_file_bytes(ctx, args[0], "split") {
-            Ok(d) => d,
-            Err(status) => return status,
-        };
-        let p = if args.len() > 1 { args[1] } else { "x" };
-        (data, p)
-    } else {
-        let data = if let Some(d) = ctx.stdin {
-            d.to_vec()
-        } else {
-            Vec::new()
-        };
-        let p = if args.len() > 1 { args[1] } else { "x" };
-        (data, p)
-    };
+    let (input_data, prefix) = split_read_input(ctx, args);
 
     if input_data.is_empty() {
         return 0;
     }
 
-    let pieces = match split_into_pieces(ctx, &input_data, &split_args) {
-        Ok(p) => p,
-        Err(status) => return status,
+    let Ok(pieces) = split_into_pieces(ctx, &input_data, &split_args) else {
+        return 1;
     };
 
+    split_write_pieces(ctx, &pieces, prefix, split_args.numeric_suffix)
+}
+
+fn split_read_input<'a>(ctx: &mut UtilContext<'_>, args: &[&'a str]) -> (Vec<u8>, &'a str) {
+    let prefix = if args.len() > 1 { args[1] } else { "x" };
+    if !args.is_empty() && args[0] != "-" {
+        match read_file_bytes(ctx, args[0], "split") {
+            Ok(d) => (d, prefix),
+            Err(_) => (Vec::new(), prefix),
+        }
+    } else {
+        let data = ctx.stdin.map(<[u8]>::to_vec).unwrap_or_default();
+        (data, prefix)
+    }
+}
+
+fn split_write_pieces(
+    ctx: &mut UtilContext<'_>,
+    pieces: &[Vec<u8>],
+    prefix: &str,
+    numeric: bool,
+) -> i32 {
     for (i, piece) in pieces.iter().enumerate() {
-        let suffix = if split_args.numeric_suffix {
+        let suffix = if numeric {
             format!("{i:02}")
         } else {
             suffix_alpha(i)
@@ -763,7 +767,6 @@ pub(crate) fn util_split(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             return 1;
         }
     }
-
     0
 }
 
