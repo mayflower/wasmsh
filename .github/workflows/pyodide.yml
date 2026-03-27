@@ -54,12 +54,15 @@ jobs:
         uses: extractions/setup-just@v2
 
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y wget ccache libtool libtool-bin autoconf automake
+        run: sudo apt-get update && sudo apt-get install -y wget ccache pkg-config
 
       - name: Build custom Pyodide (includes probe + runtime)
         run: just build-pyodide
         env:
           SED: sed
+          # Pyodide's libffi build calls autoreconf which needs libtool m4 macros.
+          # Pre-copy the system libtool.m4 into the libffi checkout during build.
+          PYODIDE_JOBS: "3"
 
       - name: Run Pyodide Node E2E
         run: just test-e2e-pyodide-node
