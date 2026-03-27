@@ -63,6 +63,7 @@ jobs:
           -p wasmsh-utils
           -p wasmsh-vm
           -p wasmsh-protocol
+          -p wasmsh-runtime
           -p wasmsh-browser
           -- -D warnings
 

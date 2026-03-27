@@ -91,6 +91,7 @@ impl ExecState {
 }
 
 /// Result from an external command handler.
+#[derive(Debug)]
 pub struct ExternalCommandResult {
     /// Data written to stdout.
     pub stdout: Vec<u8>,

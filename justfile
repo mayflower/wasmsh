@@ -35,7 +35,7 @@ clippy-wasm:
         -p wasmsh-ast -p wasmsh-lex -p wasmsh-parse -p wasmsh-expand \
         -p wasmsh-hir -p wasmsh-ir -p wasmsh-state -p wasmsh-fs \
         -p wasmsh-builtins -p wasmsh-utils -p wasmsh-vm \
-        -p wasmsh-protocol -p wasmsh-browser \
+        -p wasmsh-protocol -p wasmsh-runtime -p wasmsh-browser \
         -- -D warnings
 
 # ── Testing ──────────────────────────────────────────────────
