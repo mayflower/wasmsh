@@ -54,7 +54,7 @@ jobs:
         uses: extractions/setup-just@v2
 
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y build-essential wget ccache pkg-config xz-utils
+        run: sudo apt-get update && sudo apt-get install -y build-essential wget ccache pkg-config xz-utils autoconf automake libtool
 
       - name: Build custom Pyodide (includes probe + runtime)
         run: just build-pyodide

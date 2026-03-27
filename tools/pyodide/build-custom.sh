@@ -146,12 +146,14 @@ fi
 # Wrapper patches configure.ac before running real autoreconf.
 WRAPPER_DIR="$PYODIDE_SRC/.bin-wrappers"
 mkdir -p "$WRAPPER_DIR"
-cat > "$WRAPPER_DIR/autoreconf" << 'ENDWRAPPER'
+# Find the real autoreconf path before shadowing it.
+REAL_AUTORECONF="$(which autoreconf 2>/dev/null || echo /usr/bin/autoreconf)"
+cat > "$WRAPPER_DIR/autoreconf" << ENDWRAPPER
 #!/bin/sh
 if [ -f configure.ac ] && grep -q LT_SYS_SYMBOL_USCORE configure.ac; then
     sed -i '/LT_SYS_SYMBOL_USCORE/d' configure.ac
 fi
-exec /usr/bin/autoreconf "$@"
+exec "$REAL_AUTORECONF" "\$@"
 ENDWRAPPER
 chmod +x "$WRAPPER_DIR/autoreconf"
 export PATH="$WRAPPER_DIR:$PATH"
