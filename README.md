@@ -12,7 +12,7 @@ wasmsh is an independent shell implementation — not a port of BusyBox or a for
 
 - **Browser-first**: Compiles to `wasm32-unknown-unknown`, runs in a Web Worker
 - **No OS processes**: All commands execute in-process — builtins, utilities, and functions
-- **Virtual filesystem**: MemoryFS for ephemeral sessions, OPFS adapter for persistence
+- **Virtual filesystem**: MemoryFS for ephemeral sessions (OPFS persistence planned, not yet available)
 - **Bash-compatible syntax**: Supports the shell features real scripts actually use
 - **Sandboxed**: Step budgets, output limits, cancellation tokens, capability-gated I/O
 - **Clean provenance**: No GPL code — MIT licensed, permissive dependencies only
