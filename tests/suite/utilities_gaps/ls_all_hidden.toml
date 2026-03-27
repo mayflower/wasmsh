@@ -1,0 +1,15 @@
+[test]
+name = "ls-all-hidden"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["ls"]
+
+[setup]
+files = { "/data/.hidden" = "secret\n", "/data/visible" = "public\n" }
+
+[input]
+script = "ls -a /data"
+
+[expect]
+status = 0
+stdout_contains = [".hidden"]

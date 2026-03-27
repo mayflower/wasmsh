@@ -1,0 +1,14 @@
+[test]
+name = "find-exec-grep"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["find", "grep"]
+
+[setup]
+files = { "/d/a.txt" = "foo bar\n", "/d/b.txt" = "baz qux\n" }
+
+[input]
+script = "find /d -type f -exec grep foo {} \\;"
+
+[expect]
+stdout_contains = ["foo bar"]

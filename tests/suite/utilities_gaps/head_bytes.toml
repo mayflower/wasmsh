@@ -1,0 +1,15 @@
+[test]
+name = "head-bytes"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["head"]
+
+[setup]
+files = { "/data/file.txt" = "abcdefghij" }
+
+[input]
+script = "head -c 5 /data/file.txt"
+
+[expect]
+status = 0
+stdout = "abcde"

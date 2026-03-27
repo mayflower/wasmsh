@@ -1,0 +1,15 @@
+[test]
+name = "wc-max-line-length"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["wc"]
+
+[setup]
+files = { "/data/test.txt" = "short\nthis is a longer line\nhi\n" }
+
+[input]
+script = "wc -L /data/test.txt"
+
+[expect]
+status = 0
+stdout_contains = ["21"]

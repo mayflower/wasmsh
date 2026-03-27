@@ -1,0 +1,15 @@
+[test]
+name = "cat-number-nonblank"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["cat"]
+
+[setup]
+files = { "/data/test.txt" = "hello\n\nworld\n" }
+
+[input]
+script = "cat -b /data/test.txt"
+
+[expect]
+status = 0
+stdout = "     1\thello\n\n     2\tworld\n"

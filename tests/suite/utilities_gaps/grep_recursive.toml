@@ -1,0 +1,15 @@
+[test]
+name = "grep-recursive"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["grep"]
+
+[setup]
+files = { "/src/a.txt" = "hello world\n", "/src/sub/b.txt" = "hello again\n", "/src/sub/c.txt" = "goodbye\n" }
+
+[input]
+script = "grep -r hello /src"
+
+[expect]
+status = 0
+stdout_contains = ["hello"]

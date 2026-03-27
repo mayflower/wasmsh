@@ -1,0 +1,15 @@
+[test]
+name = "cut-complement"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["cut"]
+
+[setup]
+files = { "/data/test.txt" = "a:b:c:d\n" }
+
+[input]
+script = "cut -d : -f 2 --complement /data/test.txt"
+
+[expect]
+status = 0
+stdout = "a:c:d\n"

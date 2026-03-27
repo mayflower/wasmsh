@@ -1,0 +1,12 @@
+[test]
+name = "seq-separator"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["seq"]
+
+[input]
+script = "seq -s , 1 5"
+
+[expect]
+status = 0
+stdout = "1,2,3,4,5\n"

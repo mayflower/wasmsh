@@ -1,0 +1,15 @@
+[test]
+name = "cat-number-lines"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["cat"]
+
+[setup]
+files = { "/data/test.txt" = "alpha\nbeta\ngamma\n" }
+
+[input]
+script = "cat -n /data/test.txt"
+
+[expect]
+status = 0
+stdout = "     1\talpha\n     2\tbeta\n     3\tgamma\n"

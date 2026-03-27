@@ -1,0 +1,11 @@
+[test]
+name = "readlink-exist-check"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["readlink"]
+
+[input]
+script = "readlink -e /nonexistent"
+
+[expect]
+status = 1

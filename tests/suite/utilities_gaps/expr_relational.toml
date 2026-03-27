@@ -1,0 +1,12 @@
+[test]
+name = "expr-relational"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["expr"]
+
+[input]
+script = "expr 5 '>' 3"
+
+[expect]
+status = 0
+stdout = "1\n"

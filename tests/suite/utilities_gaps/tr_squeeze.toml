@@ -1,0 +1,12 @@
+[test]
+name = "tr-squeeze-repeats"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["tr"]
+
+[input]
+script = "echo 'hello    world' | tr -s ' '"
+
+[expect]
+status = 0
+stdout = "hello world\n"

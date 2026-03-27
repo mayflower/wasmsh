@@ -1,0 +1,15 @@
+[test]
+name = "sort-key-field"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["sort"]
+
+[setup]
+files = { "/data/test.txt" = "b:3\na:1\nc:2\n" }
+
+[input]
+script = "sort -t : -k 2 /data/test.txt"
+
+[expect]
+status = 0
+stdout = "a:1\nc:2\nb:3\n"

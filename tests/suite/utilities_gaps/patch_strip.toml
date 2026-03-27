@@ -1,0 +1,15 @@
+[test]
+name = "patch-strip-components"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["patch", "cat"]
+
+[setup]
+files = { "/file.txt" = "hello\nworld\n" }
+
+[input]
+script = "echo '--- a/file.txt\n+++ b/file.txt\n@@ -1,2 +1,2 @@\n-hello\n+goodbye\n world' | patch -p1 && cat /file.txt"
+
+[expect]
+status = 0
+stdout_contains = ["goodbye"]

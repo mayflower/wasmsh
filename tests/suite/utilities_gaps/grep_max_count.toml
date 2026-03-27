@@ -1,0 +1,15 @@
+[test]
+name = "grep-max-count"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["grep"]
+
+[setup]
+files = { "/data/test.txt" = "a\na\na\na\n" }
+
+[input]
+script = "grep -m 2 a /data/test.txt"
+
+[expect]
+status = 0
+stdout = "a\na\n"

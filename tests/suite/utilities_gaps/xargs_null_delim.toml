@@ -1,0 +1,12 @@
+[test]
+name = "xargs-null-flag-accepted"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["xargs"]
+
+[input]
+script = "echo 'hello world' | xargs -0"
+
+[expect]
+status = 0
+stdout_contains = ["hello world"]

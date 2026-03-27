@@ -1,0 +1,15 @@
+[test]
+name = "md5sum-check-mode"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["md5sum"]
+
+[setup]
+files = { "/data/hello.txt" = "hello\n" }
+
+[input]
+script = "md5sum /data/hello.txt > /data/sums.txt && md5sum -c /data/sums.txt"
+
+[expect]
+status = 0
+stdout_contains = ["OK"]

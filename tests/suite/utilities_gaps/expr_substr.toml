@@ -1,0 +1,12 @@
+[test]
+name = "expr-substr"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["expr"]
+
+[input]
+script = "expr substr hello 2 3"
+
+[expect]
+status = 0
+stdout = "ell\n"

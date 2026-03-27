@@ -1,0 +1,15 @@
+[test]
+name = "sed-inplace"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["sed", "cat"]
+
+[setup]
+files = { "/data/test.txt" = "hello world\n" }
+
+[input]
+script = "sed -i 's/hello/goodbye/' /data/test.txt && cat /data/test.txt"
+
+[expect]
+status = 0
+stdout = "goodbye world\n"

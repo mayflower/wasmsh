@@ -1,0 +1,15 @@
+[test]
+name = "grep-context-lines"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["grep"]
+
+[setup]
+files = { "/data/test.txt" = "line1\nline2\nMATCH\nline4\nline5\n" }
+
+[input]
+script = "grep -A 1 -B 1 MATCH /data/test.txt"
+
+[expect]
+status = 0
+stdout = "line2\nMATCH\nline4\n"

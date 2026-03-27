@@ -1,0 +1,15 @@
+[test]
+name = "grep-files-only"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["grep"]
+
+[setup]
+files = { "/data/a.txt" = "FOUND here\n", "/data/b.txt" = "nothing\n" }
+
+[input]
+script = "grep -rl FOUND /data"
+
+[expect]
+status = 0
+stdout_contains = ["/data/a.txt"]

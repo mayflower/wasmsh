@@ -1,0 +1,15 @@
+[test]
+name = "grep-only-matching"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["grep"]
+
+[setup]
+files = { "/data/test.txt" = "hello world\nfoo bar\nhello again\n" }
+
+[input]
+script = "grep -o hello /data/test.txt"
+
+[expect]
+status = 0
+stdout = "hello\nhello\n"

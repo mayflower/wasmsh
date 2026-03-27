@@ -230,7 +230,18 @@ pub(crate) fn hashsum_util(
     cmd_name: &str,
     hash_fn: fn(&[u8]) -> String,
 ) -> i32 {
-    let file_args = &argv[1..];
+    let mut check_mode = false;
+    let mut file_args: Vec<&str> = Vec::new();
+    for arg in &argv[1..] {
+        match *arg {
+            "-c" | "--check" => check_mode = true,
+            "-b" | "--binary" | "--tag" => {} // accept, no-op
+            _ => file_args.push(arg),
+        }
+    }
+    if check_mode {
+        return hashsum_check(ctx, &file_args, cmd_name, hash_fn);
+    }
     if file_args.is_empty() {
         let data = ctx.stdin.map(<[u8]>::to_vec).unwrap_or_default();
         let hash = hash_fn(&data);
@@ -239,7 +250,7 @@ pub(crate) fn hashsum_util(
         return 0;
     }
     let mut status = 0;
-    for path in file_args {
+    for path in &file_args {
         match read_file_bytes(ctx, path, cmd_name) {
             Ok(data) => {
                 let hash = hash_fn(&data);
@@ -250,6 +261,61 @@ pub(crate) fn hashsum_util(
         }
     }
     status
+}
+
+fn hashsum_check(
+    ctx: &mut UtilContext<'_>,
+    file_args: &[&str],
+    cmd_name: &str,
+    hash_fn: fn(&[u8]) -> String,
+) -> i32 {
+    let text = if file_args.is_empty() {
+        ctx.stdin
+            .map(|d| String::from_utf8_lossy(d).to_string())
+            .unwrap_or_default()
+    } else {
+        match read_file_bytes(ctx, file_args[0], cmd_name) {
+            Ok(data) => String::from_utf8_lossy(&data).to_string(),
+            Err(s) => return s,
+        }
+    };
+    let mut failures = 0u32;
+    for line in text.lines() {
+        let (expected, filename) = if let Some((h, f)) = line.split_once("  ") {
+            (h.trim(), f.trim())
+        } else if let Some((h, f)) = line.split_once(' ') {
+            (h.trim(), f.trim())
+        } else {
+            continue;
+        };
+        if filename.is_empty() {
+            continue;
+        }
+        match read_file_bytes(ctx, filename, cmd_name) {
+            Ok(data) => {
+                let actual = hash_fn(&data);
+                if actual == expected {
+                    let msg = format!("{filename}: OK\n");
+                    ctx.output.stdout(msg.as_bytes());
+                } else {
+                    let msg = format!("{filename}: FAILED\n");
+                    ctx.output.stdout(msg.as_bytes());
+                    failures += 1;
+                }
+            }
+            Err(_) => {
+                let msg = format!("{filename}: FAILED open or read\n");
+                ctx.output.stdout(msg.as_bytes());
+                failures += 1;
+            }
+        }
+    }
+    if failures > 0 {
+        let msg = format!("{cmd_name}: WARNING: {failures} computed checksum(s) did NOT match\n");
+        ctx.output.stderr(msg.as_bytes());
+        return 1;
+    }
+    0
 }
 
 /// Read a file from the VFS by path, returning its bytes.

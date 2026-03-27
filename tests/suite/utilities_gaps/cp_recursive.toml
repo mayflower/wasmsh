@@ -1,0 +1,15 @@
+[test]
+name = "cp-recursive"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["cp", "cat"]
+
+[setup]
+files = { "/src/sub/file.txt" = "deep content\n" }
+
+[input]
+script = "cp -r /src /dst && cat /dst/sub/file.txt"
+
+[expect]
+status = 0
+stdout = "deep content\n"

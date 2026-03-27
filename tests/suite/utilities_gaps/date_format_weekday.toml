@@ -1,0 +1,12 @@
+[test]
+name = "date-format-weekday"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["date"]
+
+[input]
+script = "date '+%A'"
+
+[expect]
+status = 0
+stdout = "Thursday\n"

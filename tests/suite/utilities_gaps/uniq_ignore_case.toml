@@ -1,0 +1,15 @@
+[test]
+name = "uniq-ignore-case"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["uniq"]
+
+[setup]
+files = { "/data/test.txt" = "Hello\nhello\nWorld\n" }
+
+[input]
+script = "uniq -i /data/test.txt"
+
+[expect]
+status = 0
+stdout = "Hello\nWorld\n"

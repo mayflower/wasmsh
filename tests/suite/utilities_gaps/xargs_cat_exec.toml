@@ -1,0 +1,15 @@
+[test]
+name = "xargs-cat-exec"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["xargs", "cat"]
+
+[setup]
+files = { "/a.txt" = "content_a\n", "/b.txt" = "content_b\n" }
+
+[input]
+script = "echo '/a.txt /b.txt' | xargs cat"
+
+[expect]
+status = 0
+stdout = "content_a\ncontent_b\n"

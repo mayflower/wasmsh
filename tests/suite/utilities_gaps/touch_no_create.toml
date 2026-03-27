@@ -1,0 +1,12 @@
+[test]
+name = "touch-no-create"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["touch", "ls"]
+
+[input]
+script = "touch -c /nonexistent && echo ok"
+
+[expect]
+status = 0
+stdout = "ok\n"

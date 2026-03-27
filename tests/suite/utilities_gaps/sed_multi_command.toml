@@ -1,0 +1,15 @@
+[test]
+name = "sed-semicolon-commands"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["sed"]
+
+[setup]
+files = { "/data/test.txt" = "abc\n" }
+
+[input]
+script = "sed 's/a/x/;s/b/y/' /data/test.txt"
+
+[expect]
+status = 0
+stdout = "xyc\n"

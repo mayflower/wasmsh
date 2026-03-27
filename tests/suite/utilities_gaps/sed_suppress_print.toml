@@ -1,0 +1,15 @@
+[test]
+name = "sed-suppress-print"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["sed"]
+
+[setup]
+files = { "/data/test.txt" = "line1\nline2\nline3\n" }
+
+[input]
+script = "sed -n '2p' /data/test.txt"
+
+[expect]
+status = 0
+stdout = "line2\n"

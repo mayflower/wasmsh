@@ -1,0 +1,15 @@
+[test]
+name = "sort-unique"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["sort"]
+
+[setup]
+files = { "/data/test.txt" = "banana\napple\nbanana\ncherry\napple\n" }
+
+[input]
+script = "sort -u /data/test.txt"
+
+[expect]
+status = 0
+stdout = "apple\nbanana\ncherry\n"

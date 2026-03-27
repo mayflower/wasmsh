@@ -1,0 +1,15 @@
+[test]
+name = "ls-classify"
+tags = ["utility", "gap"]
+tier = "P2"
+requires = ["ls", "mkdir"]
+
+[setup]
+files = { "/data/sub/file.txt" = "nested\n" }
+
+[input]
+script = "ls -F /data"
+
+[expect]
+status = 0
+stdout_contains = ["sub/"]

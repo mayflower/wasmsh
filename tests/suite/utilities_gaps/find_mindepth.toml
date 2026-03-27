@@ -1,0 +1,15 @@
+[test]
+name = "find-mindepth"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["find"]
+
+[setup]
+files = { "/data/a.txt" = "1\n", "/data/sub/b.txt" = "2\n" }
+
+[input]
+script = "find /data -mindepth 2 -type f"
+
+[expect]
+status = 0
+stdout = "/data/sub/b.txt\n"

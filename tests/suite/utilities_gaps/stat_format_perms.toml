@@ -1,0 +1,15 @@
+[test]
+name = "stat-format-permissions"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["stat"]
+
+[setup]
+files = { "/data/file.txt" = "test\n" }
+
+[input]
+script = "stat -c '%a %A' /data/file.txt"
+
+[expect]
+status = 0
+stdout = "644 -rw-r--r--\n"

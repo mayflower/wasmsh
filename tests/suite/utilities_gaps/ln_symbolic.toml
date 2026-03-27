@@ -1,0 +1,15 @@
+[test]
+name = "ln-symbolic"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["ln", "cat"]
+
+[setup]
+files = { "/src.txt" = "linked\n" }
+
+[input]
+script = "ln -s /src.txt /link.txt && cat /link.txt"
+
+[expect]
+status = 0
+stdout = "linked\n"

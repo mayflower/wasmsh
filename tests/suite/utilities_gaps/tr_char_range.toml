@@ -1,0 +1,12 @@
+[test]
+name = "tr-character-range"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["tr"]
+
+[input]
+script = "echo 'hello' | tr 'a-z' 'A-Z'"
+
+[expect]
+status = 0
+stdout = "HELLO\n"

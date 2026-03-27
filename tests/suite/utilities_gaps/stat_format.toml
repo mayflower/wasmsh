@@ -1,0 +1,15 @@
+[test]
+name = "stat-format-name-size"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["stat"]
+
+[setup]
+files = { "/data/file.txt" = "hello world\n" }
+
+[input]
+script = "stat -c '%n %s' /data/file.txt"
+
+[expect]
+status = 0
+stdout = "/data/file.txt 12\n"

@@ -1,0 +1,12 @@
+[test]
+name = "expr-index"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["expr"]
+
+[input]
+script = "expr index hello l"
+
+[expect]
+status = 0
+stdout = "3\n"

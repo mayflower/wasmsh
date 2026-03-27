@@ -1,0 +1,12 @@
+[test]
+name = "tr-character-class"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["tr"]
+
+[input]
+script = "echo 'Hello World' | tr '[:upper:]' '[:lower:]'"
+
+[expect]
+status = 0
+stdout = "hello world\n"

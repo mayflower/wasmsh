@@ -1,0 +1,15 @@
+[test]
+name = "find-exec-cat"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["find", "cat"]
+
+[setup]
+files = { "/d/a.txt" = "hello\n", "/d/b.txt" = "world\n" }
+
+[input]
+script = "find /d -name '*.txt' -exec cat {} \\;"
+
+[expect]
+status = 0
+stdout_contains = ["hello", "world"]

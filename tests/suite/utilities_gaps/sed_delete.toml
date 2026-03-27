@@ -1,0 +1,15 @@
+[test]
+name = "sed-delete-line"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["sed"]
+
+[setup]
+files = { "/data/test.txt" = "line1\nline2\nline3\n" }
+
+[input]
+script = "sed '2d' /data/test.txt"
+
+[expect]
+status = 0
+stdout = "line1\nline3\n"

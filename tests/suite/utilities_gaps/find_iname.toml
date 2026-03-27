@@ -1,0 +1,15 @@
+[test]
+name = "find-iname"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["find"]
+
+[setup]
+files = { "/data/README.md" = "docs\n", "/data/other.txt" = "x\n" }
+
+[input]
+script = "find /data -iname '*.MD'"
+
+[expect]
+status = 0
+stdout = "/data/README.md\n"

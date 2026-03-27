@@ -1,0 +1,15 @@
+[test]
+name = "cat-squeeze-blank"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["cat"]
+
+[setup]
+files = { "/data/test.txt" = "line1\n\n\n\nline2\n" }
+
+[input]
+script = "cat -s /data/test.txt"
+
+[expect]
+status = 0
+stdout = "line1\n\nline2\n"

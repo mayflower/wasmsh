@@ -1,0 +1,12 @@
+[test]
+name = "id-user-id"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["id"]
+
+[input]
+script = "id -u"
+
+[expect]
+status = 0
+stdout = "1000\n"

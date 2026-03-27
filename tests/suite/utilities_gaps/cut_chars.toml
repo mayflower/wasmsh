@@ -1,0 +1,15 @@
+[test]
+name = "cut-characters"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["cut"]
+
+[setup]
+files = { "/data/test.txt" = "abcdef\nghijkl\n" }
+
+[input]
+script = "cut -c 1-3 /data/test.txt"
+
+[expect]
+status = 0
+stdout = "abc\nghi\n"

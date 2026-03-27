@@ -1,0 +1,15 @@
+[test]
+name = "uniq-duplicates-only"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["uniq"]
+
+[setup]
+files = { "/data/test.txt" = "a\na\nb\nc\nc\n" }
+
+[input]
+script = "uniq -d /data/test.txt"
+
+[expect]
+status = 0
+stdout = "a\nc\n"

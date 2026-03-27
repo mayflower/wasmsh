@@ -1,0 +1,12 @@
+[test]
+name = "date-format-time"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["date"]
+
+[input]
+script = "date '+%H:%M:%S'"
+
+[expect]
+status = 0
+stdout = "00:00:00\n"

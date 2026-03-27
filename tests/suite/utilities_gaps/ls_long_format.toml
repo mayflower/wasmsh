@@ -1,0 +1,15 @@
+[test]
+name = "ls-long-format"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["ls"]
+
+[setup]
+files = { "/data/hello.txt" = "hello world\n" }
+
+[input]
+script = "ls -l /data"
+
+[expect]
+status = 0
+stdout_contains = ["hello.txt"]

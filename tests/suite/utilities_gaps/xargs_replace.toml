@@ -1,0 +1,12 @@
+[test]
+name = "xargs-replace-string"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["xargs"]
+
+[input]
+script = "echo 'a b c' | xargs -n 1 echo"
+
+[expect]
+status = 0
+stdout = "a\nb\nc\n"

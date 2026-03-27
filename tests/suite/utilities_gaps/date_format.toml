@@ -1,0 +1,12 @@
+[test]
+name = "date-format-string"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["date"]
+
+[input]
+script = "date '+%Y-%m-%d'"
+
+[expect]
+status = 0
+stdout = "2026-01-01\n"

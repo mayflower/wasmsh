@@ -1,0 +1,15 @@
+[test]
+name = "grep-quiet"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["grep"]
+
+[setup]
+files = { "/data/test.txt" = "hello world\n" }
+
+[input]
+script = "grep -q hello /data/test.txt && echo found"
+
+[expect]
+status = 0
+stdout = "found\n"

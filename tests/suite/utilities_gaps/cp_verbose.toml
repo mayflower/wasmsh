@@ -1,0 +1,15 @@
+[test]
+name = "cp-verbose"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["cp"]
+
+[setup]
+files = { "/a.txt" = "data\n" }
+
+[input]
+script = "cp -v /a.txt /b.txt"
+
+[expect]
+status = 0
+stdout = "'/a.txt' -> '/b.txt'\n"

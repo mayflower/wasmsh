@@ -1,0 +1,15 @@
+[test]
+name = "sort-case-insensitive"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["sort"]
+
+[setup]
+files = { "/data/test.txt" = "Banana\napple\nCherry\n" }
+
+[input]
+script = "sort -f /data/test.txt"
+
+[expect]
+status = 0
+stdout = "apple\nBanana\nCherry\n"

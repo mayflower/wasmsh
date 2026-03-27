@@ -985,7 +985,13 @@ impl WorkerRuntime {
         } else if self.builtins.is_builtin(cmd_name) {
             self.call_builtin(cmd_name, argv);
         } else if self.utils.is_utility(cmd_name) {
-            self.call_utility(cmd_name, argv);
+            if cmd_name == "find" && argv.iter().any(|a| a == "-exec") {
+                self.call_find_with_exec(argv);
+            } else if cmd_name == "xargs" {
+                self.call_xargs_with_exec(argv);
+            } else {
+                self.call_utility(cmd_name, argv);
+            }
         } else {
             let msg = format!("wasmsh: {cmd_name}: command not found\n");
             self.vm.stderr.extend_from_slice(msg.as_bytes());
@@ -1038,6 +1044,127 @@ impl WorkerRuntime {
         self.vm.output_bytes += (sink.stdout.len() + sink.stderr.len()) as u64;
         self.vm.state.last_status = status;
         self.pending_stdin = None;
+    }
+
+    /// Extract `-exec CMD [args...] {} \;` from find argv.
+    /// Returns `(exec_template, cleaned_argv)` or `None` if no `-exec` present.
+    fn extract_find_exec(argv: &[String]) -> Option<(Vec<String>, Vec<String>)> {
+        let exec_pos = argv.iter().position(|a| a == "-exec")?;
+        // Find the terminator: \; or ;
+        let term_pos = argv[exec_pos + 1..]
+            .iter()
+            .position(|a| a == "\\;" || a == ";")
+            .map(|p| p + exec_pos + 1)?;
+        let template: Vec<String> = argv[exec_pos + 1..term_pos].to_vec();
+        if template.is_empty() {
+            return None;
+        }
+        let mut cleaned: Vec<String> = argv[..exec_pos].to_vec();
+        cleaned.extend_from_slice(&argv[term_pos + 1..]);
+        Some((template, cleaned))
+    }
+
+    /// Shell-quote a path for safe interpolation into a command string.
+    fn shell_quote(s: &str) -> String {
+        if s.chars().all(|c| c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-')) {
+            s.to_string()
+        } else {
+            format!("'{}'", s.replace('\'', "'\\''"))
+        }
+    }
+
+    /// Handle `find ... -exec CMD {} \;` by running find for paths, then executing
+    /// the command for each matched path via the shell.
+    fn call_find_with_exec(&mut self, argv: &[String]) {
+        let Some((template, cleaned_argv)) = Self::extract_find_exec(argv) else {
+            // Malformed -exec (missing \;), fall through to normal find
+            self.call_utility("find", argv);
+            return;
+        };
+
+        // Phase 1: run find with cleaned argv, capturing stdout
+        let saved_stdout = std::mem::take(&mut self.vm.stdout);
+        self.call_utility("find", &cleaned_argv);
+        let find_output = std::mem::take(&mut self.vm.stdout);
+        self.vm.stdout = saved_stdout;
+
+        // Phase 2: parse matched paths
+        let paths_str = String::from_utf8_lossy(&find_output);
+        let paths: Vec<&str> = paths_str.lines().filter(|l| !l.is_empty()).collect();
+
+        // Phase 3: execute the command for each path
+        let mut last_status = 0i32;
+        for path in paths {
+            let cmd_line: String = template
+                .iter()
+                .map(|t| {
+                    if t == "{}" {
+                        Self::shell_quote(path)
+                    } else {
+                        t.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let sub_events = self.execute_input_inner(&cmd_line);
+            self.merge_sub_events(sub_events);
+            if self.vm.state.last_status != 0 {
+                last_status = self.vm.state.last_status;
+            }
+        }
+        self.vm.state.last_status = last_status;
+    }
+
+    /// Handle `xargs` with actual command execution for non-echo commands.
+    /// The existing xargs utility already formats correct command lines for
+    /// non-echo; we capture those and execute them via the shell.
+    fn call_xargs_with_exec(&mut self, argv: &[String]) {
+        // Determine if xargs has a non-echo command by scanning past flags
+        let mut has_non_echo = false;
+        let mut i = 1;
+        while i < argv.len() {
+            let arg = &argv[i];
+            if matches!(
+                arg.as_str(),
+                "-I" | "-n" | "-d" | "-P" | "-L"
+            ) && i + 1 < argv.len()
+            {
+                i += 2;
+            } else if matches!(arg.as_str(), "-0" | "--null" | "-t" | "-p") {
+                i += 1;
+            } else if arg.starts_with('-') {
+                i += 1;
+            } else {
+                // First non-flag arg is the command
+                if arg != "echo" {
+                    has_non_echo = true;
+                }
+                break;
+            }
+        }
+
+        if !has_non_echo {
+            self.call_utility("xargs", argv);
+            return;
+        }
+
+        // Run xargs utility — it outputs formatted command lines for non-echo
+        let saved_stdout = std::mem::take(&mut self.vm.stdout);
+        self.call_utility("xargs", argv);
+        let xargs_output = std::mem::take(&mut self.vm.stdout);
+        self.vm.stdout = saved_stdout;
+
+        // Execute each output line as a command
+        let output_str = String::from_utf8_lossy(&xargs_output);
+        let mut last_status = 0i32;
+        for line in output_str.lines().filter(|l| !l.is_empty()) {
+            let sub_events = self.execute_input_inner(line);
+            self.merge_sub_events(sub_events);
+            if self.vm.state.last_status != 0 {
+                last_status = self.vm.state.last_status;
+            }
+        }
+        self.vm.state.last_status = last_status;
     }
 
     /// Invoke a utility command.

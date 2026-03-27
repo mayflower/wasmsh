@@ -9,23 +9,125 @@ use crate::helpers::{
 };
 use crate::{UtilContext, UtilOutput};
 
+struct CatFlags {
+    number_all: bool,
+    number_nonblank: bool,
+    squeeze_blank: bool,
+    show_ends: bool,
+    show_tabs: bool,
+}
+
+fn parse_cat_flags<'a>(argv: &'a [&'a str]) -> (CatFlags, Vec<&'a str>) {
+    let mut flags = CatFlags {
+        number_all: false,
+        number_nonblank: false,
+        squeeze_blank: false,
+        show_ends: false,
+        show_tabs: false,
+    };
+    let mut files = Vec::new();
+    for arg in &argv[1..] {
+        if arg.starts_with('-') && arg.len() > 1 && *arg != "--" {
+            for ch in arg[1..].chars() {
+                match ch {
+                    'n' => flags.number_all = true,
+                    'b' => flags.number_nonblank = true,
+                    's' => flags.squeeze_blank = true,
+                    'E' => flags.show_ends = true,
+                    'T' => flags.show_tabs = true,
+                    'A' => {
+                        flags.show_ends = true;
+                        flags.show_tabs = true;
+                    }
+                    'e' => flags.show_ends = true,
+                    't' => flags.show_tabs = true,
+                    'v' => {} // accept, no-op in VFS
+                    _ => {}
+                }
+            }
+        } else if *arg == "--" {
+            continue;
+        } else {
+            files.push(*arg);
+        }
+    }
+    if flags.number_nonblank {
+        flags.number_all = false;
+    }
+    (flags, files)
+}
+
+fn cat_has_flags(f: &CatFlags) -> bool {
+    f.number_all || f.number_nonblank || f.squeeze_blank || f.show_ends || f.show_tabs
+}
+
+fn cat_emit_lines(output: &mut dyn UtilOutput, text: &str, flags: &CatFlags, line_num: &mut usize) {
+    let mut prev_blank = false;
+    for line in text.split('\n') {
+        let is_blank = line.is_empty();
+        if flags.squeeze_blank && is_blank && prev_blank {
+            continue;
+        }
+        prev_blank = is_blank;
+
+        if flags.number_nonblank && !is_blank {
+            *line_num += 1;
+            let prefix = format!("{:>6}\t", *line_num);
+            output.stdout(prefix.as_bytes());
+        } else if flags.number_all {
+            *line_num += 1;
+            let prefix = format!("{:>6}\t", *line_num);
+            output.stdout(prefix.as_bytes());
+        }
+
+        if flags.show_tabs {
+            output.stdout(line.replace('\t', "^I").as_bytes());
+        } else {
+            output.stdout(line.as_bytes());
+        }
+
+        if flags.show_ends {
+            output.stdout(b"$");
+        }
+        output.stdout(b"\n");
+    }
+}
+
 pub(crate) fn util_cat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    if argv.len() < 2 {
-        // No file arguments — read from stdin if available
+    let (flags, files) = parse_cat_flags(argv);
+
+    if files.is_empty() {
         if let Some(data) = ctx.stdin {
-            ctx.output.stdout(data);
+            if !cat_has_flags(&flags) {
+                ctx.output.stdout(data);
+            } else {
+                let text = String::from_utf8_lossy(data);
+                let trimmed = text.strip_suffix('\n').unwrap_or(&text);
+                let mut line_num = 0usize;
+                cat_emit_lines(ctx.output, trimmed, &flags, &mut line_num);
+            }
             return 0;
         }
         ctx.output.stderr(b"cat: missing operand\n");
         return 1;
     }
+
     let mut status = 0;
-    for path in &argv[1..] {
+    let mut line_num = 0usize;
+    for path in &files {
         let full = resolve_path(ctx.cwd, path);
         match ctx.fs.open(&full, OpenOptions::read()) {
             Ok(h) => {
                 match ctx.fs.read_file(h) {
-                    Ok(data) => ctx.output.stdout(&data),
+                    Ok(data) => {
+                        if !cat_has_flags(&flags) {
+                            ctx.output.stdout(&data);
+                        } else {
+                            let text = String::from_utf8_lossy(&data);
+                            let trimmed = text.strip_suffix('\n').unwrap_or(&text);
+                            cat_emit_lines(ctx.output, trimmed, &flags, &mut line_num);
+                        }
+                    }
                     Err(e) => {
                         emit_error(ctx.output, "cat", path, &e);
                         status = 1;
@@ -42,62 +144,207 @@ pub(crate) fn util_cat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     status
 }
 
-pub(crate) fn util_ls(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let args: Vec<&str> = argv[1..]
-        .iter()
-        .copied()
-        .filter(|a| !a.starts_with('-'))
-        .collect();
-    if args.is_empty() {
-        i32::from(ls_emit_dir(ctx, ctx.cwd, &resolve_path(ctx.cwd, ctx.cwd)).is_err())
+#[allow(clippy::struct_excessive_bools)]
+struct LsFlags {
+    long: bool,
+    all: bool,
+    recursive: bool,
+    reverse: bool,
+    sort_size: bool,
+    dir_only: bool,
+    human: bool,
+    classify: bool,
+}
+
+fn parse_ls_flags<'a>(argv: &'a [&'a str]) -> (LsFlags, Vec<&'a str>) {
+    let mut flags = LsFlags {
+        long: false,
+        all: false,
+        recursive: false,
+        reverse: false,
+        sort_size: false,
+        dir_only: false,
+        human: false,
+        classify: false,
+    };
+    let mut paths = Vec::new();
+    for arg in &argv[1..] {
+        if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") {
+            for ch in arg[1..].chars() {
+                match ch {
+                    'l' => flags.long = true,
+                    'a' => flags.all = true,
+                    '1' => {} // already one-per-line
+                    'R' => flags.recursive = true,
+                    'h' => flags.human = true,
+                    'r' => flags.reverse = true,
+                    't' => {} // accept, no real mtime in VFS
+                    'S' => flags.sort_size = true,
+                    'd' => flags.dir_only = true,
+                    'F' => flags.classify = true,
+                    'i' => {} // accept, ignore
+                    _ => {}
+                }
+            }
+        } else if arg.starts_with("--") {
+            // accept --color etc.
+        } else {
+            paths.push(*arg);
+        }
+    }
+    (flags, paths)
+}
+
+fn ls_human_size(size: u64) -> String {
+    if size >= 1_073_741_824 {
+        format!("{:.1}G", size as f64 / 1_073_741_824.0)
+    } else if size >= 1_048_576 {
+        format!("{:.1}M", size as f64 / 1_048_576.0)
+    } else if size >= 1024 {
+        format!("{:.1}K", size as f64 / 1024.0)
     } else {
-        let mut status = 0;
-        for path in &args {
-            if ls_path(ctx, path) != 0 {
+        format!("{size}")
+    }
+}
+
+struct LsEntry {
+    name: String,
+    is_dir: bool,
+    size: u64,
+}
+
+fn ls_collect_entries(fs: &mut MemoryFs, dir: &str, flags: &LsFlags) -> Result<Vec<LsEntry>, ()> {
+    let entries = fs.read_dir(dir).map_err(|_| ())?;
+    let mut result: Vec<LsEntry> = entries
+        .into_iter()
+        .filter(|e| flags.all || !e.name.starts_with('.'))
+        .map(|e| {
+            let child = child_path(dir, &e.name);
+            let size = fs.stat(&child).map(|m| m.size).unwrap_or(0);
+            LsEntry {
+                name: e.name,
+                is_dir: e.is_dir,
+                size,
+            }
+        })
+        .collect();
+    if flags.sort_size {
+        result.sort_by(|a, b| b.size.cmp(&a.size));
+    } else {
+        result.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    if flags.reverse {
+        result.reverse();
+    }
+    Ok(result)
+}
+
+fn ls_emit_entry(output: &mut dyn UtilOutput, e: &LsEntry, flags: &LsFlags) {
+    if flags.long {
+        let mode = if e.is_dir {
+            "drwxr-xr-x"
+        } else {
+            "-rw-r--r--"
+        };
+        let sz = if flags.human {
+            ls_human_size(e.size)
+        } else {
+            format!("{}", e.size)
+        };
+        let suffix = if flags.classify && e.is_dir { "/" } else { "" };
+        let line = format!("{mode}  1 user user {sz:>5} Jan  1 00:00 {}{suffix}\n", e.name);
+        output.stdout(line.as_bytes());
+    } else {
+        let suffix = if flags.classify && e.is_dir { "/" } else { "" };
+        output.stdout(e.name.as_bytes());
+        output.stdout(suffix.as_bytes());
+        output.stdout(b"\n");
+    }
+}
+
+fn ls_dir(
+    ctx: &mut UtilContext<'_>,
+    display: &str,
+    full: &str,
+    flags: &LsFlags,
+    show_header: bool,
+) -> i32 {
+    if show_header {
+        let hdr = format!("{display}:\n");
+        ctx.output.stdout(hdr.as_bytes());
+    }
+    let entries = match ls_collect_entries(ctx.fs, full, flags) {
+        Ok(e) => e,
+        Err(()) => {
+            emit_error(ctx.output, "ls", display, &"cannot open directory");
+            return 1;
+        }
+    };
+    if flags.long {
+        let total = format!("total {}\n", entries.iter().map(|e| e.size).sum::<u64>());
+        ctx.output.stdout(total.as_bytes());
+    }
+    for e in &entries {
+        ls_emit_entry(ctx.output, e, flags);
+    }
+    if flags.recursive {
+        for e in &entries {
+            if e.is_dir && e.name != "." && e.name != ".." {
+                let child_full = child_path(full, &e.name);
+                let child_display = if display == "." {
+                    format!("./{}", e.name)
+                } else {
+                    format!("{}/{}", display, e.name)
+                };
+                ctx.output.stdout(b"\n");
+                ls_dir(ctx, &child_display, &child_full, flags, true);
+            }
+        }
+    }
+    0
+}
+
+pub(crate) fn util_ls(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (flags, paths) = parse_ls_flags(argv);
+    let targets: Vec<&str> = if paths.is_empty() { vec!["."] } else { paths };
+    let multi = targets.len() > 1;
+
+    let mut status = 0;
+    for (i, path) in targets.iter().enumerate() {
+        let full = resolve_path(ctx.cwd, path);
+        if flags.dir_only {
+            let e = LsEntry {
+                name: path.to_string(),
+                is_dir: true,
+                size: 0,
+            };
+            ls_emit_entry(ctx.output, &e, &flags);
+            continue;
+        }
+        match ctx.fs.stat(&full) {
+            Ok(meta) if meta.is_dir => {
+                if i > 0 && multi {
+                    ctx.output.stdout(b"\n");
+                }
+                if ls_dir(ctx, path, &full, &flags, multi || flags.recursive) != 0 {
+                    status = 1;
+                }
+            }
+            Ok(meta) => {
+                let e = LsEntry {
+                    name: path.to_string(),
+                    is_dir: false,
+                    size: meta.size,
+                };
+                ls_emit_entry(ctx.output, &e, &flags);
+            }
+            Err(e) => {
+                emit_error(ctx.output, "ls", path, &e);
                 status = 1;
             }
         }
-        status
     }
-}
-
-fn ls_emit_entries(
-    ctx: &mut UtilContext<'_>,
-    entries: impl IntoIterator<Item = wasmsh_fs::DirEntry>,
-) {
-    for entry in entries {
-        ctx.output.stdout(entry.name.as_bytes());
-        ctx.output.stdout(b"\n");
-    }
-}
-
-fn ls_emit_dir(ctx: &mut UtilContext<'_>, display: &str, full: &str) -> Result<(), ()> {
-    match ctx.fs.read_dir(full) {
-        Ok(entries) => {
-            ls_emit_entries(ctx, entries);
-            Ok(())
-        }
-        Err(e) => {
-            emit_error(ctx.output, "ls", display, &e);
-            Err(())
-        }
-    }
-}
-
-fn ls_path(ctx: &mut UtilContext<'_>, path: &str) -> i32 {
-    let full = resolve_path(ctx.cwd, path);
-    match ctx.fs.stat(&full) {
-        Ok(meta) if meta.is_dir => i32::from(ls_emit_dir(ctx, path, &full).is_err()),
-        Ok(_) => {
-            ctx.output.stdout(path.as_bytes());
-            ctx.output.stdout(b"\n");
-            0
-        }
-        Err(e) => {
-            emit_error(ctx.output, "ls", path, &e);
-            1
-        }
-    }
+    status
 }
 
 pub(crate) fn util_mkdir(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
@@ -106,17 +353,25 @@ pub(crate) fn util_mkdir(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     }
     let mut parents = false;
     let mut dirs = Vec::new();
-    for arg in &argv[1..] {
+    let mut skip_next = false;
+    for (idx, arg) in argv[1..].iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
         if *arg == "--" {
-            dirs.extend_from_slice(&argv[argv.iter().position(|a| *a == "--").unwrap() + 1..]);
+            dirs.extend(argv[idx + 2..].iter().copied());
             break;
         } else if *arg == "-p" || *arg == "--parents" {
             parents = true;
+        } else if *arg == "-m" {
+            skip_next = true; // skip the mode argument
         } else if arg.starts_with('-') && arg.len() > 1 {
-            // Handle bundled flags like -pv (ignore v, accept p)
             for ch in arg[1..].chars() {
-                if ch == 'p' {
-                    parents = true;
+                match ch {
+                    'p' => parents = true,
+                    'v' | 'm' => {} // accept, no-op
+                    _ => {}
                 }
             }
         } else {
@@ -139,7 +394,7 @@ pub(crate) fn util_mkdir(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     status
 }
 
-fn mkdir_parents(fs: &mut wasmsh_fs::MemoryFs, path: &str) -> Result<(), wasmsh_fs::FsError> {
+fn mkdir_parents(fs: &mut MemoryFs, path: &str) -> Result<(), wasmsh_fs::FsError> {
     // Build each ancestor and create if missing
     let mut current = String::new();
     for component in path.split('/').filter(|c| !c.is_empty()) {
@@ -264,12 +519,43 @@ fn rm_recursive(fs: &mut MemoryFs, path: &str) -> Result<(), ()> {
 }
 
 pub(crate) fn util_touch(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    if !require_args(argv, 2, ctx.output) {
+    let mut no_create = false;
+    let mut files = Vec::new();
+    let mut i = 1;
+    while i < argv.len() {
+        match argv[i] {
+            "-c" => {}
+            "-a" | "-m" => {} // time flags, no-op in VFS
+            "-d" | "-t" | "-r" if i + 1 < argv.len() => {
+                i += 1; // skip argument, no-op
+            }
+            arg if arg.starts_with('-') && arg.len() > 1 && arg != "--" => {
+                for ch in arg[1..].chars() {
+                    match ch {
+                        'c' => no_create = true,
+                        'a' | 'm' => {} // no-op
+                        _ => {}
+                    }
+                }
+            }
+            "--" => {
+                files.extend(argv[i + 1..].iter().copied());
+                break;
+            }
+            _ => files.push(argv[i]),
+        }
+        i += 1;
+    }
+    if files.is_empty() {
+        ctx.output.stderr(b"touch: missing operand\n");
         return 1;
     }
     let mut status = 0;
-    for path in &argv[1..] {
+    for path in &files {
         let full = resolve_path(ctx.cwd, path);
+        if no_create && ctx.fs.stat(&full).is_err() {
+            continue;
+        }
         match ctx.fs.open(&full, OpenOptions::append()) {
             Ok(h) => ctx.fs.close(h),
             Err(e) => {
@@ -282,58 +568,256 @@ pub(crate) fn util_touch(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 }
 
 pub(crate) fn util_mv(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    if !require_args(argv, 3, ctx.output) {
+    let mut no_clobber = false;
+    let mut verbose = false;
+    let mut args = Vec::new();
+    for arg in &argv[1..] {
+        if arg.starts_with('-') && arg.len() > 1 && *arg != "--" {
+            for ch in arg[1..].chars() {
+                match ch {
+                    'f' => no_clobber = false,
+                    'n' => no_clobber = true,
+                    'i' => {} // interactive, no-op in sandbox
+                    'v' => verbose = true,
+                    _ => {}
+                }
+            }
+        } else if *arg == "--" {
+            continue;
+        } else {
+            args.push(*arg);
+        }
+    }
+    if args.len() < 2 {
+        ctx.output.stderr(b"mv: missing operand\n");
         return 1;
     }
-    let src = resolve_path(ctx.cwd, argv[1]);
-    let dst = resolve_path(ctx.cwd, argv[2]);
+    let src_arg = args[0];
+    let dst_arg = args[1];
+    let src = resolve_path(ctx.cwd, src_arg);
+    let dst_base = resolve_path(ctx.cwd, dst_arg);
+    let dst = if ctx.fs.stat(&dst_base).map(|m| m.is_dir).unwrap_or(false) {
+        let name = src_arg.rsplit('/').next().unwrap_or(src_arg);
+        child_path(&dst_base, name)
+    } else {
+        dst_base
+    };
+    if no_clobber && ctx.fs.stat(&dst).is_ok() {
+        return 0;
+    }
     if let Err(e) = copy_file_contents(ctx.fs, &src, &dst) {
-        emit_error(ctx.output, "mv", argv[1], &e);
+        emit_error(ctx.output, "mv", src_arg, &e);
         return 1;
     }
     if let Err(e) = ctx.fs.remove_file(&src) {
-        emit_error(ctx.output, "mv", argv[1], &e);
+        emit_error(ctx.output, "mv", src_arg, &e);
         return 1;
     }
+    if verbose {
+        let msg = format!("'{src_arg}' -> '{dst_arg}'\n");
+        ctx.output.stdout(msg.as_bytes());
+    }
     0
+}
+
+#[allow(clippy::struct_excessive_bools)]
+struct CpFlags {
+    recursive: bool,
+    force: bool,
+    no_clobber: bool,
+    verbose: bool,
+}
+
+fn parse_cp_flags<'a>(argv: &'a [&'a str]) -> (CpFlags, Vec<&'a str>) {
+    let mut flags = CpFlags {
+        recursive: false,
+        force: false,
+        no_clobber: false,
+        verbose: false,
+    };
+    let mut args = Vec::new();
+    for arg in &argv[1..] {
+        if arg.starts_with('-') && arg.len() > 1 && *arg != "--" {
+            for ch in arg[1..].chars() {
+                match ch {
+                    'r' | 'R' | 'a' => flags.recursive = true,
+                    'f' => flags.force = true,
+                    'n' => flags.no_clobber = true,
+                    'v' => flags.verbose = true,
+                    'p' => {} // preserve attrs, no-op in VFS
+                    _ => {}
+                }
+            }
+        } else if *arg == "--" {
+            continue;
+        } else {
+            args.push(*arg);
+        }
+    }
+    (flags, args)
+}
+
+fn cp_recursive(fs: &mut MemoryFs, src: &str, dst: &str) -> Result<(), String> {
+    if let Err(e) = fs.create_dir(dst) {
+        return Err(e.to_string());
+    }
+    let entries = fs.read_dir(src).map_err(|e| e.to_string())?;
+    for entry in entries {
+        let src_child = child_path(src, &entry.name);
+        let dst_child = child_path(dst, &entry.name);
+        if entry.is_dir {
+            cp_recursive(fs, &src_child, &dst_child)?;
+        } else {
+            copy_file_contents(fs, &src_child, &dst_child)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn util_cp(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    if !require_args(argv, 3, ctx.output) {
+    let (flags, args) = parse_cp_flags(argv);
+    if args.len() < 2 {
+        ctx.output.stderr(b"cp: missing operand\n");
         return 1;
     }
-    let src = resolve_path(ctx.cwd, argv[1]);
-    let dst = resolve_path(ctx.cwd, argv[2]);
-    if let Err(e) = copy_file_contents(ctx.fs, &src, &dst) {
-        emit_error(ctx.output, "cp", argv[1], &e);
-        return 1;
+    let dst_arg = args[args.len() - 1];
+    let sources = &args[..args.len() - 1];
+    let dst_base = resolve_path(ctx.cwd, dst_arg);
+
+    let mut status = 0;
+    for src_arg in sources {
+        let src = resolve_path(ctx.cwd, src_arg);
+        let is_dir = ctx.fs.stat(&src).map(|m| m.is_dir).unwrap_or(false);
+        let dst = if ctx.fs.stat(&dst_base).map(|m| m.is_dir).unwrap_or(false) {
+            let name = src_arg.rsplit('/').next().unwrap_or(src_arg);
+            child_path(&dst_base, name)
+        } else {
+            dst_base.clone()
+        };
+
+        if flags.no_clobber && ctx.fs.stat(&dst).is_ok() {
+            continue;
+        }
+        if flags.force && ctx.fs.stat(&dst).is_ok() {
+            let _ = ctx.fs.remove_file(&dst);
+        }
+
+        if is_dir {
+            if !flags.recursive {
+                let msg = format!("cp: -r not specified; omitting directory '{}'\n", src_arg);
+                ctx.output.stderr(msg.as_bytes());
+                status = 1;
+                continue;
+            }
+            if let Err(e) = cp_recursive(ctx.fs, &src, &dst) {
+                emit_error(ctx.output, "cp", src_arg, &e);
+                status = 1;
+                continue;
+            }
+        } else if let Err(e) = copy_file_contents(ctx.fs, &src, &dst) {
+            emit_error(ctx.output, "cp", src_arg, &e);
+            status = 1;
+            continue;
+        }
+
+        if flags.verbose {
+            let msg = format!("'{}' -> '{}'\n", src_arg, dst_arg);
+            ctx.output.stdout(msg.as_bytes());
+        }
     }
-    0
+    status
 }
 
 pub(crate) fn util_ln(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    // VFS doesn't support real links, so ln creates a copy
-    if !require_args(argv, 3, ctx.output) {
+    // VFS doesn't support real links/symlinks, so ln creates a copy
+    let mut force = false;
+    let mut verbose = false;
+    let mut args = Vec::new();
+    for arg in &argv[1..] {
+        if arg.starts_with('-') && arg.len() > 1 && *arg != "--" {
+            for ch in arg[1..].chars() {
+                match ch {
+                    's' => {} // symbolic, accepted (VFS always copies)
+                    'f' => force = true,
+                    'n' => {} // no-dereference, accepted
+                    'v' => verbose = true,
+                    _ => {}
+                }
+            }
+        } else if *arg == "--" {
+            continue;
+        } else {
+            args.push(*arg);
+        }
+    }
+    if args.len() < 2 {
+        ctx.output.stderr(b"ln: missing operand\n");
         return 1;
     }
-    let src = resolve_path(ctx.cwd, argv[argv.len() - 2]);
-    let dst = resolve_path(ctx.cwd, argv[argv.len() - 1]);
+    let src_arg = args[0];
+    let dst_arg = args[1];
+    let src = resolve_path(ctx.cwd, src_arg);
+    let dst = resolve_path(ctx.cwd, dst_arg);
+    if force {
+        let _ = ctx.fs.remove_file(&dst);
+    }
     if let Err(e) = copy_file_contents(ctx.fs, &src, &dst) {
-        emit_error(ctx.output, "ln", argv[argv.len() - 2], &e);
+        emit_error(ctx.output, "ln", src_arg, &e);
         return 1;
+    }
+    if verbose {
+        let msg = format!("'{src_arg}' -> '{dst_arg}'\n");
+        ctx.output.stdout(msg.as_bytes());
     }
     0
 }
 
 pub(crate) fn util_readlink(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    if !require_args(argv, 2, ctx.output) {
+    // VFS has no symlinks — just output the canonical path
+    let mut canonicalize = false;
+    let mut must_exist = false;
+    let mut paths = Vec::new();
+    for arg in &argv[1..] {
+        match *arg {
+            "-f" => canonicalize = true,
+            "-e" => {
+                canonicalize = true;
+                must_exist = true;
+            }
+            "-m" => canonicalize = true,
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                for ch in arg[1..].chars() {
+                    match ch {
+                        'f' => canonicalize = true,
+                        'e' => {
+                            canonicalize = true;
+                            must_exist = true;
+                        }
+                        'm' => canonicalize = true,
+                        _ => {}
+                    }
+                }
+            }
+            _ => paths.push(*arg),
+        }
+    }
+    if paths.is_empty() {
+        ctx.output.stderr(b"readlink: missing operand\n");
         return 1;
     }
-    // VFS has no symlinks — just output the canonical path
-    let full = resolve_path(ctx.cwd, argv[1]);
-    ctx.output.stdout(full.as_bytes());
-    ctx.output.stdout(b"\n");
-    0
+    let _ = canonicalize; // always canonicalize in VFS
+    let mut status = 0;
+    for path in &paths {
+        let full = resolve_path(ctx.cwd, path);
+        if must_exist && ctx.fs.stat(&full).is_err() {
+            emit_error(ctx.output, "readlink", path, &"No such file or directory");
+            status = 1;
+            continue;
+        }
+        ctx.output.stdout(full.as_bytes());
+        ctx.output.stdout(b"\n");
+    }
+    status
 }
 
 pub(crate) fn util_realpath(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
@@ -346,40 +830,139 @@ pub(crate) fn util_realpath(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     0
 }
 
+fn stat_format(fmt: &str, name: &str, size: u64, is_dir: bool) -> String {
+    let mut result = String::new();
+    let mut chars = fmt.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            match chars.next() {
+                Some('n') => result.push_str(name),
+                Some('s') => result.push_str(&format!("{size}")),
+                Some('F') => result.push_str(if is_dir { "directory" } else { "regular file" }),
+                Some('a') => result.push_str(if is_dir { "755" } else { "644" }),
+                Some('A') => {
+                    result.push_str(if is_dir {
+                        "drwxr-xr-x"
+                    } else {
+                        "-rw-r--r--"
+                    });
+                }
+                Some('U') => result.push_str("user"),
+                Some('G') => result.push_str("user"),
+                Some('h') => result.push('1'),
+                Some('f') => result.push_str(if is_dir { "41ed" } else { "81a4" }),
+                Some('Y') => result.push('0'),
+                Some('%') => result.push('%'),
+                Some(c) => {
+                    result.push('%');
+                    result.push(c);
+                }
+                None => result.push('%'),
+            }
+        } else if ch == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('\\') => result.push('\\'),
+                Some(c) => {
+                    result.push('\\');
+                    result.push(c);
+                }
+                None => result.push('\\'),
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 pub(crate) fn util_stat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    if !require_args(argv, 2, ctx.output) {
+    let mut format_str: Option<&str> = None;
+    let mut printf_mode = false;
+    let mut files = Vec::new();
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = argv[i];
+        if arg == "-c" && i + 1 < argv.len() {
+            format_str = Some(argv[i + 1]);
+            i += 2;
+        } else if let Some(fmt) = arg.strip_prefix("--format=") {
+            format_str = Some(fmt);
+            i += 1;
+        } else if arg == "--printf" && i + 1 < argv.len() {
+            format_str = Some(argv[i + 1]);
+            printf_mode = true;
+            i += 2;
+        } else if let Some(fmt) = arg.strip_prefix("--printf=") {
+            format_str = Some(fmt);
+            printf_mode = true;
+            i += 1;
+        } else if arg.starts_with('-') && arg.len() > 1 {
+            i += 1; // skip unknown flags
+        } else {
+            files.push(arg);
+            i += 1;
+        }
+    }
+    if files.is_empty() {
+        ctx.output.stderr(b"stat: missing operand\n");
         return 1;
     }
-    let full = resolve_path(ctx.cwd, argv[1]);
-    match ctx.fs.stat(&full) {
-        Ok(meta) => {
-            let kind = if meta.is_dir {
-                "directory"
-            } else {
-                "regular file"
-            };
-            let out = format!(
-                "  File: {}\n  Size: {}\n  Type: {kind}\n",
-                argv[1], meta.size
-            );
-            ctx.output.stdout(out.as_bytes());
-            0
-        }
-        Err(e) => {
-            emit_error(ctx.output, "stat", argv[1], &e);
-            1
+    let mut status = 0;
+    for path in &files {
+        let full = resolve_path(ctx.cwd, path);
+        match ctx.fs.stat(&full) {
+            Ok(meta) => {
+                if let Some(fmt) = format_str {
+                    let out = stat_format(fmt, path, meta.size, meta.is_dir);
+                    ctx.output.stdout(out.as_bytes());
+                    if !printf_mode {
+                        ctx.output.stdout(b"\n");
+                    }
+                } else {
+                    let kind = if meta.is_dir {
+                        "directory"
+                    } else {
+                        "regular file"
+                    };
+                    let out = format!(
+                        "  File: {path}\n  Size: {}\n  Type: {kind}\n",
+                        meta.size
+                    );
+                    ctx.output.stdout(out.as_bytes());
+                }
+            }
+            Err(e) => {
+                emit_error(ctx.output, "stat", path, &e);
+                status = 1;
+            }
         }
     }
+    status
 }
 
 struct FindFilters<'a> {
     name_pattern: Option<&'a str>,
+    iname_pattern: Option<&'a str>,
     type_filter: Option<&'a str>,
+    path_pattern: Option<&'a str>,
+    maxdepth: Option<usize>,
+    mindepth: Option<usize>,
+    delete: bool,
+    empty: bool,
+    negate_next: bool,
+    print0: bool,
+    size_filter: Option<&'a str>,
 }
 
 fn parse_find_args<'a>(argv: &'a [&'a str]) -> (&'a str, FindFilters<'a>) {
     let mut args = &argv[1..];
-    let dir = if !args.is_empty() && !args[0].starts_with('-') {
+    let dir = if !args.is_empty()
+        && !args[0].starts_with('-')
+        && args[0] != "!"
+        && args[0] != "("
+    {
         let d = args[0];
         args = &args[1..];
         d
@@ -389,7 +972,16 @@ fn parse_find_args<'a>(argv: &'a [&'a str]) -> (&'a str, FindFilters<'a>) {
 
     let mut filters = FindFilters {
         name_pattern: None,
+        iname_pattern: None,
         type_filter: None,
+        path_pattern: None,
+        maxdepth: None,
+        mindepth: None,
+        delete: false,
+        empty: false,
+        negate_next: false,
+        print0: false,
+        size_filter: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -398,9 +990,51 @@ fn parse_find_args<'a>(argv: &'a [&'a str]) -> (&'a str, FindFilters<'a>) {
                 filters.name_pattern = Some(args[i + 1]);
                 i += 2;
             }
+            "-iname" if i + 1 < args.len() => {
+                filters.iname_pattern = Some(args[i + 1]);
+                i += 2;
+            }
             "-type" if i + 1 < args.len() => {
                 filters.type_filter = Some(args[i + 1]);
                 i += 2;
+            }
+            "-path" | "-ipath" if i + 1 < args.len() => {
+                filters.path_pattern = Some(args[i + 1]);
+                i += 2;
+            }
+            "-maxdepth" if i + 1 < args.len() => {
+                filters.maxdepth = args[i + 1].parse().ok();
+                i += 2;
+            }
+            "-mindepth" if i + 1 < args.len() => {
+                filters.mindepth = args[i + 1].parse().ok();
+                i += 2;
+            }
+            "-size" if i + 1 < args.len() => {
+                filters.size_filter = Some(args[i + 1]);
+                i += 2;
+            }
+            "-delete" => {
+                filters.delete = true;
+                i += 1;
+            }
+            "-empty" => {
+                filters.empty = true;
+                i += 1;
+            }
+            "-print" => {
+                i += 1;
+            }
+            "-print0" => {
+                filters.print0 = true;
+                i += 1;
+            }
+            "!" | "-not" => {
+                filters.negate_next = true;
+                i += 1;
+            }
+            "-and" | "-a" | "-o" | "-or" => {
+                i += 1;
             }
             _ => i += 1,
         }
@@ -424,24 +1058,110 @@ fn find_type_matches(filter: &str, is_dir: bool) -> bool {
     }
 }
 
-fn walk_find(fs: &MemoryFs, path: &str, filters: &FindFilters<'_>, output: &mut dyn UtilOutput) {
+fn find_size_matches(spec: &str, actual_size: u64) -> bool {
+    let (cmp, rest) = if let Some(r) = spec.strip_prefix('+') {
+        (1i8, r)
+    } else if let Some(r) = spec.strip_prefix('-') {
+        (-1i8, r)
+    } else {
+        (0i8, spec)
+    };
+    let multiplier: u64 = if rest.ends_with('c') {
+        1
+    } else if rest.ends_with('k') {
+        1024
+    } else if rest.ends_with('M') {
+        1_048_576
+    } else if rest.ends_with('G') {
+        1_073_741_824
+    } else {
+        512 // default: 512-byte blocks
+    };
+    let num_str = rest.trim_end_matches(|c: char| c.is_alphabetic());
+    let threshold = num_str.parse::<u64>().unwrap_or(0).saturating_mul(multiplier);
+    match cmp {
+        1 => actual_size > threshold,
+        -1 => actual_size < threshold,
+        _ => actual_size == threshold,
+    }
+}
+
+fn find_entry_matches(
+    filters: &FindFilters<'_>,
+    name: &str,
+    full_path: &str,
+    is_dir: bool,
+    size: u64,
+    fs: &MemoryFs,
+) -> bool {
+    let mut matched = true;
+    if let Some(p) = filters.name_pattern {
+        matched = matched && find_name_matches(p, name);
+    }
+    if let Some(p) = filters.iname_pattern {
+        matched = matched && find_name_matches(&p.to_lowercase(), &name.to_lowercase());
+    }
+    if let Some(t) = filters.type_filter {
+        matched = matched && find_type_matches(t, is_dir);
+    }
+    if let Some(p) = filters.path_pattern {
+        matched = matched && find_name_matches(p, full_path);
+    }
+    if filters.empty {
+        if is_dir {
+            matched = matched && fs.read_dir(full_path).map(|e| e.is_empty()).unwrap_or(false);
+        } else {
+            matched = matched && size == 0;
+        }
+    }
+    if let Some(s) = filters.size_filter {
+        matched = matched && find_size_matches(s, size);
+    }
+    if filters.negate_next {
+        !matched
+    } else {
+        matched
+    }
+}
+
+fn walk_find(
+    fs: &mut MemoryFs,
+    path: &str,
+    filters: &FindFilters<'_>,
+    output: &mut dyn UtilOutput,
+    depth: usize,
+    to_delete: &mut Vec<(String, bool)>,
+) {
+    if let Some(max) = filters.maxdepth {
+        if depth > max {
+            return;
+        }
+    }
     let Ok(entries) = fs.read_dir(path) else {
         return;
     };
     for entry in entries {
         let child = child_path(path, &entry.name);
-        let name_ok = filters
-            .name_pattern
-            .is_none_or(|p| find_name_matches(p, &entry.name));
-        let type_ok = filters
-            .type_filter
-            .is_none_or(|t| find_type_matches(t, entry.is_dir));
-        if name_ok && type_ok {
-            output.stdout(child.as_bytes());
-            output.stdout(b"\n");
+        let size = fs.stat(&child).map(|m| m.size).unwrap_or(0);
+        let emit_depth = filters.mindepth.unwrap_or(0);
+        if depth + 1 >= emit_depth
+            && find_entry_matches(filters, &entry.name, &child, entry.is_dir, size, fs)
+        {
+            if filters.delete {
+                to_delete.push((child.clone(), entry.is_dir));
+            } else if filters.print0 {
+                output.stdout(child.as_bytes());
+                output.stdout(b"\0");
+            } else {
+                output.stdout(child.as_bytes());
+                output.stdout(b"\n");
+            }
         }
         if entry.is_dir {
-            walk_find(fs, &child, filters, output);
+            let can_recurse = filters.maxdepth.is_none_or(|max| depth + 1 < max);
+            if can_recurse {
+                walk_find(fs, &child, filters, output, depth + 1, to_delete);
+            }
         }
     }
 }
@@ -449,7 +1169,16 @@ fn walk_find(fs: &MemoryFs, path: &str, filters: &FindFilters<'_>, output: &mut 
 pub(crate) fn util_find(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let (dir, filters) = parse_find_args(argv);
     let full = resolve_path(ctx.cwd, dir);
-    walk_find(ctx.fs, &full, &filters, ctx.output);
+    let mut to_delete = Vec::new();
+    walk_find(ctx.fs, &full, &filters, ctx.output, 0, &mut to_delete);
+    // Process deletions in reverse order (deepest first)
+    for (path, is_dir) in to_delete.into_iter().rev() {
+        if is_dir {
+            let _ = ctx.fs.remove_dir(&path);
+        } else {
+            let _ = ctx.fs.remove_file(&path);
+        }
+    }
     0
 }
 

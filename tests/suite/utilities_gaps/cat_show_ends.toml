@@ -1,0 +1,15 @@
+[test]
+name = "cat-show-ends"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["cat"]
+
+[setup]
+files = { "/data/test.txt" = "hello\nworld\n" }
+
+[input]
+script = "cat -E /data/test.txt"
+
+[expect]
+status = 0
+stdout = "hello$\nworld$\n"

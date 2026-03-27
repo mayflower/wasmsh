@@ -1,0 +1,15 @@
+[test]
+name = "find-empty"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["find"]
+
+[setup]
+files = { "/data/empty.txt" = "", "/data/notempty.txt" = "content\n" }
+
+[input]
+script = "find /data -empty"
+
+[expect]
+status = 0
+stdout = "/data/empty.txt\n"

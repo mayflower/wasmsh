@@ -1,0 +1,15 @@
+[test]
+name = "grep-extended-regex"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["grep"]
+
+[setup]
+files = { "/data/test.txt" = "cat\ndog\nbird\n" }
+
+[input]
+script = "grep -E 'cat|dog' /data/test.txt"
+
+[expect]
+status = 0
+stdout = "cat\ndog\n"

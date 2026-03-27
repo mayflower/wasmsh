@@ -1,0 +1,12 @@
+[test]
+name = "seq-equal-width"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["seq"]
+
+[input]
+script = "seq -w 8 10"
+
+[expect]
+status = 0
+stdout = "08\n09\n10\n"

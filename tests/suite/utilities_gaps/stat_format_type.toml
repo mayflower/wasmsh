@@ -1,0 +1,15 @@
+[test]
+name = "stat-format-type"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["stat", "mkdir"]
+
+[setup]
+files = { "/data/sub/dummy" = "" }
+
+[input]
+script = "stat -c '%F' /data/sub"
+
+[expect]
+status = 0
+stdout = "directory\n"

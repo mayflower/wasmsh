@@ -1,0 +1,15 @@
+[test]
+name = "find-delete"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["find", "ls"]
+
+[setup]
+files = { "/data/keep.txt" = "keep\n", "/data/remove.log" = "gone\n" }
+
+[input]
+script = "find /data -name '*.log' -delete && ls /data"
+
+[expect]
+status = 0
+stdout = "keep.txt\n"

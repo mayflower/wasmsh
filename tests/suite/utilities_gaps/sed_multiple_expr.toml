@@ -1,0 +1,15 @@
+[test]
+name = "sed-multiple-expressions"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["sed"]
+
+[setup]
+files = { "/data/test.txt" = "hello world\n" }
+
+[input]
+script = "sed -e 's/hello/hi/' -e 's/world/earth/' /data/test.txt"
+
+[expect]
+status = 0
+stdout = "hi earth\n"

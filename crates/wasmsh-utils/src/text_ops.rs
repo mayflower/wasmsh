@@ -2,35 +2,89 @@
 
 use wasmsh_fs::{OpenOptions, Vfs};
 
-use crate::helpers::{
-    emit_error, get_input_text, grep_matches, parse_line_count, read_text, resolve_path,
-};
+use crate::helpers::{emit_error, get_input_text, grep_matches, read_text, resolve_path};
 use crate::{UtilContext, UtilOutput};
 
+enum HeadMode {
+    Lines(usize),
+    Bytes(usize),
+}
+
+fn parse_head_args<'a>(argv: &'a [&'a str]) -> (HeadMode, bool, bool, Vec<&'a str>) {
+    let mut mode = HeadMode::Lines(10);
+    let mut quiet = false;
+    let mut verbose = false;
+    let mut files = Vec::new();
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = argv[i];
+        if arg == "-c" && i + 1 < argv.len() {
+            mode = HeadMode::Bytes(argv[i + 1].parse().unwrap_or(0));
+            i += 2;
+        } else if arg == "-n" && i + 1 < argv.len() {
+            mode = HeadMode::Lines(argv[i + 1].parse().unwrap_or(10));
+            i += 2;
+        } else if arg == "-q" {
+            quiet = true;
+            i += 1;
+        } else if arg == "-v" {
+            verbose = true;
+            i += 1;
+        } else if arg.starts_with('-') && arg.len() > 1 && arg != "--" {
+            if let Ok(n) = arg[1..].parse::<usize>() {
+                mode = HeadMode::Lines(n);
+            }
+            i += 1;
+        } else {
+            if arg == "--" {
+                i += 1;
+            }
+            files.extend(argv[i..].iter().filter(|a| !a.starts_with('-')));
+            break;
+        }
+    }
+    (mode, quiet, verbose, files)
+}
+
+fn head_emit(output: &mut dyn UtilOutput, data: &[u8], mode: &HeadMode) {
+    match mode {
+        HeadMode::Bytes(n) => {
+            let end = (*n).min(data.len());
+            output.stdout(&data[..end]);
+        }
+        HeadMode::Lines(n) => {
+            let text = String::from_utf8_lossy(data);
+            for line in text.lines().take(*n) {
+                output.stdout(line.as_bytes());
+                output.stdout(b"\n");
+            }
+        }
+    }
+}
+
 pub(crate) fn util_head(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let (n, _from_start, files) = parse_line_count(argv, 10);
+    let (mode, quiet, verbose, files) = parse_head_args(argv);
     if files.is_empty() {
         if let Some(data) = ctx.stdin {
-            let text = String::from_utf8_lossy(data);
-            for line in text.lines().take(n) {
-                ctx.output.stdout(line.as_bytes());
-                ctx.output.stdout(b"\n");
-            }
+            head_emit(ctx.output, data, &mode);
             return 0;
         }
         ctx.output.stderr(b"head: missing operand\n");
         return 1;
     }
+    let multi = files.len() > 1;
     let mut status = 0;
-    for path in files {
+    for (idx, path) in files.iter().enumerate() {
+        if (multi && !quiet) || verbose {
+            if idx > 0 {
+                ctx.output.stdout(b"\n");
+            }
+            let hdr = format!("==> {path} <==\n");
+            ctx.output.stdout(hdr.as_bytes());
+        }
         let full = resolve_path(ctx.cwd, path);
         match read_text(ctx.fs, &full) {
-            Ok(text) => {
-                for line in text.lines().take(n) {
-                    ctx.output.stdout(line.as_bytes());
-                    ctx.output.stdout(b"\n");
-                }
-            }
+            Ok(text) => head_emit(ctx.output, text.as_bytes(), &mode),
             Err(e) => {
                 emit_error(ctx.output, "head", path, &e);
                 status = 1;
@@ -53,24 +107,102 @@ pub(crate) fn tail_output(text: &str, n: usize, from_start: bool, output: &mut d
     }
 }
 
+enum TailMode {
+    Lines(usize, bool), // (count, from_start)
+    Bytes(usize),
+}
+
+fn parse_tail_args<'a>(argv: &'a [&'a str]) -> (TailMode, bool, bool, Vec<&'a str>) {
+    let mut quiet = false;
+    let mut verbose = false;
+    let mut files = Vec::new();
+    let mut mode: Option<TailMode> = None;
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = argv[i];
+        if arg == "-c" && i + 1 < argv.len() {
+            mode = Some(TailMode::Bytes(argv[i + 1].parse().unwrap_or(0)));
+            i += 2;
+        } else if arg == "-n" && i + 1 < argv.len() {
+            let val = argv[i + 1];
+            if let Some(rest) = val.strip_prefix('+') {
+                let n = rest.parse().unwrap_or(1);
+                mode = Some(TailMode::Lines(n, true));
+            } else {
+                let n = val.parse().unwrap_or(10);
+                mode = Some(TailMode::Lines(n, false));
+            }
+            i += 2;
+        } else if arg == "-f" {
+            // accept, no-op in VFS
+            i += 1;
+        } else if arg == "-q" {
+            quiet = true;
+            i += 1;
+        } else if arg == "-v" {
+            verbose = true;
+            i += 1;
+        } else if arg.starts_with('-') && arg.len() > 1 && arg != "--" {
+            if let Ok(n) = arg[1..].parse::<usize>() {
+                mode = Some(TailMode::Lines(n, false));
+            } else if let Some(rest) = arg.strip_prefix('+') {
+                if let Ok(n) = rest.parse::<usize>() {
+                    mode = Some(TailMode::Lines(n, true));
+                }
+            }
+            i += 1;
+        } else {
+            if arg == "--" {
+                i += 1;
+            }
+            files.extend(argv[i..].iter().filter(|a| !a.starts_with('-')));
+            break;
+        }
+    }
+    (
+        mode.unwrap_or(TailMode::Lines(10, false)),
+        quiet,
+        verbose,
+        files,
+    )
+}
+
+fn tail_emit(output: &mut dyn UtilOutput, data: &[u8], mode: &TailMode) {
+    match mode {
+        TailMode::Bytes(n) => {
+            let start = data.len().saturating_sub(*n);
+            output.stdout(&data[start..]);
+        }
+        TailMode::Lines(n, from_start) => {
+            let text = String::from_utf8_lossy(data);
+            tail_output(&text, *n, *from_start, output);
+        }
+    }
+}
+
 pub(crate) fn util_tail(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let (n, from_start, files) = parse_line_count(argv, 10);
+    let (mode, quiet, verbose, files) = parse_tail_args(argv);
     if files.is_empty() {
         if let Some(data) = ctx.stdin {
-            let text = String::from_utf8_lossy(data);
-            tail_output(&text, n, from_start, ctx.output);
+            tail_emit(ctx.output, data, &mode);
             return 0;
         }
         ctx.output.stderr(b"tail: missing operand\n");
         return 1;
     }
+    let multi = files.len() > 1;
     let mut status = 0;
-    for path in files {
+    for (idx, path) in files.iter().enumerate() {
+        if (multi && !quiet) || verbose {
+            if idx > 0 {
+                ctx.output.stdout(b"\n");
+            }
+            let hdr = format!("==> {path} <==\n");
+            ctx.output.stdout(hdr.as_bytes());
+        }
         let full = resolve_path(ctx.cwd, path);
         match read_text(ctx.fs, &full) {
-            Ok(text) => {
-                tail_output(&text, n, from_start, ctx.output);
-            }
+            Ok(text) => tail_emit(ctx.output, text.as_bytes(), &mode),
             Err(e) => {
                 emit_error(ctx.output, "tail", path, &e);
                 status = 1;
@@ -113,12 +245,14 @@ struct WcFlags {
     lines: bool,
     words: bool,
     bytes: bool,
+    max_line_length: bool,
 }
 
 fn parse_wc_flags<'a>(args: &[&'a str]) -> (WcFlags, Vec<&'a str>) {
     let mut show_lines = false;
     let mut show_words = false;
     let mut show_bytes = false;
+    let mut show_max_line = false;
     let mut file_args = Vec::new();
     let mut parsing_flags = true;
 
@@ -129,6 +263,7 @@ fn parse_wc_flags<'a>(args: &[&'a str]) -> (WcFlags, Vec<&'a str>) {
                     'l' => show_lines = true,
                     'w' => show_words = true,
                     'c' | 'm' => show_bytes = true,
+                    'L' => show_max_line = true,
                     _ => {}
                 }
             }
@@ -142,7 +277,7 @@ fn parse_wc_flags<'a>(args: &[&'a str]) -> (WcFlags, Vec<&'a str>) {
     }
 
     // If no flags specified, show all
-    if !show_lines && !show_words && !show_bytes {
+    if !show_lines && !show_words && !show_bytes && !show_max_line {
         show_lines = true;
         show_words = true;
         show_bytes = true;
@@ -153,6 +288,7 @@ fn parse_wc_flags<'a>(args: &[&'a str]) -> (WcFlags, Vec<&'a str>) {
             lines: show_lines,
             words: show_words,
             bytes: show_bytes,
+            max_line_length: show_max_line,
         },
         file_args,
     )
@@ -175,6 +311,10 @@ fn wc_emit(
     if flags.bytes {
         parts.push(format!("{:>7}", bytes));
     }
+    if flags.max_line_length {
+        let max_len = text.lines().map(|l| l.len()).max().unwrap_or(0);
+        parts.push(format!("{:>7}", max_len));
+    }
     let mut out = parts.join("");
     if let Some(p) = path {
         out.push(' ');
@@ -184,160 +324,408 @@ fn wc_emit(
     ctx.output.stdout(out.as_bytes());
 }
 
-pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let (flags, args) = match parse_grep_flags(ctx, argv) {
-        Ok(result) => result,
-        Err(status) => return status,
-    };
-
-    if args.is_empty() {
-        ctx.output.stderr(b"grep: missing pattern\n");
-        return 2;
-    }
-
-    let pattern = args[0];
-    let file_args = &args[1..];
-    let text = match grep_read_text(ctx, file_args) {
-        Ok(text) => text,
-        Err(status) => return status,
-    };
-    grep_process_lines(ctx, &text, pattern, &flags)
-}
-
 #[allow(clippy::struct_excessive_bools)]
 struct GrepFlags {
     ignore_case: bool,
     invert: bool,
     count_only: bool,
     show_line_numbers: bool,
+    recursive: bool,
+    files_only: bool,
+    word_match: bool,
+    only_matching: bool,
+    quiet: bool,
+    extended: bool,
+    fixed: bool,
+    after_context: usize,
+    before_context: usize,
+    max_count: Option<usize>,
+    show_filename: Option<bool>, // None=auto, Some(true)=always, Some(false)=never
+    patterns: Vec<String>,
+    include_glob: Option<String>,
+    exclude_glob: Option<String>,
 }
 
 fn parse_grep_flags<'a>(
-    ctx: &mut UtilContext<'_>,
     argv: &'a [&'a str],
-) -> Result<(GrepFlags, &'a [&'a str]), i32> {
-    let mut args = &argv[1..];
+) -> (GrepFlags, Vec<&'a str>) {
     let mut flags = GrepFlags {
         ignore_case: false,
         invert: false,
         count_only: false,
         show_line_numbers: false,
+        recursive: false,
+        files_only: false,
+        word_match: false,
+        only_matching: false,
+        quiet: false,
+        extended: false,
+        fixed: false,
+        after_context: 0,
+        before_context: 0,
+        max_count: None,
+        show_filename: None,
+        patterns: Vec::new(),
+        include_glob: None,
+        exclude_glob: None,
     };
-
-    while let Some(arg) = args.first() {
-        if !(arg.starts_with('-') && arg.len() > 1) {
+    let mut rest = Vec::new();
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = argv[i];
+        if arg == "--" {
+            rest.extend(argv[i + 1..].iter().copied());
             break;
         }
-        for c in arg[1..].chars() {
-            match c {
-                'i' => flags.ignore_case = true,
-                'v' => flags.invert = true,
-                'c' => flags.count_only = true,
-                'n' => flags.show_line_numbers = true,
-                _ => {
-                    let msg = format!("grep: invalid option -- '{c}'\n");
-                    ctx.output.stderr(msg.as_bytes());
-                    return Err(2);
+        if let Some(g) = arg.strip_prefix("--include=") {
+            flags.include_glob = Some(g.to_string());
+            i += 1;
+            continue;
+        }
+        if let Some(g) = arg.strip_prefix("--exclude=") {
+            flags.exclude_glob = Some(g.to_string());
+            i += 1;
+            continue;
+        }
+        if arg == "--color" || arg.starts_with("--color=") {
+            i += 1;
+            continue;
+        }
+        if arg == "-e" && i + 1 < argv.len() {
+            flags.patterns.push(argv[i + 1].to_string());
+            i += 2;
+            continue;
+        }
+        if arg == "-f" && i + 1 < argv.len() {
+            // pattern file - not handled here, would need fs access
+            i += 2;
+            continue;
+        }
+        if arg == "-A" && i + 1 < argv.len() {
+            flags.after_context = argv[i + 1].parse().unwrap_or(0);
+            i += 2;
+            continue;
+        }
+        if arg == "-B" && i + 1 < argv.len() {
+            flags.before_context = argv[i + 1].parse().unwrap_or(0);
+            i += 2;
+            continue;
+        }
+        if arg == "-C" && i + 1 < argv.len() {
+            let n = argv[i + 1].parse().unwrap_or(0);
+            flags.before_context = n;
+            flags.after_context = n;
+            i += 2;
+            continue;
+        }
+        if arg == "-m" && i + 1 < argv.len() {
+            flags.max_count = argv[i + 1].parse().ok();
+            i += 2;
+            continue;
+        }
+        if arg.starts_with('-') && arg.len() > 1 {
+            for c in arg[1..].chars() {
+                match c {
+                    'i' => flags.ignore_case = true,
+                    'v' => flags.invert = true,
+                    'c' => flags.count_only = true,
+                    'n' => flags.show_line_numbers = true,
+                    'r' | 'R' => flags.recursive = true,
+                    'l' => flags.files_only = true,
+                    'E' | 'P' => flags.extended = true,
+                    'F' => flags.fixed = true,
+                    'w' => flags.word_match = true,
+                    'o' => flags.only_matching = true,
+                    'q' => flags.quiet = true,
+                    'h' => flags.show_filename = Some(false),
+                    'H' => flags.show_filename = Some(true),
+                    'z' => {} // accept, no-op
+                    _ => {}
+                }
+            }
+            i += 1;
+        } else {
+            rest.push(arg);
+            i += 1;
+        }
+    }
+    (flags, rest)
+}
+
+fn grep_match_pattern(line: &str, pattern: &str, flags: &GrepFlags) -> bool {
+    let (l, p) = if flags.ignore_case {
+        (line.to_lowercase(), pattern.to_lowercase())
+    } else {
+        (line.to_string(), pattern.to_string())
+    };
+
+    if flags.extended && p.contains('|') {
+        return p.split('|').any(|alt| grep_match_single(&l, alt.trim(), flags));
+    }
+    grep_match_single(&l, &p, flags)
+}
+
+fn grep_match_single(line: &str, pattern: &str, flags: &GrepFlags) -> bool {
+    if flags.word_match {
+        for word in line.split(|c: char| !c.is_alphanumeric() && c != '_') {
+            if word == pattern {
+                return true;
+            }
+        }
+        return false;
+    }
+    grep_matches(line, pattern, false) // already lowercased if needed
+}
+
+fn grep_find_match<'a>(line: &'a str, pattern: &str, flags: &GrepFlags) -> Option<&'a str> {
+    let (l, p) = if flags.ignore_case {
+        (line.to_lowercase(), pattern.to_lowercase())
+    } else {
+        (line.to_string(), pattern.to_string())
+    };
+    if flags.word_match {
+        let start = l.find(&p)?;
+        // Check word boundaries
+        if start > 0 && l.as_bytes()[start - 1].is_ascii_alphanumeric() {
+            return None;
+        }
+        let end = start + p.len();
+        if end < l.len() && l.as_bytes()[end].is_ascii_alphanumeric() {
+            return None;
+        }
+        Some(&line[start..start + p.len()])
+    } else {
+        let idx = l.find(&p)?;
+        Some(&line[idx..idx + p.len()])
+    }
+}
+
+fn grep_line_matches(line: &str, flags: &GrepFlags, patterns: &[&str]) -> bool {
+    let matched = patterns.iter().any(|p| grep_match_pattern(line, p, flags));
+    matched != flags.invert
+}
+
+fn grep_process_file(
+    output: &mut dyn UtilOutput,
+    text: &str,
+    filename: Option<&str>,
+    flags: &GrepFlags,
+    patterns: &[&str],
+) -> (bool, u64) {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut match_count = 0u64;
+    let mut found = false;
+    let mut remaining_after = 0usize;
+    let mut printed_separator = false;
+
+    // For -B context, track which lines to print before a match
+    let mut before_buf: Vec<(usize, &str)> = Vec::new();
+
+    for (i, &line) in lines.iter().enumerate() {
+        if grep_line_matches(line, flags, patterns) {
+            found = true;
+            match_count += 1;
+
+            if flags.quiet || flags.files_only {
+                // Don't emit lines
+                if let Some(max) = flags.max_count {
+                    if match_count >= max as u64 {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if !flags.count_only {
+                // Print before-context lines
+                if flags.before_context > 0 && !before_buf.is_empty() {
+                    if printed_separator && flags.before_context > 0 {
+                        output.stdout(b"--\n");
+                    }
+                    for (bi, bline) in &before_buf {
+                        grep_emit_one(output, bline, *bi + 1, filename, flags, patterns);
+                    }
+                }
+                before_buf.clear();
+                grep_emit_one(output, line, i + 1, filename, flags, patterns);
+                remaining_after = flags.after_context;
+                printed_separator = true;
+            }
+            if let Some(max) = flags.max_count {
+                if match_count >= max as u64 {
+                    break;
+                }
+            }
+        } else if remaining_after > 0 && !flags.count_only {
+            grep_emit_one(output, line, i + 1, filename, flags, patterns);
+            remaining_after -= 1;
+        } else if flags.before_context > 0 {
+            before_buf.push((i, line));
+            if before_buf.len() > flags.before_context {
+                before_buf.remove(0);
+            }
+        }
+    }
+
+    if flags.count_only && !flags.quiet {
+        if let Some(f) = filename {
+            if flags.show_filename != Some(false) {
+                let s = format!("{f}:{match_count}\n");
+                output.stdout(s.as_bytes());
+            } else {
+                let s = format!("{match_count}\n");
+                output.stdout(s.as_bytes());
+            }
+        } else {
+            let s = format!("{match_count}\n");
+            output.stdout(s.as_bytes());
+        }
+    }
+    (found, match_count)
+}
+
+fn grep_emit_one(
+    output: &mut dyn UtilOutput,
+    line: &str,
+    line_num: usize,
+    filename: Option<&str>,
+    flags: &GrepFlags,
+    patterns: &[&str],
+) {
+    let mut prefix = String::new();
+    if let Some(f) = filename {
+        if flags.show_filename != Some(false) {
+            prefix.push_str(f);
+            prefix.push(':');
+        }
+    }
+    if flags.show_line_numbers {
+        prefix.push_str(&format!("{line_num}:"));
+    }
+    if flags.only_matching {
+        for pat in patterns {
+            if let Some(m) = grep_find_match(line, pat, flags) {
+                output.stdout(prefix.as_bytes());
+                output.stdout(m.as_bytes());
+                output.stdout(b"\n");
+            }
+        }
+    } else {
+        output.stdout(prefix.as_bytes());
+        output.stdout(line.as_bytes());
+        output.stdout(b"\n");
+    }
+}
+
+fn grep_walk_recursive(
+    ctx: &mut UtilContext<'_>,
+    dir: &str,
+    flags: &GrepFlags,
+    patterns: &[&str],
+    found_any: &mut bool,
+) {
+    let Ok(entries) = ctx.fs.read_dir(dir) else {
+        return;
+    };
+    for entry in entries {
+        let child = crate::helpers::child_path(dir, &entry.name);
+        if entry.is_dir {
+            grep_walk_recursive(ctx, &child, flags, patterns, found_any);
+        } else {
+            if let Some(ref glob) = flags.include_glob {
+                if !crate::helpers::simple_glob_match(glob, &entry.name) {
+                    continue;
+                }
+            }
+            if let Some(ref glob) = flags.exclude_glob {
+                if crate::helpers::simple_glob_match(glob, &entry.name) {
+                    continue;
+                }
+            }
+            if let Ok(text) = read_text(ctx.fs, &child) {
+                let (found, _) =
+                    grep_process_file(ctx.output, &text, Some(&child), flags, patterns);
+                if found {
+                    *found_any = true;
+                    if flags.files_only {
+                        let out = format!("{child}\n");
+                        ctx.output.stdout(out.as_bytes());
+                    }
                 }
             }
         }
-        args = &args[1..];
     }
-
-    Ok((flags, args))
 }
 
-fn grep_read_text(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> Result<String, i32> {
-    if file_args.is_empty() {
-        return ctx
-            .stdin
-            .map(|data| String::from_utf8_lossy(data).to_string())
-            .ok_or_else(|| {
-                ctx.output.stderr(b"grep: missing file operand\n");
-                2
-            });
+pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (flags, args) = parse_grep_flags(argv);
+
+    let (pattern_strs, file_args): (Vec<String>, Vec<&str>) = if flags.patterns.is_empty() {
+        if args.is_empty() {
+            ctx.output.stderr(b"grep: missing pattern\n");
+            return 2;
+        }
+        (vec![args[0].to_string()], args[1..].to_vec())
+    } else {
+        (flags.patterns.clone(), args)
+    };
+    let patterns: Vec<&str> = pattern_strs.iter().map(String::as_str).collect();
+
+    if flags.recursive {
+        let dir = if file_args.is_empty() {
+            "."
+        } else {
+            file_args[0]
+        };
+        let full = resolve_path(ctx.cwd, dir);
+        let mut found_any = false;
+        grep_walk_recursive(ctx, &full, &flags, &patterns, &mut found_any);
+        return i32::from(!found_any);
     }
 
-    let mut combined = String::new();
-    for path in file_args {
+    if file_args.is_empty() {
+        let text = match ctx
+            .stdin
+            .map(|data| String::from_utf8_lossy(data).to_string())
+        {
+            Some(t) => t,
+            None => {
+                ctx.output.stderr(b"grep: missing file operand\n");
+                return 2;
+            }
+        };
+        let (found, _) = grep_process_file(ctx.output, &text, None, &flags, &patterns);
+        return i32::from(!found);
+    }
+
+    let multi = file_args.len() > 1;
+    let show_fn = flags.show_filename.unwrap_or(multi);
+    let adj_flags = GrepFlags {
+        show_filename: Some(show_fn),
+        ..flags
+    };
+
+    let mut found_any = false;
+    for path in &file_args {
         let full = resolve_path(ctx.cwd, path);
         match read_text(ctx.fs, &full) {
-            Ok(text) => combined.push_str(&text),
+            Ok(text) => {
+                let fname = if show_fn { Some(*path) } else { None };
+                let (found, _) =
+                    grep_process_file(ctx.output, &text, fname, &adj_flags, &patterns);
+                if found {
+                    found_any = true;
+                    if adj_flags.files_only {
+                        let out = format!("{path}\n");
+                        ctx.output.stdout(out.as_bytes());
+                    }
+                }
+            }
             Err(e) => {
                 emit_error(ctx.output, "grep", path, &e);
-                return Err(2);
             }
         }
     }
-    Ok(combined)
-}
-
-fn grep_process_lines(
-    ctx: &mut UtilContext<'_>,
-    text: &str,
-    pattern: &str,
-    flags: &GrepFlags,
-) -> i32 {
-    let mut match_count = 0u64;
-    let mut found = false;
-
-    for (i, line) in text.lines().enumerate() {
-        if !grep_line_matches(line, pattern, flags) {
-            continue;
-        }
-        found = true;
-        match_count += 1;
-        if !flags.count_only {
-            grep_emit_line(ctx, line, i + 1, flags.show_line_numbers);
-        }
-    }
-
-    if flags.count_only {
-        let out = format!("{match_count}\n");
-        ctx.output.stdout(out.as_bytes());
-    }
-    i32::from(!found)
-}
-
-fn grep_line_matches(line: &str, pattern: &str, flags: &GrepFlags) -> bool {
-    grep_matches(line, pattern, flags.ignore_case) != flags.invert
-}
-
-fn grep_emit_line(ctx: &mut UtilContext<'_>, line: &str, line_num: usize, show_num: bool) {
-    if show_num {
-        let out = format!("{line_num}:{line}\n");
-        ctx.output.stdout(out.as_bytes());
-    } else {
-        ctx.output.stdout(line.as_bytes());
-        ctx.output.stdout(b"\n");
-    }
-}
-
-pub(crate) fn util_sed(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let args = &argv[1..];
-    if args.is_empty() {
-        ctx.output.stderr(b"sed: missing script\n");
-        return 1;
-    }
-
-    let expr = args[0];
-    let file_args = &args[1..];
-    let text = get_input_text(ctx, file_args);
-    if let Some(sub) = parse_sed_substitute(expr) {
-        for line in text.lines() {
-            let result = if sub.global {
-                line.replace(&sub.pattern, &sub.replacement)
-            } else {
-                line.replacen(&sub.pattern, &sub.replacement, 1)
-            };
-            ctx.output.stdout(result.as_bytes());
-            ctx.output.stdout(b"\n");
-        }
-        0
-    } else {
-        ctx.output.stderr(b"sed: unsupported expression\n");
-        1
-    }
+    i32::from(!found_any)
 }
 
 pub(crate) struct SedSubstitute {
@@ -364,64 +752,630 @@ pub(crate) fn parse_sed_substitute(expr: &str) -> Option<SedSubstitute> {
     })
 }
 
-pub(crate) fn util_sort(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let (numeric, reverse, args) = parse_sort_flags(argv);
-    let text = get_input_text(ctx, args);
-    let mut lines: Vec<&str> = text.lines().collect();
-    sort_lines(&mut lines, numeric);
-    if reverse {
-        lines.reverse();
+enum SedAddr {
+    None,
+    Line(usize),
+    Last,
+    Regex(String),
+    Range(Box<SedAddr>, Box<SedAddr>),
+}
+
+enum SedCmd {
+    Substitute(SedSubstitute),
+    Delete,
+    Print,
+    Transliterate(Vec<char>, Vec<char>),
+    AppendText(String),
+    InsertText(String),
+    ChangeText(String),
+    Quit,
+}
+
+struct SedInstruction {
+    addr: SedAddr,
+    cmd: SedCmd,
+}
+
+fn parse_sed_addr(s: &str) -> (SedAddr, &str) {
+    if s.starts_with('/') {
+        if let Some(end) = s[1..].find('/') {
+            let pat = &s[1..end + 1];
+            let rest = &s[end + 2..];
+            if rest.starts_with(',') {
+                let (addr2, rest2) = parse_sed_addr(&rest[1..]);
+                return (SedAddr::Range(Box::new(SedAddr::Regex(pat.to_string())), Box::new(addr2)), rest2);
+            }
+            return (SedAddr::Regex(pat.to_string()), rest);
+        }
+    }
+    if s.starts_with('$') {
+        let rest = &s[1..];
+        if rest.starts_with(',') {
+            let (addr2, rest2) = parse_sed_addr(&rest[1..]);
+            return (SedAddr::Range(Box::new(SedAddr::Last), Box::new(addr2)), rest2);
+        }
+        return (SedAddr::Last, rest);
+    }
+    let num_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    if num_end > 0 {
+        if let Ok(n) = s[..num_end].parse::<usize>() {
+            let rest = &s[num_end..];
+            if rest.starts_with(',') {
+                let (addr2, rest2) = parse_sed_addr(&rest[1..]);
+                return (SedAddr::Range(Box::new(SedAddr::Line(n)), Box::new(addr2)), rest2);
+            }
+            return (SedAddr::Line(n), rest);
+        }
+    }
+    (SedAddr::None, s)
+}
+
+fn parse_sed_script(script: &str) -> Vec<SedInstruction> {
+    let mut instructions = Vec::new();
+    for part in script.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (addr, rest) = parse_sed_addr(part);
+        let rest = rest.trim();
+        let cmd = if rest.starts_with('s') {
+            if let Some(sub) = parse_sed_substitute(rest) {
+                SedCmd::Substitute(sub)
+            } else {
+                continue;
+            }
+        } else if rest == "d" {
+            SedCmd::Delete
+        } else if rest == "p" {
+            SedCmd::Print
+        } else if rest == "q" {
+            SedCmd::Quit
+        } else if rest.starts_with("y/") || rest.starts_with("y|") {
+            let delim = rest.as_bytes()[1] as char;
+            let inner = &rest[2..];
+            let parts: Vec<&str> = inner.split(delim).collect();
+            if parts.len() >= 2 {
+                SedCmd::Transliterate(parts[0].chars().collect(), parts[1].chars().collect())
+            } else {
+                continue;
+            }
+        } else if let Some(text) = rest.strip_prefix("a\\") {
+            SedCmd::AppendText(text.trim_start().to_string())
+        } else if let Some(text) = rest.strip_prefix("i\\") {
+            SedCmd::InsertText(text.trim_start().to_string())
+        } else if let Some(text) = rest.strip_prefix("c\\") {
+            SedCmd::ChangeText(text.trim_start().to_string())
+        } else if rest.starts_with('s') {
+            continue;
+        } else {
+            continue;
+        };
+        instructions.push(SedInstruction { addr, cmd });
+    }
+    instructions
+}
+
+fn sed_addr_matches(addr: &SedAddr, line_num: usize, total_lines: usize, line: &str, in_range: &mut bool) -> bool {
+    match addr {
+        SedAddr::None => true,
+        SedAddr::Line(n) => line_num == *n,
+        SedAddr::Last => line_num == total_lines,
+        SedAddr::Regex(pat) => grep_matches(line, pat, false),
+        SedAddr::Range(start, end) => {
+            if *in_range {
+                if sed_addr_matches(end, line_num, total_lines, line, &mut false) {
+                    *in_range = false;
+                }
+                true
+            } else if sed_addr_matches(start, line_num, total_lines, line, &mut false) {
+                *in_range = true;
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+pub(crate) fn util_sed(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let mut suppress_print = false;
+    let mut in_place = false;
+    let mut in_place_suffix: Option<String> = None;
+    let mut expressions: Vec<String> = Vec::new();
+    let mut file_args = Vec::new();
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = argv[i];
+        if arg == "-n" {
+            suppress_print = true;
+            i += 1;
+        } else if arg == "-i" {
+            in_place = true;
+            i += 1;
+        } else if let Some(suffix) = arg.strip_prefix("-i") {
+            in_place = true;
+            in_place_suffix = Some(suffix.to_string());
+            i += 1;
+        } else if arg == "-e" && i + 1 < argv.len() {
+            expressions.push(argv[i + 1].to_string());
+            i += 2;
+        } else if arg == "-E" || arg == "-r" {
+            i += 1; // extended regex, accept
+        } else if arg == "-f" && i + 1 < argv.len() {
+            // script file - read it
+            let full = resolve_path(ctx.cwd, argv[i + 1]);
+            if let Ok(script) = read_text(ctx.fs, &full) {
+                expressions.push(script);
+            }
+            i += 2;
+        } else if arg.starts_with('-') && arg.len() > 1 && arg != "--" {
+            i += 1;
+        } else {
+            if arg == "--" {
+                i += 1;
+                file_args.extend(argv[i..].iter().copied());
+                break;
+            }
+            if expressions.is_empty() {
+                expressions.push(arg.to_string());
+            } else {
+                file_args.push(arg);
+            }
+            i += 1;
+        }
     }
 
-    for line in &lines {
-        ctx.output.stdout(line.as_bytes());
-        ctx.output.stdout(b"\n");
+    if expressions.is_empty() {
+        ctx.output.stderr(b"sed: missing script\n");
+        return 1;
+    }
+
+    let script = expressions.join(";");
+    let instructions = parse_sed_script(&script);
+
+    let process = |text: &str, output: &mut dyn UtilOutput| -> String {
+        let lines: Vec<&str> = text.lines().collect();
+        let total = lines.len();
+        let mut result = String::new();
+        let mut range_states: Vec<bool> = vec![false; instructions.len()];
+
+        for (idx, &line) in lines.iter().enumerate() {
+            let line_num = idx + 1;
+            let mut current = line.to_string();
+            let mut deleted = false;
+            let mut printed = false;
+            let mut quit = false;
+
+            for (ci, instr) in instructions.iter().enumerate() {
+                if !sed_addr_matches(&instr.addr, line_num, total, &current, &mut range_states[ci]) {
+                    continue;
+                }
+                match &instr.cmd {
+                    SedCmd::Substitute(sub) => {
+                        current = if sub.global {
+                            current.replace(&sub.pattern, &sub.replacement)
+                        } else {
+                            current.replacen(&sub.pattern, &sub.replacement, 1)
+                        };
+                    }
+                    SedCmd::Delete => {
+                        deleted = true;
+                        break;
+                    }
+                    SedCmd::Print => {
+                        output.stdout(current.as_bytes());
+                        output.stdout(b"\n");
+                        printed = true;
+                    }
+                    SedCmd::Transliterate(from, to) => {
+                        current = current
+                            .chars()
+                            .map(|c| {
+                                if let Some(pos) = from.iter().position(|&fc| fc == c) {
+                                    to.get(pos).or(to.last()).copied().unwrap_or(c)
+                                } else {
+                                    c
+                                }
+                            })
+                            .collect();
+                    }
+                    SedCmd::AppendText(text) => {
+                        if !suppress_print {
+                            output.stdout(current.as_bytes());
+                            output.stdout(b"\n");
+                        }
+                        output.stdout(text.as_bytes());
+                        output.stdout(b"\n");
+                        printed = true;
+                    }
+                    SedCmd::InsertText(text) => {
+                        output.stdout(text.as_bytes());
+                        output.stdout(b"\n");
+                    }
+                    SedCmd::ChangeText(text) => {
+                        output.stdout(text.as_bytes());
+                        output.stdout(b"\n");
+                        deleted = true;
+                        break;
+                    }
+                    SedCmd::Quit => {
+                        if !suppress_print && !printed {
+                            output.stdout(current.as_bytes());
+                            output.stdout(b"\n");
+                        }
+                        result.push_str(&current);
+                        result.push('\n');
+                        quit = true;
+                        break;
+                    }
+                }
+            }
+            if quit {
+                break;
+            }
+            if !deleted {
+                if !suppress_print && !printed {
+                    output.stdout(current.as_bytes());
+                    output.stdout(b"\n");
+                }
+                result.push_str(&current);
+                result.push('\n');
+            }
+        }
+        result
+    };
+
+    if in_place && !file_args.is_empty() {
+        for path in &file_args {
+            let full = resolve_path(ctx.cwd, path);
+            let text = match read_text(ctx.fs, &full) {
+                Ok(t) => t,
+                Err(e) => {
+                    emit_error(ctx.output, "sed", path, &e);
+                    return 1;
+                }
+            };
+            if let Some(ref suffix) = in_place_suffix {
+                let backup = format!("{full}{suffix}");
+                let _ = crate::helpers::copy_file_contents(ctx.fs, &full, &backup);
+            }
+            // process without output (in-place)
+            let mut dummy = SedDummyOutput;
+            let result = process(&text, &mut dummy);
+            // Write back
+            if let Ok(h) = ctx.fs.open(&full, OpenOptions::write()) {
+                let _ = ctx.fs.write_file(h, result.as_bytes());
+                ctx.fs.close(h);
+            }
+        }
+        return 0;
+    }
+
+    let text = get_input_text(ctx, &file_args);
+    process(&text, ctx.output);
+    0
+}
+
+struct SedDummyOutput;
+impl UtilOutput for SedDummyOutput {
+    fn stdout(&mut self, _data: &[u8]) {}
+    fn stderr(&mut self, _data: &[u8]) {}
+}
+
+#[allow(clippy::struct_excessive_bools)]
+struct SortFlags {
+    numeric: bool,
+    reverse: bool,
+    unique: bool,
+    ignore_case: bool,
+    stable: bool,
+    ignore_leading_blanks: bool,
+    check: bool,
+    human_numeric: bool,
+    version_sort: bool,
+    key_field: Option<usize>,
+    separator: Option<char>,
+    output_file: Option<String>,
+}
+
+fn parse_sort_flags<'a>(argv: &'a [&'a str]) -> (SortFlags, Vec<&'a str>) {
+    let mut flags = SortFlags {
+        numeric: false,
+        reverse: false,
+        unique: false,
+        ignore_case: false,
+        stable: false,
+        ignore_leading_blanks: false,
+        check: false,
+        human_numeric: false,
+        version_sort: false,
+        key_field: None,
+        separator: None,
+        output_file: None,
+    };
+    let mut file_args = Vec::new();
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = argv[i];
+        if arg == "-k" && i + 1 < argv.len() {
+            // Parse key spec: "-k 2" or "-k 2,3"
+            let spec = argv[i + 1];
+            let field: &str = spec.split(',').next().unwrap_or(spec);
+            let field: &str = field.split('.').next().unwrap_or(field);
+            flags.key_field = field.parse().ok();
+            i += 2;
+        } else if arg == "-t" && i + 1 < argv.len() {
+            flags.separator = argv[i + 1].chars().next();
+            i += 2;
+        } else if arg == "-o" && i + 1 < argv.len() {
+            flags.output_file = Some(argv[i + 1].to_string());
+            i += 2;
+        } else if arg.starts_with('-') && arg.len() > 1 && arg != "--" {
+            for c in arg[1..].chars() {
+                match c {
+                    'n' => flags.numeric = true,
+                    'r' => flags.reverse = true,
+                    'u' => flags.unique = true,
+                    'f' => flags.ignore_case = true,
+                    's' => flags.stable = true,
+                    'b' => flags.ignore_leading_blanks = true,
+                    'c' => flags.check = true,
+                    'h' => flags.human_numeric = true,
+                    'V' => flags.version_sort = true,
+                    'm' | 'z' => {} // accept, no special handling
+                    _ => {}
+                }
+            }
+            i += 1;
+        } else {
+            if arg == "--" {
+                i += 1;
+            }
+            file_args.extend(argv[i..].iter().filter(|a| !a.starts_with('-')).copied());
+            break;
+        }
+    }
+    (flags, file_args)
+}
+
+fn sort_extract_key<'a>(line: &'a str, flags: &SortFlags) -> &'a str {
+    if let Some(field_num) = flags.key_field {
+        if field_num == 0 {
+            return line;
+        }
+        let parts: Vec<&str> = if let Some(sep) = flags.separator {
+            line.split(sep).collect()
+        } else {
+            line.split_whitespace().collect()
+        };
+        if field_num <= parts.len() {
+            return parts[field_num - 1];
+        }
+        ""
+    } else {
+        line
+    }
+}
+
+fn sort_compare(a: &str, b: &str, flags: &SortFlags) -> std::cmp::Ordering {
+    let ka = sort_extract_key(a, flags);
+    let kb = sort_extract_key(b, flags);
+    let ka = if flags.ignore_leading_blanks {
+        ka.trim_start()
+    } else {
+        ka
+    };
+    let kb = if flags.ignore_leading_blanks {
+        kb.trim_start()
+    } else {
+        kb
+    };
+
+    if flags.numeric || flags.human_numeric {
+        let na = ka.trim().parse::<f64>().unwrap_or(0.0);
+        let nb = kb.trim().parse::<f64>().unwrap_or(0.0);
+        na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
+    } else if flags.version_sort {
+        version_compare(ka, kb)
+    } else if flags.ignore_case {
+        ka.to_lowercase().cmp(&kb.to_lowercase())
+    } else {
+        ka.cmp(kb)
+    }
+}
+
+fn version_compare(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut ai = a.chars().peekable();
+    let mut bi = b.chars().peekable();
+    loop {
+        match (ai.peek(), bi.peek()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(&ac), Some(&bc)) => {
+                if ac.is_ascii_digit() && bc.is_ascii_digit() {
+                    let na: String = ai.by_ref().take_while(|c| c.is_ascii_digit()).collect();
+                    let nb: String = bi.by_ref().take_while(|c| c.is_ascii_digit()).collect();
+                    let cmp = na
+                        .parse::<u64>()
+                        .unwrap_or(0)
+                        .cmp(&nb.parse::<u64>().unwrap_or(0));
+                    if cmp != std::cmp::Ordering::Equal {
+                        return cmp;
+                    }
+                } else {
+                    let cmp = ac.cmp(&bc);
+                    if cmp != std::cmp::Ordering::Equal {
+                        return cmp;
+                    }
+                    ai.next();
+                    bi.next();
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn util_sort(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let (flags, file_args) = parse_sort_flags(argv);
+    let text = get_input_text(ctx, &file_args);
+    let mut lines: Vec<&str> = text.lines().collect();
+
+    if flags.check {
+        for w in lines.windows(2) {
+            let ord = sort_compare(w[0], w[1], &flags);
+            if (flags.reverse && ord == std::cmp::Ordering::Less)
+                || (!flags.reverse && ord == std::cmp::Ordering::Greater)
+            {
+                let msg = format!("sort: disorder: {}\n", w[1]);
+                ctx.output.stderr(msg.as_bytes());
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    if flags.stable {
+        lines.sort_by(|a, b| sort_compare(a, b, &flags));
+    } else {
+        lines.sort_unstable_by(|a, b| sort_compare(a, b, &flags));
+    }
+    if flags.reverse {
+        lines.reverse();
+    }
+    if flags.unique {
+        lines.dedup_by(|a, b| {
+            if flags.ignore_case {
+                a.to_lowercase() == b.to_lowercase()
+            } else {
+                a == b
+            }
+        });
+    }
+
+    if let Some(ref path) = flags.output_file {
+        let full = resolve_path(ctx.cwd, path);
+        let mut out = String::new();
+        for line in &lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+        if let Ok(h) = ctx.fs.open(&full, OpenOptions::write()) {
+            let _ = ctx.fs.write_file(h, out.as_bytes());
+            ctx.fs.close(h);
+        }
+    } else {
+        for line in &lines {
+            ctx.output.stdout(line.as_bytes());
+            ctx.output.stdout(b"\n");
+        }
     }
     0
 }
 
-fn parse_sort_flags<'a>(argv: &'a [&'a str]) -> (bool, bool, &'a [&'a str]) {
-    let mut args = &argv[1..];
-    let mut numeric = false;
-    let mut reverse = false;
-
-    while let Some(arg) = args.first() {
-        if !(arg.starts_with('-') && arg.len() > 1) {
-            break;
-        }
-        for c in arg[1..].chars() {
-            match c {
-                'n' => numeric = true,
-                'r' => reverse = true,
-                _ => {}
-            }
-        }
-        args = &args[1..];
-    }
-
-    (numeric, reverse, args)
+#[allow(clippy::struct_excessive_bools)]
+struct UniqFlags {
+    count: bool,
+    duplicates_only: bool,
+    unique_only: bool,
+    ignore_case: bool,
+    skip_fields: usize,
+    skip_chars: usize,
+    compare_chars: Option<usize>,
 }
 
-fn sort_lines(lines: &mut Vec<&str>, numeric: bool) {
-    if numeric {
-        lines.sort_by_key(|line| line.trim().parse::<i64>().unwrap_or(0));
-    } else {
-        lines.sort_unstable();
+fn parse_uniq_flags<'a>(argv: &'a [&'a str]) -> (UniqFlags, Vec<&'a str>) {
+    let mut flags = UniqFlags {
+        count: false,
+        duplicates_only: false,
+        unique_only: false,
+        ignore_case: false,
+        skip_fields: 0,
+        skip_chars: 0,
+        compare_chars: None,
+    };
+    let mut file_args = Vec::new();
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = argv[i];
+        if arg == "-f" && i + 1 < argv.len() {
+            flags.skip_fields = argv[i + 1].parse().unwrap_or(0);
+            i += 2;
+        } else if arg == "-s" && i + 1 < argv.len() {
+            flags.skip_chars = argv[i + 1].parse().unwrap_or(0);
+            i += 2;
+        } else if arg == "-w" && i + 1 < argv.len() {
+            flags.compare_chars = argv[i + 1].parse().ok();
+            i += 2;
+        } else if arg.starts_with('-') && arg.len() > 1 && arg != "--" {
+            for c in arg[1..].chars() {
+                match c {
+                    'c' => flags.count = true,
+                    'd' => flags.duplicates_only = true,
+                    'u' => flags.unique_only = true,
+                    'i' => flags.ignore_case = true,
+                    'z' => {} // accept, no-op
+                    _ => {}
+                }
+            }
+            i += 1;
+        } else {
+            file_args.push(arg);
+            i += 1;
+        }
     }
+    (flags, file_args)
+}
+
+fn uniq_compare_key<'a>(line: &'a str, flags: &UniqFlags) -> String {
+    let mut s = line;
+    // Skip fields
+    for _ in 0..flags.skip_fields {
+        s = s.trim_start();
+        if let Some(pos) = s.find(char::is_whitespace) {
+            s = &s[pos..];
+        } else {
+            s = "";
+            break;
+        }
+    }
+    // Skip chars
+    if flags.skip_chars > 0 {
+        let chars: Vec<char> = s.chars().collect();
+        s = if flags.skip_chars < chars.len() {
+            &s[chars[..flags.skip_chars].iter().map(|c| c.len_utf8()).sum::<usize>()..]
+        } else {
+            ""
+        };
+    }
+    let mut key = s.to_string();
+    // Limit compare chars
+    if let Some(w) = flags.compare_chars {
+        let truncated: String = key.chars().take(w).collect();
+        key = truncated;
+    }
+    if flags.ignore_case {
+        key = key.to_lowercase();
+    }
+    key
 }
 
 pub(crate) fn util_uniq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
-    let mut count = false;
-    if args.first() == Some(&"-c") {
-        count = true;
-        args = &args[1..];
-    }
-    let text = get_input_text(ctx, args);
-    let mut prev: Option<String> = None;
+    let (flags, file_args) = parse_uniq_flags(argv);
+    let text = get_input_text(ctx, &file_args);
+
+    let mut prev: Option<(String, String)> = None; // (original_line, compare_key)
     let mut cnt: usize = 0;
-    let emit = |output: &mut dyn UtilOutput, line: &str, n: usize| {
-        if count {
+
+    let emit = |output: &mut dyn UtilOutput, line: &str, n: usize, flags: &UniqFlags| {
+        if flags.duplicates_only && n < 2 {
+            return;
+        }
+        if flags.unique_only && n > 1 {
+            return;
+        }
+        if flags.count {
             let s = format!("{n:>7} {line}\n");
             output.stdout(s.as_bytes());
         } else {
@@ -429,94 +1383,336 @@ pub(crate) fn util_uniq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             output.stdout(b"\n");
         }
     };
+
     for line in text.lines() {
-        if prev.as_deref() == Some(line) {
+        let key = uniq_compare_key(line, &flags);
+        if prev.as_ref().is_some_and(|(_, k)| *k == key) {
             cnt += 1;
         } else {
-            if let Some(ref p) = prev {
-                emit(ctx.output, p, cnt);
+            if let Some((ref p, _)) = prev {
+                emit(ctx.output, p, cnt, &flags);
             }
-            prev = Some(line.to_string());
+            prev = Some((line.to_string(), key));
             cnt = 1;
         }
     }
-    if let Some(ref p) = prev {
-        emit(ctx.output, p, cnt);
+    if let Some((ref p, _)) = prev {
+        emit(ctx.output, p, cnt, &flags);
     }
     0
+}
+
+enum CutMode {
+    Fields(Vec<CutRange>),
+    Chars(Vec<CutRange>),
+    Bytes(Vec<CutRange>),
+}
+
+#[derive(Clone)]
+struct CutRange {
+    start: Option<usize>, // None = from beginning
+    end: Option<usize>,   // None = to end
+}
+
+fn parse_cut_ranges(spec: &str) -> Vec<CutRange> {
+    spec.split(',')
+        .filter_map(|s| {
+            if let Some((a, b)) = s.split_once('-') {
+                Some(CutRange {
+                    start: if a.is_empty() {
+                        None
+                    } else {
+                        a.parse().ok()
+                    },
+                    end: if b.is_empty() {
+                        None
+                    } else {
+                        b.parse().ok()
+                    },
+                })
+            } else {
+                let n: usize = s.parse().ok()?;
+                Some(CutRange {
+                    start: Some(n),
+                    end: Some(n),
+                })
+            }
+        })
+        .collect()
+}
+
+fn cut_range_includes(ranges: &[CutRange], idx: usize) -> bool {
+    ranges.iter().any(|r| {
+        let start = r.start.unwrap_or(1);
+        let end = r.end.unwrap_or(usize::MAX);
+        idx >= start && idx <= end
+    })
 }
 
 pub(crate) fn util_cut(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
     let mut delim = '\t';
-    let mut fields: Vec<usize> = Vec::new();
-    while let Some(arg) = args.first() {
-        if *arg == "-d" && args.len() > 1 {
-            delim = args[1].chars().next().unwrap_or('\t');
-            args = &args[2..];
-        } else if *arg == "-f" && args.len() > 1 {
-            fields = args[1].split(',').filter_map(|s| s.parse().ok()).collect();
-            args = &args[2..];
+    let mut mode: Option<CutMode> = None;
+    let mut complement = false;
+    let mut only_delimited = false;
+    let mut output_delim: Option<String> = None;
+    let mut file_args = Vec::new();
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = argv[i];
+        if arg == "-d" && i + 1 < argv.len() {
+            delim = argv[i + 1].chars().next().unwrap_or('\t');
+            i += 2;
+        } else if arg == "-f" && i + 1 < argv.len() {
+            mode = Some(CutMode::Fields(parse_cut_ranges(argv[i + 1])));
+            i += 2;
+        } else if arg == "-c" && i + 1 < argv.len() {
+            mode = Some(CutMode::Chars(parse_cut_ranges(argv[i + 1])));
+            i += 2;
+        } else if arg == "-b" && i + 1 < argv.len() {
+            mode = Some(CutMode::Bytes(parse_cut_ranges(argv[i + 1])));
+            i += 2;
+        } else if arg == "--complement" {
+            complement = true;
+            i += 1;
+        } else if arg == "-s" {
+            only_delimited = true;
+            i += 1;
+        } else if let Some(od) = arg.strip_prefix("--output-delimiter=") {
+            output_delim = Some(od.to_string());
+            i += 1;
+        } else if arg == "-z" {
+            i += 1; // accept, no-op
         } else {
-            break;
+            file_args.push(arg);
+            i += 1;
         }
     }
-    let text = get_input_text(ctx, args);
+
+    let Some(mode) = mode else {
+        ctx.output.stderr(b"cut: you must specify a list of bytes, characters, or fields\n");
+        return 1;
+    };
+    let out_sep = output_delim.unwrap_or_else(|| delim.to_string());
+    let text = get_input_text(ctx, &file_args);
+
     for line in text.lines() {
-        let parts: Vec<&str> = line.split(delim).collect();
-        let selected: Vec<&str> = fields
-            .iter()
-            .filter_map(|&f| {
-                if f > 0 {
-                    parts.get(f - 1).copied()
-                } else {
-                    None
+        match &mode {
+            CutMode::Fields(ranges) => {
+                if only_delimited && !line.contains(delim) {
+                    continue;
                 }
-            })
-            .collect();
-        ctx.output
-            .stdout(selected.join(&delim.to_string()).as_bytes());
-        ctx.output.stdout(b"\n");
+                let parts: Vec<&str> = line.split(delim).collect();
+                let selected: Vec<&str> = parts
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, _)| {
+                        let included = cut_range_includes(ranges, idx + 1);
+                        if complement { !included } else { included }
+                    })
+                    .map(|(_, s)| *s)
+                    .collect();
+                ctx.output.stdout(selected.join(&out_sep).as_bytes());
+                ctx.output.stdout(b"\n");
+            }
+            CutMode::Chars(ranges) | CutMode::Bytes(ranges) => {
+                let chars: Vec<char> = line.chars().collect();
+                let selected: String = chars
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, _)| {
+                        let included = cut_range_includes(ranges, idx + 1);
+                        if complement { !included } else { included }
+                    })
+                    .map(|(_, c)| *c)
+                    .collect();
+                ctx.output.stdout(selected.as_bytes());
+                ctx.output.stdout(b"\n");
+            }
+        }
     }
     0
 }
 
-pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let args = &argv[1..];
-    if args.is_empty() {
-        ctx.output.stderr(b"tr: missing operand\n");
-        return 1;
+fn tr_expand_set(s: &str) -> Vec<char> {
+    let mut chars = Vec::new();
+    let mut iter = s.chars().peekable();
+    while let Some(ch) = iter.next() {
+        if ch == '[' && iter.peek() == Some(&':') {
+            // Character class [:name:]
+            iter.next(); // consume ':'
+            let class_name: String = iter.by_ref().take_while(|&c| c != ':').collect();
+            let _ = iter.next(); // consume ']'
+            match class_name.as_str() {
+                "upper" => chars.extend('A'..='Z'),
+                "lower" => chars.extend('a'..='z'),
+                "digit" => chars.extend('0'..='9'),
+                "alpha" => {
+                    chars.extend('A'..='Z');
+                    chars.extend('a'..='z');
+                }
+                "alnum" => {
+                    chars.extend('0'..='9');
+                    chars.extend('A'..='Z');
+                    chars.extend('a'..='z');
+                }
+                "space" => chars.extend([' ', '\t', '\n', '\r', '\x0b', '\x0c']),
+                "blank" => chars.extend([' ', '\t']),
+                "punct" => {
+                    chars.extend("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~".chars());
+                }
+                _ => {}
+            }
+        } else if iter.peek() == Some(&'-') {
+            // Character range: a-z
+            let saved = iter.clone();
+            iter.next(); // consume '-'
+            if let Some(&end_ch) = iter.peek() {
+                if end_ch > ch {
+                    chars.extend(ch..=end_ch);
+                    iter.next(); // consume end char
+                } else {
+                    chars.push(ch);
+                    // put back '-'
+                    *(&mut iter) = saved;
+                    iter.next(); // skip '-'
+                    chars.push('-');
+                }
+            } else {
+                chars.push(ch);
+                chars.push('-');
+            }
+        } else if ch == '\\' {
+            match iter.next() {
+                Some('n') => chars.push('\n'),
+                Some('t') => chars.push('\t'),
+                Some('r') => chars.push('\r'),
+                Some('\\') => chars.push('\\'),
+                Some(c) => chars.push(c),
+                None => chars.push('\\'),
+            }
+        } else {
+            chars.push(ch);
+        }
     }
+    chars
+}
+
+pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let mut delete = false;
+    let mut squeeze = false;
+    let mut complement = false;
+    let mut set_args: Vec<&str> = Vec::new();
+
+    for arg in &argv[1..] {
+        if arg.starts_with('-') && arg.len() > 1 {
+            for ch in arg[1..].chars() {
+                match ch {
+                    'd' => delete = true,
+                    's' => squeeze = true,
+                    'c' | 'C' => complement = true,
+                    't' => {} // truncate, accepted
+                    _ => {}
+                }
+            }
+        } else {
+            set_args.push(arg);
+        }
+    }
+
     let text = if let Some(data) = ctx.stdin {
         String::from_utf8_lossy(data).to_string()
     } else {
+        ctx.output.stderr(b"tr: missing operand\n");
         return 1;
     };
 
-    if args.first() == Some(&"-d") && args.len() >= 2 {
-        let del_chars = args[1];
-        let result: String = text.chars().filter(|c| !del_chars.contains(*c)).collect();
-        ctx.output.stdout(result.as_bytes());
-        return 0;
-    }
-    if args.len() < 2 {
+    if set_args.is_empty() {
         ctx.output.stderr(b"tr: missing operand\n");
         return 1;
     }
-    let from = args[0];
-    let to = args[1];
-    let from_chars: Vec<char> = from.chars().collect();
-    let to_chars: Vec<char> = to.chars().collect();
-    let result: String = text
-        .chars()
-        .map(|c| {
-            if let Some(pos) = from_chars.iter().position(|&fc| fc == c) {
-                to_chars.get(pos).or(to_chars.last()).copied().unwrap_or(c)
-            } else {
-                c
+
+    let from_chars = tr_expand_set(set_args[0]);
+
+    if delete && squeeze && set_args.len() >= 2 {
+        // -ds: delete chars in SET1, then squeeze chars in SET2
+        let squeeze_chars = tr_expand_set(set_args[1]);
+        let after_delete: String = text
+            .chars()
+            .filter(|c| {
+                let in_set = from_chars.contains(c);
+                if complement { in_set } else { !in_set }
+            })
+            .collect();
+        let mut result = String::new();
+        let mut prev: Option<char> = None;
+        for c in after_delete.chars() {
+            if squeeze_chars.contains(&c) && prev == Some(c) {
+                continue;
             }
-        })
-        .collect();
+            result.push(c);
+            prev = Some(c);
+        }
+        ctx.output.stdout(result.as_bytes());
+        return 0;
+    }
+
+    if delete {
+        let result: String = text
+            .chars()
+            .filter(|c| {
+                let in_set = from_chars.contains(c);
+                if complement { in_set } else { !in_set }
+            })
+            .collect();
+        ctx.output.stdout(result.as_bytes());
+        return 0;
+    }
+
+    if squeeze && set_args.len() < 2 {
+        // Squeeze only — squeeze repeated chars from SET1
+        let mut result = String::new();
+        let mut prev: Option<char> = None;
+        for c in text.chars() {
+            if from_chars.contains(&c) && prev == Some(c) {
+                continue;
+            }
+            result.push(c);
+            prev = Some(c);
+        }
+        ctx.output.stdout(result.as_bytes());
+        return 0;
+    }
+
+    if set_args.len() < 2 {
+        ctx.output.stderr(b"tr: missing operand\n");
+        return 1;
+    }
+
+    let to_chars = tr_expand_set(set_args[1]);
+    let from_set = if complement {
+        // Build complement: all ASCII chars not in from_chars
+        (0u8..=127)
+            .map(|b| b as char)
+            .filter(|c| !from_chars.contains(c))
+            .collect()
+    } else {
+        from_chars.clone()
+    };
+
+    let mut result = String::new();
+    let mut prev: Option<char> = None;
+    for c in text.chars() {
+        let translated = if let Some(pos) = from_set.iter().position(|&fc| fc == c) {
+            to_chars.get(pos).or(to_chars.last()).copied().unwrap_or(c)
+        } else {
+            c
+        };
+        if squeeze && to_chars.contains(&translated) && prev == Some(translated) {
+            continue;
+        }
+        result.push(translated);
+        prev = Some(translated);
+    }
     ctx.output.stdout(result.as_bytes());
     0
 }

@@ -1,0 +1,15 @@
+[test]
+name = "ln-force"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["ln", "cat"]
+
+[setup]
+files = { "/src.txt" = "new\n", "/dst.txt" = "old\n" }
+
+[input]
+script = "ln -sf /src.txt /dst.txt && cat /dst.txt"
+
+[expect]
+status = 0
+stdout = "new\n"

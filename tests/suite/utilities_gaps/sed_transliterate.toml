@@ -1,0 +1,15 @@
+[test]
+name = "sed-transliterate"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["sed"]
+
+[setup]
+files = { "/data/test.txt" = "hello\n" }
+
+[input]
+script = "sed 'y/helo/HELO/' /data/test.txt"
+
+[expect]
+status = 0
+stdout = "HELLO\n"

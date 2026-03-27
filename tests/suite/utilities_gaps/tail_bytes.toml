@@ -1,0 +1,15 @@
+[test]
+name = "tail-bytes"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["tail"]
+
+[setup]
+files = { "/data/file.txt" = "abcdefghij" }
+
+[input]
+script = "tail -c 5 /data/file.txt"
+
+[expect]
+status = 0
+stdout = "fghij"

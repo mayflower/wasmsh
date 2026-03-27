@@ -1,0 +1,12 @@
+[test]
+name = "env-ignore-environment"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["env"]
+
+[input]
+script = "env -i FOO=bar | grep FOO"
+
+[expect]
+status = 0
+stdout = "FOO=bar\n"

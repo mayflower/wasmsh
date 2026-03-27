@@ -1,0 +1,15 @@
+[test]
+name = "cp-no-clobber"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["cp", "cat"]
+
+[setup]
+files = { "/a.txt" = "original\n", "/b.txt" = "existing\n" }
+
+[input]
+script = "cp -n /a.txt /b.txt && cat /b.txt"
+
+[expect]
+status = 0
+stdout = "existing\n"

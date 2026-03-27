@@ -1,0 +1,15 @@
+[test]
+name = "sort-check-sorted"
+tags = ["utility", "gap"]
+tier = "P2"
+requires = ["sort"]
+
+[setup]
+files = { "/data/sorted.txt" = "a\nb\nc\n", "/data/unsorted.txt" = "b\na\nc\n" }
+
+[input]
+script = "sort -c /data/sorted.txt && echo ok"
+
+[expect]
+status = 0
+stdout = "ok\n"

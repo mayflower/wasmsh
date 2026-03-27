@@ -1,0 +1,15 @@
+[test]
+name = "readlink-canonical"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["readlink"]
+
+[setup]
+files = { "/data/file.txt" = "test\n" }
+
+[input]
+script = "readlink -f /data/file.txt"
+
+[expect]
+status = 0
+stdout = "/data/file.txt\n"

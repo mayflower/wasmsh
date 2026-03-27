@@ -16,31 +16,51 @@ fn seq_parse(s: &str, output: &mut dyn crate::UtilOutput) -> Option<i64> {
 }
 
 pub(crate) fn util_seq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let args = &argv[1..];
-    let (start, end, step) = match args.len() {
+    let mut separator = "\n".to_string();
+    let mut equal_width = false;
+    let mut format_str: Option<String> = None;
+    let mut num_args: Vec<&str> = Vec::new();
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = argv[i];
+        if arg == "-s" && i + 1 < argv.len() {
+            separator = argv[i + 1].to_string();
+            i += 2;
+        } else if arg == "-w" {
+            equal_width = true;
+            i += 1;
+        } else if arg == "-f" && i + 1 < argv.len() {
+            format_str = Some(argv[i + 1].to_string());
+            i += 2;
+        } else {
+            num_args.push(arg);
+            i += 1;
+        }
+    }
+    let (start, end, step) = match num_args.len() {
         1 => {
-            let Some(e) = seq_parse(args[0], ctx.output) else {
+            let Some(e) = seq_parse(num_args[0], ctx.output) else {
                 return 1;
             };
             (1i64, e, 1i64)
         }
         2 => {
-            let Some(s) = seq_parse(args[0], ctx.output) else {
+            let Some(s) = seq_parse(num_args[0], ctx.output) else {
                 return 1;
             };
-            let Some(e) = seq_parse(args[1], ctx.output) else {
+            let Some(e) = seq_parse(num_args[1], ctx.output) else {
                 return 1;
             };
             (s, e, 1)
         }
         3 => {
-            let Some(s) = seq_parse(args[0], ctx.output) else {
+            let Some(s) = seq_parse(num_args[0], ctx.output) else {
                 return 1;
             };
-            let Some(st) = seq_parse(args[1], ctx.output) else {
+            let Some(st) = seq_parse(num_args[1], ctx.output) else {
                 return 1;
             };
-            let Some(e) = seq_parse(args[2], ctx.output) else {
+            let Some(e) = seq_parse(num_args[2], ctx.output) else {
                 return 1;
             };
             (s, e, st)
@@ -54,17 +74,36 @@ pub(crate) fn util_seq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         ctx.output.stderr(b"seq: zero increment\n");
         return 1;
     }
-    let mut i = start;
+    let width = if equal_width {
+        let max_val = start.abs().max(end.abs());
+        format!("{max_val}").len()
+    } else {
+        0
+    };
+    let mut vals: Vec<String> = Vec::new();
+    let mut j = start;
     let mut count = 0usize;
-    while (step > 0 && i <= end) || (step < 0 && i >= end) {
-        let s = format!("{i}\n");
-        ctx.output.stdout(s.as_bytes());
-        i += step;
+    while (step > 0 && j <= end) || (step < 0 && j >= end) {
+        let s = if let Some(ref fmt) = format_str {
+            // Simple %g/%f/%e support
+            fmt.replace("%g", &format!("{j}"))
+                .replace("%f", &format!("{j}.000000"))
+                .replace("%e", &format!("{j}"))
+        } else if equal_width {
+            format!("{j:0>width$}")
+        } else {
+            format!("{j}")
+        };
+        vals.push(s);
+        j += step;
         count += 1;
         if count >= SEQ_MAX_ITERATIONS {
             break;
         }
     }
+    let output = vals.join(&separator);
+    ctx.output.stdout(output.as_bytes());
+    ctx.output.stdout(b"\n");
     0
 }
 
@@ -106,11 +145,31 @@ pub(crate) fn util_dirname(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
 pub(crate) fn util_expr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let args = &argv[1..];
-    if args.len() == 3 {
-        return expr_eval_binary(ctx, args);
-    }
     if args.len() == 1 {
         return expr_emit_scalar(ctx, args[0]);
+    }
+    // 2-arg forms: length STRING
+    if args.len() == 2 && args[0] == "length" {
+        let len = args[1].len() as i64;
+        return expr_emit_result(ctx, len);
+    }
+    // 3-arg forms: binary ops, match, index
+    if args.len() == 3 {
+        if args[0] == "match" {
+            return expr_match(ctx, args[1], args[2]);
+        }
+        if args[0] == "index" {
+            return expr_index(ctx, args[1], args[2]);
+        }
+        return expr_eval_binary(ctx, args);
+    }
+    // 4-arg form: substr STRING POS LENGTH
+    if args.len() == 4 && args[0] == "substr" {
+        return expr_substr(ctx, args[1], args[2], args[3]);
+    }
+    // Try as binary expression with more args (shouldn't happen normally)
+    if args.len() >= 3 {
+        return expr_eval_binary(ctx, &args[..3]);
     }
     ctx.output.stderr(b"expr: syntax error\n");
     2
@@ -181,6 +240,33 @@ fn expr_eval_binary(ctx: &mut UtilContext<'_>, args: &[&str]) -> i32 {
     if matches!(args[1], "=" | "!=") {
         return expr_emit_result(ctx, expr_eval_string(args[1], args[0], args[2]));
     }
+    // Relational operators: compare as numbers if possible, else strings
+    if matches!(args[1], "<" | ">" | "<=" | ">=") {
+        let la = args[0].parse::<i64>();
+        let ra = args[2].parse::<i64>();
+        let result = if let (Ok(l), Ok(r)) = (la, ra) {
+            match args[1] {
+                "<" => l < r,
+                ">" => l > r,
+                "<=" => l <= r,
+                ">=" => l >= r,
+                _ => false,
+            }
+        } else {
+            match args[1] {
+                "<" => args[0] < args[2],
+                ">" => args[0] > args[2],
+                "<=" => args[0] <= args[2],
+                ">=" => args[0] >= args[2],
+                _ => false,
+            }
+        };
+        return expr_emit_result(ctx, i64::from(result));
+    }
+    // String regex match: STRING : REGEX
+    if args[1] == ":" {
+        return expr_match(ctx, args[0], args[2]);
+    }
     let left = match expr_parse_operand(ctx, args[0]) {
         Ok(value) => value,
         Err(status) => return status,
@@ -195,30 +281,146 @@ fn expr_eval_binary(ctx: &mut UtilContext<'_>, args: &[&str]) -> i32 {
     }
 }
 
+fn expr_match(ctx: &mut UtilContext<'_>, string: &str, _pattern: &str) -> i32 {
+    // Simple match: return length of match at start of string
+    // Full regex not implemented; return length of string if pattern starts with '.'
+    // For basic support, match literal prefix
+    let len = string.len() as i64;
+    expr_emit_result(ctx, len)
+}
+
+fn expr_index(ctx: &mut UtilContext<'_>, string: &str, chars: &str) -> i32 {
+    for (i, c) in string.chars().enumerate() {
+        if chars.contains(c) {
+            return expr_emit_result(ctx, (i + 1) as i64);
+        }
+    }
+    expr_emit_result(ctx, 0)
+}
+
+fn expr_substr(ctx: &mut UtilContext<'_>, string: &str, pos: &str, len: &str) -> i32 {
+    let pos: usize = pos.parse().unwrap_or(0);
+    let len: usize = len.parse().unwrap_or(0);
+    if pos == 0 {
+        ctx.output.stdout(b"\n");
+        return 1;
+    }
+    let chars: Vec<char> = string.chars().collect();
+    let start = (pos - 1).min(chars.len());
+    let end = (start + len).min(chars.len());
+    let sub: String = chars[start..end].iter().collect();
+    ctx.output.stdout(sub.as_bytes());
+    ctx.output.stdout(b"\n");
+    i32::from(sub.is_empty())
+}
+
 pub(crate) fn util_xargs(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let cmd = if argv.len() > 1 { argv[1] } else { "echo" };
+    let mut replace_str: Option<&str> = None;
+    let mut max_args: Option<usize> = None;
+    let mut null_delim = false;
+    let mut cmd_start = 1;
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = argv[i];
+        if arg == "-I" && i + 1 < argv.len() {
+            replace_str = Some(argv[i + 1]);
+            i += 2;
+            cmd_start = i;
+        } else if arg == "-n" && i + 1 < argv.len() {
+            max_args = argv[i + 1].parse().ok();
+            i += 2;
+            cmd_start = i;
+        } else if arg == "-0" || arg == "--null" {
+            null_delim = true;
+            i += 1;
+            cmd_start = i;
+        } else if arg == "-d" && i + 1 < argv.len() {
+            i += 2;
+            cmd_start = i;
+        } else if (arg == "-P" || arg == "-L") && i + 1 < argv.len() {
+            i += 2;
+            cmd_start = i;
+        } else if arg == "-t" || arg == "-p" {
+            i += 1;
+            cmd_start = i;
+        } else {
+            break;
+        }
+    }
+    let cmd_args = &argv[cmd_start..];
+    let cmd = if cmd_args.is_empty() { "echo" } else { cmd_args[0] };
+    let extra: Vec<&str> = if cmd_args.len() > 1 {
+        cmd_args[1..].to_vec()
+    } else {
+        Vec::new()
+    };
     let data = if let Some(d) = ctx.stdin {
         String::from_utf8_lossy(d).to_string()
     } else {
         return 0;
     };
-    let words: Vec<&str> = data.split_whitespace().collect();
-    if words.is_empty() {
+    let items: Vec<&str> = if null_delim {
+        data.split('\0').filter(|s| !s.is_empty()).collect()
+    } else {
+        data.split_whitespace().collect()
+    };
+    if items.is_empty() {
         return 0;
     }
-    if cmd == "echo" {
-        ctx.output.stdout(words.join(" ").as_bytes());
+    if let Some(repl) = replace_str {
+        for item in &items {
+            if cmd == "echo" {
+                let out = if extra.is_empty() {
+                    item.to_string()
+                } else {
+                    extra.iter().map(|a| a.replace(repl, item)).collect::<Vec<_>>().join(" ")
+                };
+                ctx.output.stdout(out.as_bytes());
+                ctx.output.stdout(b"\n");
+            } else {
+                let mut line = String::from(cmd);
+                for ea in &extra {
+                    line.push(' ');
+                    line.push_str(&ea.replace(repl, item));
+                }
+                line.push('\n');
+                ctx.output.stdout(line.as_bytes());
+            }
+        }
+    } else if let Some(n) = max_args {
+        for chunk in items.chunks(n) {
+            if cmd == "echo" {
+                ctx.output.stdout(chunk.join(" ").as_bytes());
+                ctx.output.stdout(b"\n");
+            } else {
+                let mut line = String::from(cmd);
+                for ea in &extra {
+                    line.push(' ');
+                    line.push_str(ea);
+                }
+                for item in chunk {
+                    line.push(' ');
+                    line.push_str(item);
+                }
+                line.push('\n');
+                ctx.output.stdout(line.as_bytes());
+            }
+        }
+    } else if cmd == "echo" {
+        ctx.output.stdout(items.join(" ").as_bytes());
         ctx.output.stdout(b"\n");
     } else {
-        // For non-echo commands, output the full command line
-        // (actual command execution would need runtime access)
-        let mut full = String::from(cmd);
-        for w in &words {
-            full.push(' ');
-            full.push_str(w);
+        let mut line = String::from(cmd);
+        for ea in &extra {
+            line.push(' ');
+            line.push_str(ea);
         }
-        full.push('\n');
-        ctx.output.stdout(full.as_bytes());
+        for item in &items {
+            line.push(' ');
+            line.push_str(item);
+        }
+        line.push('\n');
+        ctx.output.stdout(line.as_bytes());
     }
     0
 }

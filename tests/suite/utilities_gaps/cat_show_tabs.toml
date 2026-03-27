@@ -1,0 +1,15 @@
+[test]
+name = "cat-show-tabs"
+tags = ["utility", "gap"]
+tier = "P2"
+requires = ["cat"]
+
+[setup]
+files = { "/data/test.txt" = "col1\tcol2\n" }
+
+[input]
+script = "cat -T /data/test.txt"
+
+[expect]
+status = 0
+stdout = "col1^Icol2\n"

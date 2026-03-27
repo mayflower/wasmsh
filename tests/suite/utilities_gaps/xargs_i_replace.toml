@@ -1,0 +1,15 @@
+[test]
+name = "xargs-i-replace-exec"
+tags = ["utility", "gap"]
+tier = "P0"
+requires = ["xargs", "cat"]
+
+[setup]
+files = { "/data/hello.txt" = "hello\n" }
+
+[input]
+script = "echo '/data/hello.txt' | xargs -I {} cat {}"
+
+[expect]
+status = 0
+stdout = "hello\n"
