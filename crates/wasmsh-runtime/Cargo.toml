@@ -11,10 +11,6 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
-[features]
-default = []
-emscripten = ["wasmsh-fs/emscripten"]
-
 [dependencies]
 wasmsh-ast = { workspace = true }
 wasmsh-protocol = { workspace = true }

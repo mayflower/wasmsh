@@ -21,15 +21,14 @@ pub use emscripten_fs::EmscriptenFs;
 
 /// Platform filesystem backend.
 ///
-/// With the `emscripten` feature, this is [`EmscriptenFs`] (shares the
-/// Emscripten/Pyodide POSIX filesystem). Otherwise it is [`MemoryFs`].
-#[cfg(feature = "emscripten")]
+/// Resolves to [`EmscriptenFs`] when the `emscripten` feature is enabled
+/// AND the target is `wasm32-unknown-emscripten`. Otherwise [`MemoryFs`].
+/// This dual gate prevents `--all-features` from breaking native builds.
+#[cfg(all(feature = "emscripten", target_os = "emscripten"))]
 pub type BackendFs = EmscriptenFs;
 
-/// Platform filesystem backend.
-///
-/// Without the `emscripten` feature, this is the in-memory [`MemoryFs`].
-#[cfg(not(feature = "emscripten"))]
+/// Platform filesystem backend (default: in-memory).
+#[cfg(not(all(feature = "emscripten", target_os = "emscripten")))]
 pub type BackendFs = MemoryFs;
 
 use thiserror::Error;

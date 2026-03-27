@@ -11,7 +11,8 @@ repository = "https://github.com/mayflower/wasmsh"
 crate-type = ["staticlib"]
 
 [dependencies]
-wasmsh-runtime = { path = "../wasmsh-runtime", features = ["emscripten"] }
+wasmsh-runtime = { path = "../wasmsh-runtime" }
+wasmsh-fs = { path = "../wasmsh-fs", features = ["emscripten"] }
 wasmsh-protocol = { path = "../wasmsh-protocol" }
 serde_json = "1"
 libc = "0.2"
