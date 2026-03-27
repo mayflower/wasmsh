@@ -141,19 +141,21 @@ if ! grep "ccall,cwrap,stringToNewUTF8" Makefile.envs >/dev/null 2>&1; then
     echo "  Added stringToNewUTF8,callMain,FS to EXPORTED_RUNTIME_METHODS."
 fi
 
-# Fix libffi autoreconf failure on modern Linux.
-# libffi's configure.ac uses LT_SYS_SYMBOL_USCORE which was removed from
-# modern libtool (2.5+). The git checkout has a pre-generated configure.
-# Shadow autoreconf with a no-op wrapper so libffi's build.sh skips regeneration.
+# Fix libffi autoreconf on modern Linux.
+# libffi's configure.ac uses LT_SYS_SYMBOL_USCORE removed in libtool 2.5+.
+# Wrapper patches configure.ac before running real autoreconf.
 WRAPPER_DIR="$PYODIDE_SRC/.bin-wrappers"
 mkdir -p "$WRAPPER_DIR"
-cat > "$WRAPPER_DIR/autoreconf" << 'WRAPPER'
+cat > "$WRAPPER_DIR/autoreconf" << 'ENDWRAPPER'
 #!/bin/sh
-echo "[wasmsh] autoreconf skipped (using pre-generated configure)"
-WRAPPER
+if [ -f configure.ac ] && grep -q LT_SYS_SYMBOL_USCORE configure.ac; then
+    sed -i '/LT_SYS_SYMBOL_USCORE/d' configure.ac
+fi
+exec /usr/bin/autoreconf "$@"
+ENDWRAPPER
 chmod +x "$WRAPPER_DIR/autoreconf"
 export PATH="$WRAPPER_DIR:$PATH"
-echo "  Installed autoreconf wrapper to skip libffi regeneration."
+echo "  Installed autoreconf wrapper to patch libffi configure.ac."
 
 # ── Build CPython + core ────────────────────────────────────
 echo "Building Pyodide core (this takes a while on first run)..."
