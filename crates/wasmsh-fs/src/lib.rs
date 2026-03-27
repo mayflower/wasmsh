@@ -10,7 +10,7 @@ mod memfs;
 #[cfg(feature = "opfs")]
 mod opfs;
 #[cfg(feature = "emscripten")]
-#[allow(unsafe_code)]
+#[allow(unsafe_code, clippy::borrow_as_ptr)]
 mod emscripten_fs;
 
 pub use memfs::MemoryFs;

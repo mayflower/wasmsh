@@ -16,7 +16,7 @@ use crate::{DirEntry, FileHandle, FsError, Metadata, OpenOptions, Vfs};
 #[derive(Debug)]
 pub struct EmscriptenFs {
     next_handle: u64,
-    /// Maps our FileHandle to (libc FILE*, path, open-for-write).
+    /// Maps our `FileHandle` to (libc `FILE*`, path, open-for-write).
     open_files: HashMap<u64, OpenFile>,
 }
 
