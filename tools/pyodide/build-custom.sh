@@ -141,12 +141,13 @@ if ! grep "ccall,cwrap,stringToNewUTF8" Makefile.envs >/dev/null 2>&1; then
     echo "  Added stringToNewUTF8,callMain,FS to EXPORTED_RUNTIME_METHODS."
 fi
 
-# Patch cpython/Makefile to fix libffi autoreconf on Linux.
-# The bundled libtool.m4 in libffi is incomplete (missing LT_SYS_SYMBOL_USCORE).
-# Inject a libtoolize step after the git checkout to install system libtool macros.
-if ! grep -q "libtoolize" cpython/Makefile; then
-    "$SED" -i 's|&& ./testsuite/emscripten/build.sh|\&\& libtoolize --copy --force 2>/dev/null; ./testsuite/emscripten/build.sh|' cpython/Makefile
-    echo "  Patched cpython/Makefile to run libtoolize before libffi build."
+# Fix libffi autoreconf failure on modern Linux.
+# libffi's configure.ac uses LT_SYS_SYMBOL_USCORE which was removed from
+# modern libtool. Patch the cpython Makefile to sed out the autoreconf call
+# in libffi's build.sh after clone, using the pre-generated configure.
+if ! grep -q "wasmsh_patch_libffi" cpython/Makefile; then
+    "$SED" -i '/git checkout FETCH_HEAD/a\\t\t&& sed -i "s|autoreconf -fiv|echo wasmsh_patch_libffi: skipping autoreconf|" ./testsuite/emscripten/build.sh' cpython/Makefile
+    echo "  Patched cpython/Makefile to skip libffi autoreconf."
 fi
 
 # ── Build CPython + core ────────────────────────────────────
