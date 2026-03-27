@@ -1,0 +1,72 @@
+name: Pyodide
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/wasmsh-runtime/**'
+      - 'crates/wasmsh-pyodide/**'
+      - 'crates/wasmsh-pyodide-probe/**'
+      - 'crates/wasmsh-fs/**'
+      - 'tools/pyodide/**'
+      - 'e2e/pyodide-node/**'
+      - 'e2e/pyodide-browser/**'
+      - 'e2e/build-contract/**'
+  pull_request:
+    paths:
+      - 'crates/wasmsh-runtime/**'
+      - 'crates/wasmsh-pyodide/**'
+      - 'crates/wasmsh-pyodide-probe/**'
+      - 'crates/wasmsh-fs/**'
+      - 'tools/pyodide/**'
+      - 'e2e/pyodide-node/**'
+      - 'e2e/pyodide-browser/**'
+      - 'e2e/build-contract/**'
+
+jobs:
+  build-and-test:
+    name: Pyodide build + E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: "4.0.9"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-emscripten
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: pyodide
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y wget
+
+      - name: Build emscripten probe
+        run: just build-emscripten-probe
+
+      - name: Build custom Pyodide
+        run: just build-pyodide
+
+      - name: Run Pyodide Node E2E
+        run: just test-e2e-pyodide-node
+
+      - name: Install Playwright browsers
+        working-directory: e2e/pyodide-browser
+        run: npm install && npx playwright install chromium --with-deps
+
+      - name: Run Pyodide browser E2E
+        run: just test-e2e-pyodide-browser

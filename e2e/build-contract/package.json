@@ -1,0 +1,7 @@
+{
+  "name": "wasmsh-e2e-build-contract",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/pyodide-probe-build.test.mjs"
+  }
+}

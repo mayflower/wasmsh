@@ -1,0 +1,13 @@
+{
+  "name": "wasmsh-e2e-standalone",
+  "private": true,
+  "scripts": {
+    "build:wasm": "./build.sh",
+    "test": "npx playwright test",
+    "test:headed": "npx playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.52.0",
+    "serve": "^14.2.6"
+  }
+}

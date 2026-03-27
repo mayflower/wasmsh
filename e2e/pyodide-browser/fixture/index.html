@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>wasmsh Pyodide E2E</title></head>
+<body>
+  <p id="status">loading</p>
+  <script>
+    const worker = new Worker("./pyodide-worker.js");
+    window._pyWorker = worker;
+    window._pyWorkerReady = false;
+    worker.onmessage = function (e) {
+      if (e.data && e.data.type === "ready") {
+        window._pyWorkerReady = true;
+        document.getElementById("status").textContent = "ready";
+      }
+    };
+  </script>
+</body>
+</html>

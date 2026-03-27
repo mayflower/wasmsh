@@ -421,6 +421,23 @@ Arithmetic is available in `$(( ))`, `(( ))`, `let`, and `declare -i` contexts. 
 
 ---
 
+## Build Targets
+
+| Target | Triple | FS Backend | Python | Build Command |
+|--------|--------|------------|--------|---------------|
+| **Standalone** | `wasm32-unknown-unknown` | `MemoryFs` (in-process) | N/A | `just build-standalone` |
+| **Pyodide** | `wasm32-unknown-emscripten` | `EmscriptenFs` (libc, shared with Python) | In-process via `PyRun_SimpleString` | `just build-pyodide` |
+
+### Pyodide-only commands
+
+| Command | Flags | Description |
+|---------|-------|-------------|
+| `python` / `python3` | `-c CODE` | Run Python code in-process; stdin from heredoc/pipe also supported |
+
+Python stdout and stderr are captured and surfaced as normal `Stdout`/`Stderr` worker events. File I/O from Python goes through the same Emscripten filesystem the shell uses.
+
+---
+
 ## Non-Goals
 
 - Not a BusyBox port or Bash fork — clean-room implementation

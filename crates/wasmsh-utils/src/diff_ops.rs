@@ -453,7 +453,7 @@ fn is_blank(s: &str) -> bool {
 
 /// Collect sorted list of relative paths under `dir` in the VFS.
 fn collect_dir_entries(
-    fs: &wasmsh_fs::MemoryFs,
+    fs: &wasmsh_fs::BackendFs,
     dir: &str,
     prefix: &str,
     out: &mut Vec<(String, bool)>,
@@ -741,7 +741,7 @@ pub(crate) fn util_diff(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 }
 
 /// Collect and merge unique file entries from two directories.
-fn merge_dir_files(fs: &wasmsh_fs::MemoryFs, dir_a: &str, dir_b: &str) -> Vec<String> {
+fn merge_dir_files(fs: &wasmsh_fs::BackendFs, dir_a: &str, dir_b: &str) -> Vec<String> {
     let mut entries_a: Vec<(String, bool)> = Vec::new();
     let mut entries_b: Vec<(String, bool)> = Vec::new();
     collect_dir_entries(fs, dir_a, "", &mut entries_a);

@@ -4,15 +4,15 @@
 
 [![CI](https://img.shields.io/badge/CI-passing-brightgreen)](.github/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.75+-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/Rust-1.89+-orange.svg)](https://www.rust-lang.org)
 
 wasmsh is an independent shell implementation — not a port of BusyBox or a fork of Bash. It provides compatible behavior through a clean-room implementation with its own parser, VM, and utility stack.
 
 ## Why wasmsh?
 
-- **Browser-first**: Compiles to `wasm32-unknown-unknown`, runs in a Web Worker
-- **No OS processes**: All commands execute in-process — builtins, utilities, and functions
-- **Virtual filesystem**: MemoryFS for ephemeral sessions (OPFS persistence planned, not yet available)
+- **Dual-target**: Standalone browser Web Worker (`wasm32-unknown-unknown`) or embedded inside Pyodide (`wasm32-unknown-emscripten`) with shared filesystem
+- **No OS processes**: All commands execute in-process — builtins, utilities, functions, and `python3`
+- **Virtual filesystem**: `MemoryFs` for standalone, `EmscriptenFs` (libc) for Pyodide — shell and Python see the same `/workspace`
 - **Bash-compatible syntax**: Supports the shell features real scripts actually use
 - **Sandboxed**: Step budgets, output limits, cancellation tokens, capability-gated I/O
 - **Clean provenance**: No GPL code — MIT licensed, permissive dependencies only
@@ -20,7 +20,7 @@ wasmsh is an independent shell implementation — not a port of BusyBox or a for
 ## Quick Start
 
 ```rust
-use wasmsh_browser::WorkerRuntime;
+use wasmsh_runtime::WorkerRuntime;
 use wasmsh_protocol::HostCommand;
 
 let mut rt = WorkerRuntime::new();
@@ -47,19 +47,17 @@ See [SUPPORTED.md](SUPPORTED.md) for the complete feature matrix.
 ## Installation
 
 ```bash
-# From source
-git clone https://github.com/user/wasmsh
+git clone https://github.com/mayflower/wasmsh
 cd wasmsh
-cargo build --workspace
-
-# Run tests
-cargo test --workspace
+cargo build --workspace    # build the Rust workspace
+cargo test --workspace     # run 1379 Rust tests
 ```
 
 ### Requirements
 
-- Rust 1.75+ (pinned via `rust-toolchain.toml`)
-- For wasm: `rustup target add wasm32-unknown-unknown`
+- Rust 1.89+ (pinned via `rust-toolchain.toml`)
+- For standalone wasm: `wasm-pack` (`cargo install wasm-pack`)
+- For Pyodide: `emcc` (Emscripten SDK), Python 3.13+, `gsed` on macOS
 
 ## Documentation
 
@@ -78,33 +76,72 @@ cargo test --workspace
 source → lexer → parser → AST → HIR → IR → VM → builtins/utilities → VFS → protocol events
 ```
 
-14 crates with clear boundaries:
+Crates with clear boundaries:
 
 | Layer | Crates |
 |-------|--------|
 | **Syntax** | `wasmsh-lex`, `wasmsh-parse`, `wasmsh-ast` |
 | **Semantics** | `wasmsh-expand`, `wasmsh-hir`, `wasmsh-ir` |
 | **Execution** | `wasmsh-vm`, `wasmsh-state`, `wasmsh-builtins` |
+| **Runtime** | `wasmsh-runtime` (shared core), `wasmsh-protocol` |
 | **Platform** | `wasmsh-fs`, `wasmsh-utils` |
-| **Embedding** | `wasmsh-browser`, `wasmsh-protocol` |
+| **Standalone** | `wasmsh-browser` (wasm-bindgen Web Worker adapter) |
+| **Pyodide** | `wasmsh-pyodide`, `wasmsh-pyodide-probe` (excluded from workspace, require emcc) |
 | **Testing** | `wasmsh-testkit` |
+
+## Build Targets
+
+wasmsh supports two build targets from the same `wasmsh-runtime` core:
+
+### Standalone (browser Web Worker)
+
+```bash
+just build-standalone     # wasm-pack → e2e/standalone/fixture/pkg/
+just test-e2e-standalone  # Playwright browser tests (6 tests)
+```
+
+Requirements: Rust 1.89+, `wasm-pack`
+
+### Pyodide (Python + shell same-module)
+
+```bash
+just build-pyodide              # custom Pyodide build → dist/pyodide-custom/
+just test-e2e-pyodide-node      # Node E2E tests (19 tests)
+just test-e2e-pyodide-browser   # Playwright browser tests (4 tests)
+```
+
+Requirements: Rust 1.89+, emcc (Emscripten), Python 3.13+, GNU sed (`gsed` on macOS)
+
+Version pins are in `tools/pyodide/versions.env`.
+
+### Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| `emcc not found` | Install Emscripten SDK or run `just build-pyodide` which sets up its own emsdk |
+| `gsed not found` | `brew install gnu-sed` (macOS) |
+| Python `No module named 'encodings'` | Stdlib zip not mounted — check `build-custom.sh` preRun |
+| `MAIN_MODULE=1` export error | Rust mangled symbols with `$` — build uses `MAIN_MODULE=2` |
 
 ## Development
 
 ```bash
 just check    # fmt + clippy + tests (pre-push)
 just ci       # full CI locally
-just test     # all tests
+just test     # all Rust tests
 just coverage # HTML coverage report
 just deny     # license/advisory check
 ```
 
 ## Testing
 
-960 tests across two layers:
+1400+ tests across multiple layers:
 
-- **506 Rust unit/integration tests** (400 in wasmsh-utils alone) including property-based fuzzing via proptest
-- **454 TOML declarative test cases** covering shell semantics, utility behavior, and 60 real-world production script patterns (CI/CD, log analysis, ETL pipelines, deployment automation, etc.)
+- **1379 Rust unit/integration tests** including property-based fuzzing via proptest
+- **536 TOML declarative test cases** covering shell semantics, utility behavior, and 60 real-world production script patterns
+- **6 Standalone browser E2E tests** (Playwright)
+- **19 Pyodide Node E2E tests** (protocol parity, FS sharing, python command)
+- **4 Pyodide browser E2E tests** (Playwright)
 - **Criterion benchmarks** for parser, expansion, and pipeline performance
 
 ## License

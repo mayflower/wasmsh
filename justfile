@@ -122,6 +122,40 @@ build-wasm-release:
     rustup target add wasm32-unknown-unknown 2>/dev/null || true
     cargo build --target wasm32-unknown-unknown --profile dist -p wasmsh-browser
 
+# ── Standalone Build + E2E ───────────────────────────────────
+
+# Build standalone wasm artifact (wasm-pack → e2e/standalone/fixture/pkg)
+build-standalone:
+    bash e2e/standalone/build.sh
+
+# Run standalone browser E2E tests (Playwright)
+test-e2e-standalone:
+    cd e2e/standalone && npm install --silent && npx playwright test
+
+# ── Pyodide Build + E2E ─────────────────────────────────────
+
+# Build custom Pyodide distribution with wasmsh linked in (requires emcc)
+build-pyodide:
+    bash tools/pyodide/build-custom.sh
+
+# Run Pyodide Node E2E tests
+test-e2e-pyodide-node:
+    cd {{justfile_directory()}} && node --test e2e/pyodide-node/tests/*.test.mjs
+
+# Run Pyodide browser E2E tests (Playwright)
+test-e2e-pyodide-browser:
+    cd e2e/pyodide-browser && npm install --silent && npx playwright test
+
+# ── Emscripten Probe (lower-level) ──────────────────────────
+
+# Build the emscripten probe staticlib (requires emcc)
+build-emscripten-probe:
+    bash e2e/build-contract/build-probe.sh
+
+# Run the emscripten build contract test (requires emcc)
+test-emscripten-probe:
+    node --test e2e/build-contract/tests/pyodide-probe-build.test.mjs
+
 # ── Wasm Post-processing ──────────────────────────────────────
 
 # Build optimized wasm with wasm-opt post-processing

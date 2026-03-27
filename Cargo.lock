@@ -972,21 +972,12 @@ version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "criterion",
- "indexmap",
  "serde",
  "serde_json",
- "smol_str",
  "wasm-bindgen",
- "wasmsh-ast",
- "wasmsh-builtins",
- "wasmsh-expand",
  "wasmsh-fs",
- "wasmsh-hir",
- "wasmsh-parse",
  "wasmsh-protocol",
- "wasmsh-state",
- "wasmsh-utils",
- "wasmsh-vm",
+ "wasmsh-runtime",
 ]
 
 [[package]]
@@ -1013,6 +1004,7 @@ dependencies = [
 name = "wasmsh-fs"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "thiserror",
 ]
 
@@ -1057,6 +1049,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasmsh-runtime"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "smol_str",
+ "wasmsh-ast",
+ "wasmsh-builtins",
+ "wasmsh-expand",
+ "wasmsh-fs",
+ "wasmsh-hir",
+ "wasmsh-parse",
+ "wasmsh-protocol",
+ "wasmsh-state",
+ "wasmsh-utils",
+ "wasmsh-vm",
+]
+
+[[package]]
 name = "wasmsh-state"
 version = "0.1.0"
 dependencies = [
@@ -1070,10 +1080,10 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "toml",
- "wasmsh-browser",
  "wasmsh-hir",
  "wasmsh-parse",
  "wasmsh-protocol",
+ "wasmsh-runtime",
 ]
 
 [[package]]

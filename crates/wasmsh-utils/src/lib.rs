@@ -5,7 +5,7 @@
 //! from shell builtins.
 
 use indexmap::IndexMap;
-use wasmsh_fs::MemoryFs;
+use wasmsh_fs::BackendFs;
 use wasmsh_state::ShellState;
 
 mod archive_ops;
@@ -57,7 +57,7 @@ impl VecOutput {
 
 /// Context passed to utility implementations.
 pub struct UtilContext<'a> {
-    pub fs: &'a mut MemoryFs,
+    pub fs: &'a mut BackendFs,
     pub output: &'a mut dyn UtilOutput,
     pub cwd: &'a str,
     /// Stdin data from pipe or here-doc. `None` if not connected.
@@ -236,7 +236,7 @@ impl Default for UtilRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wasmsh_fs::{OpenOptions, Vfs};
+    use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
 
     fn make_fs_with_file(path: &str, content: &[u8]) -> MemoryFs {
         let mut fs = MemoryFs::new();

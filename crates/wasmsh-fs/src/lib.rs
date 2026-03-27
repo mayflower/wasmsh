@@ -9,10 +9,28 @@
 mod memfs;
 #[cfg(feature = "opfs")]
 mod opfs;
+#[cfg(feature = "emscripten")]
+#[allow(unsafe_code)]
+mod emscripten_fs;
 
 pub use memfs::MemoryFs;
 #[cfg(feature = "opfs")]
 pub use opfs::OpfsFs;
+#[cfg(feature = "emscripten")]
+pub use emscripten_fs::EmscriptenFs;
+
+/// Platform filesystem backend.
+///
+/// With the `emscripten` feature, this is [`EmscriptenFs`] (shares the
+/// Emscripten/Pyodide POSIX filesystem). Otherwise it is [`MemoryFs`].
+#[cfg(feature = "emscripten")]
+pub type BackendFs = EmscriptenFs;
+
+/// Platform filesystem backend.
+///
+/// Without the `emscripten` feature, this is the in-memory [`MemoryFs`].
+#[cfg(not(feature = "emscripten"))]
+pub type BackendFs = MemoryFs;
 
 use thiserror::Error;
 

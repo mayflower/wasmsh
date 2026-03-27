@@ -1,6 +1,6 @@
 //! Disk utilities: du, df.
 
-use wasmsh_fs::{MemoryFs, Vfs};
+use wasmsh_fs::{BackendFs, Vfs};
 
 use crate::helpers::{child_path, emit_error, resolve_path};
 use crate::UtilContext;
@@ -317,7 +317,7 @@ pub(crate) fn util_df(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 }
 
 /// Recursively sum all file sizes in the VFS.
-fn vfs_total_size(fs: &MemoryFs, path: &str) -> u64 {
+fn vfs_total_size(fs: &BackendFs, path: &str) -> u64 {
     let mut total: u64 = 0;
     if let Ok(entries) = fs.read_dir(path) {
         for entry in entries {

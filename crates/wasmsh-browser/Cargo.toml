@@ -20,18 +20,9 @@ browser-core = []
 browser-extended = ["browser-core", "wasmsh-fs/opfs"]
 
 [dependencies]
-wasmsh-ast = { workspace = true }
+wasmsh-runtime = { workspace = true }
 wasmsh-protocol = { workspace = true }
-wasmsh-parse = { workspace = true }
-wasmsh-hir = { workspace = true }
-wasmsh-expand = { workspace = true }
-wasmsh-vm = { workspace = true }
-wasmsh-state = { workspace = true }
 wasmsh-fs = { workspace = true }
-wasmsh-utils = { workspace = true }
-wasmsh-builtins = { workspace = true }
-smol_str = { workspace = true }
-indexmap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

@@ -1,0 +1,28 @@
+[package]
+name = "wasmsh-pyodide"
+description = "Pyodide-facing C ABI for the wasmsh runtime"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/mayflower/wasmsh"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+wasmsh-runtime = { path = "../wasmsh-runtime", features = ["emscripten"] }
+wasmsh-protocol = { path = "../wasmsh-protocol" }
+serde_json = "1"
+libc = "0.2"
+
+[lints.rust]
+# C ABI functions require unsafe
+unsafe_code = "allow"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

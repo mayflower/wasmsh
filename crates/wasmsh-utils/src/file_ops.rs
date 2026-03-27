@@ -1,7 +1,7 @@
 //! File utilities: cat, ls, mkdir, rm, touch, mv, cp, ln, readlink, realpath, stat, find, chmod,
 //! mktemp.
 
-use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
+use wasmsh_fs::{BackendFs, OpenOptions, Vfs};
 
 use crate::helpers::{
     child_path, copy_file_contents, emit_error, require_args, resolve_path, simple_glob_match,
@@ -213,7 +213,7 @@ struct LsEntry {
     size: u64,
 }
 
-fn ls_collect_entries(fs: &mut MemoryFs, dir: &str, flags: &LsFlags) -> Result<Vec<LsEntry>, ()> {
+fn ls_collect_entries(fs: &mut BackendFs, dir: &str, flags: &LsFlags) -> Result<Vec<LsEntry>, ()> {
     let entries = fs.read_dir(dir).map_err(|_| ())?;
     let mut result: Vec<LsEntry> = entries
         .into_iter()
@@ -394,7 +394,7 @@ pub(crate) fn util_mkdir(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     status
 }
 
-fn mkdir_parents(fs: &mut MemoryFs, path: &str) -> Result<(), wasmsh_fs::FsError> {
+fn mkdir_parents(fs: &mut BackendFs, path: &str) -> Result<(), wasmsh_fs::FsError> {
     // Build each ancestor and create if missing
     let mut current = String::new();
     for component in path.split('/').filter(|c| !c.is_empty()) {
@@ -501,7 +501,7 @@ pub(crate) fn util_rm(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 }
 
 /// Recursively remove a directory and all its contents.
-fn rm_recursive(fs: &mut MemoryFs, path: &str) -> Result<(), ()> {
+fn rm_recursive(fs: &mut BackendFs, path: &str) -> Result<(), ()> {
     // First remove all children
     if let Ok(entries) = fs.read_dir(path) {
         for entry in entries {
@@ -657,7 +657,7 @@ fn parse_cp_flags<'a>(argv: &'a [&'a str]) -> (CpFlags, Vec<&'a str>) {
     (flags, args)
 }
 
-fn cp_recursive(fs: &mut MemoryFs, src: &str, dst: &str) -> Result<(), String> {
+fn cp_recursive(fs: &mut BackendFs, src: &str, dst: &str) -> Result<(), String> {
     if let Err(e) = fs.create_dir(dst) {
         return Err(e.to_string());
     }
@@ -1092,7 +1092,7 @@ fn find_entry_matches(
     full_path: &str,
     is_dir: bool,
     size: u64,
-    fs: &MemoryFs,
+    fs: &BackendFs,
 ) -> bool {
     let mut matched = true;
     if let Some(p) = filters.name_pattern {
@@ -1125,7 +1125,7 @@ fn find_entry_matches(
 }
 
 fn walk_find(
-    fs: &mut MemoryFs,
+    fs: &mut BackendFs,
     path: &str,
     filters: &FindFilters<'_>,
     output: &mut dyn UtilOutput,

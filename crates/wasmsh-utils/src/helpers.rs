@@ -1,6 +1,6 @@
 //! Shared helper functions used across utility modules.
 
-use wasmsh_fs::{FsError, MemoryFs, OpenOptions, Vfs};
+use wasmsh_fs::{BackendFs, FsError, OpenOptions, Vfs};
 
 use crate::{UtilContext, UtilOutput};
 
@@ -32,7 +32,7 @@ pub(crate) fn require_args(argv: &[&str], min: usize, output: &mut dyn UtilOutpu
     }
 }
 
-pub(crate) fn copy_file_contents(fs: &mut MemoryFs, src: &str, dst: &str) -> Result<(), String> {
+pub(crate) fn copy_file_contents(fs: &mut BackendFs, src: &str, dst: &str) -> Result<(), String> {
     let h = fs
         .open(src, OpenOptions::read())
         .map_err(|e| e.to_string())?;
@@ -57,7 +57,7 @@ pub(crate) fn copy_file_contents(fs: &mut MemoryFs, src: &str, dst: &str) -> Res
     Ok(())
 }
 
-pub(crate) fn read_text(fs: &mut MemoryFs, path: &str) -> Result<String, FsError> {
+pub(crate) fn read_text(fs: &mut BackendFs, path: &str) -> Result<String, FsError> {
     let h = fs.open(path, OpenOptions::read())?;
     let data = match fs.read_file(h) {
         Ok(d) => {

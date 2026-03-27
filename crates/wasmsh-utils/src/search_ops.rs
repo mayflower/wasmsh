@@ -1,6 +1,6 @@
 //! Search utilities: rg (ripgrep-compatible recursive search).
 
-use wasmsh_fs::{MemoryFs, Vfs};
+use wasmsh_fs::{BackendFs, Vfs};
 
 use crate::helpers::{child_path, read_text, resolve_path, simple_glob_match};
 use crate::UtilContext;
@@ -327,7 +327,7 @@ fn display_path(abs_path: &str, root_abs: &str, original_arg: &str) -> String {
 }
 
 /// Recursively collect all files under a directory, respecting filters.
-fn collect_files(fs: &MemoryFs, dir: &str, opts: &RgOpts, out: &mut Vec<String>) {
+fn collect_files(fs: &BackendFs, dir: &str, opts: &RgOpts, out: &mut Vec<String>) {
     let Ok(entries) = fs.read_dir(dir) else {
         return;
     };
@@ -1144,7 +1144,7 @@ fn fd_emit_results(
 
 /// Recursively walk the VFS collecting paths.
 fn fd_walk(
-    fs: &MemoryFs,
+    fs: &BackendFs,
     dir: &str,
     depth: usize,
     max_depth: Option<usize>,

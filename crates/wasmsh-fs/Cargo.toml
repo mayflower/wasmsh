@@ -14,9 +14,11 @@ categories.workspace = true
 [features]
 default = []
 opfs = []
+emscripten = ["libc"]
 
 [dependencies]
 thiserror = { workspace = true }
+libc = { version = "0.2", optional = true }
 
 [lints]
 workspace = true

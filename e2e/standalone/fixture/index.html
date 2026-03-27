@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>wasmsh E2E</title></head>
+<body>
+  <p id="status">loading</p>
+  <script>
+    window.createShellWorker = function () {
+      return new Worker("./worker.js", { type: "module" });
+    };
+    document.getElementById("status").textContent = "ready";
+  </script>
+</body>
+</html>

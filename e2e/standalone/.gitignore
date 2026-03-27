@@ -1,0 +1,4 @@
+node_modules/
+fixture/pkg/
+test-results/
+playwright-report/
