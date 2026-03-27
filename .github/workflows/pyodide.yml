@@ -54,7 +54,7 @@ jobs:
         uses: extractions/setup-just@v2
 
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y wget ccache pkg-config
+        run: sudo apt-get update && sudo apt-get install -y wget ccache pkg-config xz-utils
 
       - name: Build custom Pyodide (includes probe + runtime)
         run: just build-pyodide
