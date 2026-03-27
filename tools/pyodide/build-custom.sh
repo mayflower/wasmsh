@@ -16,12 +16,6 @@ echo "=== wasmsh custom Pyodide build ==="
 echo "Pyodide version: $PYODIDE_VERSION"
 echo "Repo root:       $REPO_ROOT"
 
-# ── Prerequisites ───────────────────────────────────────────
-if ! command -v emcc &>/dev/null; then
-    echo "ERROR: emcc not found. Install Emscripten SDK first."
-    exit 1
-fi
-
 # ── Clone Pyodide source ───────────────────────────────────
 if [ ! -d "$PYODIDE_SRC" ]; then
     echo "Cloning Pyodide $PYODIDE_VERSION..."
@@ -59,6 +53,11 @@ fi
 # Source Pyodide's emsdk
 # shellcheck disable=SC1091
 source emsdk/emsdk/emsdk_env.sh 2>/dev/null || true
+
+if ! command -v emcc &>/dev/null; then
+    echo "ERROR: emcc not found after emsdk setup."
+    exit 1
+fi
 echo "Using emcc: $(emcc --version | head -1)"
 
 # Pyodide's Makefiles use sed -i (GNU style). macOS sed is different.
