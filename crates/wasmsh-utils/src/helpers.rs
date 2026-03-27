@@ -91,36 +91,6 @@ pub(crate) fn get_input_text(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> S
     }
 }
 
-/// Parse `-n N` or `-N` line count from argv. Returns (count, remaining files).
-/// Returns (count, `from_start`, files). `from_start=true` means `+N` syntax.
-pub(crate) fn parse_line_count<'a>(
-    argv: &'a [&'a str],
-    default: usize,
-) -> (usize, bool, Vec<&'a str>) {
-    let args = &argv[1..];
-    if args.is_empty() {
-        return (default, false, vec![]);
-    }
-    if args[0] == "-n" && args.len() >= 2 {
-        if let Some(rest) = args[1].strip_prefix('+') {
-            let n = rest.parse().unwrap_or(1);
-            return (n, true, args[2..].to_vec());
-        }
-        let n = args[1].parse().unwrap_or(default);
-        return (n, false, args[2..].to_vec());
-    }
-    if let Some(rest) = args[0].strip_prefix('-') {
-        if let Ok(n) = rest.parse::<usize>() {
-            return (n, false, args[1..].to_vec());
-        }
-    }
-    if let Some(rest) = args[0].strip_prefix('+') {
-        if let Ok(n) = rest.parse::<usize>() {
-            return (n, true, args[1..].to_vec());
-        }
-    }
-    (default, false, args.to_vec())
-}
 
 // ---------------------------------------------------------------------------
 // CRC-32 (ISO 3309, polynomial 0xEDB88320) — shared by cksum, gzip, etc.
