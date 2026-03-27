@@ -52,10 +52,12 @@ jobs:
         uses: extractions/setup-just@v2
 
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y wget
+        run: sudo apt-get update && sudo apt-get install -y wget ccache
 
       - name: Build custom Pyodide (includes probe + runtime)
         run: just build-pyodide
+        env:
+          SED: sed
 
       - name: Run Pyodide Node E2E
         run: just test-e2e-pyodide-node

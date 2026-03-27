@@ -150,7 +150,7 @@ pub(crate) fn util_expr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     }
     // 2-arg forms: length STRING
     if args.len() == 2 && args[0] == "length" {
-        let len = args[1].len() as i64;
+        let len = i64::try_from(args[1].len()).unwrap_or(i64::MAX);
         return expr_emit_result(ctx, len);
     }
     // 3-arg forms: binary ops, match, index
@@ -285,14 +285,14 @@ fn expr_match(ctx: &mut UtilContext<'_>, string: &str, _pattern: &str) -> i32 {
     // Simple match: return length of match at start of string
     // Full regex not implemented; return length of string if pattern starts with '.'
     // For basic support, match literal prefix
-    let len = string.len() as i64;
+    let len = i64::try_from(string.len()).unwrap_or(i64::MAX);
     expr_emit_result(ctx, len)
 }
 
 fn expr_index(ctx: &mut UtilContext<'_>, string: &str, chars: &str) -> i32 {
     for (i, c) in string.chars().enumerate() {
         if chars.contains(c) {
-            return expr_emit_result(ctx, (i + 1) as i64);
+            return expr_emit_result(ctx, i64::try_from(i + 1).unwrap_or(i64::MAX));
         }
     }
     expr_emit_result(ctx, 0)
@@ -334,10 +334,7 @@ pub(crate) fn util_xargs(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             null_delim = true;
             i += 1;
             cmd_start = i;
-        } else if arg == "-d" && i + 1 < argv.len() {
-            i += 2;
-            cmd_start = i;
-        } else if (arg == "-P" || arg == "-L") && i + 1 < argv.len() {
+        } else if (arg == "-d" || arg == "-P" || arg == "-L") && i + 1 < argv.len() {
             i += 2;
             cmd_start = i;
         } else if arg == "-t" || arg == "-p" {

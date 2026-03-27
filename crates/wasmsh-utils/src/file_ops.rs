@@ -1,6 +1,8 @@
 //! File utilities: cat, ls, mkdir, rm, touch, mv, cp, ln, readlink, realpath, stat, find, chmod,
 //! mktemp.
 
+use std::fmt::Write;
+
 use wasmsh_fs::{BackendFs, OpenOptions, Vfs};
 
 use crate::helpers::{
@@ -9,6 +11,7 @@ use crate::helpers::{
 };
 use crate::{UtilContext, UtilOutput};
 
+#[allow(clippy::struct_excessive_bools)]
 struct CatFlags {
     number_all: bool,
     number_nonblank: bool,
@@ -33,21 +36,16 @@ fn parse_cat_flags<'a>(argv: &'a [&'a str]) -> (CatFlags, Vec<&'a str>) {
                     'n' => flags.number_all = true,
                     'b' => flags.number_nonblank = true,
                     's' => flags.squeeze_blank = true,
-                    'E' => flags.show_ends = true,
-                    'T' => flags.show_tabs = true,
+                    'E' | 'e' => flags.show_ends = true,
+                    'T' | 't' => flags.show_tabs = true,
                     'A' => {
                         flags.show_ends = true;
                         flags.show_tabs = true;
                     }
-                    'e' => flags.show_ends = true,
-                    't' => flags.show_tabs = true,
-                    'v' => {} // accept, no-op in VFS
-                    _ => {}
+                    _ => {} // 'v' etc. accepted, no-op in VFS
                 }
             }
-        } else if *arg == "--" {
-            continue;
-        } else {
+        } else if *arg != "--" {
             files.push(*arg);
         }
     }
@@ -70,11 +68,7 @@ fn cat_emit_lines(output: &mut dyn UtilOutput, text: &str, flags: &CatFlags, lin
         }
         prev_blank = is_blank;
 
-        if flags.number_nonblank && !is_blank {
-            *line_num += 1;
-            let prefix = format!("{:>6}\t", *line_num);
-            output.stdout(prefix.as_bytes());
-        } else if flags.number_all {
+        if (flags.number_nonblank && !is_blank) || flags.number_all {
             *line_num += 1;
             let prefix = format!("{:>6}\t", *line_num);
             output.stdout(prefix.as_bytes());
@@ -174,15 +168,14 @@ fn parse_ls_flags<'a>(argv: &'a [&'a str]) -> (LsFlags, Vec<&'a str>) {
                 match ch {
                     'l' => flags.long = true,
                     'a' => flags.all = true,
-                    '1' => {} // already one-per-line
                     'R' => flags.recursive = true,
                     'h' => flags.human = true,
                     'r' => flags.reverse = true,
-                    't' => {} // accept, no real mtime in VFS
                     'S' => flags.sort_size = true,
                     'd' => flags.dir_only = true,
                     'F' => flags.classify = true,
-                    'i' => {} // accept, ignore
+                    // '1' (already one-per-line), 't' (no real mtime in VFS),
+                    // 'i' (inode, ignore) — all accepted as no-ops
                     _ => {}
                 }
             }
@@ -273,12 +266,9 @@ fn ls_dir(
         let hdr = format!("{display}:\n");
         ctx.output.stdout(hdr.as_bytes());
     }
-    let entries = match ls_collect_entries(ctx.fs, full, flags) {
-        Ok(e) => e,
-        Err(()) => {
-            emit_error(ctx.output, "ls", display, &"cannot open directory");
-            return 1;
-        }
+    let Ok(entries) = ls_collect_entries(ctx.fs, full, flags) else {
+        emit_error(ctx.output, "ls", display, &"cannot open directory");
+        return 1;
     };
     if flags.long {
         let total = format!("total {}\n", entries.iter().map(|e| e.size).sum::<u64>());
@@ -368,10 +358,9 @@ pub(crate) fn util_mkdir(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             skip_next = true; // skip the mode argument
         } else if arg.starts_with('-') && arg.len() > 1 {
             for ch in arg[1..].chars() {
-                match ch {
-                    'p' => parents = true,
-                    'v' | 'm' => {} // accept, no-op
-                    _ => {}
+                // 'v', 'm' etc. accepted, no-op
+                if ch == 'p' {
+                    parents = true;
                 }
             }
         } else {
@@ -524,17 +513,15 @@ pub(crate) fn util_touch(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut i = 1;
     while i < argv.len() {
         match argv[i] {
-            "-c" => {}
-            "-a" | "-m" => {} // time flags, no-op in VFS
+            "-c" | "-a" | "-m" => {} // time flags, no-op in VFS
             "-d" | "-t" | "-r" if i + 1 < argv.len() => {
                 i += 1; // skip argument, no-op
             }
             arg if arg.starts_with('-') && arg.len() > 1 && arg != "--" => {
                 for ch in arg[1..].chars() {
-                    match ch {
-                        'c' => no_create = true,
-                        'a' | 'm' => {} // no-op
-                        _ => {}
+                    // 'a', 'm' etc. — no-op
+                    if ch == 'c' {
+                        no_create = true;
                     }
                 }
             }
@@ -577,14 +564,12 @@ pub(crate) fn util_mv(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                 match ch {
                     'f' => no_clobber = false,
                     'n' => no_clobber = true,
-                    'i' => {} // interactive, no-op in sandbox
                     'v' => verbose = true,
+                    // 'i' (interactive) etc. — no-op in sandbox
                     _ => {}
                 }
             }
-        } else if *arg == "--" {
-            continue;
-        } else {
+        } else if *arg != "--" {
             args.push(*arg);
         }
     }
@@ -644,13 +629,11 @@ fn parse_cp_flags<'a>(argv: &'a [&'a str]) -> (CpFlags, Vec<&'a str>) {
                     'f' => flags.force = true,
                     'n' => flags.no_clobber = true,
                     'v' => flags.verbose = true,
-                    'p' => {} // preserve attrs, no-op in VFS
+                    // 'p' (preserve attrs) etc. — no-op in VFS
                     _ => {}
                 }
             }
-        } else if *arg == "--" {
-            continue;
-        } else {
+        } else if *arg != "--" {
             args.push(*arg);
         }
     }
@@ -704,7 +687,7 @@ pub(crate) fn util_cp(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
         if is_dir {
             if !flags.recursive {
-                let msg = format!("cp: -r not specified; omitting directory '{}'\n", src_arg);
+                let msg = format!("cp: -r not specified; omitting directory '{src_arg}'\n");
                 ctx.output.stderr(msg.as_bytes());
                 status = 1;
                 continue;
@@ -721,7 +704,7 @@ pub(crate) fn util_cp(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
 
         if flags.verbose {
-            let msg = format!("'{}' -> '{}'\n", src_arg, dst_arg);
+            let msg = format!("'{src_arg}' -> '{dst_arg}'\n");
             ctx.output.stdout(msg.as_bytes());
         }
     }
@@ -737,16 +720,13 @@ pub(crate) fn util_ln(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         if arg.starts_with('-') && arg.len() > 1 && *arg != "--" {
             for ch in arg[1..].chars() {
                 match ch {
-                    's' => {} // symbolic, accepted (VFS always copies)
                     'f' => force = true,
-                    'n' => {} // no-dereference, accepted
                     'v' => verbose = true,
+                    // 's' (symbolic), 'n' (no-dereference) etc. — accepted, VFS always copies
                     _ => {}
                 }
             }
-        } else if *arg == "--" {
-            continue;
-        } else {
+        } else if *arg != "--" {
             args.push(*arg);
         }
     }
@@ -779,21 +759,19 @@ pub(crate) fn util_readlink(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut paths = Vec::new();
     for arg in &argv[1..] {
         match *arg {
-            "-f" => canonicalize = true,
+            "-f" | "-m" => canonicalize = true,
             "-e" => {
                 canonicalize = true;
                 must_exist = true;
             }
-            "-m" => canonicalize = true,
             _ if arg.starts_with('-') && arg.len() > 1 => {
                 for ch in arg[1..].chars() {
                     match ch {
-                        'f' => canonicalize = true,
+                        'f' | 'm' => canonicalize = true,
                         'e' => {
                             canonicalize = true;
                             must_exist = true;
                         }
-                        'm' => canonicalize = true,
                         _ => {}
                     }
                 }
@@ -837,7 +815,7 @@ fn stat_format(fmt: &str, name: &str, size: u64, is_dir: bool) -> String {
         if ch == '%' {
             match chars.next() {
                 Some('n') => result.push_str(name),
-                Some('s') => result.push_str(&format!("{size}")),
+                Some('s') => { let _ = write!(result, "{size}"); }
                 Some('F') => result.push_str(if is_dir { "directory" } else { "regular file" }),
                 Some('a') => result.push_str(if is_dir { "755" } else { "644" }),
                 Some('A') => {
@@ -847,28 +825,25 @@ fn stat_format(fmt: &str, name: &str, size: u64, is_dir: bool) -> String {
                         "-rw-r--r--"
                     });
                 }
-                Some('U') => result.push_str("user"),
-                Some('G') => result.push_str("user"),
+                Some('U' | 'G') => result.push_str("user"),
                 Some('h') => result.push('1'),
                 Some('f') => result.push_str(if is_dir { "41ed" } else { "81a4" }),
                 Some('Y') => result.push('0'),
-                Some('%') => result.push('%'),
+                Some('%') | None => result.push('%'),
                 Some(c) => {
                     result.push('%');
                     result.push(c);
                 }
-                None => result.push('%'),
             }
         } else if ch == '\\' {
             match chars.next() {
                 Some('n') => result.push('\n'),
                 Some('t') => result.push('\t'),
-                Some('\\') => result.push('\\'),
+                Some('\\') | None => result.push('\\'),
                 Some(c) => {
                     result.push('\\');
                     result.push(c);
                 }
-                None => result.push('\\'),
             }
         } else {
             result.push(ch);
@@ -942,6 +917,7 @@ pub(crate) fn util_stat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     status
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct FindFilters<'a> {
     name_pattern: Option<&'a str>,
     iname_pattern: Option<&'a str>,
@@ -1022,7 +998,7 @@ fn parse_find_args<'a>(argv: &'a [&'a str]) -> (&'a str, FindFilters<'a>) {
                 filters.empty = true;
                 i += 1;
             }
-            "-print" => {
+            "-print" | "-and" | "-a" | "-o" | "-or" => {
                 i += 1;
             }
             "-print0" => {
@@ -1031,9 +1007,6 @@ fn parse_find_args<'a>(argv: &'a [&'a str]) -> (&'a str, FindFilters<'a>) {
             }
             "!" | "-not" => {
                 filters.negate_next = true;
-                i += 1;
-            }
-            "-and" | "-a" | "-o" | "-or" => {
                 i += 1;
             }
             _ => i += 1,

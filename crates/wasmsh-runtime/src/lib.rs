@@ -1179,9 +1179,9 @@ impl WorkerRuntime {
             ) && i + 1 < argv.len()
             {
                 i += 2;
-            } else if matches!(arg.as_str(), "-0" | "--null" | "-t" | "-p") {
-                i += 1;
-            } else if arg.starts_with('-') {
+            } else if matches!(arg.as_str(), "-0" | "--null" | "-t" | "-p")
+                || arg.starts_with('-')
+            {
                 i += 1;
             } else {
                 // First non-flag arg is the command

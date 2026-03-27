@@ -1,5 +1,7 @@
 //! Text utilities: head, tail, wc, grep, sed, sort, uniq, cut, tr, tee, paste, rev, column.
 
+use std::fmt::Write;
+
 use wasmsh_fs::{OpenOptions, Vfs};
 
 use crate::helpers::{emit_error, get_input_text, grep_matches, read_text, resolve_path};
@@ -241,6 +243,7 @@ pub(crate) fn util_wc(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     status
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct WcFlags {
     lines: bool,
     words: bool,
@@ -309,11 +312,11 @@ fn wc_emit(
         parts.push(format!("{:>7}", text.split_whitespace().count()));
     }
     if flags.bytes {
-        parts.push(format!("{:>7}", bytes));
+        parts.push(format!("{bytes:>7}"));
     }
     if flags.max_line_length {
-        let max_len = text.lines().map(|l| l.len()).max().unwrap_or(0);
-        parts.push(format!("{:>7}", max_len));
+        let max_len = text.lines().map(str::len).max().unwrap_or(0);
+        parts.push(format!("{max_len:>7}"));
     }
     let mut out = parts.join("");
     if let Some(p) = path {
@@ -439,7 +442,7 @@ fn parse_grep_flags<'a>(
                     'q' => flags.quiet = true,
                     'h' => flags.show_filename = Some(false),
                     'H' => flags.show_filename = Some(true),
-                    'z' => {} // accept, no-op
+                    // 'z' etc. — accepted, no-op
                     _ => {}
                 }
             }
@@ -599,7 +602,7 @@ fn grep_emit_one(
         }
     }
     if flags.show_line_numbers {
-        prefix.push_str(&format!("{line_num}:"));
+        let _ = write!(prefix, "{line_num}:");
     }
     if flags.only_matching {
         for pat in patterns {
@@ -683,15 +686,12 @@ pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     }
 
     if file_args.is_empty() {
-        let text = match ctx
+        let Some(text) = ctx
             .stdin
             .map(|data| String::from_utf8_lossy(data).to_string())
-        {
-            Some(t) => t,
-            None => {
-                ctx.output.stderr(b"grep: missing file operand\n");
-                return 2;
-            }
+        else {
+            ctx.output.stderr(b"grep: missing file operand\n");
+            return 2;
         };
         let (found, _) = grep_process_file(ctx.output, &text, None, &flags, &patterns);
         return i32::from(!found);
@@ -777,21 +777,20 @@ struct SedInstruction {
 }
 
 fn parse_sed_addr(s: &str) -> (SedAddr, &str) {
-    if s.starts_with('/') {
-        if let Some(end) = s[1..].find('/') {
-            let pat = &s[1..end + 1];
-            let rest = &s[end + 2..];
-            if rest.starts_with(',') {
-                let (addr2, rest2) = parse_sed_addr(&rest[1..]);
+    if let Some(stripped) = s.strip_prefix('/') {
+        if let Some(end) = stripped.find('/') {
+            let pat = &stripped[..end];
+            let rest = &stripped[end + 1..];
+            if let Some(after_comma) = rest.strip_prefix(',') {
+                let (addr2, rest2) = parse_sed_addr(after_comma);
                 return (SedAddr::Range(Box::new(SedAddr::Regex(pat.to_string())), Box::new(addr2)), rest2);
             }
             return (SedAddr::Regex(pat.to_string()), rest);
         }
     }
-    if s.starts_with('$') {
-        let rest = &s[1..];
-        if rest.starts_with(',') {
-            let (addr2, rest2) = parse_sed_addr(&rest[1..]);
+    if let Some(rest) = s.strip_prefix('$') {
+        if let Some(after_comma) = rest.strip_prefix(',') {
+            let (addr2, rest2) = parse_sed_addr(after_comma);
             return (SedAddr::Range(Box::new(SedAddr::Last), Box::new(addr2)), rest2);
         }
         return (SedAddr::Last, rest);
@@ -800,8 +799,8 @@ fn parse_sed_addr(s: &str) -> (SedAddr, &str) {
     if num_end > 0 {
         if let Ok(n) = s[..num_end].parse::<usize>() {
             let rest = &s[num_end..];
-            if rest.starts_with(',') {
-                let (addr2, rest2) = parse_sed_addr(&rest[1..]);
+            if let Some(after_comma) = rest.strip_prefix(',') {
+                let (addr2, rest2) = parse_sed_addr(after_comma);
                 return (SedAddr::Range(Box::new(SedAddr::Line(n)), Box::new(addr2)), rest2);
             }
             return (SedAddr::Line(n), rest);
@@ -846,8 +845,6 @@ fn parse_sed_script(script: &str) -> Vec<SedInstruction> {
             SedCmd::InsertText(text.trim_start().to_string())
         } else if let Some(text) = rest.strip_prefix("c\\") {
             SedCmd::ChangeText(text.trim_start().to_string())
-        } else if rest.starts_with('s') {
-            continue;
         } else {
             continue;
         };
@@ -1123,7 +1120,7 @@ fn parse_sort_flags<'a>(argv: &'a [&'a str]) -> (SortFlags, Vec<&'a str>) {
                     'c' => flags.check = true,
                     'h' => flags.human_numeric = true,
                     'V' => flags.version_sort = true,
-                    'm' | 'z' => {} // accept, no special handling
+                    // 'm', 'z' etc. — accept, no special handling
                     _ => {}
                 }
             }
@@ -1195,8 +1192,8 @@ fn version_compare(a: &str, b: &str) -> std::cmp::Ordering {
             (Some(_), None) => return std::cmp::Ordering::Greater,
             (Some(&ac), Some(&bc)) => {
                 if ac.is_ascii_digit() && bc.is_ascii_digit() {
-                    let na: String = ai.by_ref().take_while(|c| c.is_ascii_digit()).collect();
-                    let nb: String = bi.by_ref().take_while(|c| c.is_ascii_digit()).collect();
+                    let na: String = ai.by_ref().take_while(char::is_ascii_digit).collect();
+                    let nb: String = bi.by_ref().take_while(char::is_ascii_digit).collect();
                     let cmp = na
                         .parse::<u64>()
                         .unwrap_or(0)
@@ -1315,7 +1312,7 @@ fn parse_uniq_flags<'a>(argv: &'a [&'a str]) -> (UniqFlags, Vec<&'a str>) {
                     'd' => flags.duplicates_only = true,
                     'u' => flags.unique_only = true,
                     'i' => flags.ignore_case = true,
-                    'z' => {} // accept, no-op
+                    // 'z' etc. — accept, no-op
                     _ => {}
                 }
             }
@@ -1573,7 +1570,7 @@ fn tr_expand_set(s: &str) -> Vec<char> {
                 } else {
                     chars.push(ch);
                     // put back '-'
-                    *(&mut iter) = saved;
+                    iter = saved;
                     iter.next(); // skip '-'
                     chars.push('-');
                 }
@@ -1586,9 +1583,8 @@ fn tr_expand_set(s: &str) -> Vec<char> {
                 Some('n') => chars.push('\n'),
                 Some('t') => chars.push('\t'),
                 Some('r') => chars.push('\r'),
-                Some('\\') => chars.push('\\'),
+                Some('\\') | None => chars.push('\\'),
                 Some(c) => chars.push(c),
-                None => chars.push('\\'),
             }
         } else {
             chars.push(ch);
@@ -1610,7 +1606,7 @@ pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     'd' => delete = true,
                     's' => squeeze = true,
                     'c' | 'C' => complement = true,
-                    't' => {} // truncate, accepted
+                    // 't' (truncate) etc. — accepted
                     _ => {}
                 }
             }

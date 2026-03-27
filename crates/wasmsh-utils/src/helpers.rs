@@ -261,23 +261,20 @@ fn hashsum_check(
         if filename.is_empty() {
             continue;
         }
-        match read_file_bytes(ctx, filename, cmd_name) {
-            Ok(data) => {
-                let actual = hash_fn(&data);
-                if actual == expected {
-                    let msg = format!("{filename}: OK\n");
-                    ctx.output.stdout(msg.as_bytes());
-                } else {
-                    let msg = format!("{filename}: FAILED\n");
-                    ctx.output.stdout(msg.as_bytes());
-                    failures += 1;
-                }
-            }
-            Err(_) => {
-                let msg = format!("{filename}: FAILED open or read\n");
+        if let Ok(data) = read_file_bytes(ctx, filename, cmd_name) {
+            let actual = hash_fn(&data);
+            if actual == expected {
+                let msg = format!("{filename}: OK\n");
+                ctx.output.stdout(msg.as_bytes());
+            } else {
+                let msg = format!("{filename}: FAILED\n");
                 ctx.output.stdout(msg.as_bytes());
                 failures += 1;
             }
+        } else {
+            let msg = format!("{filename}: FAILED open or read\n");
+            ctx.output.stdout(msg.as_bytes());
+            failures += 1;
         }
     }
     if failures > 0 {

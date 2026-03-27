@@ -1,5 +1,7 @@
 //! System/env utilities: env, printenv, id, whoami, uname, hostname, sleep, date.
 
+use std::fmt::Write;
+
 use crate::UtilContext;
 
 pub(crate) fn print_all_exported(ctx: &mut UtilContext<'_>) {
@@ -104,26 +106,14 @@ pub(crate) fn util_id(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     'g' => show_group = true,
                     'G' => show_groups = true,
                     'n' => show_name = true,
-                    'r' => {} // real id, same as effective in VFS
+                    // 'r' (real id, same as effective in VFS) etc. — no-op
                     _ => {}
                 }
             }
         }
     }
 
-    if show_user {
-        if show_name {
-            ctx.output.stdout(b"user\n");
-        } else {
-            ctx.output.stdout(b"1000\n");
-        }
-    } else if show_group {
-        if show_name {
-            ctx.output.stdout(b"user\n");
-        } else {
-            ctx.output.stdout(b"1000\n");
-        }
-    } else if show_groups {
+    if show_user || show_group || show_groups {
         if show_name {
             ctx.output.stdout(b"user\n");
         } else {
@@ -151,9 +141,7 @@ pub(crate) fn util_uname(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         ctx.output.stdout(b"wasm32\n");
     } else if args.contains(&"-r") {
         ctx.output.stdout(b"0.1.0\n");
-    } else if args.contains(&"-n") {
-        ctx.output.stdout(b"wasmsh\n");
-    } else if args.contains(&"-o") {
+    } else if args.contains(&"-n") || args.contains(&"-o") {
         ctx.output.stdout(b"wasmsh\n");
     } else if args.contains(&"-p") {
         ctx.output.stdout(b"wasm32\n");
@@ -269,21 +257,27 @@ fn format_date(fmt: &str, parts: &DateParts) -> String {
     while let Some(ch) = chars.next() {
         if ch == '%' {
             match chars.next() {
-                Some('Y') => result.push_str(&format!("{:04}", parts.year)),
-                Some('m') => result.push_str(&format!("{:02}", parts.month)),
-                Some('d') => result.push_str(&format!("{:02}", parts.day)),
-                Some('H') => result.push_str(&format!("{:02}", parts.hour)),
-                Some('M') => result.push_str(&format!("{:02}", parts.minute)),
-                Some('S') => result.push_str(&format!("{:02}", parts.second)),
+                Some('Y') => { let _ = write!(result, "{:04}", parts.year); }
+                Some('m') => { let _ = write!(result, "{:02}", parts.month); }
+                Some('d') => { let _ = write!(result, "{:02}", parts.day); }
+                Some('H') => { let _ = write!(result, "{:02}", parts.hour); }
+                Some('M') => { let _ = write!(result, "{:02}", parts.minute); }
+                Some('S') => { let _ = write!(result, "{:02}", parts.second); }
                 Some('s') => result.push('0'), // epoch seconds, fake
-                Some('F') => result.push_str(&format!(
-                    "{:04}-{:02}-{:02}",
-                    parts.year, parts.month, parts.day
-                )),
-                Some('T') => result.push_str(&format!(
-                    "{:02}:{:02}:{:02}",
-                    parts.hour, parts.minute, parts.second
-                )),
+                Some('F') => {
+                    let _ = write!(
+                        result,
+                        "{:04}-{:02}-{:02}",
+                        parts.year, parts.month, parts.day
+                    );
+                }
+                Some('T') => {
+                    let _ = write!(
+                        result,
+                        "{:02}:{:02}:{:02}",
+                        parts.hour, parts.minute, parts.second
+                    );
+                }
                 Some('A') => {
                     let dow = day_of_week(parts.year, parts.month, parts.day);
                     result.push_str(WEEKDAY_NAMES[dow]);
@@ -297,7 +291,7 @@ fn format_date(fmt: &str, parts: &DateParts) -> String {
                         result.push_str(MONTH_NAMES[(parts.month - 1) as usize]);
                     }
                 }
-                Some('b') | Some('h') => {
+                Some('b' | 'h') => {
                     if parts.month >= 1 && parts.month <= 12 {
                         result.push_str(MONTH_ABBR[(parts.month - 1) as usize]);
                     }
@@ -306,8 +300,8 @@ fn format_date(fmt: &str, parts: &DateParts) -> String {
                 Some('z') => result.push_str("+0000"),
                 Some('n') => result.push('\n'),
                 Some('t') => result.push('\t'),
-                Some('%') => result.push('%'),
-                Some('e') => result.push_str(&format!("{:>2}", parts.day)),
+                Some('%') | None => result.push('%'),
+                Some('e') => { let _ = write!(result, "{:>2}", parts.day); }
                 Some('I') => {
                     let h12 = if parts.hour == 0 {
                         12
@@ -316,19 +310,18 @@ fn format_date(fmt: &str, parts: &DateParts) -> String {
                     } else {
                         parts.hour
                     };
-                    result.push_str(&format!("{h12:02}"));
+                    let _ = write!(result, "{h12:02}");
                 }
                 Some('p') => {
                     result.push_str(if parts.hour < 12 { "AM" } else { "PM" });
                 }
                 Some('R') => {
-                    result.push_str(&format!("{:02}:{:02}", parts.hour, parts.minute));
+                    let _ = write!(result, "{:02}:{:02}", parts.hour, parts.minute);
                 }
                 Some(c) => {
                     result.push('%');
                     result.push(c);
                 }
-                None => result.push('%'),
             }
         } else {
             result.push(ch);
@@ -340,9 +333,7 @@ fn format_date(fmt: &str, parts: &DateParts) -> String {
 pub(crate) fn util_date(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let base_str = ctx
         .state
-        .and_then(|s| s.get_var("WASMSH_DATE"))
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "2026-01-01 00:00:00 UTC".to_string());
+        .and_then(|s| s.get_var("WASMSH_DATE")).map_or_else(|| "2026-01-01 00:00:00 UTC".to_string(), |s| s.to_string());
 
     let parts = parse_date_string(&base_str);
 
