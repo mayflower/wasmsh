@@ -143,12 +143,17 @@ fi
 
 # Fix libffi autoreconf failure on modern Linux.
 # libffi's configure.ac uses LT_SYS_SYMBOL_USCORE which was removed from
-# modern libtool. Patch the cpython Makefile to sed out the autoreconf call
-# in libffi's build.sh after clone, using the pre-generated configure.
-if ! grep -q "wasmsh_patch_libffi" cpython/Makefile; then
-    "$SED" -i '/git checkout FETCH_HEAD/a\\t\t&& sed -i "s|autoreconf -fiv|echo wasmsh_patch_libffi: skipping autoreconf|" ./testsuite/emscripten/build.sh' cpython/Makefile
-    echo "  Patched cpython/Makefile to skip libffi autoreconf."
-fi
+# modern libtool (2.5+). The git checkout has a pre-generated configure.
+# Shadow autoreconf with a no-op wrapper so libffi's build.sh skips regeneration.
+WRAPPER_DIR="$PYODIDE_SRC/.bin-wrappers"
+mkdir -p "$WRAPPER_DIR"
+cat > "$WRAPPER_DIR/autoreconf" << 'WRAPPER'
+#!/bin/sh
+echo "[wasmsh] autoreconf skipped (using pre-generated configure)"
+WRAPPER
+chmod +x "$WRAPPER_DIR/autoreconf"
+export PATH="$WRAPPER_DIR:$PATH"
+echo "  Installed autoreconf wrapper to skip libffi regeneration."
 
 # ── Build CPython + core ────────────────────────────────────
 echo "Building Pyodide core (this takes a while on first run)..."
