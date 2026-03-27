@@ -349,9 +349,7 @@ struct GrepFlags {
     exclude_glob: Option<String>,
 }
 
-fn parse_grep_flags<'a>(
-    argv: &'a [&'a str],
-) -> (GrepFlags, Vec<&'a str>) {
+fn parse_grep_flags<'a>(argv: &'a [&'a str]) -> (GrepFlags, Vec<&'a str>) {
     let mut flags = GrepFlags {
         ignore_case: false,
         invert: false,
@@ -463,7 +461,9 @@ fn grep_match_pattern(line: &str, pattern: &str, flags: &GrepFlags) -> bool {
     };
 
     if flags.extended && p.contains('|') {
-        return p.split('|').any(|alt| grep_match_single(&l, alt.trim(), flags));
+        return p
+            .split('|')
+            .any(|alt| grep_match_single(&l, alt.trim(), flags));
     }
     grep_match_single(&l, &p, flags)
 }
@@ -710,8 +710,7 @@ pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         match read_text(ctx.fs, &full) {
             Ok(text) => {
                 let fname = if show_fn { Some(*path) } else { None };
-                let (found, _) =
-                    grep_process_file(ctx.output, &text, fname, &adj_flags, &patterns);
+                let (found, _) = grep_process_file(ctx.output, &text, fname, &adj_flags, &patterns);
                 if found {
                     found_any = true;
                     if adj_flags.files_only {
@@ -783,7 +782,10 @@ fn parse_sed_addr(s: &str) -> (SedAddr, &str) {
             let rest = &stripped[end + 1..];
             if let Some(after_comma) = rest.strip_prefix(',') {
                 let (addr2, rest2) = parse_sed_addr(after_comma);
-                return (SedAddr::Range(Box::new(SedAddr::Regex(pat.to_string())), Box::new(addr2)), rest2);
+                return (
+                    SedAddr::Range(Box::new(SedAddr::Regex(pat.to_string())), Box::new(addr2)),
+                    rest2,
+                );
             }
             return (SedAddr::Regex(pat.to_string()), rest);
         }
@@ -791,7 +793,10 @@ fn parse_sed_addr(s: &str) -> (SedAddr, &str) {
     if let Some(rest) = s.strip_prefix('$') {
         if let Some(after_comma) = rest.strip_prefix(',') {
             let (addr2, rest2) = parse_sed_addr(after_comma);
-            return (SedAddr::Range(Box::new(SedAddr::Last), Box::new(addr2)), rest2);
+            return (
+                SedAddr::Range(Box::new(SedAddr::Last), Box::new(addr2)),
+                rest2,
+            );
         }
         return (SedAddr::Last, rest);
     }
@@ -801,7 +806,10 @@ fn parse_sed_addr(s: &str) -> (SedAddr, &str) {
             let rest = &s[num_end..];
             if let Some(after_comma) = rest.strip_prefix(',') {
                 let (addr2, rest2) = parse_sed_addr(after_comma);
-                return (SedAddr::Range(Box::new(SedAddr::Line(n)), Box::new(addr2)), rest2);
+                return (
+                    SedAddr::Range(Box::new(SedAddr::Line(n)), Box::new(addr2)),
+                    rest2,
+                );
             }
             return (SedAddr::Line(n), rest);
         }
@@ -853,7 +861,13 @@ fn parse_sed_script(script: &str) -> Vec<SedInstruction> {
     instructions
 }
 
-fn sed_addr_matches(addr: &SedAddr, line_num: usize, total_lines: usize, line: &str, in_range: &mut bool) -> bool {
+fn sed_addr_matches(
+    addr: &SedAddr,
+    line_num: usize,
+    total_lines: usize,
+    line: &str,
+    in_range: &mut bool,
+) -> bool {
     match addr {
         SedAddr::None => true,
         SedAddr::Line(n) => line_num == *n,
@@ -945,7 +959,13 @@ pub(crate) fn util_sed(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             let mut quit = false;
 
             for (ci, instr) in instructions.iter().enumerate() {
-                if !sed_addr_matches(&instr.addr, line_num, total, &current, &mut range_states[ci]) {
+                if !sed_addr_matches(
+                    &instr.addr,
+                    line_num,
+                    total,
+                    &current,
+                    &mut range_states[ci],
+                ) {
                     continue;
                 }
                 match &instr.cmd {
@@ -1341,7 +1361,10 @@ fn uniq_compare_key<'a>(line: &'a str, flags: &UniqFlags) -> String {
     if flags.skip_chars > 0 {
         let chars: Vec<char> = s.chars().collect();
         s = if flags.skip_chars < chars.len() {
-            &s[chars[..flags.skip_chars].iter().map(|c| c.len_utf8()).sum::<usize>()..]
+            &s[chars[..flags.skip_chars]
+                .iter()
+                .map(|c| c.len_utf8())
+                .sum::<usize>()..]
         } else {
             ""
         };
@@ -1416,16 +1439,8 @@ fn parse_cut_ranges(spec: &str) -> Vec<CutRange> {
         .filter_map(|s| {
             if let Some((a, b)) = s.split_once('-') {
                 Some(CutRange {
-                    start: if a.is_empty() {
-                        None
-                    } else {
-                        a.parse().ok()
-                    },
-                    end: if b.is_empty() {
-                        None
-                    } else {
-                        b.parse().ok()
-                    },
+                    start: if a.is_empty() { None } else { a.parse().ok() },
+                    end: if b.is_empty() { None } else { b.parse().ok() },
                 })
             } else {
                 let n: usize = s.parse().ok()?;
@@ -1486,7 +1501,8 @@ pub(crate) fn util_cut(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     }
 
     let Some(mode) = mode else {
-        ctx.output.stderr(b"cut: you must specify a list of bytes, characters, or fields\n");
+        ctx.output
+            .stderr(b"cut: you must specify a list of bytes, characters, or fields\n");
         return 1;
     };
     let out_sep = output_delim.unwrap_or_else(|| delim.to_string());
@@ -1504,7 +1520,11 @@ pub(crate) fn util_cut(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     .enumerate()
                     .filter(|(idx, _)| {
                         let included = cut_range_includes(ranges, idx + 1);
-                        if complement { !included } else { included }
+                        if complement {
+                            !included
+                        } else {
+                            included
+                        }
                     })
                     .map(|(_, s)| *s)
                     .collect();
@@ -1518,7 +1538,11 @@ pub(crate) fn util_cut(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     .enumerate()
                     .filter(|(idx, _)| {
                         let included = cut_range_includes(ranges, idx + 1);
-                        if complement { !included } else { included }
+                        if complement {
+                            !included
+                        } else {
+                            included
+                        }
                     })
                     .map(|(_, c)| *c)
                     .collect();
@@ -1636,7 +1660,11 @@ pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             .chars()
             .filter(|c| {
                 let in_set = from_chars.contains(c);
-                if complement { in_set } else { !in_set }
+                if complement {
+                    in_set
+                } else {
+                    !in_set
+                }
             })
             .collect();
         let mut result = String::new();
@@ -1657,7 +1685,11 @@ pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             .chars()
             .filter(|c| {
                 let in_set = from_chars.contains(c);
-                if complement { in_set } else { !in_set }
+                if complement {
+                    in_set
+                } else {
+                    !in_set
+                }
             })
             .collect();
         ctx.output.stdout(result.as_bytes());

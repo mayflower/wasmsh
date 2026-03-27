@@ -39,7 +39,7 @@ name = "pipeline_bench"
 harness = false
 
 [package.metadata.cargo-machete]
-ignored = ["serde"]  # used only behind cfg(target_arch = "wasm32")
+ignored = ["serde", "wasmsh-fs"]  # serde: wasm32 only; wasmsh-fs: feature flag forwarding
 
 [lints]
 workspace = true

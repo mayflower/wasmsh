@@ -5,8 +5,8 @@
 
 use std::path::Path;
 
-use wasmsh_runtime::WorkerRuntime;
 use wasmsh_protocol::{HostCommand, WorkerEvent};
+use wasmsh_runtime::WorkerRuntime;
 
 use crate::features;
 use crate::toml_case::TomlTestFile;

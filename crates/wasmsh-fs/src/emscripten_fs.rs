@@ -3,7 +3,6 @@
 //! Delegates to libc POSIX calls which go through Emscripten's virtual
 //! filesystem. This shares the same FS that Python sees inside Pyodide.
 
-
 use std::collections::HashMap;
 use std::ffi::CString;
 
@@ -81,7 +80,11 @@ impl Vfs for EmscriptenFs {
         let mode = if opts.append {
             c"a+"
         } else if opts.write && opts.read {
-            if opts.truncate { c"w+" } else { c"r+" }
+            if opts.truncate {
+                c"w+"
+            } else {
+                c"r+"
+            }
         } else if opts.write {
             c"w"
         } else {
@@ -99,16 +102,21 @@ impl Vfs for EmscriptenFs {
 
         let h = self.next_handle;
         self.next_handle += 1;
-        self.open_files.insert(h, OpenFile {
-            fp,
-            path: path.to_string(),
-            writable: opts.write || opts.append,
-        });
+        self.open_files.insert(
+            h,
+            OpenFile {
+                fp,
+                path: path.to_string(),
+                writable: opts.write || opts.append,
+            },
+        );
         Ok(FileHandle(h))
     }
 
     fn read_file(&self, handle: FileHandle) -> Result<Vec<u8>, FsError> {
-        let of = self.open_files.get(&handle.0)
+        let of = self
+            .open_files
+            .get(&handle.0)
             .ok_or_else(|| FsError::Io("invalid handle".into()))?;
 
         // Seek to start, read all
@@ -116,26 +124,26 @@ impl Vfs for EmscriptenFs {
         let mut buf = vec![0u8; 65536];
         let mut result = Vec::new();
         loop {
-            let n = unsafe {
-                libc::fread(buf.as_mut_ptr().cast(), 1, buf.len(), of.fp)
-            };
-            if n == 0 { break; }
+            let n = unsafe { libc::fread(buf.as_mut_ptr().cast(), 1, buf.len(), of.fp) };
+            if n == 0 {
+                break;
+            }
             result.extend_from_slice(&buf[..n]);
         }
         Ok(result)
     }
 
     fn write_file(&mut self, handle: FileHandle, data: &[u8]) -> Result<(), FsError> {
-        let of = self.open_files.get(&handle.0)
+        let of = self
+            .open_files
+            .get(&handle.0)
             .ok_or_else(|| FsError::Io("invalid handle".into()))?;
         if !of.writable {
             return Err(FsError::PermissionDenied(of.path.clone()));
         }
         // Truncate and write from beginning
         unsafe { libc::fseek(of.fp, 0, libc::SEEK_SET) };
-        let written = unsafe {
-            libc::fwrite(data.as_ptr().cast(), 1, data.len(), of.fp)
-        };
+        let written = unsafe { libc::fwrite(data.as_ptr().cast(), 1, data.len(), of.fp) };
         unsafe { libc::fflush(of.fp) };
         if written != data.len() {
             return Err(FsError::Io("short write".into()));
@@ -170,12 +178,16 @@ impl Vfs for EmscriptenFs {
         let mut entries = Vec::new();
         loop {
             let ent = unsafe { libc::readdir(dp) };
-            if ent.is_null() { break; }
+            if ent.is_null() {
+                break;
+            }
             let name_ptr = unsafe { (*ent).d_name.as_ptr() };
             let name = unsafe { std::ffi::CStr::from_ptr(name_ptr) }
                 .to_string_lossy()
                 .into_owned();
-            if name == "." || name == ".." { continue; }
+            if name == "." || name == ".." {
+                continue;
+            }
             let is_dir = unsafe { (*ent).d_type } == libc::DT_DIR;
             entries.push(DirEntry { name, is_dir });
         }

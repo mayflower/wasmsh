@@ -345,7 +345,11 @@ pub(crate) fn util_xargs(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     }
     let cmd_args = &argv[cmd_start..];
-    let cmd = if cmd_args.is_empty() { "echo" } else { cmd_args[0] };
+    let cmd = if cmd_args.is_empty() {
+        "echo"
+    } else {
+        cmd_args[0]
+    };
     let extra: Vec<&str> = if cmd_args.len() > 1 {
         cmd_args[1..].to_vec()
     } else {
@@ -370,7 +374,11 @@ pub(crate) fn util_xargs(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                 let out = if extra.is_empty() {
                     item.to_string()
                 } else {
-                    extra.iter().map(|a| a.replace(repl, item)).collect::<Vec<_>>().join(" ")
+                    extra
+                        .iter()
+                        .map(|a| a.replace(repl, item))
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 };
                 ctx.output.stdout(out.as_bytes());
                 ctx.output.stdout(b"\n");

@@ -234,18 +234,17 @@ fn ls_collect_entries(fs: &mut BackendFs, dir: &str, flags: &LsFlags) -> Result<
 
 fn ls_emit_entry(output: &mut dyn UtilOutput, e: &LsEntry, flags: &LsFlags) {
     if flags.long {
-        let mode = if e.is_dir {
-            "drwxr-xr-x"
-        } else {
-            "-rw-r--r--"
-        };
+        let mode = if e.is_dir { "drwxr-xr-x" } else { "-rw-r--r--" };
         let sz = if flags.human {
             ls_human_size(e.size)
         } else {
             format!("{}", e.size)
         };
         let suffix = if flags.classify && e.is_dir { "/" } else { "" };
-        let line = format!("{mode}  1 user user {sz:>5} Jan  1 00:00 {}{suffix}\n", e.name);
+        let line = format!(
+            "{mode}  1 user user {sz:>5} Jan  1 00:00 {}{suffix}\n",
+            e.name
+        );
         output.stdout(line.as_bytes());
     } else {
         let suffix = if flags.classify && e.is_dir { "/" } else { "" };
@@ -815,15 +814,13 @@ fn stat_format(fmt: &str, name: &str, size: u64, is_dir: bool) -> String {
         if ch == '%' {
             match chars.next() {
                 Some('n') => result.push_str(name),
-                Some('s') => { let _ = write!(result, "{size}"); }
+                Some('s') => {
+                    let _ = write!(result, "{size}");
+                }
                 Some('F') => result.push_str(if is_dir { "directory" } else { "regular file" }),
                 Some('a') => result.push_str(if is_dir { "755" } else { "644" }),
                 Some('A') => {
-                    result.push_str(if is_dir {
-                        "drwxr-xr-x"
-                    } else {
-                        "-rw-r--r--"
-                    });
+                    result.push_str(if is_dir { "drwxr-xr-x" } else { "-rw-r--r--" });
                 }
                 Some('U' | 'G') => result.push_str("user"),
                 Some('h') => result.push('1'),
@@ -901,10 +898,7 @@ pub(crate) fn util_stat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     } else {
                         "regular file"
                     };
-                    let out = format!(
-                        "  File: {path}\n  Size: {}\n  Type: {kind}\n",
-                        meta.size
-                    );
+                    let out = format!("  File: {path}\n  Size: {}\n  Type: {kind}\n", meta.size);
                     ctx.output.stdout(out.as_bytes());
                 }
             }
@@ -934,11 +928,7 @@ struct FindFilters<'a> {
 
 fn parse_find_args<'a>(argv: &'a [&'a str]) -> (&'a str, FindFilters<'a>) {
     let mut args = &argv[1..];
-    let dir = if !args.is_empty()
-        && !args[0].starts_with('-')
-        && args[0] != "!"
-        && args[0] != "("
-    {
+    let dir = if !args.is_empty() && !args[0].starts_with('-') && args[0] != "!" && args[0] != "(" {
         let d = args[0];
         args = &args[1..];
         d
@@ -1051,7 +1041,10 @@ fn find_size_matches(spec: &str, actual_size: u64) -> bool {
         512 // default: 512-byte blocks
     };
     let num_str = rest.trim_end_matches(|c: char| c.is_alphabetic());
-    let threshold = num_str.parse::<u64>().unwrap_or(0).saturating_mul(multiplier);
+    let threshold = num_str
+        .parse::<u64>()
+        .unwrap_or(0)
+        .saturating_mul(multiplier);
     match cmp {
         1 => actual_size > threshold,
         -1 => actual_size < threshold,
@@ -1082,7 +1075,11 @@ fn find_entry_matches(
     }
     if filters.empty {
         if is_dir {
-            matched = matched && fs.read_dir(full_path).map(|e| e.is_empty()).unwrap_or(false);
+            matched = matched
+                && fs
+                    .read_dir(full_path)
+                    .map(|e| e.is_empty())
+                    .unwrap_or(false);
         } else {
             matched = matched && size == 0;
         }

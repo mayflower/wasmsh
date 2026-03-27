@@ -257,12 +257,24 @@ fn format_date(fmt: &str, parts: &DateParts) -> String {
     while let Some(ch) = chars.next() {
         if ch == '%' {
             match chars.next() {
-                Some('Y') => { let _ = write!(result, "{:04}", parts.year); }
-                Some('m') => { let _ = write!(result, "{:02}", parts.month); }
-                Some('d') => { let _ = write!(result, "{:02}", parts.day); }
-                Some('H') => { let _ = write!(result, "{:02}", parts.hour); }
-                Some('M') => { let _ = write!(result, "{:02}", parts.minute); }
-                Some('S') => { let _ = write!(result, "{:02}", parts.second); }
+                Some('Y') => {
+                    let _ = write!(result, "{:04}", parts.year);
+                }
+                Some('m') => {
+                    let _ = write!(result, "{:02}", parts.month);
+                }
+                Some('d') => {
+                    let _ = write!(result, "{:02}", parts.day);
+                }
+                Some('H') => {
+                    let _ = write!(result, "{:02}", parts.hour);
+                }
+                Some('M') => {
+                    let _ = write!(result, "{:02}", parts.minute);
+                }
+                Some('S') => {
+                    let _ = write!(result, "{:02}", parts.second);
+                }
                 Some('s') => result.push('0'), // epoch seconds, fake
                 Some('F') => {
                     let _ = write!(
@@ -301,7 +313,9 @@ fn format_date(fmt: &str, parts: &DateParts) -> String {
                 Some('n') => result.push('\n'),
                 Some('t') => result.push('\t'),
                 Some('%') | None => result.push('%'),
-                Some('e') => { let _ = write!(result, "{:>2}", parts.day); }
+                Some('e') => {
+                    let _ = write!(result, "{:>2}", parts.day);
+                }
                 Some('I') => {
                     let h12 = if parts.hour == 0 {
                         12
@@ -333,7 +347,8 @@ fn format_date(fmt: &str, parts: &DateParts) -> String {
 pub(crate) fn util_date(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let base_str = ctx
         .state
-        .and_then(|s| s.get_var("WASMSH_DATE")).map_or_else(|| "2026-01-01 00:00:00 UTC".to_string(), |s| s.to_string());
+        .and_then(|s| s.get_var("WASMSH_DATE"))
+        .map_or_else(|| "2026-01-01 00:00:00 UTC".to_string(), |s| s.to_string());
 
     let parts = parse_date_string(&base_str);
 

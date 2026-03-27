@@ -6,18 +6,18 @@
 
 #![warn(missing_docs)]
 
-mod memfs;
-#[cfg(feature = "opfs")]
-mod opfs;
 #[cfg(feature = "emscripten")]
 #[allow(unsafe_code, clippy::borrow_as_ptr)]
 mod emscripten_fs;
+mod memfs;
+#[cfg(feature = "opfs")]
+mod opfs;
 
+#[cfg(feature = "emscripten")]
+pub use emscripten_fs::EmscriptenFs;
 pub use memfs::MemoryFs;
 #[cfg(feature = "opfs")]
 pub use opfs::OpfsFs;
-#[cfg(feature = "emscripten")]
-pub use emscripten_fs::EmscriptenFs;
 
 /// Platform filesystem backend.
 ///
