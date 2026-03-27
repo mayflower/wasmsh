@@ -65,6 +65,8 @@ struct ExecState {
     errexit_suppressed: bool,
     local_save_stack: Vec<(smol_str::SmolStr, Option<smol_str::SmolStr>)>,
     recursion_depth: u32,
+    /// Set when a resource limit (step budget, output limit, cancel) is hit.
+    resource_exhausted: bool,
 }
 
 impl ExecState {
@@ -76,6 +78,7 @@ impl ExecState {
             errexit_suppressed: false,
             local_save_stack: Vec::new(),
             recursion_depth: 0,
+            resource_exhausted: false,
         }
     }
 
@@ -84,6 +87,7 @@ impl ExecState {
         self.loop_continue = false;
         self.exit_requested = None;
         self.errexit_suppressed = false;
+        self.resource_exhausted = false;
     }
 }
 
@@ -467,9 +471,9 @@ impl WorkerRuntime {
         }
 
         events.push(WorkerEvent::Diagnostic(
-            DiagnosticLevel::Warning,
+            DiagnosticLevel::Error,
             format!(
-                "output limit exceeded: {} bytes (limit: {})",
+                "output limit exceeded: {} bytes (limit: {}); execution aborted",
                 self.vm.output_bytes, self.vm.limits.output_byte_limit
             ),
         ));
@@ -980,6 +984,9 @@ impl WorkerRuntime {
 
     /// Dispatch a command to a shell function, builtin, utility, or report not found.
     fn dispatch_command(&mut self, cmd_name: &str, argv: &[String]) {
+        if self.check_resource_limits() {
+            return;
+        }
         if let Some(body) = self.functions.get(cmd_name).cloned() {
             self.call_shell_function(cmd_name, argv, &body);
         } else if self.builtins.is_builtin(cmd_name) {
@@ -1218,6 +1225,9 @@ impl WorkerRuntime {
     /// Execute a `while` loop.
     fn execute_while_loop(&mut self, loop_cmd: &wasmsh_hir::HirLoop) {
         loop {
+            if self.check_resource_limits() {
+                break;
+            }
             let saved = self.exec.errexit_suppressed;
             self.exec.errexit_suppressed = true;
             self.execute_body(&loop_cmd.condition);
@@ -1235,6 +1245,9 @@ impl WorkerRuntime {
     /// Execute an `until` loop.
     fn execute_until_loop(&mut self, loop_cmd: &wasmsh_hir::HirLoop) {
         loop {
+            if self.check_resource_limits() {
+                break;
+            }
             let saved = self.exec.errexit_suppressed;
             self.exec.errexit_suppressed = true;
             self.execute_body(&loop_cmd.condition);
@@ -1265,6 +1278,9 @@ impl WorkerRuntime {
     fn execute_for_loop(&mut self, for_cmd: &wasmsh_hir::HirFor) {
         let words = self.expand_for_words(for_cmd.words.as_deref());
         for word in words {
+            if self.check_resource_limits() {
+                break;
+            }
             self.vm.state.set_var(for_cmd.var_name.clone(), word.into());
             self.execute_body(&for_cmd.body);
             if self.exec.break_depth > 0 {
@@ -1354,6 +1370,9 @@ impl WorkerRuntime {
             wasmsh_expand::eval_arithmetic(&af.init, &mut self.vm.state);
         }
         loop {
+            if self.check_resource_limits() {
+                break;
+            }
             if !af.cond.is_empty() {
                 let cond_val = wasmsh_expand::eval_arithmetic(&af.cond, &mut self.vm.state);
                 if cond_val == 0 {
@@ -1946,12 +1965,63 @@ impl WorkerRuntime {
     }
 
     fn should_stop_execution(&self) -> bool {
-        self.exec.break_depth > 0 || self.exec.loop_continue || self.exec.exit_requested.is_some()
+        self.exec.break_depth > 0
+            || self.exec.loop_continue
+            || self.exec.exit_requested.is_some()
+            || self.exec.resource_exhausted
+    }
+
+    /// Check resource limits (step budget, output limit, cancellation).
+    /// Returns true if execution should stop. Emits a diagnostic on first violation.
+    fn check_resource_limits(&mut self) -> bool {
+        if self.exec.resource_exhausted {
+            return true;
+        }
+        // Step budget
+        self.vm.steps += 1;
+        if self.vm.limits.step_limit > 0 && self.vm.steps >= self.vm.limits.step_limit {
+            self.exec.resource_exhausted = true;
+            self.vm.diagnostics.push(wasmsh_vm::DiagnosticEvent {
+                level: wasmsh_vm::DiagLevel::Error,
+                category: wasmsh_vm::DiagCategory::Budget,
+                message: format!(
+                    "step budget exhausted: {} steps (limit: {})",
+                    self.vm.steps, self.vm.limits.step_limit
+                ),
+            });
+            return true;
+        }
+        // Cancellation
+        if self.vm.cancellation_token().is_cancelled() {
+            self.exec.resource_exhausted = true;
+            self.vm.diagnostics.push(wasmsh_vm::DiagnosticEvent {
+                level: wasmsh_vm::DiagLevel::Error,
+                category: wasmsh_vm::DiagCategory::Budget,
+                message: "execution cancelled".to_string(),
+            });
+            return true;
+        }
+        // Output limit
+        if self.vm.limits.output_byte_limit > 0
+            && self.vm.output_bytes > self.vm.limits.output_byte_limit
+        {
+            self.exec.resource_exhausted = true;
+            self.vm.diagnostics.push(wasmsh_vm::DiagnosticEvent {
+                level: wasmsh_vm::DiagLevel::Error,
+                category: wasmsh_vm::DiagCategory::Budget,
+                message: format!(
+                    "output limit exceeded: {} bytes (limit: {})",
+                    self.vm.output_bytes, self.vm.limits.output_byte_limit
+                ),
+            });
+            return true;
+        }
+        false
     }
 
     fn execute_body(&mut self, body: &[HirCompleteCommand]) {
         for cc in body {
-            if self.should_stop_execution() {
+            if self.should_stop_execution() || self.check_resource_limits() {
                 break;
             }
             self.execute_complete_command(cc);
