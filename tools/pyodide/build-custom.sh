@@ -10,7 +10,7 @@ PYODIDE_SRC="$SCRIPT_DIR/pyodide-src"
 DIST_DIR="$REPO_ROOT/dist/pyodide-custom"
 PROBE_BUILD="$SCRIPT_DIR/probe-build"
 
-export PATH="$HOME/.cargo/bin:$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
+export PATH="$HOME/.cargo/bin:$(rustc --print sysroot 2>/dev/null)/bin:$PATH"
 
 echo "=== wasmsh custom Pyodide build ==="
 echo "Pyodide version: $PYODIDE_VERSION"

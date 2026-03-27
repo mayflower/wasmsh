@@ -27,13 +27,9 @@ jobs:
   build-and-test:
     name: Pyodide build + E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-
-      - uses: mymindstorm/setup-emsdk@v14
-        with:
-          version: "4.0.9"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -58,10 +54,7 @@ jobs:
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y wget
 
-      - name: Build emscripten probe
-        run: just build-emscripten-probe
-
-      - name: Build custom Pyodide
+      - name: Build custom Pyodide (includes probe + runtime)
         run: just build-pyodide
 
       - name: Run Pyodide Node E2E
