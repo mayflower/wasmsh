@@ -2,12 +2,16 @@
 
 ## Threat Model
 
-wasmsh is a POSIX-like shell that runs entirely in the browser via WebAssembly.
-All code execution is sandboxed within the browser's WebAssembly runtime. There
-is no access to the host operating system, native filesystem, or network stack
-beyond what the browser page explicitly provides through the protocol layer.
+wasmsh is a POSIX-like shell that runs via WebAssembly. It supports two
+deployment targets with different trust boundaries:
 
-### Trust Boundaries
+- **Standalone**: browser Web Worker (`wasm32-unknown-unknown`) with an
+  in-memory VFS. No host OS access.
+- **Pyodide**: linked into a custom Pyodide build (`wasm32-unknown-emscripten`),
+  sharing the Python interpreter's Emscripten module and filesystem. Shell
+  commands and Python code run in the same Wasm instance.
+
+### Trust Boundaries — Standalone
 
 1. **Browser sandbox**: The outermost boundary. wasmsh executes as a Wasm
    module inside a Web Worker. It cannot escape the browser sandbox.
@@ -21,6 +25,28 @@ beyond what the browser page explicitly provides through the protocol layer.
    Multiple resource limits are enforced to prevent denial-of-service within
    the sandbox.
 
+### Trust Boundaries — Pyodide
+
+1. **Browser sandbox**: Same outermost boundary as standalone.
+2. **Shared Emscripten module**: wasmsh and CPython are statically linked into
+   the same Wasm module. They share a single linear memory, Emscripten
+   filesystem (`EmscriptenFs`), and environment variables. There is **no
+   isolation** between shell and Python execution — each can read and modify
+   the other's files and memory.
+3. **C FFI interface**: The host communicates with wasmsh via exported C
+   functions (`wasmsh_runtime_new`, `wasmsh_runtime_handle_json`,
+   `wasmsh_runtime_free_string`). Input is JSON-encoded `HostCommand`
+   messages. The host is responsible for constructing valid JSON; malformed
+   input is rejected but should not cause memory corruption.
+4. **Python interpreter**: The `python`/`python3` built-in commands execute
+   Python code via `PyRun_SimpleString` in the same process. Python code has
+   full access to the shared filesystem and can call any C API exported by
+   the module. Shell resource limits (step budgets, output caps) do **not**
+   constrain Python execution.
+5. **Emscripten filesystem**: Unlike the standalone VFS, `EmscriptenFs` routes
+   through Emscripten's libc `open`/`read`/`write`/`stat`. File operations
+   are bounded by the Emscripten heap, not wasmsh's per-file 64 MiB limit.
+
 ### What wasmsh Does NOT Protect Against
 
 - **Malicious host pages**: If the embedding page is compromised, all bets are
@@ -30,6 +56,10 @@ beyond what the browser page explicitly provides through the protocol layer.
   isolation. Browser-level exploits are out of scope.
 - **Timing side channels**: No hardening against speculative execution or
   timing attacks has been performed.
+- **Cross-domain shell ↔ Python attacks** (Pyodide only): Shell and Python
+  share the same address space and filesystem. A malicious Python script can
+  modify files that shell commands depend on, and vice versa. The Pyodide
+  target assumes both shell and Python inputs are equally trusted.
 
 ## Resource Limits
 
@@ -61,6 +91,11 @@ sandbox:
 - **CPU**: The `step_budget` configuration limits execution steps, but
   computationally expensive expansions (e.g., deeply nested parameter
   operations) may still cause noticeable delays.
+- **Python is unconstrained** (Pyodide only): Shell resource limits do not
+  apply to Python code executed via `python`/`python3`. Python can allocate
+  memory, run indefinitely, and modify the shared filesystem without
+  wasmsh-level restrictions. Rate-limiting or sandboxing Python execution is
+  the host's responsibility.
 
 ## Reporting Vulnerabilities
 
