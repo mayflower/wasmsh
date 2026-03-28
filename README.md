@@ -44,7 +44,117 @@ wasmsh supports a broad subset of Bash syntax and BusyBox-style utilities:
 
 See [SUPPORTED.md](SUPPORTED.md) for the complete feature matrix.
 
-## Installation
+## Using Release Artifacts
+
+Pre-built tarballs are published with each [GitHub Release](https://github.com/mayflower/wasmsh/releases):
+
+| Artifact | Contents |
+|----------|----------|
+| `wasmsh-standalone-<tag>.tar.gz` | `bundler/`, `web/`, `nodejs/` — wasm-pack packages for each target |
+| `wasmsh-pyodide-<tag>.tar.gz` | Custom Pyodide distribution with wasmsh linked in (`pyodide.asm.js`, `pyodide.asm.wasm`, `python_stdlib.zip`, …) |
+
+### Standalone (browser Web Worker)
+
+Unpack the tarball and serve the `web/` directory. In a Web Worker:
+
+```javascript
+import wasmInit, { WasmShell } from "./pkg/wasmsh_browser.js";
+
+await wasmInit();
+const shell = new WasmShell();
+shell.init(BigInt(0)); // 0 = unlimited step budget
+
+const events = JSON.parse(shell.exec("echo hello"));
+// events: [{ Stdout: [104,101,108,...] }, { Exit: 0 }]
+
+const text = new TextDecoder().decode(
+  new Uint8Array(events.find(e => "Stdout" in e).Stdout)
+);
+// text: "hello\n"
+```
+
+For Node.js, use the `nodejs/` directory instead — no `wasmInit()` call needed:
+
+```javascript
+import { WasmShell } from "wasmsh-browser"; // from nodejs/
+const shell = new WasmShell();
+shell.init(BigInt(0));
+console.log(JSON.parse(shell.exec("ls /")));
+```
+
+See [`examples/typescript/`](examples/typescript/) for a full Node.js example.
+
+### Pyodide (Python + shell, shared filesystem)
+
+The Pyodide distribution embeds wasmsh into a custom Pyodide build. Shell and Python share the same Emscripten module and filesystem — files written by Python are visible to shell commands and vice versa.
+
+In a browser Web Worker:
+
+```javascript
+importScripts("./dist/pyodide.asm.js");
+const factory = self._createPyodideModule;
+
+const Module = await new Promise((resolve) => {
+  factory({
+    noInitialRun: true,
+    locateFile: (path) => "./dist/" + path,
+    instantiateWasm(imports, successCallback) {
+      fetch("./dist/pyodide.asm.wasm")
+        .then(r => r.arrayBuffer())
+        .then(buf => WebAssembly.instantiate(buf, imports)
+          .then(({ instance }) => successCallback(instance, new Uint8Array(buf))));
+      return {};
+    },
+    preRun: [(m) => {
+      // Mount Python stdlib
+      const stdlibResp = /* fetch python_stdlib.zip */;
+      m.FS.mkdirTree("/lib/python3.13");
+      m.FS.writeFile("/lib/python3.13/python_stdlib.zip", stdlibData);
+      m.ENV.PYTHONPATH = "/lib/python3.13/python_stdlib.zip";
+      m.ENV.PYTHONHOME = "/";
+      m.FS.mkdirTree("/workspace");
+    }],
+    onRuntimeInitialized() { resolve(this); },
+  });
+});
+
+Module.callMain([]); // Boot CPython
+
+// Create wasmsh runtime and send commands via C FFI
+const handle = Module.ccall("wasmsh_runtime_new", "number", [], []);
+
+function runShell(cmd) {
+  const json = JSON.stringify({ Run: { input: cmd } });
+  const ptr = Module.stringToNewUTF8(json);
+  const resPtr = Module.ccall("wasmsh_runtime_handle_json", "number",
+    ["number", "number"], [handle, ptr]);
+  Module._free(ptr);
+  const result = Module.UTF8ToString(resPtr);
+  Module.ccall("wasmsh_runtime_free_string", null, ["number"], [resPtr]);
+  return JSON.parse(result);
+}
+
+runShell("echo hello from pyodide"); // [{ Stdout: [...] }, { Exit: 0 }]
+```
+
+See [`e2e/pyodide-browser/fixture/pyodide-worker.js`](e2e/pyodide-browser/fixture/pyodide-worker.js) and [`e2e/pyodide-node/host-wrapper.mjs`](e2e/pyodide-node/host-wrapper.mjs) for complete working examples (browser and Node.js).
+
+### Message Protocol
+
+Both targets use the same JSON protocol:
+
+| Command | Payload |
+|---------|---------|
+| `Init`  | `{ Init: { step_budget: 100000 } }` |
+| `Run`   | `{ Run: { input: "echo hello" } }` |
+| `WriteFile` | `{ WriteFile: { path: "/data/f.txt", data: [bytes...] } }` |
+| `ReadFile`  | `{ ReadFile: { path: "/data/f.txt" } }` |
+| `ListDir`   | `{ ListDir: { path: "/data" } }` |
+| `Cancel`    | `"Cancel"` |
+
+Responses are JSON arrays of events: `Stdout`, `Stderr`, `Exit`, `Version`, `Diagnostic`, `FsChanged`.
+
+## Installation (from source)
 
 ```bash
 git clone https://github.com/mayflower/wasmsh
