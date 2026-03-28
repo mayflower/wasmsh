@@ -34,9 +34,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-  # ── Build wasm32 release artifacts ─────────────────────────
-  build-wasm:
-    name: build wasm32
+  # ── Build standalone wasm32 artifacts ─────────────────────
+  build-standalone:
+    name: build standalone wasm32
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -66,39 +66,81 @@ jobs:
               fi
             done
           done
-      - name: Package artifacts
+      - name: Package standalone artifact
         env:
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          mkdir -p dist
-          cp -r pkg/bundler dist/bundler
-          cp -r pkg/web dist/web
-          cp -r pkg/nodejs dist/nodejs
-          cp LICENSE README.md SUPPORTED.md dist/
-          echo "$TAG_NAME" > dist/VERSION
-          tar czf "wasmsh-wasm32-${TAG_NAME}.tar.gz" -C dist .
+          mkdir -p release-standalone
+          cp -r pkg/bundler release-standalone/bundler
+          cp -r pkg/web release-standalone/web
+          cp -r pkg/nodejs release-standalone/nodejs
+          cp LICENSE README.md SUPPORTED.md release-standalone/
+          echo "$TAG_NAME" > release-standalone/VERSION
+          tar czf "wasmsh-standalone-${TAG_NAME}.tar.gz" -C release-standalone .
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wasmsh-wasm32
-          path: "wasmsh-wasm32-*.tar.gz"
+          name: wasmsh-standalone
+          path: "wasmsh-standalone-*.tar.gz"
+
+  # ── Build Pyodide artifact ───────────────────────────────
+  build-pyodide:
+    name: build pyodide
+    needs: validate
+    runs-on: mayflower-k8s-runners
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-emscripten
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pyodide-release
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install just
+        uses: extractions/setup-just@v2
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y build-essential wget ccache pkg-config xz-utils autoconf automake libtool
+      - name: Build custom Pyodide
+        run: just build-pyodide
+        env:
+          SED: sed
+      - name: Package Pyodide artifact
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          cp LICENSE README.md SUPPORTED.md dist/pyodide-custom/
+          echo "$TAG_NAME" > dist/pyodide-custom/VERSION
+          tar czf "wasmsh-pyodide-${TAG_NAME}.tar.gz" -C dist/pyodide-custom .
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasmsh-pyodide
+          path: "wasmsh-pyodide-*.tar.gz"
 
   # ── Create GitHub Release ──────────────────────────────────
   release:
     name: github release
-    needs: [validate, build-wasm]
+    needs: [validate, build-standalone, build-pyodide]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Download wasm artifact
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: wasmsh-wasm32
+          pattern: wasmsh-*
+          merge-multiple: true
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: "wasmsh-wasm32-*.tar.gz"
+          files: "wasmsh-*.tar.gz"
           draft: false
           prerelease: false

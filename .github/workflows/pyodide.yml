@@ -73,3 +73,9 @@ jobs:
 
       - name: Run Pyodide browser E2E
         run: just test-e2e-pyodide-browser
+
+      - name: Upload Pyodide artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasmsh-pyodide
+          path: dist/pyodide-custom/

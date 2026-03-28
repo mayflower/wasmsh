@@ -8,7 +8,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -87,20 +87,55 @@ jobs:
           name: wasmsh-nodejs
           path: pkg/nodejs/
 
-      - name: Package release tarball
-        if: startsWith(github.ref, 'refs/tags/v')
+  build-pyodide:
+    name: Build Pyodide artifact
+    runs-on: mayflower-k8s-runners
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-emscripten
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pyodide-build
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y build-essential wget ccache pkg-config xz-utils autoconf automake libtool
+
+      - name: Build custom Pyodide
+        run: just build-pyodide
         env:
-          TAG_NAME: ${{ github.ref_name }}
+          SED: sed
+
+      - name: Report sizes
         run: |
-          for target in bundler web nodejs; do
-            tar czf "wasmsh-${target}-${TAG_NAME}.tar.gz" -C pkg/${target} .
+          echo "## Pyodide Build Sizes" >> "$GITHUB_STEP_SUMMARY"
+          echo "| File | Size |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|------|" >> "$GITHUB_STEP_SUMMARY"
+          for f in dist/pyodide-custom/*; do
+            if [ -f "$f" ]; then
+              size=$(wc -c < "$f" | tr -d ' ')
+              echo "| $(basename "$f") | ${size} bytes |" >> "$GITHUB_STEP_SUMMARY"
+            fi
           done
 
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+      - name: Upload Pyodide artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: wasmsh-*-v*.tar.gz
-          generate_release_notes: true
-          draft: false
-          prerelease: false
+          name: wasmsh-pyodide
+          path: dist/pyodide-custom/
+
