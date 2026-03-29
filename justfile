@@ -138,6 +138,10 @@ test-e2e-standalone:
 build-pyodide:
     bash tools/pyodide/build-custom.sh
 
+# Copy the custom Pyodide dist into the runtime package layouts
+package-pyodide-runtime:
+    node tools/pyodide/package-runtime-assets.mjs
+
 # Run Pyodide Node E2E tests
 test-e2e-pyodide-node:
     cd {{justfile_directory()}} && node --test e2e/pyodide-node/tests/*.test.mjs

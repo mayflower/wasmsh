@@ -188,3 +188,8 @@ done
 echo "=== Custom Pyodide build complete ==="
 echo "Distribution: $DIST_DIR"
 ls -lh "$DIST_DIR/"
+
+if command -v node >/dev/null 2>&1; then
+    echo "Packaging runtime assets for npm and Python consumers..."
+    node "$SCRIPT_DIR/package-runtime-assets.mjs"
+fi

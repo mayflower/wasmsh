@@ -118,11 +118,13 @@ jobs:
           cp LICENSE README.md SUPPORTED.md dist/pyodide-custom/
           echo "$TAG_NAME" > dist/pyodide-custom/VERSION
           tar czf "wasmsh-pyodide-${TAG_NAME}.tar.gz" -C dist/pyodide-custom .
+          tar czf "wasmsh-pyodide-npm-${TAG_NAME}.tar.gz" -C packages/npm/wasmsh-pyodide .
+          tar czf "wasmsh-pyodide-runtime-py-${TAG_NAME}.tar.gz" -C packages/python/wasmsh-pyodide-runtime .
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: wasmsh-pyodide
-          path: "wasmsh-pyodide-*.tar.gz"
+          path: "wasmsh-pyodide*.tar.gz"
 
   # ── Create GitHub Release ──────────────────────────────────
   release:

@@ -1,0 +1,33 @@
+{
+  "name": "wasmsh-pyodide",
+  "version": "0.1.0",
+  "description": "Pyodide-backed wasmsh runtime package for Node.js and browser workers",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./node-host": "./node-host.mjs",
+    "./browser-worker": "./browser-worker.js"
+  },
+  "files": [
+    "assets/**/*",
+    "browser-worker.js",
+    "index.d.ts",
+    "index.js",
+    "lib/**/*.mjs",
+    "node-host.mjs",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "wasmsh",
+    "pyodide",
+    "sandbox",
+    "bash",
+    "python"
+  ],
+  "license": "MIT"
+}

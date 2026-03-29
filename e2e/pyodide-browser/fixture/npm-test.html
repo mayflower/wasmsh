@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>wasmsh-pyodide npm package E2E</title></head>
+<body>
+  <p id="status">loading</p>
+  <script>
+    // Load the npm package's browser-worker.js instead of the raw pyodide-worker.js
+    const workerUrl = "../../packages/npm/wasmsh-pyodide/browser-worker.js";
+    const worker = new Worker(workerUrl);
+    window._npmWorker = worker;
+    window._npmWorkerReady = false;
+    window._npmNextId = 1;
+
+    // Helper: send a JSON-RPC request to the worker and get the response
+    window._npmSend = function (method, params) {
+      return new Promise(function (resolve, reject) {
+        var id = window._npmNextId++;
+        var timeout = setTimeout(function () { reject(new Error("worker timeout")); }, 60000);
+        function handler(e) {
+          if (e.data && e.data.id === id) {
+            clearTimeout(timeout);
+            worker.removeEventListener("message", handler);
+            if (e.data.ok) resolve(e.data.result);
+            else reject(new Error(e.data.error));
+          }
+        }
+        worker.addEventListener("message", handler);
+        worker.postMessage({ id: id, method: method, params: params || {} });
+      });
+    };
+
+    // Init the worker with the dist path pointing at the symlinked assets
+    window._npmSend("init", {
+      assetBaseUrl: "./dist",
+      stepBudget: 0,
+      initialFiles: [],
+    }).then(function () {
+      window._npmWorkerReady = true;
+      document.getElementById("status").textContent = "ready";
+    }).catch(function (err) {
+      document.getElementById("status").textContent = "error: " + err.message;
+    });
+  </script>
+</body>
+</html>
