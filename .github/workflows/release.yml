@@ -154,12 +154,16 @@ jobs:
         env:
           CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
 
-  # ── Publish npm package ───────────────────────────────────
+  # ── Publish npm package (trusted publishing via OIDC) ─────
   publish-npm:
     name: publish npm
     needs: build-pyodide
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/setup-node@v4
         with:
@@ -175,9 +179,7 @@ jobs:
           ls -la package/
           node -e "const p = require('./package/package.json'); console.log(p.name + '@' + p.version)"
       - name: Publish to npm
-        run: npm publish ./package/ --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish ./package/ --access public --provenance
 
   # ── Publish Python package to PyPI ────────────────────────
   publish-pypi:
