@@ -19,5 +19,5 @@ classifiers = [
 ]
 
 [tool.setuptools.package-data]
-"wasmsh_pyodide_runtime" = ["assets/*", "py.typed"]
+"wasmsh_pyodide_runtime" = ["assets/*", "assets/lib/*", "py.typed"]
 

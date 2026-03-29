@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write  # needed for PyPI trusted publishing
 
 env:
   CARGO_TERM_COLOR: always
@@ -111,34 +112,114 @@ jobs:
         run: just build-pyodide
         env:
           SED: sed
-      - name: Package Pyodide artifact
+      - name: Package runtime assets
+        run: just package-pyodide-runtime
+      - name: Package Pyodide dist artifact
         env:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           cp LICENSE README.md SUPPORTED.md dist/pyodide-custom/
           echo "$TAG_NAME" > dist/pyodide-custom/VERSION
           tar czf "wasmsh-pyodide-${TAG_NAME}.tar.gz" -C dist/pyodide-custom .
-          tar czf "wasmsh-pyodide-npm-${TAG_NAME}.tar.gz" -C packages/npm/wasmsh-pyodide .
-          tar czf "wasmsh-pyodide-runtime-py-${TAG_NAME}.tar.gz" -C packages/python/wasmsh-pyodide-runtime .
-      - name: Upload artifact
+      - name: Upload npm package
         uses: actions/upload-artifact@v4
         with:
-          name: wasmsh-pyodide
-          path: "wasmsh-pyodide*.tar.gz"
+          name: wasmsh-pyodide-npm
+          path: packages/npm/wasmsh-pyodide/
+      - name: Upload python package
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasmsh-pyodide-runtime-py
+          path: packages/python/wasmsh-pyodide-runtime/
+      - name: Upload pyodide dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasmsh-pyodide-dist
+          path: "wasmsh-pyodide-*.tar.gz"
+
+  # ── Publish Rust crates to crates.io ──────────────────────
+  publish-crates:
+    name: publish crates.io
+    needs: [validate, build-standalone]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-workspaces
+        run: cargo install cargo-workspaces
+      - name: Publish workspace crates
+        run: cargo workspaces publish --from-git --yes --token "$CRATES_IO_TOKEN"
+        env:
+          CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+
+  # ── Publish npm package ───────────────────────────────────
+  publish-npm:
+    name: publish npm
+    needs: build-pyodide
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: Download npm package
+        uses: actions/download-artifact@v4
+        with:
+          name: wasmsh-pyodide-npm
+          path: package/
+      - name: Verify package contents
+        run: |
+          ls -la package/
+          node -e "const p = require('./package/package.json'); console.log(p.name + '@' + p.version)"
+      - name: Publish to npm
+        run: npm publish ./package/ --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ── Publish Python package to PyPI ────────────────────────
+  publish-pypi:
+    name: publish pypi
+    needs: build-pyodide
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Download python package
+        uses: actions/download-artifact@v4
+        with:
+          name: wasmsh-pyodide-runtime-py
+          path: package/
+      - name: Build sdist and wheel
+        run: |
+          pip install build
+          cd package && python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: package/dist/
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
   # ── Create GitHub Release ──────────────────────────────────
   release:
     name: github release
-    needs: [validate, build-standalone, build-pyodide]
+    needs: [build-standalone, build-pyodide, publish-crates, publish-npm, publish-pypi]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Download all artifacts
+      - name: Download standalone artifact
         uses: actions/download-artifact@v4
         with:
-          pattern: wasmsh-*
-          merge-multiple: true
+          name: wasmsh-standalone
+      - name: Download pyodide dist
+        uses: actions/download-artifact@v4
+        with:
+          name: wasmsh-pyodide-dist
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
