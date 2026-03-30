@@ -1,0 +1,19 @@
+{
+  "name": "wasmsh-deepagent-typescript-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "npx tsx example.ts"
+  },
+  "dependencies": {
+    "@langchain/wasmsh": "latest",
+    "deepagents": "latest",
+    "@langchain/anthropic": "latest",
+    "@langchain/core": "latest"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

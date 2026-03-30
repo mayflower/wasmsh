@@ -1,0 +1,22 @@
+{
+  "name": "wasmsh-deepagent-browser-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest",
+    "@mayflowergmbh/wasmsh-pyodide": "latest",
+    "deepagents": "latest",
+    "@langchain/anthropic": "latest",
+    "@langchain/core": "latest"
+  },
+  "devDependencies": {
+    "vite": "^8.0.0",
+    "sirv": "^3.0.0",
+    "path-browserify": "^1.0.1"
+  }
+}
