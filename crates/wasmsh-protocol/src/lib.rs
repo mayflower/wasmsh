@@ -19,6 +19,12 @@ pub enum HostCommand {
     Init {
         /// Maximum step budget per execution (0 = unlimited).
         step_budget: u64,
+        /// Hostnames/IPs allowed for network access (empty = no network).
+        ///
+        /// Patterns: exact host (`api.example.com`), wildcard (`*.example.com`),
+        /// IP (`192.168.1.100`), host with port (`api.example.com:8080`).
+        #[serde(default)]
+        allowed_hosts: Vec<String>,
     },
     /// Execute a shell command string.
     Run {

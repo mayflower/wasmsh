@@ -14,8 +14,9 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
 use wasmsh_protocol::HostCommand;
-use wasmsh_runtime::{ExternalCommandResult, WorkerRuntime};
+use wasmsh_runtime::WorkerRuntime;
 
+mod network;
 mod python_cmd;
 
 /// Opaque handle wrapping a `WorkerRuntime`.
@@ -53,6 +54,18 @@ pub extern "C" fn wasmsh_runtime_handle_json(
     };
 
     let rt = unsafe { &mut (*handle).runtime };
+
+    // On Init with allowed_hosts, configure the network backend.
+    if let HostCommand::Init {
+        ref allowed_hosts, ..
+    } = cmd
+    {
+        if !allowed_hosts.is_empty() {
+            let backend = network::PyodideNetworkBackend::new(allowed_hosts.clone());
+            rt.set_network_backend(Box::new(backend));
+        }
+    }
+
     let events = rt.handle_command(cmd);
 
     let result = serde_json::to_string(&events).unwrap_or_else(|_| "[]".to_string());

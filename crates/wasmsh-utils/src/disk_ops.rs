@@ -352,6 +352,7 @@ mod tests {
                 cwd,
                 stdin: None,
                 state: None,
+                network: None,
             };
             func(&mut ctx, argv)
         };

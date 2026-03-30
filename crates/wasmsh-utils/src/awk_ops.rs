@@ -3494,6 +3494,7 @@ mod tests {
                 cwd: "/",
                 stdin: Some(stdin_data),
                 state: None,
+                network: None,
             };
             util_awk(&mut ctx, argv)
         };
@@ -3515,6 +3516,7 @@ mod tests {
                 cwd: "/",
                 stdin: None,
                 state: None,
+                network: None,
             };
             let argv = vec!["awk", program, path];
             util_awk(&mut ctx, &argv)
@@ -4151,6 +4153,7 @@ mod tests {
                     Some(stdin_data)
                 },
                 state: None,
+                network: None,
             };
             util_awk(&mut ctx, &argv)
         };
@@ -4463,6 +4466,7 @@ mod tests {
                 cwd: "/",
                 stdin: None,
                 state: None,
+                network: None,
             };
             let argv = vec!["awk", "{ print FILENAME, $0 }", "/file1.txt", "/file2.txt"];
             util_awk(&mut ctx, &argv)

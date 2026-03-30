@@ -976,6 +976,7 @@ mod tests {
                 cwd: "/",
                 stdin: Some(input_bytes),
                 state: None,
+                network: None,
             };
             util_bc(&mut ctx, &argv)
         };

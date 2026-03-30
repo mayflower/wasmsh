@@ -100,7 +100,7 @@
 
 ---
 
-## Utilities (86)
+## Utilities (88)
 
 All utilities operate on the in-process VFS (no OS calls).
 
@@ -254,6 +254,15 @@ All utilities operate on the in-process VFS (no OS calls).
 |--------------|--------|-------|
 | `du`         | Done   | Estimate file space usage |
 | `df`         | Done   | Report filesystem disk space usage |
+
+### Network utilities (2)
+
+| Command      | Status | Notes |
+|--------------|--------|-------|
+| `curl`       | Done   | HTTP client — GET/POST/HEAD, headers, output to file/stdout, follow redirects, verbose, fail-on-error, write-out |
+| `wget`       | Done   | File downloader — download to file or stdout, quiet mode, custom headers |
+
+Network access requires an allowlist of permitted hosts configured at sandbox initialization. Without an allowlist, both commands return an error. See [ADR-0021](docs/adr/adr-0021-network-capability.md).
 
 ---
 

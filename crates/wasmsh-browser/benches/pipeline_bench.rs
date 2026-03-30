@@ -23,6 +23,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
                     let mut rt = WorkerRuntime::new();
                     rt.handle_command(HostCommand::Init {
                         step_budget: 100_000,
+                        allowed_hosts: vec![],
                     });
                     let _ = rt.handle_command(HostCommand::Run {
                         input: black_box(script).into(),
@@ -41,6 +42,7 @@ fn bench_init_overhead(c: &mut Criterion) {
             let mut rt = WorkerRuntime::new();
             rt.handle_command(HostCommand::Init {
                 step_budget: 100_000,
+                allowed_hosts: vec![],
             });
         });
     });

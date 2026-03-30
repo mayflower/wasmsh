@@ -8,6 +8,9 @@ use indexmap::IndexMap;
 use wasmsh_fs::BackendFs;
 use wasmsh_state::ShellState;
 
+mod net_ops;
+pub mod net_types;
+
 mod archive_ops;
 mod awk_ops;
 mod binary_ops;
@@ -64,6 +67,8 @@ pub struct UtilContext<'a> {
     pub stdin: Option<&'a [u8]>,
     /// Optional shell state access (for env/printenv/date).
     pub state: Option<&'a ShellState>,
+    /// Optional network backend for curl/wget (None = no network access).
+    pub network: Option<&'a dyn net_types::NetworkBackend>,
 }
 
 impl std::fmt::Debug for UtilContext<'_> {
@@ -213,6 +218,10 @@ impl UtilRegistry {
         utils.insert("unzip", archive_ops::util_unzip);
         utils.insert("yq", yaml_ops::util_yq);
 
+        // --- Network utilities ---
+        utils.insert("curl", net_ops::util_curl);
+        utils.insert("wget", net_ops::util_wget);
+
         Self { utils }
     }
 
@@ -257,6 +266,7 @@ mod tests {
                 cwd: "/",
                 stdin: None,
                 state: None,
+                network: None,
             };
             util(&mut ctx, argv)
         };

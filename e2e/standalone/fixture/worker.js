@@ -18,6 +18,41 @@ let shell = null;
 let ready = false;
 const pending = [];
 
+/**
+ * Synchronous HTTP fetch for wasmsh curl/wget utilities.
+ * Called from WASM via wasm-bindgen extern. Uses synchronous XMLHttpRequest
+ * which is available in Web Worker contexts.
+ */
+self.wasmsh_http_fetch = function (url, method, headersJson, body, bodyLen, followRedirects) {
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open(method, url, false); // synchronous
+    const headers = JSON.parse(headersJson || "[]");
+    for (const [key, value] of headers) {
+      xhr.setRequestHeader(key, value);
+    }
+    xhr.responseType = "arraybuffer";
+    xhr.send(bodyLen > 0 ? body : null);
+
+    const respHeaders = xhr
+      .getAllResponseHeaders()
+      .split("\r\n")
+      .filter((h) => h)
+      .map((h) => {
+        const idx = h.indexOf(": ");
+        return idx >= 0 ? [h.slice(0, idx), h.slice(idx + 2)] : [h, ""];
+      });
+
+    return {
+      status: xhr.status,
+      headers_json: JSON.stringify(respHeaders),
+      body: new Uint8Array(xhr.response || new ArrayBuffer(0)),
+    };
+  } catch (e) {
+    return { status: 0, headers_json: "[]", body: new Uint8Array(0), error: e.message };
+  }
+};
+
 async function boot() {
   await wasmInit();
   shell = new WasmShell();
@@ -33,7 +68,10 @@ function handle(msg) {
   let json;
   switch (msg.type) {
     case "Init":
-      json = shell.init(BigInt(msg.step_budget ?? 0));
+      json = shell.init(
+        BigInt(msg.step_budget ?? 0),
+        JSON.stringify(msg.allowed_hosts ?? []),
+      );
       break;
     case "Run":
       json = shell.exec(msg.input);

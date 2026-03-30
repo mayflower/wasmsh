@@ -428,6 +428,7 @@ mod tests {
                 cwd,
                 stdin: None,
                 state: None,
+                network: None,
             };
             util_tree(&mut ctx, argv)
         };
@@ -564,6 +565,7 @@ mod tests {
                 cwd: "/",
                 stdin: None,
                 state: None,
+                network: None,
             };
             util_tree(&mut ctx, &["tree", "/file.txt"])
         };

@@ -1229,6 +1229,7 @@ mod tests {
                 cwd,
                 stdin: None,
                 state: None,
+                network: None,
             };
             util_rg(&mut ctx, argv)
         };
@@ -1522,6 +1523,7 @@ mod tests {
                 cwd,
                 stdin: None,
                 state: None,
+                network: None,
             };
             util_fd(&mut ctx, argv)
         };

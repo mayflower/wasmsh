@@ -105,6 +105,7 @@ fn new_runtime() -> WorkerRuntime {
     let mut rt = WorkerRuntime::new();
     rt.handle_command(HostCommand::Init {
         step_budget: 100_000,
+        allowed_hosts: vec![],
     });
     rt
 }

@@ -22,6 +22,7 @@ browser-extended = ["browser-core", "wasmsh-fs/opfs"]
 [dependencies]
 wasmsh-runtime = { workspace = true }
 wasmsh-protocol = { workspace = true }
+wasmsh-utils = { workspace = true }
 wasmsh-fs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -29,17 +30,19 @@ serde_json = { workspace = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }
 console_error_panic_hook = { workspace = true }
+js-sys = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
 wasmsh-protocol = { workspace = true }
+ureq = { workspace = true }
 
 [[bench]]
 name = "pipeline_bench"
 harness = false
 
 [package.metadata.cargo-machete]
-ignored = ["serde", "wasmsh-fs"]  # serde: wasm32 only; wasmsh-fs: feature flag forwarding
+ignored = ["serde", "wasmsh-fs", "wasmsh-utils", "js-sys"]  # serde/js-sys/wasmsh-utils: wasm32 only; wasmsh-fs: feature flag forwarding
 
 [lints]
 workspace = true

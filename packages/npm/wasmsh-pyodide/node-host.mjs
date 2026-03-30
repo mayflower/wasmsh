@@ -90,9 +90,11 @@ class WasmshNodeHost {
     return JSON.parse(resultStr);
   }
 
-  async init({ stepBudget = 0, initialFiles = [] } = {}) {
+  async init({ stepBudget = 0, initialFiles = [], allowedHosts = [] } = {}) {
     await this.ensureBooted();
-    const events = this.sendHostCommand({ Init: { step_budget: stepBudget } });
+    const events = this.sendHostCommand({
+      Init: { step_budget: stepBudget, allowed_hosts: allowedHosts },
+    });
     for (const file of initialFiles) {
       this.sendHostCommand({
         WriteFile: {

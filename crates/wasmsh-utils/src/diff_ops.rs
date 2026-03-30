@@ -1330,6 +1330,7 @@ mod tests {
                 cwd: "/",
                 stdin: None,
                 state: None,
+                network: None,
             };
             util_diff(&mut ctx, argv)
         };
@@ -1349,6 +1350,7 @@ mod tests {
                 cwd: "/",
                 stdin,
                 state: None,
+                network: None,
             };
             util_patch(&mut ctx, argv)
         };

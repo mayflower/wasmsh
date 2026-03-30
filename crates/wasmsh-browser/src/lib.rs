@@ -16,7 +16,10 @@ mod tests {
 
     fn run_shell(input: &str) -> (Vec<WorkerEvent>, i32) {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         let events = rt.handle_command(HostCommand::Run {
             input: input.into(),
         });
@@ -56,7 +59,10 @@ mod tests {
     #[test]
     fn init_returns_version() {
         let mut rt = WorkerRuntime::new();
-        let events = rt.handle_command(HostCommand::Init { step_budget: 0 });
+        let events = rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         assert!(matches!(&events[0], WorkerEvent::Version(v) if v == PROTOCOL_VERSION));
     }
 
@@ -145,7 +151,10 @@ mod tests {
     #[test]
     fn cancel_command() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         let events = rt.handle_command(HostCommand::Cancel);
         assert!(matches!(
             &events[0],
@@ -158,7 +167,10 @@ mod tests {
     #[test]
     fn touch_and_cat_via_shell() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         // touch creates a file, then we write via protocol and cat it
         rt.handle_command(HostCommand::Run {
             input: "touch /hello.txt".into(),
@@ -176,7 +188,10 @@ mod tests {
     #[test]
     fn mkdir_and_ls_via_shell() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::Run {
             input: "mkdir /mydir".into(),
         });
@@ -212,7 +227,10 @@ mod tests {
     #[test]
     fn protocol_write_and_read_file() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         let write_events = rt.handle_command(HostCommand::WriteFile {
             path: "/test.txt".into(),
             data: b"content".to_vec(),
@@ -230,7 +248,10 @@ mod tests {
     #[test]
     fn protocol_list_dir() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::WriteFile {
             path: "/a.txt".into(),
             data: vec![],
@@ -250,7 +271,10 @@ mod tests {
     #[test]
     fn output_redirection_to_file() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         // echo hello > /out.txt should write to file, not stdout
         let events = rt.handle_command(HostCommand::Run {
             input: "echo hello > /out.txt".into(),
@@ -267,7 +291,10 @@ mod tests {
     #[test]
     fn append_redirection() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::Run {
             input: "echo line1 > /log.txt".into(),
         });
@@ -283,7 +310,10 @@ mod tests {
     #[test]
     fn redirect_only_creates_file() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::Run {
             input: "> /empty.txt".into(),
         });
@@ -298,7 +328,10 @@ mod tests {
     #[test]
     fn vm_diagnostics_surfaced() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         // Running an unknown command triggers a diagnostic in the VM
         let events = rt.handle_command(HostCommand::Run {
             input: "unknown_cmd_xyz".into(),
@@ -315,7 +348,10 @@ mod tests {
     #[test]
     fn unset_then_default_expansion() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::Run {
             input: "X=hello".into(),
         });
@@ -332,7 +368,10 @@ mod tests {
     #[test]
     fn readonly_prevents_reassignment() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::Run {
             input: "readonly X=locked".into(),
         });
@@ -377,7 +416,10 @@ mod tests {
     #[test]
     fn while_loop_with_counter() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 10000 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 10000,
+            allowed_hosts: vec![],
+        });
         // Simple loop that echoes 3 times using a counter variable
         let events = rt.handle_command(HostCommand::Run {
             input: "for i in 1 2 3; do echo line; done".into(),
@@ -388,7 +430,10 @@ mod tests {
     #[test]
     fn heredoc_with_cat() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         let events = rt.handle_command(HostCommand::Run {
             input: "cat <<EOF\nhello world\nEOF\n".into(),
         });
@@ -414,7 +459,10 @@ mod tests {
     #[test]
     fn function_with_args() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::Run {
             input: "greet() { echo hello $1; }".into(),
         });
@@ -428,7 +476,10 @@ mod tests {
     fn function_modifies_parent_scope() {
         // Bash behavior: functions share parent scope (no isolation by default)
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::Run {
             input: "X=outer".into(),
         });
@@ -446,7 +497,10 @@ mod tests {
     fn local_isolates_in_function() {
         // `local` creates a variable that is restored after function returns
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::Run {
             input: "X=outer".into(),
         });
@@ -488,7 +542,10 @@ mod tests {
     #[test]
     fn subshell_scope_isolation() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::Run {
             input: "X=outer".into(),
         });
@@ -514,7 +571,10 @@ mod tests {
     #[test]
     fn glob_star_matches_files() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::Run {
             input: "touch /a.txt".into(),
         });
@@ -542,7 +602,10 @@ mod tests {
     #[test]
     fn glob_question_mark() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::Run {
             input: "touch /ab".into(),
         });
@@ -625,7 +688,10 @@ mod tests {
     #[test]
     fn stderr_redirect_to_file() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         // Running a command that doesn't exist produces stderr
         let _events = rt.handle_command(HostCommand::Run {
             input: "nonexistent_cmd 2> /err.txt".into(),
@@ -641,7 +707,10 @@ mod tests {
     #[test]
     fn stderr_merge_into_stdout() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         // 2>&1 merges stderr into stdout, then redirect stdout to file
         let _events = rt.handle_command(HostCommand::Run {
             input: "nonexistent_cmd 2>&1 > /out.txt".into(),
@@ -661,7 +730,10 @@ mod tests {
     #[test]
     fn amp_greater_both_to_file() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         let _events = rt.handle_command(HostCommand::Run {
             input: "nonexistent_cmd &> /all.txt".into(),
         });
@@ -780,7 +852,10 @@ mod tests {
     #[test]
     fn dbl_bracket_file_tests() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         // Create a file
         rt.handle_command(HostCommand::Run {
             input: "touch /testfile".into(),
@@ -853,7 +928,10 @@ mod tests {
     #[test]
     fn dbl_bracket_dir_test() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::Run {
             input: "mkdir /testdir".into(),
         });
@@ -1216,7 +1294,10 @@ mod tests {
     #[test]
     fn noglob_skips_expansion() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         // Create a file that would match *.txt
         rt.handle_command(HostCommand::Run {
             input: "touch /hello.txt".into(),
@@ -1232,7 +1313,10 @@ mod tests {
     #[test]
     fn noglob_disabled_allows_expansion() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::Run {
             input: "touch /abc.txt".into(),
         });
@@ -1387,7 +1471,10 @@ mod tests {
     #[test]
     fn dynamic_bash_source() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::WriteFile {
             path: "/test.sh".into(),
             data: b"echo $BASH_SOURCE".to_vec(),
@@ -1579,7 +1666,10 @@ mod tests {
     #[test]
     fn source_path_search() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         // Create /bin directory and a script in it
         rt.handle_command(HostCommand::Run {
             input: "mkdir /bin".into(),
@@ -1729,7 +1819,10 @@ mod tests {
     #[test]
     fn dotglob_matches_hidden() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::Run {
             input: "mkdir /tmp2".into(),
         });
@@ -1803,7 +1896,10 @@ mod tests {
     #[test]
     fn extglob_at_pattern() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::WriteFile {
             path: "/tmp3/file.jpg".into(),
             data: vec![],
@@ -1829,7 +1925,10 @@ mod tests {
     #[test]
     fn extglob_not_pattern() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::WriteFile {
             path: "/tmp4/a.txt".into(),
             data: vec![],
@@ -1854,7 +1953,10 @@ mod tests {
     #[test]
     fn extglob_optional_pattern() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::WriteFile {
             path: "/tmp5/color".into(),
             data: vec![],
@@ -1876,7 +1978,10 @@ mod tests {
     #[test]
     fn globstar_recursive() {
         let mut rt = WorkerRuntime::new();
-        rt.handle_command(HostCommand::Init { step_budget: 0 });
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
         rt.handle_command(HostCommand::WriteFile {
             path: "/project/a.txt".into(),
             data: vec![],
@@ -1905,8 +2010,86 @@ mod tests {
 mod wasm_bindings {
     use wasm_bindgen::prelude::*;
     use wasmsh_protocol::HostCommand;
+    use wasmsh_utils::net_types::{
+        HostAllowlist, HttpRequest, HttpResponse, NetworkBackend, NetworkError,
+    };
 
     use crate::WorkerRuntime;
+
+    // JS function provided by the worker scope for synchronous HTTP.
+    #[wasm_bindgen]
+    extern "C" {
+        /// Synchronous HTTP fetch implemented in JavaScript (Web Worker).
+        /// Returns a JS object: `{ status: number, headers_json: string, body: Uint8Array }`.
+        fn wasmsh_http_fetch(
+            url: &str,
+            method: &str,
+            headers_json: &str,
+            body: &[u8],
+            body_len: u32,
+            follow_redirects: bool,
+        ) -> JsValue;
+    }
+
+    /// Network backend using synchronous `XMLHttpRequest` in a Web Worker.
+    struct BrowserNetworkBackend {
+        allowlist: HostAllowlist,
+    }
+
+    impl NetworkBackend for BrowserNetworkBackend {
+        fn fetch(&self, request: &HttpRequest) -> Result<HttpResponse, NetworkError> {
+            self.allowlist.check(&request.url)?;
+
+            let headers_json =
+                serde_json::to_string(&request.headers).unwrap_or_else(|_| "[]".into());
+            let body = request.body.as_deref().unwrap_or(&[]);
+            let body_len = body.len() as u32;
+
+            let result = wasmsh_http_fetch(
+                &request.url,
+                &request.method,
+                &headers_json,
+                body,
+                body_len,
+                request.follow_redirects,
+            );
+
+            // Parse the JS result object.
+            let status = js_sys::Reflect::get(&result, &"status".into())
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0) as u16;
+
+            let headers_str = js_sys::Reflect::get(&result, &"headers_json".into())
+                .ok()
+                .and_then(|v| v.as_string())
+                .unwrap_or_else(|| "[]".into());
+            let headers: Vec<(String, String)> =
+                serde_json::from_str(&headers_str).unwrap_or_default();
+
+            let body_val = js_sys::Reflect::get(&result, &"body".into())
+                .ok()
+                .unwrap_or(JsValue::NULL);
+            let body_bytes = if body_val.is_instance_of::<js_sys::Uint8Array>() {
+                js_sys::Uint8Array::from(body_val).to_vec()
+            } else {
+                Vec::new()
+            };
+
+            // Check for error field (connection failure, etc.)
+            if let Ok(err_val) = js_sys::Reflect::get(&result, &"error".into()) {
+                if let Some(err_msg) = err_val.as_string() {
+                    return Err(NetworkError::ConnectionFailed(err_msg));
+                }
+            }
+
+            Ok(HttpResponse {
+                status,
+                headers,
+                body: body_bytes,
+            })
+        }
+    }
 
     /// Browser-facing shell instance exposed via `wasm-bindgen`.
     #[wasm_bindgen]
@@ -1926,11 +2109,24 @@ mod wasm_bindings {
             }
         }
 
-        /// Initialize the shell with a step budget.  Returns a JSON array of events.
-        pub fn init(&mut self, step_budget: u64) -> String {
-            let events = self
-                .runtime
-                .handle_command(HostCommand::Init { step_budget });
+        /// Initialize the shell with a step budget and optional network allowlist.
+        /// `allowed_hosts_json` is a JSON array of host patterns (default `"[]"`).
+        /// Returns a JSON array of events.
+        pub fn init(&mut self, step_budget: u64, allowed_hosts_json: &str) -> String {
+            let allowed_hosts: Vec<String> =
+                serde_json::from_str(allowed_hosts_json).unwrap_or_default();
+
+            if !allowed_hosts.is_empty() {
+                let backend = BrowserNetworkBackend {
+                    allowlist: HostAllowlist::new(allowed_hosts.clone()),
+                };
+                self.runtime.set_network_backend(Box::new(backend));
+            }
+
+            let events = self.runtime.handle_command(HostCommand::Init {
+                step_budget,
+                allowed_hosts,
+            });
             serde_json::to_string(&events).unwrap_or_default()
         }
 

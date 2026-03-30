@@ -11,6 +11,68 @@ const sentinelStubs = {
   is_sentinel: (value) => (value === SENTINEL_MARKER ? 1 : 0),
 };
 
+/**
+ * Synchronous HTTP fetch for wasmsh curl/wget (called from Rust via extern "C").
+ *
+ * Parameters are WASM pointers (C strings + byte buffer). Returns a pointer
+ * to a JSON C string allocated with malloc. The Rust caller frees it.
+ */
+function createNetworkStubs(module) {
+  return {
+    wasmsh_js_http_fetch(urlPtr, methodPtr, headersJsonPtr, bodyPtr, bodyLen, followRedirects) {
+      const url = module.UTF8ToString(urlPtr);
+      const method = module.UTF8ToString(methodPtr);
+      const headersJson = module.UTF8ToString(headersJsonPtr);
+
+      let bodyBytes = null;
+      if (bodyPtr !== 0 && bodyLen > 0) {
+        bodyBytes = new Uint8Array(module.HEAPU8.buffer, bodyPtr, bodyLen).slice();
+      }
+
+      let result;
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.open(method, url, false); // synchronous — works in Web Workers
+        const headers = JSON.parse(headersJson || "[]");
+        for (const [key, value] of headers) {
+          xhr.setRequestHeader(key, value);
+        }
+        xhr.responseType = "arraybuffer";
+        xhr.send(bodyBytes);
+
+        const respHeaders = xhr
+          .getAllResponseHeaders()
+          .split("\r\n")
+          .filter((h) => h)
+          .map((h) => {
+            const idx = h.indexOf(": ");
+            return idx >= 0 ? [h.slice(0, idx), h.slice(idx + 2)] : [h, ""];
+          });
+
+        // Encode response body as base64
+        const respBytes = new Uint8Array(xhr.response || new ArrayBuffer(0));
+        let binary = "";
+        for (const byte of respBytes) {
+          binary += String.fromCharCode(byte);
+        }
+        const bodyBase64 = btoa(binary);
+
+        result = JSON.stringify({
+          status: xhr.status,
+          headers: respHeaders,
+          body_base64: bodyBase64,
+        });
+      } catch (e) {
+        result = JSON.stringify({ status: 0, headers: [], body_base64: "", error: e.message });
+      }
+
+      // Allocate a C string via malloc and copy the result
+      const resultPtr = module.stringToNewUTF8(result);
+      return resultPtr;
+    },
+  };
+}
+
 function extractStream(events, key) {
   const bytes = [];
   for (const event of events) {
@@ -115,6 +177,15 @@ async function boot(baseUrl) {
       },
       instantiateWasm(imports, successCallback) {
         imports.sentinel = sentinelStubs;
+        // Provide network fetch to Emscripten env namespace.
+        // Uses the outer `moduleRef` which is set before any shell commands run.
+        if (!imports.env) {
+          imports.env = {};
+        }
+        imports.env.wasmsh_js_http_fetch = (...args) => {
+          if (!moduleRef) return 0;
+          return createNetworkStubs(moduleRef).wasmsh_js_http_fetch(...args);
+        };
         fetch(`${assetBaseUrl}/pyodide.asm.wasm`)
           .then((response) => response.arrayBuffer())
           .then((buffer) =>
@@ -157,9 +228,16 @@ async function ensureBooted(baseUrl) {
 }
 
 const methods = {
-  async init({ assetBaseUrl: baseUrl, stepBudget = 0, initialFiles = [] }) {
+  async init({
+    assetBaseUrl: baseUrl,
+    stepBudget = 0,
+    initialFiles = [],
+    allowedHosts = [],
+  }) {
     await ensureBooted(baseUrl);
-    const events = sendHostCommand({ Init: { step_budget: stepBudget } });
+    const events = sendHostCommand({
+      Init: { step_budget: stepBudget, allowed_hosts: allowedHosts },
+    });
     for (const file of initialFiles) {
       sendHostCommand({
         WriteFile: {

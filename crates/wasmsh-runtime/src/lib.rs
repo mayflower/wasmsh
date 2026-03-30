@@ -43,12 +43,15 @@ const CMD_TYPE: &str = "type";
 #[derive(Debug, Clone)]
 pub struct BrowserConfig {
     pub step_budget: u64,
+    /// Hostnames/IPs allowed for network access (empty = no network).
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
             step_budget: 100_000,
+            allowed_hosts: Vec::new(),
         }
     }
 }
@@ -127,6 +130,8 @@ pub struct WorkerRuntime {
     aliases: IndexMap<String, String>,
     /// Optional handler for external commands (e.g. python3 in Pyodide).
     external_handler: Option<ExternalCommandHandler>,
+    /// Optional network backend for curl/wget utilities.
+    network: Option<Box<dyn wasmsh_utils::net_types::NetworkBackend>>,
 }
 
 /// Action to take for a character during array element parsing.
@@ -236,6 +241,7 @@ impl WorkerRuntime {
             exec: ExecState::new(),
             aliases: IndexMap::new(),
             external_handler: None,
+            network: None,
         }
     }
 
@@ -244,11 +250,23 @@ impl WorkerRuntime {
         self.external_handler = Some(handler);
     }
 
+    /// Register a network backend for `curl`/`wget` utilities.
+    pub fn set_network_backend(
+        &mut self,
+        backend: Box<dyn wasmsh_utils::net_types::NetworkBackend>,
+    ) {
+        self.network = Some(backend);
+    }
+
     /// Process a host command and return a list of events to send back.
     pub fn handle_command(&mut self, cmd: HostCommand) -> Vec<WorkerEvent> {
         match cmd {
-            HostCommand::Init { step_budget } => {
+            HostCommand::Init {
+                step_budget,
+                allowed_hosts,
+            } => {
                 self.config.step_budget = step_budget;
+                self.config.allowed_hosts = allowed_hosts;
                 self.vm = Vm::new(ShellState::new(), step_budget);
                 self.fs = BackendFs::new();
                 self.pending_stdin = None;
@@ -1234,6 +1252,7 @@ impl WorkerRuntime {
                 cwd: &cwd,
                 stdin: stdin_data.as_deref(),
                 state: Some(&self.vm.state),
+                network: self.network.as_deref(),
             };
             util_fn(&mut ctx, &argv_refs)
         };

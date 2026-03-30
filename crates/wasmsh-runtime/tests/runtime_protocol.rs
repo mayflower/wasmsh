@@ -34,7 +34,10 @@ fn get_exit(events: &[WorkerEvent]) -> i32 {
 #[test]
 fn init_returns_protocol_version() {
     let mut rt = WorkerRuntime::new();
-    let events = rt.handle_command(HostCommand::Init { step_budget: 0 });
+    let events = rt.handle_command(HostCommand::Init {
+        step_budget: 0,
+        allowed_hosts: vec![],
+    });
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0],
@@ -45,7 +48,10 @@ fn init_returns_protocol_version() {
 #[test]
 fn run_echo_hello() {
     let mut rt = WorkerRuntime::new();
-    rt.handle_command(HostCommand::Init { step_budget: 0 });
+    rt.handle_command(HostCommand::Init {
+        step_budget: 0,
+        allowed_hosts: vec![],
+    });
     let events = rt.handle_command(HostCommand::Run {
         input: "echo hello".into(),
     });
@@ -56,7 +62,10 @@ fn run_echo_hello() {
 #[test]
 fn write_file_then_read_file() {
     let mut rt = WorkerRuntime::new();
-    rt.handle_command(HostCommand::Init { step_budget: 0 });
+    rt.handle_command(HostCommand::Init {
+        step_budget: 0,
+        allowed_hosts: vec![],
+    });
 
     let write_events = rt.handle_command(HostCommand::WriteFile {
         path: "/test.txt".into(),
@@ -75,7 +84,10 @@ fn write_file_then_read_file() {
 #[test]
 fn list_dir_shows_written_files() {
     let mut rt = WorkerRuntime::new();
-    rt.handle_command(HostCommand::Init { step_budget: 0 });
+    rt.handle_command(HostCommand::Init {
+        step_budget: 0,
+        allowed_hosts: vec![],
+    });
 
     rt.handle_command(HostCommand::WriteFile {
         path: "/a.txt".into(),
@@ -106,7 +118,10 @@ fn run_not_initialized_returns_error() {
 #[test]
 fn cancel_returns_diagnostic() {
     let mut rt = WorkerRuntime::new();
-    rt.handle_command(HostCommand::Init { step_budget: 0 });
+    rt.handle_command(HostCommand::Init {
+        step_budget: 0,
+        allowed_hosts: vec![],
+    });
     let events = rt.handle_command(HostCommand::Cancel);
     assert!(events
         .iter()
@@ -116,7 +131,10 @@ fn cancel_returns_diagnostic() {
 #[test]
 fn cat_reads_vfs_file() {
     let mut rt = WorkerRuntime::new();
-    rt.handle_command(HostCommand::Init { step_budget: 0 });
+    rt.handle_command(HostCommand::Init {
+        step_budget: 0,
+        allowed_hosts: vec![],
+    });
     rt.handle_command(HostCommand::WriteFile {
         path: "/hello.txt".into(),
         data: b"world".to_vec(),

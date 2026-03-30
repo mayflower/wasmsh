@@ -1,0 +1,12 @@
+[test]
+name = "wget with no URL returns usage error"
+tags = ["network", "wget"]
+tier = "P0"
+requires = ["utilities"]
+
+[input]
+script = "wget"
+
+[expect]
+status = 2
+stderr_contains = ["missing URL"]

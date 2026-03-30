@@ -12,7 +12,7 @@ fuzz_target!(|data: &[u8]| {
         }
         // Full pipeline: Init then Run. The runtime must never panic.
         let mut rt = WorkerRuntime::new();
-        let _ = rt.handle_command(HostCommand::Init { step_budget: 10_000 });
+        let _ = rt.handle_command(HostCommand::Init { step_budget: 10_000, allowed_hosts: vec![] });
         let _ = rt.handle_command(HostCommand::Run { input: s.to_string() });
     }
 });

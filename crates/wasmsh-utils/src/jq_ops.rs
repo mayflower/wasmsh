@@ -6056,6 +6056,7 @@ mod tests {
                 cwd: "/",
                 stdin: None,
                 state: None,
+                network: None,
             };
             util_jq(&mut ctx, &["jq", ".name", "/test.json"])
         };
@@ -6076,6 +6077,7 @@ mod tests {
                 cwd: "/",
                 stdin: Some(input),
                 state: None,
+                network: None,
             };
             util_jq(&mut ctx, &["jq", "-r", ".name"])
         };
@@ -6096,6 +6098,7 @@ mod tests {
                 cwd: "/",
                 stdin: Some(input),
                 state: None,
+                network: None,
             };
             util_jq(&mut ctx, &["jq", "-c", "."])
         };
@@ -6115,6 +6118,7 @@ mod tests {
                 cwd: "/",
                 stdin: None,
                 state: None,
+                network: None,
             };
             util_jq(&mut ctx, &["jq", "-n", "1 + 2"])
         };
@@ -6135,6 +6139,7 @@ mod tests {
                 cwd: "/",
                 stdin: Some(input),
                 state: None,
+                network: None,
             };
             util_jq(&mut ctx, &["jq", "-s", "add"])
         };
@@ -6154,6 +6159,7 @@ mod tests {
                 cwd: "/",
                 stdin: None,
                 state: None,
+                network: None,
             };
             util_jq(&mut ctx, &["jq", "-n", "--arg", "name", "bob", "$name"])
         };
@@ -6174,6 +6180,7 @@ mod tests {
                 cwd: "/",
                 stdin: Some(input),
                 state: None,
+                network: None,
             };
             util_jq(&mut ctx, &["jq", "-e", "."])
         };
@@ -6195,6 +6202,7 @@ mod tests {
                 cwd: "/",
                 stdin,
                 state: None,
+                network: None,
             };
             util_jq(&mut ctx, argv)
         };
@@ -6782,6 +6790,7 @@ mod tests {
                 cwd: "/",
                 stdin: None,
                 state: None,
+                network: None,
             };
             util_jq(&mut ctx, &["jq", "add", "/data.json"])
         };
@@ -6801,6 +6810,7 @@ mod tests {
                 cwd: "/",
                 stdin: None,
                 state: None,
+                network: None,
             };
             util_jq(&mut ctx, &["jq", ".", "/nonexistent.json"])
         };

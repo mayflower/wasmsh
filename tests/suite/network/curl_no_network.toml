@@ -1,0 +1,12 @@
+[test]
+name = "curl without network backend returns error"
+tags = ["network", "curl"]
+tier = "P0"
+requires = ["utilities"]
+
+[input]
+script = "curl http://example.com"
+
+[expect]
+status = 1
+stderr_contains = ["network access not available"]

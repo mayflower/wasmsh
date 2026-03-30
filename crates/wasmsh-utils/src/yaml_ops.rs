@@ -1257,6 +1257,7 @@ mod tests {
                 cwd: "/",
                 stdin,
                 state: None,
+                network: None,
             };
             util_yq(&mut ctx, argv)
         };

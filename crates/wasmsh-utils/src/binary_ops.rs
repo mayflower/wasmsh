@@ -1119,6 +1119,7 @@ mod tests {
                 cwd: "/",
                 stdin,
                 state: None,
+                network: None,
             };
             func(&mut ctx, argv)
         };

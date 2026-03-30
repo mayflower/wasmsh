@@ -2307,6 +2307,7 @@ mod tests {
                 cwd: "/",
                 stdin: None,
                 state: None,
+                network: None,
             };
             f(&mut ctx, argv)
         };
@@ -2331,6 +2332,7 @@ mod tests {
                 cwd: "/",
                 stdin: Some(stdin),
                 state: None,
+                network: None,
             };
             f(&mut ctx, argv)
         };

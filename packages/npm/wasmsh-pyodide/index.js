@@ -201,6 +201,7 @@ export async function createNodeSession(options = {}) {
   await session._sendRequest("init", {
     stepBudget: options.stepBudget ?? 0,
     initialFiles: normalizeInitialFiles(options.initialFiles),
+    allowedHosts: options.allowedHosts ?? [],
   });
   return session;
 }
@@ -213,6 +214,7 @@ export async function createBrowserWorkerSession(options) {
     assetBaseUrl: options.assetBaseUrl,
     stepBudget: options.stepBudget ?? 0,
     initialFiles: normalizeInitialFiles(options.initialFiles),
+    allowedHosts: options.allowedHosts ?? [],
   });
   return session;
 }

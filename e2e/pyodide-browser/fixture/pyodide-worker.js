@@ -82,6 +82,40 @@ async function boot() {
 
       instantiateWasm: function (imports, successCallback) {
         imports.sentinel = sentinelStubs;
+        // Provide network fetch in env namespace for curl/wget.
+        if (!imports.env) imports.env = {};
+        imports.env.wasmsh_js_http_fetch = function (urlPtr, methodPtr, headersJsonPtr, bodyPtr, bodyLen, followRedirects) {
+          if (!Module) return 0;
+          var url = Module.UTF8ToString(urlPtr);
+          var method = Module.UTF8ToString(methodPtr);
+          var headersJson = Module.UTF8ToString(headersJsonPtr);
+          var bodyBytes = null;
+          if (bodyPtr !== 0 && bodyLen > 0) {
+            bodyBytes = new Uint8Array(Module.HEAPU8.buffer, bodyPtr, bodyLen).slice();
+          }
+          var result;
+          try {
+            var xhr = new XMLHttpRequest();
+            xhr.open(method, url, false);
+            var headers = JSON.parse(headersJson || "[]");
+            for (var h = 0; h < headers.length; h++) {
+              xhr.setRequestHeader(headers[h][0], headers[h][1]);
+            }
+            xhr.responseType = "arraybuffer";
+            xhr.send(bodyBytes);
+            var respBytes = new Uint8Array(xhr.response || new ArrayBuffer(0));
+            var binary = "";
+            for (var b = 0; b < respBytes.length; b++) binary += String.fromCharCode(respBytes[b]);
+            var respHeaders = xhr.getAllResponseHeaders().split("\r\n").filter(function(h){return h;}).map(function(h){
+              var idx = h.indexOf(": ");
+              return idx >= 0 ? [h.slice(0, idx), h.slice(idx + 2)] : [h, ""];
+            });
+            result = JSON.stringify({ status: xhr.status, headers: respHeaders, body_base64: btoa(binary) });
+          } catch (e) {
+            result = JSON.stringify({ status: 0, headers: [], body_base64: "", error: e.message });
+          }
+          return Module.stringToNewUTF8(result);
+        };
         fetch("./dist/pyodide.asm.wasm")
           .then(function (resp) {
             return resp.arrayBuffer();
@@ -138,7 +172,7 @@ function handleMessage(msg) {
   var cmd;
   switch (msg.type) {
     case "Init":
-      cmd = { Init: { step_budget: msg.step_budget || 0 } };
+      cmd = { Init: { step_budget: msg.step_budget || 0, allowed_hosts: msg.allowed_hosts || [] } };
       break;
     case "Run":
       cmd = { Run: { input: msg.input } };

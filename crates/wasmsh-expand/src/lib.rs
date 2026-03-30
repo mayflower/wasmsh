@@ -81,12 +81,10 @@ pub fn expand_words_argv(words: &[Word], state: &mut ShellState) -> Vec<Expanded
     words
         .iter()
         .map(|w| {
-            let was_quoted = w.parts.iter().any(|p| {
-                matches!(
-                    p,
-                    WordPart::SingleQuoted(_) | WordPart::DoubleQuoted(_)
-                )
-            });
+            let was_quoted = w
+                .parts
+                .iter()
+                .any(|p| matches!(p, WordPart::SingleQuoted(_) | WordPart::DoubleQuoted(_)));
             ExpandedWord {
                 text: expand_word(w, state),
                 was_quoted,
