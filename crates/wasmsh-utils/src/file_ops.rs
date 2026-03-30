@@ -923,6 +923,7 @@ struct FindFilters<'a> {
     empty: bool,
     negate_next: bool,
     print0: bool,
+    printf_format: Option<&'a str>,
     size_filter: Option<&'a str>,
 }
 
@@ -947,6 +948,7 @@ fn parse_find_args<'a>(argv: &'a [&'a str]) -> (&'a str, FindFilters<'a>) {
         empty: false,
         negate_next: false,
         print0: false,
+        printf_format: None,
         size_filter: None,
     };
     let mut i = 0;
@@ -987,6 +989,10 @@ fn parse_find_args<'a>(argv: &'a [&'a str]) -> (&'a str, FindFilters<'a>) {
             "-empty" => {
                 filters.empty = true;
                 i += 1;
+            }
+            "-printf" if i + 1 < args.len() => {
+                filters.printf_format = Some(args[i + 1]);
+                i += 2;
             }
             "-print" | "-and" | "-a" | "-o" | "-or" => {
                 i += 1;
@@ -1094,6 +1100,54 @@ fn find_entry_matches(
     }
 }
 
+/// Format a find -printf format string for a single entry.
+fn find_printf_format(fmt: &str, path: &str, is_dir: bool, size: u64) -> String {
+    let mut out = String::new();
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '%' => match chars.next() {
+                Some('s') => out.push_str(&size.to_string()),
+                Some('p') => out.push_str(path),
+                Some('f') => {
+                    let name = path.rsplit('/').next().unwrap_or(path);
+                    out.push_str(name);
+                }
+                Some('y') => out.push(if is_dir { 'd' } else { 'f' }),
+                Some('T') => {
+                    // %T@ = mtime as epoch seconds (VFS has no mtime, emit 0)
+                    if chars.peek() == Some(&'@') {
+                        chars.next();
+                        out.push('0');
+                    } else {
+                        out.push('0');
+                    }
+                }
+                Some('d') => out.push_str(&path.matches('/').count().to_string()),
+                Some('%') => out.push('%'),
+                Some(other) => {
+                    out.push('%');
+                    out.push(other);
+                }
+                None => out.push('%'),
+            },
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('\\') => out.push('\\'),
+                Some('0') => out.push('\0'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            },
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 fn walk_find(
     fs: &mut BackendFs,
     path: &str,
@@ -1119,6 +1173,9 @@ fn walk_find(
         {
             if filters.delete {
                 to_delete.push((child.clone(), entry.is_dir));
+            } else if let Some(fmt) = filters.printf_format {
+                let formatted = find_printf_format(fmt, &child, entry.is_dir, size);
+                output.stdout(formatted.as_bytes());
             } else if filters.print0 {
                 output.stdout(child.as_bytes());
                 output.stdout(b"\0");

@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 
 use wasmsh_ast::CaseTerminator;
 use wasmsh_ast::RedirectionOp;
-use wasmsh_expand::expand_words;
+use wasmsh_expand::{expand_words, expand_words_argv};
 use wasmsh_fs::{BackendFs, OpenOptions, Vfs};
 use wasmsh_hir::{
     HirAndOr, HirAndOrOp, HirCommand, HirCompleteCommand, HirPipeline, HirRedirection,
@@ -709,18 +709,25 @@ impl WorkerRuntime {
     /// Execute a simple command (`HirCommand::Exec`).
     fn execute_exec(&mut self, exec: &wasmsh_hir::HirExec) {
         let resolved = self.resolve_command_subst(&exec.argv);
-        let argv = expand_words(&resolved, &mut self.vm.state);
+        let expanded = expand_words_argv(&resolved, &mut self.vm.state);
 
         if self.check_nounset_error() {
             return;
         }
-        if argv.is_empty() {
+        if expanded.is_empty() {
             return;
         }
 
-        let argv: Vec<String> = argv
+        // Brace expansion must be suppressed for quoted words (POSIX + bash behavior).
+        let argv: Vec<String> = expanded
             .into_iter()
-            .flat_map(|arg| wasmsh_expand::expand_braces(&arg))
+            .flat_map(|ew| {
+                if ew.was_quoted {
+                    vec![ew.text]
+                } else {
+                    wasmsh_expand::expand_braces(&ew.text)
+                }
+            })
             .collect();
         let argv = self.expand_globs(argv);
 

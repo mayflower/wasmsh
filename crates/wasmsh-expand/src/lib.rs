@@ -65,6 +65,36 @@ pub fn expand_words(words: &[Word], state: &mut ShellState) -> Vec<String> {
     words.iter().map(|w| expand_word(w, state)).collect()
 }
 
+/// An expanded word paired with its quoting context.
+#[derive(Debug, Clone)]
+pub struct ExpandedWord {
+    /// The expanded text (quotes removed, parameters resolved).
+    pub text: String,
+    /// True when the original word contained any quoting (single, double, or escape).
+    /// Brace expansion must be suppressed for quoted words.
+    pub was_quoted: bool,
+}
+
+/// Expand a list of words for argv, preserving quote metadata so the
+/// runtime can skip brace expansion on quoted arguments.
+pub fn expand_words_argv(words: &[Word], state: &mut ShellState) -> Vec<ExpandedWord> {
+    words
+        .iter()
+        .map(|w| {
+            let was_quoted = w.parts.iter().any(|p| {
+                matches!(
+                    p,
+                    WordPart::SingleQuoted(_) | WordPart::DoubleQuoted(_)
+                )
+            });
+            ExpandedWord {
+                text: expand_word(w, state),
+                was_quoted,
+            }
+        })
+        .collect()
+}
+
 /// Expand `$var` and `${...}` references in a raw string (e.g. here-doc body).
 pub fn expand_string(text: &str, state: &mut ShellState) -> String {
     expand_operand(text, state)
