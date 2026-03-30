@@ -1124,23 +1124,21 @@ fn find_printf_format(fmt: &str, path: &str, is_dir: bool, size: u64) -> String 
                     }
                 }
                 Some('d') => out.push_str(&path.matches('/').count().to_string()),
-                Some('%') => out.push('%'),
+                Some('%') | None => out.push('%'),
                 Some(other) => {
                     out.push('%');
                     out.push(other);
                 }
-                None => out.push('%'),
             },
             '\\' => match chars.next() {
                 Some('n') => out.push('\n'),
                 Some('t') => out.push('\t'),
-                Some('\\') => out.push('\\'),
                 Some('0') => out.push('\0'),
+                Some('\\') | None => out.push('\\'),
                 Some(other) => {
                     out.push('\\');
                     out.push(other);
                 }
-                None => out.push('\\'),
             },
             _ => out.push(c),
         }
