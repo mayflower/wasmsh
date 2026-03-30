@@ -142,7 +142,7 @@ jobs:
     name: publish crates.io
     needs: [validate, build-standalone]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -172,11 +172,11 @@ jobs:
               echo "::endgroup::"
               continue
             fi
-            echo "Retrying $crate after rate-limit cooldown..."
-            sleep 30
+            echo "Retrying $crate after rate-limit cooldown (120s)..."
+            sleep 120
             cargo publish -p "$crate" --no-verify
             echo "::endgroup::"
-            sleep 10
+            sleep 15
           done
 
   # ── Publish npm package (trusted publishing via OIDC) ─────
@@ -205,7 +205,14 @@ jobs:
           ls -la package/
           node -e "const p = require('./package/package.json'); console.log(p.name + '@' + p.version)"
       - name: Publish to npm
-        run: npm publish ./package/ --access public
+        run: |
+          npm publish ./package/ --access public 2>&1 || {
+            if npm view "$(node -e "const p=require('./package/package.json');console.log(p.name+'@'+p.version)")" version 2>/dev/null; then
+              echo "Version already published, skipping"
+            else
+              exit 1
+            fi
+          }
 
   # ── Publish Python package to PyPI (trusted publishing) ───
   publish-pypi:
