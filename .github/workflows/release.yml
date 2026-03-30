@@ -147,12 +147,27 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-workspaces
-        run: cargo install cargo-workspaces
-      - name: Publish workspace crates
-        run: cargo workspaces publish --from-git --yes --token "$CRATES_IO_TOKEN"
+      - name: Publish workspace crates (sequential, respecting rate limits)
         env:
-          CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          CRATES=(
+            wasmsh-ast wasmsh-ir wasmsh-state wasmsh-fs wasmsh-protocol
+            wasmsh-lex wasmsh-hir wasmsh-builtins wasmsh-utils
+            wasmsh-parse wasmsh-expand wasmsh-vm
+            wasmsh-runtime
+            wasmsh-browser wasmsh-testkit
+          )
+          for crate in "${CRATES[@]}"; do
+            echo "::group::Publishing $crate"
+            cargo publish -p "$crate" --no-verify || {
+              echo "Retrying $crate after rate-limit cooldown..."
+              sleep 30
+              cargo publish -p "$crate" --no-verify
+            }
+            echo "::endgroup::"
+            sleep 10
+          done
 
   # ── Publish npm package (trusted publishing via OIDC) ─────
   publish-npm:
