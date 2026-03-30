@@ -62,7 +62,7 @@ async function startup() {
   try {
     await wasmInit();
     shell = new WasmShell();
-    const initJson = shell.init(BigInt(0));
+    const initJson = shell.init(BigInt(0), "[]");
     const initEvents = JSON.parse(initJson);
     const version = initEvents.find(function (e) { return "Version" in e; });
     appendOutput(

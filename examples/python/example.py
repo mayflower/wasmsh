@@ -43,7 +43,7 @@ class WasmShell:
             "const s=new WasmShell();"
             "rl.on('line',l=>{"
             "try{const c=JSON.parse(l);let r;"
-            "if(c.t==='i')r=s.init(BigInt(c.b||0));"
+            "if(c.t==='i')r=s.init(BigInt(c.b||0),'[]');"
             "else if(c.t==='e')r=s.exec(c.v);"  # noqa: E501
             "else if(c.t==='w')r=s.write_file(c.p,new Uint8Array(c.d));"
             "else if(c.t==='r')r=s.read_file(c.p);"

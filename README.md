@@ -148,7 +148,7 @@ import wasmInit, { WasmShell } from "./pkg/wasmsh_browser.js";
 
 await wasmInit();
 const shell = new WasmShell();
-shell.init(BigInt(0)); // 0 = unlimited step budget
+shell.init(BigInt(0), "[]"); // 0 = unlimited step budget
 
 const events = JSON.parse(shell.exec("echo hello"));
 // events: [{ Stdout: [104,101,108,...] }, { Exit: 0 }]
@@ -164,7 +164,7 @@ For Node.js, use the `nodejs/` directory instead — no `wasmInit()` call needed
 ```javascript
 import { WasmShell } from "wasmsh-browser"; // from nodejs/
 const shell = new WasmShell();
-shell.init(BigInt(0));
+shell.init(BigInt(0), "[]");
 console.log(JSON.parse(shell.exec("ls /")));
 ```
 

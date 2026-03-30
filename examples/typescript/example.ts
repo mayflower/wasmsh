@@ -71,7 +71,7 @@ function main() {
   const shell = new WasmShell();
 
   // Initialize with step budget (0 = unlimited)
-  const initEvents = parseEvents(shell.init(BigInt(0)));
+  const initEvents = parseEvents(shell.init(BigInt(0), "[]"));
   const version = initEvents.find((e): e is VersionEvent => "Version" in e);
   console.log("wasmsh protocol version:", version?.Version);
   console.log("");
