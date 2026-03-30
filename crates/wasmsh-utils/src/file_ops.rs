@@ -1100,46 +1100,57 @@ fn find_entry_matches(
     }
 }
 
+/// Expand a single `%X` format specifier for find -printf.
+fn expand_printf_specifier(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    path: &str,
+    is_dir: bool,
+    size: u64,
+) {
+    match chars.next() {
+        Some('s') => out.push_str(&size.to_string()),
+        Some('p') => out.push_str(path),
+        Some('f') => out.push_str(path.rsplit('/').next().unwrap_or(path)),
+        Some('y') => out.push(if is_dir { 'd' } else { 'f' }),
+        Some('T') => {
+            // %T@ = mtime as epoch seconds (VFS has no mtime, emit 0)
+            if chars.peek() == Some(&'@') {
+                chars.next();
+            }
+            out.push('0');
+        }
+        Some('d') => out.push_str(&path.matches('/').count().to_string()),
+        Some('%') | None => out.push('%'),
+        Some(other) => {
+            out.push('%');
+            out.push(other);
+        }
+    }
+}
+
+/// Expand a single `\X` escape for find -printf.
+fn expand_printf_escape(out: &mut String, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    match chars.next() {
+        Some('n') => out.push('\n'),
+        Some('t') => out.push('\t'),
+        Some('0') => out.push('\0'),
+        Some('\\') | None => out.push('\\'),
+        Some(other) => {
+            out.push('\\');
+            out.push(other);
+        }
+    }
+}
+
 /// Format a find -printf format string for a single entry.
 fn find_printf_format(fmt: &str, path: &str, is_dir: bool, size: u64) -> String {
     let mut out = String::new();
     let mut chars = fmt.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '%' => match chars.next() {
-                Some('s') => out.push_str(&size.to_string()),
-                Some('p') => out.push_str(path),
-                Some('f') => {
-                    let name = path.rsplit('/').next().unwrap_or(path);
-                    out.push_str(name);
-                }
-                Some('y') => out.push(if is_dir { 'd' } else { 'f' }),
-                Some('T') => {
-                    // %T@ = mtime as epoch seconds (VFS has no mtime, emit 0)
-                    if chars.peek() == Some(&'@') {
-                        chars.next();
-                        out.push('0');
-                    } else {
-                        out.push('0');
-                    }
-                }
-                Some('d') => out.push_str(&path.matches('/').count().to_string()),
-                Some('%') | None => out.push('%'),
-                Some(other) => {
-                    out.push('%');
-                    out.push(other);
-                }
-            },
-            '\\' => match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('0') => out.push('\0'),
-                Some('\\') | None => out.push('\\'),
-                Some(other) => {
-                    out.push('\\');
-                    out.push(other);
-                }
-            },
+            '%' => expand_printf_specifier(&mut out, &mut chars, path, is_dir, size),
+            '\\' => expand_printf_escape(&mut out, &mut chars),
             _ => out.push(c),
         }
     }

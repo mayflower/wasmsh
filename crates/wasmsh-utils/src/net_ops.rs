@@ -1,7 +1,7 @@
 //! Network utilities: `curl` and `wget`.
 
 use crate::helpers::resolve_path;
-use crate::net_types::{HttpRequest, NetworkError};
+use crate::net_types::{HttpRequest, HttpResponse, NetworkError};
 use crate::UtilContext;
 use wasmsh_fs::{OpenOptions, Vfs};
 
@@ -21,6 +21,45 @@ struct CurlOpts {
     fail_on_error: bool,
     verbose: bool,
     write_out: Option<String>,
+}
+
+/// Parse combined short flags like `-sSL` or `-so file.txt` for curl.
+/// Returns the (possibly advanced) argv index after consuming any trailing argument.
+fn parse_combined_curl_flags(
+    opts: &mut CurlOpts,
+    flags: &str,
+    argv: &[&str],
+    mut i: usize,
+) -> Result<usize, String> {
+    let mut j = 0;
+    while j < flags.len() {
+        match flags.as_bytes()[j] {
+            b's' => opts.silent = true,
+            b'S' => opts.show_error = true,
+            b'L' => opts.follow_redirects = true,
+            b'I' => opts.head_only = true,
+            b'f' => opts.fail_on_error = true,
+            b'v' => opts.verbose = true,
+            b'o' => {
+                // -o might be combined: -so file.txt
+                let rest = &flags[j + 1..];
+                if rest.is_empty() {
+                    i += 1;
+                    opts.output = Some(
+                        argv.get(i)
+                            .ok_or("-o requires a filename argument")?
+                            .to_string(),
+                    );
+                } else {
+                    opts.output = Some(rest.to_string());
+                }
+                return Ok(i);
+            }
+            _ => return Err(format!("unknown option: -{}", flags.as_bytes()[j] as char)),
+        }
+        j += 1;
+    }
+    Ok(i)
 }
 
 fn parse_curl_args(argv: &[&str]) -> Result<CurlOpts, String> {
@@ -96,39 +135,7 @@ fn parse_curl_args(argv: &[&str]) -> Result<CurlOpts, String> {
                 opts.show_error = true;
             }
             _ if arg.starts_with('-') => {
-                // Handle combined short flags like -sSL
-                let flags = &arg[1..];
-                let mut j = 0;
-                while j < flags.len() {
-                    match flags.as_bytes()[j] {
-                        b's' => opts.silent = true,
-                        b'S' => opts.show_error = true,
-                        b'L' => opts.follow_redirects = true,
-                        b'I' => opts.head_only = true,
-                        b'f' => opts.fail_on_error = true,
-                        b'v' => opts.verbose = true,
-                        b'o' => {
-                            // -o might be combined: -so file.txt
-                            let rest = &flags[j + 1..];
-                            if rest.is_empty() {
-                                i += 1;
-                                opts.output = Some(
-                                    argv.get(i)
-                                        .ok_or("-o requires a filename argument")?
-                                        .to_string(),
-                                );
-                            } else {
-                                opts.output = Some(rest.to_string());
-                            }
-                            j = flags.len(); // consumed rest
-                            continue;
-                        }
-                        _ => {
-                            return Err(format!("unknown option: -{}", flags.as_bytes()[j] as char))
-                        }
-                    }
-                    j += 1;
-                }
+                i = parse_combined_curl_flags(&mut opts, &arg[1..], argv, i)?;
             }
             _ => {
                 // Positional: URL
@@ -143,6 +150,76 @@ fn parse_curl_args(argv: &[&str]) -> Result<CurlOpts, String> {
     }
 
     Ok(opts)
+}
+
+/// Log the outgoing request in curl verbose mode (`> METHOD url`, `> Header: val`).
+fn curl_log_request(ctx: &mut UtilContext<'_>, method: &str, url: &str, request: &HttpRequest) {
+    ctx.output.stderr(format!("> {method} {url}\n").as_bytes());
+    for (k, v) in &request.headers {
+        ctx.output.stderr(format!("> {k}: {v}\n").as_bytes());
+    }
+    ctx.output.stderr(b">\n");
+}
+
+/// Log the incoming response in curl verbose mode (`< HTTP status`, `< Header: val`).
+fn curl_log_response(ctx: &mut UtilContext<'_>, response: &HttpResponse) {
+    ctx.output
+        .stderr(format!("< HTTP {}\n", response.status).as_bytes());
+    for (k, v) in &response.headers {
+        ctx.output.stderr(format!("< {k}: {v}\n").as_bytes());
+    }
+    ctx.output.stderr(b"<\n");
+}
+
+/// Map a `NetworkError` to a curl exit code and optionally print the message.
+fn curl_handle_fetch_error(ctx: &mut UtilContext<'_>, e: &NetworkError, opts: &CurlOpts) -> i32 {
+    let msg = format!("curl: {e}\n");
+    if !opts.silent || opts.show_error {
+        ctx.output.stderr(msg.as_bytes());
+    }
+    match e {
+        NetworkError::HostDenied(_) => 6,
+        NetworkError::ConnectionFailed(_) => 7,
+        NetworkError::Timeout(_) => 28,
+        _ => 1,
+    }
+}
+
+/// Write the curl response body to the appropriate destination (headers-only, file, or stdout).
+/// Returns `0` on success or an error exit code.
+fn write_curl_response(ctx: &mut UtilContext<'_>, opts: &CurlOpts, response: &HttpResponse) -> i32 {
+    if opts.head_only {
+        ctx.output
+            .stdout(format!("HTTP {}\r\n", response.status).as_bytes());
+        for (k, v) in &response.headers {
+            ctx.output.stdout(format!("{k}: {v}\r\n").as_bytes());
+        }
+        ctx.output.stdout(b"\r\n");
+        return 0;
+    }
+
+    if let Some(ref output_file) = opts.output {
+        let path = resolve_path(ctx.cwd, output_file);
+        let h = match ctx.fs.open(&path, OpenOptions::write()) {
+            Ok(h) => h,
+            Err(e) => {
+                ctx.output
+                    .stderr(format!("curl: cannot write to '{output_file}': {e}\n").as_bytes());
+                return 23;
+            }
+        };
+        if let Err(e) = ctx.fs.write_file(h, &response.body) {
+            ctx.output
+                .stderr(format!("curl: write error: {e}\n").as_bytes());
+            ctx.fs.close(h);
+            return 23;
+        }
+        ctx.fs.close(h);
+        return 0;
+    }
+
+    ctx.output.stdout(&response.body);
+    0
 }
 
 pub(crate) fn util_curl(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
@@ -196,36 +273,16 @@ pub(crate) fn util_curl(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     };
 
     if opts.verbose {
-        ctx.output.stderr(format!("> {method} {url}\n").as_bytes());
-        for (k, v) in &request.headers {
-            ctx.output.stderr(format!("> {k}: {v}\n").as_bytes());
-        }
-        ctx.output.stderr(b">\n");
+        curl_log_request(ctx, &method, &url, &request);
     }
 
     let response = match backend.fetch(&request) {
         Ok(r) => r,
-        Err(e) => {
-            let msg = format!("curl: {e}\n");
-            if !opts.silent || opts.show_error {
-                ctx.output.stderr(msg.as_bytes());
-            }
-            return match e {
-                NetworkError::HostDenied(_) => 6,
-                NetworkError::ConnectionFailed(_) => 7,
-                NetworkError::Timeout(_) => 28,
-                _ => 1,
-            };
-        }
+        Err(e) => return curl_handle_fetch_error(ctx, &e, &opts),
     };
 
     if opts.verbose {
-        ctx.output
-            .stderr(format!("< HTTP {}\n", response.status).as_bytes());
-        for (k, v) in &response.headers {
-            ctx.output.stderr(format!("< {k}: {v}\n").as_bytes());
-        }
-        ctx.output.stderr(b"<\n");
+        curl_log_response(ctx, &response);
     }
 
     if opts.fail_on_error && response.status >= 400 {
@@ -241,35 +298,9 @@ pub(crate) fn util_curl(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         return 22;
     }
 
-    if opts.head_only {
-        // Print response headers
-        ctx.output
-            .stdout(format!("HTTP {}\r\n", response.status).as_bytes());
-        for (k, v) in &response.headers {
-            ctx.output.stdout(format!("{k}: {v}\r\n").as_bytes());
-        }
-        ctx.output.stdout(b"\r\n");
-    } else if let Some(ref output_file) = opts.output {
-        // Write to file
-        let path = resolve_path(ctx.cwd, output_file);
-        let h = match ctx.fs.open(&path, OpenOptions::write()) {
-            Ok(h) => h,
-            Err(e) => {
-                ctx.output
-                    .stderr(format!("curl: cannot write to '{output_file}': {e}\n").as_bytes());
-                return 23;
-            }
-        };
-        if let Err(e) = ctx.fs.write_file(h, &response.body) {
-            ctx.output
-                .stderr(format!("curl: write error: {e}\n").as_bytes());
-            ctx.fs.close(h);
-            return 23;
-        }
-        ctx.fs.close(h);
-    } else {
-        // Write to stdout
-        ctx.output.stdout(&response.body);
+    let write_status = write_curl_response(ctx, &opts, &response);
+    if write_status != 0 {
+        return write_status;
     }
 
     // Handle --write-out
@@ -288,6 +319,39 @@ struct WgetOpts {
     output: Option<String>,
     quiet: bool,
     headers: Vec<(String, String)>,
+}
+
+/// Parse combined short flags like `-qO-` or `-qO file` for wget.
+/// Returns the (possibly advanced) argv index after consuming any trailing argument.
+fn parse_combined_wget_flags(
+    opts: &mut WgetOpts,
+    flags: &str,
+    argv: &[&str],
+    mut i: usize,
+) -> Result<usize, String> {
+    let mut j = 0;
+    while j < flags.len() {
+        match flags.as_bytes()[j] {
+            b'q' => opts.quiet = true,
+            b'O' => {
+                let rest = &flags[j + 1..];
+                if rest.is_empty() {
+                    i += 1;
+                    opts.output = Some(
+                        argv.get(i)
+                            .ok_or("-O requires a filename argument")?
+                            .to_string(),
+                    );
+                } else {
+                    opts.output = Some(rest.to_string());
+                }
+                return Ok(i);
+            }
+            _ => return Err(format!("unknown option: -{}", flags.as_bytes()[j] as char)),
+        }
+        j += 1;
+    }
+    Ok(i)
 }
 
 fn parse_wget_args(argv: &[&str]) -> Result<WgetOpts, String> {
@@ -322,33 +386,7 @@ fn parse_wget_args(argv: &[&str]) -> Result<WgetOpts, String> {
                 }
             }
             _ if arg.starts_with('-') && arg.len() > 1 => {
-                // Handle combined flags like -qO-
-                let flags = &arg[1..];
-                let mut j = 0;
-                while j < flags.len() {
-                    match flags.as_bytes()[j] {
-                        b'q' => opts.quiet = true,
-                        b'O' => {
-                            let rest = &flags[j + 1..];
-                            if rest.is_empty() {
-                                i += 1;
-                                opts.output = Some(
-                                    argv.get(i)
-                                        .ok_or("-O requires a filename argument")?
-                                        .to_string(),
-                                );
-                            } else {
-                                opts.output = Some(rest.to_string());
-                            }
-                            j = flags.len();
-                            continue;
-                        }
-                        _ => {
-                            return Err(format!("unknown option: -{}", flags.as_bytes()[j] as char))
-                        }
-                    }
-                    j += 1;
-                }
+                i = parse_combined_wget_flags(&mut opts, &arg[1..], argv, i)?;
             }
             _ => {
                 if opts.url.is_none() {
