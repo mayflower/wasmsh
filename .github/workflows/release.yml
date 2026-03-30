@@ -181,12 +181,16 @@ jobs:
       - name: Publish to npm
         run: npm publish ./package/ --access public --provenance
 
-  # ── Publish Python package to PyPI ────────────────────────
+  # ── Publish Python package to PyPI (trusted publishing) ───
   publish-pypi:
     name: publish pypi
     needs: build-pyodide
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    environment: pypi-publish
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/setup-python@v5
         with:
@@ -204,7 +208,6 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: package/dist/
-          password: ${{ secrets.PYPI_API_TOKEN }}
 
   # ── Create GitHub Release ──────────────────────────────────
   release:
