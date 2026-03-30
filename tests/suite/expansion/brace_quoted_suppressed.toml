@@ -1,0 +1,12 @@
+[test]
+name = "brace-expansion-suppressed-by-single-quotes"
+tags = ["expansion", "brace", "quoting", "P0"]
+tier = "P0"
+requires = ["brace-expansion", "echo"]
+
+[input]
+script = "echo '{a,b,c}'"
+
+[expect]
+status = 0
+stdout = "{a,b,c}\n"

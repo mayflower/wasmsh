@@ -3,8 +3,5 @@
   "private": true,
   "scripts": {
     "test": "node --test tests/probe-export.test.mjs"
-  },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.52.0"
   }
 }
