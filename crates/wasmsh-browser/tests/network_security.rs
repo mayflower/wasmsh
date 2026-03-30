@@ -135,8 +135,7 @@ fn init_runtime_with_network(allowed_hosts: Vec<String>) -> WorkerRuntime {
 #[test]
 fn curl_allowed_host_succeeds() {
     if !mayflower_reachable() {
-        eprintln!("SKIP: mayflower.de unreachable");
-        return;
+        return; // mayflower.de unreachable — skip
     }
 
     let mut rt = init_runtime_with_network(vec!["mayflower.de".into()]);
@@ -162,8 +161,7 @@ fn curl_allowed_host_succeeds() {
 #[test]
 fn wget_allowed_host_succeeds() {
     if !mayflower_reachable() {
-        eprintln!("SKIP: mayflower.de unreachable");
-        return;
+        return; // mayflower.de unreachable — skip
     }
 
     let mut rt = init_runtime_with_network(vec!["mayflower.de".into()]);
@@ -254,8 +252,7 @@ fn curl_denied_similar_hostname() {
 #[test]
 fn curl_wildcard_allows_subdomains() {
     if !mayflower_reachable() {
-        eprintln!("SKIP: mayflower.de unreachable");
-        return;
+        return; // mayflower.de unreachable — skip
     }
 
     // *.mayflower.de should allow www.mayflower.de and bare mayflower.de
@@ -325,8 +322,7 @@ fn curl_no_backend_returns_error() {
 #[test]
 fn curl_output_to_file_allowed_host() {
     if !mayflower_reachable() {
-        eprintln!("SKIP: mayflower.de unreachable");
-        return;
+        return; // mayflower.de unreachable — skip
     }
 
     let mut rt = init_runtime_with_network(vec!["mayflower.de".into()]);
@@ -342,7 +338,6 @@ fn curl_output_to_file_allowed_host() {
     });
     let stdout = extract_stdout(&events);
     let byte_count: usize = stdout
-        .trim()
         .split_whitespace()
         .next()
         .and_then(|s| s.parse().ok())
@@ -358,8 +353,7 @@ fn curl_output_to_file_allowed_host() {
 #[test]
 fn curl_write_out_http_code() {
     if !mayflower_reachable() {
-        eprintln!("SKIP: mayflower.de unreachable");
-        return;
+        return; // mayflower.de unreachable — skip
     }
 
     let mut rt = init_runtime_with_network(vec!["mayflower.de".into()]);
@@ -382,8 +376,7 @@ fn curl_write_out_http_code() {
 #[test]
 fn curl_pipe_to_shell_command() {
     if !mayflower_reachable() {
-        eprintln!("SKIP: mayflower.de unreachable");
-        return;
+        return; // mayflower.de unreachable — skip
     }
 
     let mut rt = init_runtime_with_network(vec!["mayflower.de".into()]);
