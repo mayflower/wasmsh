@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 
 use wasmsh_ast::CaseTerminator;
 use wasmsh_ast::RedirectionOp;
-use wasmsh_expand::{expand_words, expand_words_argv};
+use wasmsh_expand::expand_words_argv;
 use wasmsh_fs::{BackendFs, OpenOptions, Vfs};
 use wasmsh_hir::{
     HirAndOr, HirAndOrOp, HirCommand, HirCompleteCommand, HirPipeline, HirRedirection,
