@@ -160,11 +160,21 @@ jobs:
           )
           for crate in "${CRATES[@]}"; do
             echo "::group::Publishing $crate"
-            cargo publish -p "$crate" --no-verify || {
-              echo "Retrying $crate after rate-limit cooldown..."
-              sleep 30
-              cargo publish -p "$crate" --no-verify
+            output=$(cargo publish -p "$crate" --no-verify 2>&1) && {
+              echo "$output"
+              echo "::endgroup::"
+              sleep 10
+              continue
             }
+            echo "$output"
+            if echo "$output" | grep -q "already exists"; then
+              echo "$crate already published, skipping"
+              echo "::endgroup::"
+              continue
+            fi
+            echo "Retrying $crate after rate-limit cooldown..."
+            sleep 30
+            cargo publish -p "$crate" --no-verify
             echo "::endgroup::"
             sleep 10
           done
