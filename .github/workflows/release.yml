@@ -160,7 +160,8 @@ jobs:
           )
           publish_crate() {
             local crate=$1
-            for attempt in 1 2 3; do
+            local deadline=$((SECONDS + 900))
+            while true; do
               output=$(cargo publish -p "$crate" --no-verify 2>&1) && {
                 echo "$output"
                 return 0
@@ -170,14 +171,14 @@ jobs:
                 echo "$crate already published, skipping"
                 return 0
               fi
-              if echo "$output" | grep -q "429"; then
-                echo "Rate limited (attempt $attempt/3), waiting 180s..."
-                sleep 180
+              if echo "$output" | grep -q "429" && [ $SECONDS -lt $deadline ]; then
+                local wait=$((deadline - SECONDS))
+                echo "Rate limited, retrying in 120s (${wait}s left before giving up)..."
+                sleep 120
               else
                 return 1
               fi
             done
-            return 1
           }
           for crate in "${CRATES[@]}"; do
             echo "::group::Publishing $crate"
