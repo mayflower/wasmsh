@@ -168,8 +168,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Configure npm for OIDC publishing
-        run: npm config set registry https://registry.npmjs.org/
+      - name: Install npm with OIDC trusted publishing support
+        run: npm install -g npm@latest && npm --version
       - name: Download npm package
         uses: actions/download-artifact@v4
         with:
@@ -180,7 +180,7 @@ jobs:
           ls -la package/
           node -e "const p = require('./package/package.json'); console.log(p.name + '@' + p.version)"
       - name: Publish to npm
-        run: npm publish ./package/ --access public --provenance
+        run: npm publish ./package/ --access public
 
   # ── Publish Python package to PyPI (trusted publishing) ───
   publish-pypi:
@@ -209,6 +209,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: package/dist/
+          skip-existing: true
 
   # ── Create GitHub Release ──────────────────────────────────
   release:
