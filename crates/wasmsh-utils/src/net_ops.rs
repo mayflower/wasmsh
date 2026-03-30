@@ -222,26 +222,8 @@ fn write_curl_response(ctx: &mut UtilContext<'_>, opts: &CurlOpts, response: &Ht
     0
 }
 
-pub(crate) fn util_curl(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let opts = match parse_curl_args(argv) {
-        Ok(o) => o,
-        Err(e) => {
-            ctx.output.stderr(format!("curl: {e}\n").as_bytes());
-            return 2;
-        }
-    };
-
-    let Some(url) = &opts.url else {
-        ctx.output.stderr(b"curl: no URL specified\n");
-        return 2;
-    };
-    let url = url.clone();
-
-    let Some(backend) = ctx.network else {
-        ctx.output.stderr(b"curl: network access not available\n");
-        return 1;
-    };
-
+/// Build the HTTP request from parsed curl options.
+fn build_curl_request(opts: &CurlOpts, url: &str) -> HttpRequest {
     let method = opts.method.clone().unwrap_or_else(|| {
         if opts.head_only {
             "HEAD".into()
@@ -264,16 +246,60 @@ pub(crate) fn util_curl(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         ));
     }
 
-    let request = HttpRequest {
-        url: url.clone(),
-        method: method.clone(),
+    HttpRequest {
+        url: url.to_string(),
+        method,
         headers,
         body: opts.data.as_ref().map(|d| d.as_bytes().to_vec()),
         follow_redirects: opts.follow_redirects,
+    }
+}
+
+/// Check for HTTP error status when `--fail` is set. Returns exit code 22 if error.
+fn curl_check_fail_on_error(
+    ctx: &mut UtilContext<'_>,
+    opts: &CurlOpts,
+    response: &HttpResponse,
+) -> Option<i32> {
+    if !opts.fail_on_error || response.status < 400 {
+        return None;
+    }
+    if !opts.silent || opts.show_error {
+        ctx.output.stderr(
+            format!(
+                "curl: (22) The requested URL returned error: {}\n",
+                response.status
+            )
+            .as_bytes(),
+        );
+    }
+    Some(22)
+}
+
+pub(crate) fn util_curl(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let opts = match parse_curl_args(argv) {
+        Ok(o) => o,
+        Err(e) => {
+            ctx.output.stderr(format!("curl: {e}\n").as_bytes());
+            return 2;
+        }
     };
 
+    let Some(url) = &opts.url else {
+        ctx.output.stderr(b"curl: no URL specified\n");
+        return 2;
+    };
+    let url = url.clone();
+
+    let Some(backend) = ctx.network else {
+        ctx.output.stderr(b"curl: network access not available\n");
+        return 1;
+    };
+
+    let request = build_curl_request(&opts, &url);
+
     if opts.verbose {
-        curl_log_request(ctx, &method, &url, &request);
+        curl_log_request(ctx, &request.method, &url, &request);
     }
 
     let response = match backend.fetch(&request) {
@@ -285,17 +311,8 @@ pub(crate) fn util_curl(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         curl_log_response(ctx, &response);
     }
 
-    if opts.fail_on_error && response.status >= 400 {
-        if !opts.silent || opts.show_error {
-            ctx.output.stderr(
-                format!(
-                    "curl: (22) The requested URL returned error: {}\n",
-                    response.status
-                )
-                .as_bytes(),
-            );
-        }
-        return 22;
+    if let Some(code) = curl_check_fail_on_error(ctx, &opts, &response) {
+        return code;
     }
 
     let write_status = write_curl_response(ctx, &opts, &response);
