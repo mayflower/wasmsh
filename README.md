@@ -5,6 +5,9 @@
 [![CI](https://img.shields.io/badge/CI-passing-brightgreen)](.github/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.89+-orange.svg)](https://www.rust-lang.org)
+[![crates.io](https://img.shields.io/crates/v/wasmsh-runtime.svg)](https://crates.io/crates/wasmsh-runtime)
+[![npm](https://img.shields.io/npm/v/@mayflowergmbh/wasmsh-pyodide.svg)](https://www.npmjs.com/package/@mayflowergmbh/wasmsh-pyodide)
+[![PyPI](https://img.shields.io/pypi/v/wasmsh-pyodide-runtime.svg)](https://pypi.org/project/wasmsh-pyodide-runtime/)
 
 wasmsh is an independent shell implementation — not a port of BusyBox or a fork of Bash. It provides compatible behavior through a clean-room implementation with its own parser, VM, and utility stack.
 
@@ -43,6 +46,89 @@ wasmsh supports a broad subset of Bash syntax and BusyBox-style utilities:
 **Utilities** (86): `cat`, `ls`, `mkdir`, `rm`, `touch`, `mv`, `cp`, `ln`, `head`, `tail`, `wc`, `grep`, `sed`, `sort`, `uniq`, `cut`, `tr`, `tee`, `paste`, `rev`, `column`, `bat`, `xargs`, `seq`, `find`, `stat`, `basename`, `dirname`, `readlink`, `realpath`, `chmod`, `mktemp`, `date`, `sleep`, `env`, `printenv`, `expr`, `id`, `whoami`, `uname`, `hostname`, `yes`, `md5sum`, `sha256sum`, `sha1sum`, `sha512sum`, `base64`, `which`, `rmdir`, `tac`, `nl`, `shuf`, `cmp`, `comm`, `fold`, `nproc`, `expand`, `unexpand`, `truncate`, `factor`, `cksum`, `tsort`, `install`, `timeout`, `cal`, `diff`, `patch`, `tree`, `rg`, `fd`, `awk`, `jq`, `yq`, `bc`, `xxd`, `dd`, `strings`, `split`, `file`, `tar`, `gzip`, `gunzip`, `zcat`, `unzip`, `du`, `df`
 
 See [SUPPORTED.md](SUPPORTED.md) for the complete feature matrix.
+
+## Packages
+
+wasmsh is published to three registries:
+
+| Package | Registry | Install |
+|---------|----------|---------|
+| [`wasmsh-runtime`](https://crates.io/crates/wasmsh-runtime) | crates.io | `cargo add wasmsh-runtime` |
+| [`@mayflowergmbh/wasmsh-pyodide`](https://www.npmjs.com/package/@mayflowergmbh/wasmsh-pyodide) | npm | `npm install @mayflowergmbh/wasmsh-pyodide` |
+| [`wasmsh-pyodide-runtime`](https://pypi.org/project/wasmsh-pyodide-runtime/) | PyPI | `pip install wasmsh-pyodide-runtime` |
+
+All 15 workspace crates are published to crates.io under the `wasmsh-*` prefix.
+
+## DeepAgents Integration
+
+wasmsh provides a sandboxed execution backend for [DeepAgents](https://github.com/langchain-ai/deepagentsjs) — LLM agents get shell, Python, and filesystem tools without any host OS access.
+
+### TypeScript (Node.js and Browser)
+
+```bash
+npm install @langchain/wasmsh
+```
+
+```typescript
+import { createDeepAgent } from "deepagents";
+import { WasmshSandbox } from "@langchain/wasmsh";
+
+const sandbox = await WasmshSandbox.createNode();
+const agent = createDeepAgent({ model: "claude-sonnet-4-5-20250929", backend: sandbox });
+
+const result = await agent.invoke({
+  messages: [{ role: "user", content: "Analyze data.csv and create a summary report" }],
+});
+// Agent uses: execute (bash/python3), read_file, write_file, edit_file, ls, grep, glob
+await sandbox.stop();
+```
+
+In the browser, wasmsh runs entirely client-side via a Web Worker — no backend service needed:
+
+```typescript
+const sandbox = await WasmshSandbox.createBrowserWorker({
+  assetBaseUrl: "/pyodide-assets",
+});
+const agent = createDeepAgent({
+  model: new ChatAnthropic({
+    model: "claude-sonnet-4-5-20250929",
+    clientOptions: { dangerouslyAllowBrowser: true },
+  }),
+  backend: sandbox,
+});
+```
+
+### Python
+
+```bash
+pip install langchain-wasmsh
+```
+
+```python
+from deepagents.graph import create_deep_agent
+from langchain_wasmsh import WasmshSandbox
+
+sandbox = WasmshSandbox()
+agent = create_deep_agent(model="claude-sonnet-4-5-20250929", backend=sandbox)
+result = agent.invoke({"messages": [HumanMessage(content="Sort numbers.txt and compute statistics")]})
+sandbox.close()
+```
+
+### What the Agent Gets
+
+The `createDeepAgent` filesystem middleware automatically provides these tools when backed by a wasmsh sandbox:
+
+| Tool | Description |
+|------|-------------|
+| `execute` | Run shell commands (bash, python3, all 86 utilities) |
+| `read_file` | Read file content with line numbers |
+| `write_file` | Create new files |
+| `edit_file` | Exact string replacement in existing files |
+| `ls` | List directory contents |
+| `grep` | Search for patterns across files |
+| `glob` | Find files matching wildcard patterns |
+
+Skills and memory middleware also work through the sandbox — SKILL.md and AGENTS.md files are loaded from the sandboxed filesystem.
 
 ## Using Release Artifacts
 
