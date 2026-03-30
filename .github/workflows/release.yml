@@ -158,23 +158,30 @@ jobs:
             wasmsh-runtime
             wasmsh-browser wasmsh-testkit
           )
+          publish_crate() {
+            local crate=$1
+            for attempt in 1 2 3; do
+              output=$(cargo publish -p "$crate" --no-verify 2>&1) && {
+                echo "$output"
+                return 0
+              }
+              echo "$output"
+              if echo "$output" | grep -q "already exists"; then
+                echo "$crate already published, skipping"
+                return 0
+              fi
+              if echo "$output" | grep -q "429"; then
+                echo "Rate limited (attempt $attempt/3), waiting 180s..."
+                sleep 180
+              else
+                return 1
+              fi
+            done
+            return 1
+          }
           for crate in "${CRATES[@]}"; do
             echo "::group::Publishing $crate"
-            output=$(cargo publish -p "$crate" --no-verify 2>&1) && {
-              echo "$output"
-              echo "::endgroup::"
-              sleep 10
-              continue
-            }
-            echo "$output"
-            if echo "$output" | grep -q "already exists"; then
-              echo "$crate already published, skipping"
-              echo "::endgroup::"
-              continue
-            fi
-            echo "Retrying $crate after rate-limit cooldown (120s)..."
-            sleep 120
-            cargo publish -p "$crate" --no-verify
+            publish_crate "$crate"
             echo "::endgroup::"
             sleep 15
           done
