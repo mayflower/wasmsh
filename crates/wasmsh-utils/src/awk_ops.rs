@@ -2602,11 +2602,34 @@ impl AwkInterpreter {
     }
 
     fn exec_for_in(&mut self, var: &str, arr_name: &str, body: &[Stmt]) -> ControlFlow {
-        let keys: Vec<String> = self
+        let mut keys: Vec<String> = self
             .arrays
             .get(arr_name)
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default();
+        // gawk PROCINFO["sorted_in"] support: sort array traversal order
+        let sort_order = self
+            .arrays
+            .get("PROCINFO")
+            .and_then(|m| m.get("sorted_in"))
+            .map(AwkValue::to_str);
+        if let Some(ref order) = sort_order {
+            match order.as_str() {
+                "@ind_str_asc" => keys.sort(),
+                "@ind_str_desc" => keys.sort_by(|a, b| b.cmp(a)),
+                "@ind_num_asc" => keys.sort_by(|a, b| {
+                    parse_leading_num(a)
+                        .partial_cmp(&parse_leading_num(b))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }),
+                "@ind_num_desc" => keys.sort_by(|a, b| {
+                    parse_leading_num(b)
+                        .partial_cmp(&parse_leading_num(a))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }),
+                _ => {} // unsorted or unrecognized — default HashMap order
+            }
+        }
         for key in keys {
             self.set_var(var, AwkValue::Str(key));
             match self.exec_stmts(body) {
@@ -4812,5 +4835,44 @@ END { print count }
         let (status, out, _) = run_awk("BEGIN { printf \"% d\\n\", 42 }", "");
         assert_eq!(status, 0);
         assert_eq!(out, " 42\n");
+    }
+
+    #[test]
+    fn test_procinfo_sorted_in_str_asc() {
+        let prog = r#"BEGIN {
+            a["cherry"] = 3; a["apple"] = 1; a["banana"] = 2
+            PROCINFO["sorted_in"] = "@ind_str_asc"
+            for (k in a) printf "%s ", k
+            printf "\n"
+        }"#;
+        let (status, out, _) = run_awk(prog, "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "apple banana cherry \n");
+    }
+
+    #[test]
+    fn test_procinfo_sorted_in_str_desc() {
+        let prog = r#"BEGIN {
+            a["cherry"] = 3; a["apple"] = 1; a["banana"] = 2
+            PROCINFO["sorted_in"] = "@ind_str_desc"
+            for (k in a) printf "%s ", k
+            printf "\n"
+        }"#;
+        let (status, out, _) = run_awk(prog, "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "cherry banana apple \n");
+    }
+
+    #[test]
+    fn test_procinfo_sorted_in_num_asc() {
+        let prog = r#"BEGIN {
+            a[3] = "c"; a[1] = "a"; a[10] = "j"; a[2] = "b"
+            PROCINFO["sorted_in"] = "@ind_num_asc"
+            for (k in a) printf "%s ", k
+            printf "\n"
+        }"#;
+        let (status, out, _) = run_awk(prog, "");
+        assert_eq!(status, 0);
+        assert_eq!(out, "1 2 3 10 \n");
     }
 }
