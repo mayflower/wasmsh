@@ -40,6 +40,7 @@ export async function generateTasks(count, options = {}) {
   const model = new ChatAnthropic({
     model: "claude-haiku-4-5-20251001",
     temperature: 1.0,
+    maxTokens: 8192,
   });
 
   const categories = category
@@ -61,7 +62,23 @@ export async function generateTasks(count, options = {}) {
 
   // Strip markdown fences if the model included them
   const cleaned = text.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "").trim();
-  const tasks = JSON.parse(cleaned);
+
+  let tasks;
+  try {
+    tasks = JSON.parse(cleaned);
+  } catch (e) {
+    // Try to extract the largest valid JSON array
+    const match = cleaned.match(/\[[\s\S]*\]/);
+    if (match) {
+      try {
+        tasks = JSON.parse(match[0]);
+      } catch {
+        throw new Error(`Task generation returned invalid JSON: ${e.message}\n${cleaned.slice(0, 500)}`);
+      }
+    } else {
+      throw new Error(`Task generation returned invalid JSON: ${e.message}\n${cleaned.slice(0, 500)}`);
+    }
+  }
 
   if (!Array.isArray(tasks)) {
     throw new Error("Task generation did not return an array");

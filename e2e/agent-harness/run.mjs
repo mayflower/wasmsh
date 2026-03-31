@@ -14,7 +14,6 @@
 import { generateTasks, CATEGORIES } from "./lib/generate.mjs";
 import { executeTask } from "./lib/execute.mjs";
 import { diagnoseFailure } from "./lib/diagnose.mjs";
-import { createSandbox } from "./lib/session.mjs";
 import { createRecorder, printBugs, printSummaryFromFile } from "./lib/recorder.mjs";
 import { readdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
@@ -86,11 +85,6 @@ async function main() {
     process.exit(1);
   }
 
-  // Boot the sandbox once — reused across all tasks
-  console.log("Booting wasmsh sandbox (Pyodide WASM)...");
-  const sandbox = await createSandbox();
-  console.log("Sandbox ready.\n");
-
   console.log(`Generating ${opts.count} random tasks...`);
   const tasks = await generateTasks(opts.count, { category: opts.category });
   console.log(`Generated ${tasks.length} tasks.\n`);
@@ -103,7 +97,7 @@ async function main() {
     const label = `${task.category}: ${task.id}`;
     process.stdout.write(`${prefix} ${padRight(label, 45)} `);
 
-    const result = await executeTask(task, sandbox);
+    const result = await executeTask(task);
 
     let diagnosis = null;
     if (!result.passed) {
@@ -148,9 +142,6 @@ async function main() {
       }
     }
   }
-
-  // Cleanup
-  try { await sandbox.stop(); } catch { /* ignore */ }
 
   recorder.printSummary();
 }

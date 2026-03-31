@@ -64,16 +64,13 @@ function formatToolTrace(trace) {
 
 export { formatToolTrace };
 
-export async function executeTask(task, sandbox) {
+export async function executeTask(task) {
+  const { createSandbox } = await import("./session.mjs");
+  const sandbox = await createSandbox();
   const startTime = Date.now();
   const toolTrace = [];
 
   try {
-    // Clean workspace from previous task (preserve /workspace itself)
-    await sandbox.execute(
-      "find /workspace -mindepth 1 -delete 2>/dev/null; mkdir -p /workspace; true",
-    );
-
     // Upload seed files
     for (const f of task.seed_files || []) {
       await sandbox.uploadFiles([
@@ -120,5 +117,7 @@ export async function executeTask(task, sandbox) {
       duration_ms: Date.now() - startTime,
       error: err.message === "TIMEOUT" ? "timeout" : err.message,
     };
+  } finally {
+    try { await sandbox.stop(); } catch { /* ignore */ }
   }
 }

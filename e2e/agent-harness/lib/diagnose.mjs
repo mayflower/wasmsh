@@ -13,12 +13,12 @@ An LLM agent was given a task. It used tools (execute, write_file, read_file, ed
 You will see the FULL tool call trace — every command the agent ran and every response the sandbox returned.
 
 Classify the failure as exactly one of:
-- sandbox_bug: A shell command or utility returned wrong output, threw an unexpected error, or is missing/unimplemented. Look for: "command not found", "not implemented", wrong output from a utility, Python import errors for stdlib modules, unexpected exit codes from correct commands.
-- llm_mistake: The agent used wrong logic, wrong syntax, or misunderstood the task. The sandbox responded correctly to what the agent asked, but the agent asked the wrong thing.
-- test_issue: The generated task or verification command was flawed (impossible to complete, wrong verification logic, seed files missing, contradictory requirements).
+- sandbox_bug: The sandbox didn't behave like a real bash+Python environment would. This includes: "command not found" for standard commands, syntax not parsed that bash would accept (process substitution, arrays, etc.), utilities producing wrong output, Python stdlib modules failing to import, unexpected exit codes from correct commands, shell features not working. If a verification command fails because wasmsh can't parse valid bash syntax, that's sandbox_bug. If a utility exists but gives wrong results, that's sandbox_bug.
+- llm_mistake: The sandbox behaved exactly like real bash would, but the agent wrote incorrect logic. The agent's commands would also fail on a real Linux system.
+- test_issue: ONLY use this if the task is literally impossible (contradictory requirements, expects files that don't exist and weren't seeded). Do NOT use this just because the verification uses advanced bash features — if wasmsh can't run valid bash, that's sandbox_bug.
 - timeout: The task exceeded time limits.
 
-IMPORTANT: Focus on the tool outputs. If a command the agent ran returned an error message from wasmsh (e.g., "command not found", unexpected empty output from a valid command, segfault, or wrong computation from a utility), that's sandbox_bug even if the agent could have worked around it.
+IMPORTANT: Bias toward sandbox_bug. The whole point is to find gaps in wasmsh. If there's any doubt whether the sandbox or the agent is at fault, classify as sandbox_bug. Only use llm_mistake if you're certain the same commands would fail on a real Linux bash shell.
 
 Respond as a single JSON object:
 {"classification": "sandbox_bug|llm_mistake|test_issue|timeout", "reason": "1-2 sentence explanation of root cause", "failed_command": "the specific command that failed, or null", "wasmsh_component": "utility or feature name, or null", "suggested_fix": "what to fix in wasmsh, or null"}`;
