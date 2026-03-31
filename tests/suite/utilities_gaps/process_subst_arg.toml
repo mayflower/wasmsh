@@ -1,0 +1,14 @@
+[test]
+name = "process-substitution-as-command-argument"
+tags = ["process-substitution", "gap"]
+requires = ["simple-command"]
+
+[setup]
+files = { "/test.txt" = "hello\n" }
+
+[input]
+script = "diff /test.txt <(echo hello) && echo SAME || echo DIFF"
+
+[expect]
+status = 0
+stdout = "SAME\n"

@@ -101,14 +101,7 @@ impl<'src> Parser<'src> {
         self.at_word() && self.current_text() == text
     }
 
-    fn at_process_substitution(&mut self) -> bool {
-        if matches!(self.current.kind, TokenKind::Less | TokenKind::Greater) {
-            if let Ok(next) = self.peek_nth(0) {
-                return next.kind == TokenKind::LParen;
-            }
-        }
-        false
-    }
+    // at_process_substitution removed — use inline peek_is_lparen check instead
 
     fn parse_process_substitution_word(&mut self) -> Result<Word, ParseError> {
         use wasmsh_ast::WordPart;
@@ -157,11 +150,7 @@ impl<'src> Parser<'src> {
         })
     }
 
-    fn at_redirection(&mut self) -> bool {
-        // `<(` and `>(` are process substitution, not redirection.
-        if self.at_process_substitution() {
-            return false;
-        }
+    fn at_redirection(&self) -> bool {
         matches!(
             self.current.kind,
             TokenKind::Less
@@ -269,7 +258,7 @@ impl<'src> Parser<'src> {
         matches!(self.peek_nth(1), Ok(tok) if tok.kind == TokenKind::Amp)
     }
 
-    fn at_command_start(&mut self) -> bool {
+    fn at_command_start(&self) -> bool {
         if self.at(&TokenKind::LParen) || self.at(&TokenKind::DblLBracket) {
             return true;
         }
@@ -1018,7 +1007,9 @@ impl<'src> Parser<'src> {
             return Ok(true);
         }
         // Process substitution <(cmd) / >(cmd) is a word argument, not a redirection.
-        if self.at_process_substitution() {
+        if matches!(self.current.kind, TokenKind::Less | TokenKind::Greater)
+            && self.peek_is_lparen()
+        {
             let word = self.parse_process_substitution_word()?;
             words.push(word);
             *past_assignments = true;

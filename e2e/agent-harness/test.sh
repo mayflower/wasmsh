@@ -39,7 +39,16 @@ echo ""
 echo "=== Packaging runtime assets ==="
 node tools/pyodide/package-runtime-assets.mjs
 
-# ── Step 4: Reinstall local deps so the agent harness picks up fresh wasm ──
+# ── Step 4: Refresh deepagentsjs pnpm deps (pnpm copies file: deps, not symlinks) ──
+DEEPAGENTS_DIR="$REPO_ROOT/../deepagentsjs"
+if [ -d "$DEEPAGENTS_DIR" ]; then
+    echo ""
+    echo "=== Refreshing deepagentsjs pnpm dependencies ==="
+    cd "$DEEPAGENTS_DIR"
+    pnpm install --frozen-lockfile 2>/dev/null || pnpm install
+fi
+
+# ── Step 5: Reinstall agent harness npm deps ──
 echo ""
 echo "=== Reinstalling agent harness dependencies ==="
 cd "$SCRIPT_DIR"
