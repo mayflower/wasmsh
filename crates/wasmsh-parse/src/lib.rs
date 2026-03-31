@@ -101,7 +101,67 @@ impl<'src> Parser<'src> {
         self.at_word() && self.current_text() == text
     }
 
-    fn at_redirection(&self) -> bool {
+    fn at_process_substitution(&mut self) -> bool {
+        if matches!(self.current.kind, TokenKind::Less | TokenKind::Greater) {
+            if let Ok(next) = self.peek_nth(0) {
+                return next.kind == TokenKind::LParen;
+            }
+        }
+        false
+    }
+
+    fn parse_process_substitution_word(&mut self) -> Result<Word, ParseError> {
+        use wasmsh_ast::WordPart;
+
+        let start = self.current.span.start;
+        let is_input = self.current.kind == TokenKind::Less;
+        self.advance()?; // consume < or >
+        self.advance()?; // consume (
+
+        // Collect tokens until matching )
+        let inner_start = self.current.span.start;
+        let mut depth = 1u32;
+        while depth > 0 {
+            match self.current.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                TokenKind::Eof => {
+                    return Err(ParseError {
+                        message: "unterminated process substitution".into(),
+                        offset: start,
+                    });
+                }
+                _ => {}
+            }
+            self.advance()?;
+        }
+        let inner_end = self.current.span.start;
+        let inner_text = self.source[inner_start as usize..inner_end as usize]
+            .trim()
+            .to_string();
+        self.advance()?; // consume )
+
+        let part = if is_input {
+            WordPart::ProcessSubstIn(inner_text.into())
+        } else {
+            WordPart::ProcessSubstOut(inner_text.into())
+        };
+        Ok(Word {
+            parts: vec![part],
+            span: self.span_from(start),
+        })
+    }
+
+    fn at_redirection(&mut self) -> bool {
+        // `<(` and `>(` are process substitution, not redirection.
+        if self.at_process_substitution() {
+            return false;
+        }
         matches!(
             self.current.kind,
             TokenKind::Less
@@ -209,7 +269,7 @@ impl<'src> Parser<'src> {
         matches!(self.peek_nth(1), Ok(tok) if tok.kind == TokenKind::Amp)
     }
 
-    fn at_command_start(&self) -> bool {
+    fn at_command_start(&mut self) -> bool {
         if self.at(&TokenKind::LParen) || self.at(&TokenKind::DblLBracket) {
             return true;
         }
@@ -955,6 +1015,13 @@ impl<'src> Parser<'src> {
     ) -> Result<bool, ParseError> {
         if self.at_fd_prefix_redirection() {
             redirections.push(self.parse_fd_prefixed_redirection()?);
+            return Ok(true);
+        }
+        // Process substitution <(cmd) / >(cmd) is a word argument, not a redirection.
+        if self.at_process_substitution() {
+            let word = self.parse_process_substitution_word()?;
+            words.push(word);
+            *past_assignments = true;
             return Ok(true);
         }
         if self.at_redirection() {
