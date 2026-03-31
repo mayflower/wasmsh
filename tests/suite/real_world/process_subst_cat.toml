@@ -1,0 +1,12 @@
+[test]
+name = "process substitution <(cmd) works with cat"
+tags = ["process-substitution"]
+tier = "P0"
+requires = ["simple-command"]
+
+[input]
+script = "cat <(echo hello)"
+
+[expect]
+status = 0
+stdout = "hello\n"

@@ -33,6 +33,9 @@ fn parse_word_part(
         b'"' => parse_double_quoted_part(text, pos, lit, parts),
         b'\\' => parse_escaped_literal(bytes, pos, lit),
         b'$' => parse_dollar_part(text, bytes, pos, lit, parts),
+        b'<' | b'>' if bytes.get(*pos + 1) == Some(&b'(') => {
+            parse_process_subst(text, bytes, pos, lit, parts);
+        }
         _ => {
             lit.push(bytes[*pos] as char);
             *pos += 1;
@@ -286,6 +289,55 @@ fn parse_dollar_brace(text: &str, pos: &mut usize) -> WordPart {
         }
     }
     WordPart::Parameter(text[start..*pos].into())
+}
+
+/// Parse `<(cmd)` or `>(cmd)` process substitution.
+fn parse_process_subst(
+    text: &str,
+    bytes: &[u8],
+    pos: &mut usize,
+    lit: &mut String,
+    parts: &mut Vec<WordPart>,
+) {
+    flush(lit, parts);
+    let is_input = bytes[*pos] == b'<';
+    *pos += 2; // skip <( or >(
+    let start = *pos;
+    let mut depth: u32 = 1;
+    while *pos < bytes.len() && depth > 0 {
+        match bytes[*pos] {
+            b'(' => {
+                depth += 1;
+                *pos += 1;
+            }
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    let inner = &text[start..*pos];
+                    *pos += 1; // skip )
+                    let part = if is_input {
+                        WordPart::ProcessSubstIn(inner.into())
+                    } else {
+                        WordPart::ProcessSubstOut(inner.into())
+                    };
+                    parts.push(part);
+                    return;
+                }
+                *pos += 1;
+            }
+            b'\'' => skip_single_quoted(bytes, pos),
+            b'"' => skip_double_quoted(bytes, pos),
+            _ => *pos += 1,
+        }
+    }
+    // Unterminated — treat as literal
+    let inner = &text[start..*pos];
+    let part = if is_input {
+        WordPart::ProcessSubstIn(inner.into())
+    } else {
+        WordPart::ProcessSubstOut(inner.into())
+    };
+    parts.push(part);
 }
 
 /// Skip past a single-quoted string (pos is at the opening `'`).

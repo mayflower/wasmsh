@@ -124,6 +124,7 @@ fn expand_part_depth(part: &WordPart, state: &mut ShellState, out: &mut String, 
             let result = eval_arithmetic(expr, state);
             out.push_str(&result.to_string());
         }
+        // CommandSubstitution and ProcessSubst* are resolved at runtime, not during expansion.
         _ => {}
     }
 }

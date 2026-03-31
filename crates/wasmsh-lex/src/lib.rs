@@ -507,8 +507,8 @@ impl<'src> Lexer<'src> {
             }
             b'&' => Ok(self.amp_token()),
             b'|' => Ok(self.pipe_token()),
-            b'>' => Ok(self.greater_token()),
-            b'<' => Ok(self.less_token()),
+            b'>' => self.greater_token(),
+            b'<' => self.less_token(),
             _ => self.read_word(),
         }
     }
@@ -533,21 +533,63 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn greater_token(&mut self) -> Token {
+    fn greater_token(&mut self) -> Result<Token, LexerError> {
+        if self.peek_ahead(1) == Some(b'(') {
+            return self.consume_process_subst();
+        }
         if self.peek_ahead(1) == Some(b'>') {
-            self.double_op(TokenKind::GreaterGreater)
+            Ok(self.double_op(TokenKind::GreaterGreater))
         } else {
-            self.single_op(TokenKind::Greater)
+            Ok(self.single_op(TokenKind::Greater))
         }
     }
 
-    fn less_token(&mut self) -> Token {
-        match (self.peek_ahead(1), self.peek_ahead(2)) {
+    fn less_token(&mut self) -> Result<Token, LexerError> {
+        if self.peek_ahead(1) == Some(b'(') {
+            return self.consume_process_subst();
+        }
+        Ok(match (self.peek_ahead(1), self.peek_ahead(2)) {
             (Some(b'<'), Some(b'<')) => self.triple_op(TokenKind::LessLessLess),
             (Some(b'<'), Some(b'-')) => self.triple_op(TokenKind::LessLessDash),
             (Some(b'<'), _) => self.double_op(TokenKind::LessLess),
             (Some(b'>'), _) => self.double_op(TokenKind::LessGreater),
             _ => self.single_op(TokenKind::Less),
+        })
+    }
+
+    /// Consume `<(...)` or `>(...)` process substitution as a word token.
+    fn consume_process_subst(&mut self) -> Result<Token, LexerError> {
+        let start = self.pos;
+        self.pos += 2; // skip < or > and (
+        let mut depth: u32 = 1;
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(LexerError {
+                        message: "unterminated process substitution".into(),
+                        span: self.span_from(start),
+                    });
+                }
+                Some(b'(') => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                Some(b')') => {
+                    self.pos += 1;
+                    depth -= 1;
+                    if depth == 0 {
+                        let span = self.span_from(start);
+                        return Ok(Token {
+                            kind: TokenKind::Word {
+                                is_reserved_candidate: false,
+                            },
+                            span,
+                        });
+                    }
+                }
+                Some(b'\\') => self.consume_backslash(),
+                Some(_) => self.pos += 1,
+            }
         }
     }
 

@@ -315,6 +315,10 @@ pub enum WordPart {
     CommandSubstitution(SmolStr),
     /// `$((...))` arithmetic expansion. Stores the inner expression text.
     Arithmetic(SmolStr),
+    /// `<(cmd)` process substitution (input). Stores the inner command text.
+    ProcessSubstIn(SmolStr),
+    /// `>(cmd)` process substitution (output). Stores the inner command text.
+    ProcessSubstOut(SmolStr),
     // Glob and tilde expansion handled at runtime/expansion layers.
 }
 

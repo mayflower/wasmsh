@@ -1,0 +1,15 @@
+[test]
+name = "process substitution <(cmd) works with diff"
+tags = ["process-substitution"]
+tier = "P0"
+requires = ["simple-command"]
+
+[setup]
+files = { "/a.txt" = "hello\nworld\n" }
+
+[input]
+script = "diff /a.txt <(echo -e 'hello\\nworld') && echo SAME || echo DIFF"
+
+[expect]
+status = 0
+stdout = "SAME\n"

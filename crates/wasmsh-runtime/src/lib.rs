@@ -642,6 +642,53 @@ impl WorkerRuntime {
         smol_str::SmolStr::from(result.trim_end_matches('\n'))
     }
 
+    /// Counter for generating unique temp file paths for process substitution.
+    fn next_proc_subst_id() -> u64 {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Execute `<(cmd)` — run the command, write stdout to a temp file,
+    /// return the temp file path as the expansion result.
+    fn execute_process_subst_in(&mut self, inner: &str) -> smol_str::SmolStr {
+        let output = self.execute_subst_raw(inner);
+        let path = format!("/tmp/_proc_subst_{}", Self::next_proc_subst_id());
+        let h = self.fs.open(&path, OpenOptions::write()).unwrap();
+        let _ = self.fs.write_file(h, output.as_bytes());
+        self.fs.close(h);
+        smol_str::SmolStr::from(path)
+    }
+
+    /// Execute `>(cmd)` — create a temp file, return its path.
+    /// After the outer command writes to it, read and feed to the inner command.
+    /// (Simplified: just returns a writable temp path; full pipe semantics deferred.)
+    fn execute_process_subst_out(&mut self, _inner: &str) -> smol_str::SmolStr {
+        let path = format!("/tmp/_proc_subst_{}", Self::next_proc_subst_id());
+        // Create empty file
+        let h = self.fs.open(&path, OpenOptions::write()).unwrap();
+        let _ = self.fs.write_file(h, b"");
+        self.fs.close(h);
+        smol_str::SmolStr::from(path)
+    }
+
+    /// Execute a command and return its raw stdout (without trimming).
+    fn execute_subst_raw(&mut self, inner: &str) -> String {
+        let saved_stdout = std::mem::take(&mut self.vm.stdout);
+        let events = self.execute_input_inner(inner);
+        let mut result = String::new();
+        for e in &events {
+            if let WorkerEvent::Stdout(d) = e {
+                result.push_str(&String::from_utf8_lossy(d));
+            }
+        }
+        if !self.vm.stdout.is_empty() {
+            result.push_str(&String::from_utf8_lossy(&self.vm.stdout));
+            self.vm.stdout.clear();
+        }
+        self.vm.stdout = saved_stdout;
+        result
+    }
+
     /// Resolve command substitutions in a list of words by executing them.
     fn resolve_command_subst(&mut self, words: &[wasmsh_ast::Word]) -> Vec<wasmsh_ast::Word> {
         words
@@ -654,15 +701,30 @@ impl WorkerRuntime {
                         wasmsh_ast::WordPart::CommandSubstitution(inner) => {
                             wasmsh_ast::WordPart::Literal(self.execute_subst(inner))
                         }
+                        wasmsh_ast::WordPart::ProcessSubstIn(inner) => {
+                            wasmsh_ast::WordPart::Literal(self.execute_process_subst_in(inner))
+                        }
+                        wasmsh_ast::WordPart::ProcessSubstOut(inner) => {
+                            wasmsh_ast::WordPart::Literal(self.execute_process_subst_out(inner))
+                        }
                         wasmsh_ast::WordPart::DoubleQuoted(inner_parts) => {
                             let resolved: Vec<wasmsh_ast::WordPart> = inner_parts
                                 .iter()
-                                .map(|ip| {
-                                    if let wasmsh_ast::WordPart::CommandSubstitution(inner) = ip {
+                                .map(|ip| match ip {
+                                    wasmsh_ast::WordPart::CommandSubstitution(inner) => {
                                         wasmsh_ast::WordPart::Literal(self.execute_subst(inner))
-                                    } else {
-                                        ip.clone()
                                     }
+                                    wasmsh_ast::WordPart::ProcessSubstIn(inner) => {
+                                        wasmsh_ast::WordPart::Literal(
+                                            self.execute_process_subst_in(inner),
+                                        )
+                                    }
+                                    wasmsh_ast::WordPart::ProcessSubstOut(inner) => {
+                                        wasmsh_ast::WordPart::Literal(
+                                            self.execute_process_subst_out(inner),
+                                        )
+                                    }
+                                    other => other.clone(),
                                 })
                                 .collect();
                             wasmsh_ast::WordPart::DoubleQuoted(resolved)
