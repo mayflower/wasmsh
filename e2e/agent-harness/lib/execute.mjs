@@ -26,14 +26,22 @@ function extractToolTrace(messages) {
         trace.push({
           tool: tc.name,
           input: tc.args,
+          toolCallId: tc.id ?? null,
           output: null, // filled from the next ToolMessage
         });
       }
     }
     // ToolMessage — result of a tool call
     if (msg.constructor?.name === "ToolMessage" || msg.name) {
-      // Match to the last trace entry with same tool and no output yet
-      const pending = trace.findLast((t) => t.output === null);
+      // Match by tool_call_id first (correct for parallel calls),
+      // fall back to first pending entry with no output.
+      const toolCallId = msg.tool_call_id;
+      let pending = toolCallId
+        ? trace.find((t) => t.output === null && t.toolCallId === toolCallId)
+        : null;
+      if (!pending) {
+        pending = trace.find((t) => t.output === null);
+      }
       if (pending) {
         const content = typeof msg.content === "string"
           ? msg.content
