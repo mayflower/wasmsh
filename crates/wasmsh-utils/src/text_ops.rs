@@ -227,11 +227,17 @@ pub(crate) fn util_wc(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         return 1;
     }
     let mut status = 0;
+    let mut total_lines: usize = 0;
+    let mut total_words: usize = 0;
+    let mut total_bytes: usize = 0;
     for path in &file_args {
         let full = resolve_path(ctx.cwd, path);
         match read_text(ctx.fs, &full) {
             Ok(text) => {
                 let bytes = text.len();
+                total_lines += text.lines().count();
+                total_words += text.split_whitespace().count();
+                total_bytes += bytes;
                 wc_emit(ctx, &text, bytes, Some(path), &flags);
             }
             Err(e) => {
@@ -239,6 +245,9 @@ pub(crate) fn util_wc(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                 status = 1;
             }
         }
+    }
+    if file_args.len() > 1 {
+        wc_emit_totals(ctx, total_lines, total_words, total_bytes, &flags);
     }
     status
 }
@@ -324,6 +333,31 @@ fn wc_emit(
         out.push_str(p);
     }
     out.push('\n');
+    ctx.output.stdout(out.as_bytes());
+}
+
+fn wc_emit_totals(
+    ctx: &mut UtilContext<'_>,
+    lines: usize,
+    words: usize,
+    bytes: usize,
+    flags: &WcFlags,
+) {
+    let mut parts = Vec::new();
+    if flags.lines {
+        parts.push(format!("{lines:>7}"));
+    }
+    if flags.words {
+        parts.push(format!("{words:>7}"));
+    }
+    if flags.bytes {
+        parts.push(format!("{bytes:>7}"));
+    }
+    if flags.max_line_length {
+        parts.push(format!("{:>7}", 0)); // total max-line not meaningful
+    }
+    let mut out = parts.join("");
+    out.push_str(" total\n");
     ctx.output.stdout(out.as_bytes());
 }
 

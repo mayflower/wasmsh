@@ -1,0 +1,14 @@
+[test]
+name = "wc-multi-file-total"
+tags = ["utility", "gap"]
+requires = ["wc"]
+
+[setup]
+files = { "/a.txt" = "one\ntwo\nthree\n", "/b.txt" = "four\nfive\n" }
+
+[input]
+script = "wc -l /a.txt /b.txt"
+
+[expect]
+status = 0
+stdout_contains = ["total"]
