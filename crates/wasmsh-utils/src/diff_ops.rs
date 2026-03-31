@@ -700,38 +700,54 @@ pub(crate) fn util_diff(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         return 2;
     }
 
-    let path_a = resolve_path(ctx.cwd, positional[0]);
-    let path_b = resolve_path(ctx.cwd, positional[1]);
-
-    let stat_a = ctx.fs.stat(&path_a);
-    let stat_b = ctx.fs.stat(&path_b);
-
-    let a_is_dir = stat_a.as_ref().is_ok_and(|m| m.is_dir);
-    let b_is_dir = stat_b.as_ref().is_ok_and(|m| m.is_dir);
-
-    if a_is_dir && b_is_dir {
-        if !flags.recursive {
-            let msg = format!("diff: {} is a directory\n", positional[0]);
-            ctx.output.stderr(msg.as_bytes());
-            return 2;
+    // Handle "-" as stdin for either operand
+    let stdin_text = ctx.stdin.map(|d| String::from_utf8_lossy(d).to_string());
+    let (old_text, old_label) = if positional[0] == "-" {
+        (
+            stdin_text.clone().unwrap_or_default(),
+            "/dev/stdin".to_string(),
+        )
+    } else {
+        let path = resolve_path(ctx.cwd, positional[0]);
+        let stat = ctx.fs.stat(&path);
+        if stat.as_ref().is_ok_and(|m| m.is_dir) {
+            let path_b = resolve_path(ctx.cwd, positional[1]);
+            let stat_b = ctx.fs.stat(&path_b);
+            if stat_b.as_ref().is_ok_and(|m| m.is_dir) && flags.recursive {
+                return diff_dirs(ctx, &path, &path_b, positional[0], positional[1], &flags);
+            }
         }
-        return diff_dirs(ctx, &path_a, &path_b, positional[0], positional[1], &flags);
-    }
-
-    let old_text = match diff_read_file(ctx, &stat_a, &path_a, positional[0], flags.new_file) {
-        Ok(t) => t,
-        Err(status) => return status,
+        match diff_read_file(
+            ctx,
+            &ctx.fs.stat(&path),
+            &path,
+            positional[0],
+            flags.new_file,
+        ) {
+            Ok(t) => (t, positional[0].to_string()),
+            Err(status) => return status,
+        }
     };
-    let new_text = match diff_read_file(ctx, &stat_b, &path_b, positional[1], flags.new_file) {
-        Ok(t) => t,
-        Err(status) => return status,
+    let (new_text, new_label) = if positional[1] == "-" {
+        (stdin_text.unwrap_or_default(), "/dev/stdin".to_string())
+    } else {
+        let path = resolve_path(ctx.cwd, positional[1]);
+        match diff_read_file(
+            ctx,
+            &ctx.fs.stat(&path),
+            &path,
+            positional[1],
+            flags.new_file,
+        ) {
+            Ok(t) => (t, positional[1].to_string()),
+            Err(status) => return status,
+        }
     };
 
     let old_lines: Vec<&str> = old_text.lines().collect();
     let new_lines: Vec<&str> = new_text.lines().collect();
 
-    let (output, differs) =
-        diff_texts(&old_lines, &new_lines, positional[0], positional[1], &flags);
+    let (output, differs) = diff_texts(&old_lines, &new_lines, &old_label, &new_label, &flags);
 
     if !output.is_empty() {
         ctx.output.stdout(output.as_bytes());
