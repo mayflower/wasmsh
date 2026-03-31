@@ -1,0 +1,16 @@
+{
+  "name": "wasmsh-agent-harness",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "LLM-generated random task harness for wasmsh compatibility testing (uses mayflower/deepagentsjs fork)",
+  "dependencies": {
+    "@langchain/anthropic": "^0.3",
+    "@langchain/core": "^0.3",
+    "deepagents": "file:../../../deepagentsjs/libs/deepagents",
+    "@langchain/wasmsh": "file:../../../deepagentsjs/libs/providers/wasmsh"
+  },
+  "scripts": {
+    "start": "node run.mjs"
+  }
+}
