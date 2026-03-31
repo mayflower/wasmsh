@@ -8,7 +8,7 @@
 import { createDeepAgent } from "deepagents";
 import { HumanMessage } from "@langchain/core/messages";
 
-const MODEL = "claude-haiku-4-5-20251001";
+const MODEL = "claude-sonnet-4-5-20250929";
 const MAX_AGENT_TIMEOUT = 300_000; // 5 minutes per task
 
 /**
