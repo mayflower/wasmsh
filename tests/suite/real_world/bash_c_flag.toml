@@ -1,0 +1,12 @@
+[test]
+name = "bash -c executes inline script"
+tags = ["bash", "sh", "script"]
+tier = "P0"
+requires = ["simple-command"]
+
+[input]
+script = "bash -c 'echo inline'"
+
+[expect]
+status = 0
+stdout = "inline\n"

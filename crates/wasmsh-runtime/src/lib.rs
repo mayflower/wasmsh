@@ -1037,9 +1037,58 @@ impl WorkerRuntime {
         }
     }
 
+    /// Handle `bash`/`sh` commands by reading the script and executing it.
+    fn call_shell_script(&mut self, argv: &[String]) {
+        if argv.len() < 2 {
+            // Interactive shell not supported — just return
+            return;
+        }
+
+        // Check for -c flag (inline script)
+        if argv[1] == "-c" {
+            if let Some(script) = argv.get(2) {
+                let sub_events = self.execute_input_inner(script);
+                self.merge_sub_events_with_diagnostics(sub_events);
+            }
+            return;
+        }
+
+        // Read script file from VFS
+        let path = if argv[1].starts_with('/') {
+            argv[1].clone()
+        } else {
+            format!("{}/{}", self.vm.state.cwd, argv[1])
+        };
+        let Ok(h) = self.fs.open(&path, OpenOptions::read()) else {
+            let msg = format!("{}: {}: No such file or directory\n", argv[0], argv[1]);
+            self.vm.stderr.extend_from_slice(msg.as_bytes());
+            self.vm.state.last_status = 127;
+            return;
+        };
+        let data = self.fs.read_file(h).unwrap_or_default();
+        self.fs.close(h);
+        let content = String::from_utf8_lossy(&data).to_string();
+
+        // Set positional parameters from remaining argv
+        let old_positional = std::mem::take(&mut self.vm.state.positional);
+        self.vm.state.positional = argv[1..]
+            .iter()
+            .map(|s| smol_str::SmolStr::from(s.as_str()))
+            .collect();
+
+        let sub_events = self.execute_input_inner(&content);
+        self.merge_sub_events_with_diagnostics(sub_events);
+
+        self.vm.state.positional = old_positional;
+    }
+
     /// Dispatch a command to a shell function, builtin, utility, or report not found.
     fn dispatch_command(&mut self, cmd_name: &str, argv: &[String]) {
         if self.check_resource_limits() {
+            return;
+        }
+        if cmd_name == "bash" || cmd_name == "sh" {
+            self.call_shell_script(argv);
             return;
         }
         if let Some(body) = self.functions.get(cmd_name).cloned() {

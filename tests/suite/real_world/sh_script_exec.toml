@@ -1,0 +1,15 @@
+[test]
+name = "sh executes a script file"
+tags = ["bash", "sh", "script"]
+tier = "P0"
+requires = ["simple-command"]
+
+[setup]
+files = { "/test.sh" = "echo hello from sh" }
+
+[input]
+script = "sh /test.sh"
+
+[expect]
+status = 0
+stdout = "hello from sh\n"
