@@ -732,7 +732,7 @@ fn test_binary(left: &str, op: &str, right: &str) -> bool {
 }
 
 fn int(s: &str) -> i64 {
-    s.parse().unwrap_or(0)
+    s.trim().parse().unwrap_or(0)
 }
 
 /// `shift` — shift positional parameters left by N (default 1).

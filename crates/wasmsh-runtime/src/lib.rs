@@ -3123,8 +3123,8 @@ fn eval_regex_match(lhs: &str, rhs: &str, state: &mut ShellState) -> bool {
 
 /// Evaluate an integer comparison operator (`-eq`, `-ne`, `-lt`, `-le`, `-gt`, `-ge`).
 fn eval_int_cmp(lhs: &str, op: &str, rhs: &str) -> bool {
-    let a: i64 = lhs.parse().unwrap_or(0);
-    let b: i64 = rhs.parse().unwrap_or(0);
+    let a: i64 = lhs.trim().parse().unwrap_or(0);
+    let b: i64 = rhs.trim().parse().unwrap_or(0);
     match op {
         "-eq" => a == b,
         "-ne" => a != b,

@@ -1,0 +1,11 @@
+[test]
+name = "test-eq-trims-whitespace"
+tags = ["builtin", "gap"]
+requires = ["test"]
+
+[input]
+script = '[ "   5" -eq 5 ] && echo PASS || echo FAIL'
+
+[expect]
+status = 0
+stdout = "PASS\n"
