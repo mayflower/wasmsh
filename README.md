@@ -65,10 +65,15 @@ just build-pyodide                                   # Pyodide wasm (needs emcc)
 
 ## Docs
 
-- [Supported features](SUPPORTED.md) — full syntax and command matrix
-- [Architecture](docs/adr/) — ADRs for design decisions
-- [Protocol](docs/reference/) — JSON message protocol
-- [Examples](examples/) — standalone and TypeScript usage
+| | |
+|-|-|
+| [Tutorials](docs/tutorials/) | Step-by-step guides to get started |
+| [How-to Guides](docs/guides/) | Task-oriented recipes for common operations |
+| [Reference](docs/reference/) | Shell syntax, builtins, utilities, protocol |
+| [Explanation](docs/explanation/) | Architecture, design decisions, trade-offs |
+| [ADRs](docs/adr/) | Architectural Decision Records |
+| [Supported Features](SUPPORTED.md) | Complete syntax and command matrix |
+| [Examples](examples/) | Standalone and TypeScript usage |
 
 ## License
 
