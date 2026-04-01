@@ -1528,15 +1528,27 @@ pub(crate) fn util_cut(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         if arg == "-d" && i + 1 < argv.len() {
             delim = argv[i + 1].chars().next().unwrap_or('\t');
             i += 2;
+        } else if arg.starts_with("-d") && arg.len() > 2 {
+            delim = arg[2..].chars().next().unwrap_or('\t');
+            i += 1;
         } else if arg == "-f" && i + 1 < argv.len() {
             mode = Some(CutMode::Fields(parse_cut_ranges(argv[i + 1])));
             i += 2;
+        } else if let Some(spec) = arg.strip_prefix("-f") {
+            mode = Some(CutMode::Fields(parse_cut_ranges(spec)));
+            i += 1;
         } else if arg == "-c" && i + 1 < argv.len() {
             mode = Some(CutMode::Chars(parse_cut_ranges(argv[i + 1])));
             i += 2;
+        } else if let Some(spec) = arg.strip_prefix("-c") {
+            mode = Some(CutMode::Chars(parse_cut_ranges(spec)));
+            i += 1;
         } else if arg == "-b" && i + 1 < argv.len() {
             mode = Some(CutMode::Bytes(parse_cut_ranges(argv[i + 1])));
             i += 2;
+        } else if let Some(spec) = arg.strip_prefix("-b") {
+            mode = Some(CutMode::Bytes(parse_cut_ranges(spec)));
+            i += 1;
         } else if arg == "--complement" {
             complement = true;
             i += 1;
