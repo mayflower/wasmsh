@@ -86,8 +86,16 @@ export async function executeTask(task) {
       ]);
     }
 
-    // Create the deepagent with wasmsh sandbox as the only backend
-    const agent = createDeepAgent({ model: MODEL, backend: sandbox });
+    // Create the deepagent with wasmsh sandbox as the only backend.
+    // Disable HumanMessage eviction — our tasks are small and the eviction
+    // writes to the sandbox filesystem, interfering with workspace state.
+    const agent = createDeepAgent({
+      model: MODEL,
+      backend: sandbox,
+      filesystemOptions: {
+        humanMessageTokenLimitBeforeEvict: null,
+      },
+    });
 
     // Run with timeout
     const agentResult = await Promise.race([
