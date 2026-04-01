@@ -87,7 +87,7 @@ pub fn handle_python_command(
     })
 }
 
-/// Extract code to run from argv (`-c CODE`) or stdin.
+/// Extract code to run from argv (`-c CODE`, script file, or stdin).
 fn extract_code(argv: &[String], stdin: Option<&[u8]>) -> Option<String> {
     let mut i = 1;
     while i < argv.len() {
@@ -98,7 +98,13 @@ fn extract_code(argv: &[String], stdin: Option<&[u8]>) -> Option<String> {
                 Some(String::new())
             };
         }
-        i += 1;
+        // Skip known flags
+        if argv[i].starts_with('-') {
+            i += 1;
+            continue;
+        }
+        // Non-flag argument is a script file path — read it via libc
+        return Some(read_script_file(&argv[i]));
     }
 
     if let Some(data) = stdin {
@@ -109,6 +115,23 @@ fn extract_code(argv: &[String], stdin: Option<&[u8]>) -> Option<String> {
 
     // No code — empty success (interactive mode not supported).
     Some(String::new())
+}
+
+/// Read a script file from the Emscripten filesystem via libc (non-destructive).
+fn read_script_file(path: &str) -> String {
+    let c_path = match CString::new(path) {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+    let fp = unsafe { libc::fopen(c_path.as_ptr(), c"r".as_ptr()) };
+    if fp.is_null() {
+        return String::new();
+    }
+    let mut buf = vec![0u8; 65536];
+    let n = unsafe { libc::fread(buf.as_mut_ptr().cast(), 1, buf.len(), fp) };
+    unsafe { libc::fclose(fp) };
+    buf.truncate(n);
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Escape a string as a Python triple-quoted string literal.
