@@ -1224,8 +1224,8 @@ fn sort_compare(a: &str, b: &str, flags: &SortFlags) -> std::cmp::Ordering {
     };
 
     if flags.numeric || flags.human_numeric {
-        let na = ka.trim().parse::<f64>().unwrap_or(0.0);
-        let nb = kb.trim().parse::<f64>().unwrap_or(0.0);
+        let na = parse_leading_number(ka.trim());
+        let nb = parse_leading_number(kb.trim());
         na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
     } else if flags.version_sort {
         version_compare(ka, kb)
@@ -1234,6 +1234,26 @@ fn sort_compare(a: &str, b: &str, flags: &SortFlags) -> std::cmp::Ordering {
     } else {
         ka.cmp(kb)
     }
+}
+
+/// Parse the leading numeric portion of a string, ignoring trailing text.
+/// Matches GNU sort -n behavior: `"  3 apple"` → `3.0`, `"foo"` → `0.0`.
+fn parse_leading_number(s: &str) -> f64 {
+    let s = s.trim_start();
+    if s.is_empty() {
+        return 0.0;
+    }
+    // Collect optional sign + digits + optional decimal
+    let end = s
+        .char_indices()
+        .skip_while(|(i, c)| *i == 0 && (*c == '-' || *c == '+'))
+        .skip_while(|(_, c)| c.is_ascii_digit())
+        .skip_while(|(_, c)| *c == '.')
+        .skip_while(|(_, c)| c.is_ascii_digit())
+        .map(|(i, _)| i)
+        .next()
+        .unwrap_or(s.len());
+    s[..end].parse::<f64>().unwrap_or(0.0)
 }
 
 fn version_compare(a: &str, b: &str) -> std::cmp::Ordering {
