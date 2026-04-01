@@ -34,7 +34,7 @@ Rules:
 - The verification command must be self-contained — it should not depend on the agent's approach, only the outcome
 - Do NOT use utilities or features that don't exist in the sandbox (no apt, npm, pip, git, docker, ssh, nc, nmap)
 - Python has no pip packages — only stdlib modules
-- For "shell-advanced": use heredocs (<<EOF), here-strings (<<<), nested command substitution $(cmd $(cmd)), process substitution <(cmd), arithmetic $(( )), arrays, declare -A, case statements, trap, while read loops, brace expansion {a,b,c}, parameter expansion ${var:-default}, ${var//pattern/replace}
+- For "shell-advanced": use heredocs (<<EOF), here-strings (<<<), nested command substitution, process substitution <(cmd), arithmetic (( )), arrays, declare -A, case statements, trap, while read loops, brace expansion, parameter expansion with defaults and substitution
 - For "combined": combine shell + Python in a pipeline (e.g., shell generates data, Python processes it, shell verifies)
 - IMPORTANT: Avoid repeating the same patterns — each task should stress a DIFFERENT utility or shell feature
 
