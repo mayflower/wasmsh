@@ -7,10 +7,10 @@ name = "wasmsh-pyodide-runtime"
 version = "0.4.0"
 description = "Pyodide-backed wasmsh runtime assets for Python integrations"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 classifiers = [
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",

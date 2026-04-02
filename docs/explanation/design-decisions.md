@@ -70,4 +70,4 @@ Commands like `id`, `whoami`, `uname`, and `hostname` return deterministic virtu
 
 ## No GPL Code
 
-wasmsh is MIT-licensed. No code, test cases, or documentation is copied from GPL-licensed projects (bash, BusyBox). Behavioral compatibility is achieved through specification reading and black-box testing.
+wasmsh is Apache-2.0-licensed. No code, test cases, or documentation is copied from GPL-licensed projects (bash, BusyBox). Behavioral compatibility is achieved through specification reading and black-box testing.
