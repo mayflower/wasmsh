@@ -153,8 +153,9 @@ jobs:
         run: |
           CRATES=(
             wasmsh-ast wasmsh-ir wasmsh-state wasmsh-fs wasmsh-protocol
-            wasmsh-lex wasmsh-hir wasmsh-builtins wasmsh-utils
-            wasmsh-parse wasmsh-expand wasmsh-vm
+            wasmsh-lex wasmsh-parse wasmsh-hir
+            wasmsh-builtins wasmsh-utils wasmsh-expand
+            wasmsh-vm
             wasmsh-runtime
             wasmsh-browser wasmsh-testkit
           )
