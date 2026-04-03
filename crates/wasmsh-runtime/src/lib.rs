@@ -285,6 +285,7 @@ impl WorkerRuntime {
                         "runtime not initialized".into(),
                     )];
                 }
+                self.exec.reset();
                 self.execute_input(&input)
             }
             HostCommand::Cancel => {

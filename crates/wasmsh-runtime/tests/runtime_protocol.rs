@@ -145,3 +145,25 @@ fn cat_reads_vfs_file() {
     assert_eq!(get_stdout(&events), "world");
     assert_eq!(get_exit(&events), 0);
 }
+
+#[test]
+fn run_recovers_after_exit_builtin() {
+    let mut rt = WorkerRuntime::new();
+    rt.handle_command(HostCommand::Init {
+        step_budget: 0,
+        allowed_hosts: vec![],
+    });
+
+    // `exit 42` should return exit code 42
+    let events = rt.handle_command(HostCommand::Run {
+        input: "exit 42".into(),
+    });
+    assert_eq!(get_exit(&events), 42);
+
+    // Subsequent commands must still work — exit_requested must not persist
+    let events = rt.handle_command(HostCommand::Run {
+        input: "echo recovered".into(),
+    });
+    assert_eq!(get_stdout(&events), "recovered\n");
+    assert_eq!(get_exit(&events), 0);
+}
