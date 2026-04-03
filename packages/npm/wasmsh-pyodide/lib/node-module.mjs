@@ -44,28 +44,29 @@ function makeApi(distDir) {
   };
 }
 
+const fetchHelperPath = resolve(
+  new URL(".", import.meta.url).pathname,
+  "fetch-helper.mjs",
+);
+
 /**
- * Synchronous HTTP fetch for Node.js — spawns a subprocess that calls fetch().
+ * Synchronous HTTP fetch for Node.js — spawns a subprocess that runs
+ * fetch-helper.mjs. Request data is passed via stdin (no argv size limits).
  * Returns a JSON object with {status, headers, body_base64}.
  */
-function syncHttpFetchNode(url, method, headersJson, bodyBase64) {
-  const script = [
-    "const h=JSON.parse(process.argv[2]||'[]');",
-    "const o={method:process.argv[1],headers:Object.fromEntries(h),redirect:'follow'};",
-    "if(process.argv[3])o.body=Buffer.from(process.argv[3],'base64');",
-    "fetch(process.argv[4],o).then(async r=>{",
-    "const b=Buffer.from(await r.arrayBuffer());",
-    "const rh=[...r.headers.entries()];",
-    "process.stdout.write(JSON.stringify({status:r.status,headers:rh,body_base64:b.toString('base64')}));",
-    "}).catch(e=>{",
-    "process.stdout.write(JSON.stringify({status:0,headers:[],body_base64:'',error:e.message}));",
-    "})",
-  ].join("");
+function syncHttpFetchNode(url, method, headersJson, bodyBase64, followRedirects) {
+  const input = JSON.stringify({
+    url,
+    method,
+    headers: JSON.parse(headersJson || "[]"),
+    body_base64: bodyBase64 || null,
+    follow_redirects: Boolean(followRedirects),
+  });
   try {
     const out = execFileSync(
       process.execPath,
-      ["-e", script, method, headersJson, bodyBase64 || "", url],
-      { timeout: 30000, encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] },
+      [fetchHelperPath],
+      { timeout: 30000, encoding: "utf-8", input, stdio: ["pipe", "pipe", "ignore"] },
     );
     return JSON.parse(out);
   } catch (e) {
@@ -86,7 +87,7 @@ function createNetworkStubsNode(moduleRef) {
         bodyBase64 = Buffer.from(bodyBytes).toString("base64");
       }
 
-      const result = syncHttpFetchNode(url, method, headersJson, bodyBase64);
+      const result = syncHttpFetchNode(url, method, headersJson, bodyBase64, followRedirects);
       const resultJson = JSON.stringify(result);
       return moduleRef.stringToNewUTF8(resultJson);
     },

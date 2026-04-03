@@ -13,7 +13,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
-use wasmsh_protocol::HostCommand;
+use wasmsh_protocol::{DiagnosticLevel, HostCommand, WorkerEvent};
 use wasmsh_runtime::WorkerRuntime;
 
 mod network;
@@ -41,7 +41,12 @@ pub extern "C" fn wasmsh_runtime_handle_json(
     json_ptr: *const c_char,
 ) -> *mut c_char {
     if handle.is_null() || json_ptr.is_null() {
-        return alloc_cstring("[]");
+        let err = vec![WorkerEvent::Diagnostic(
+            DiagnosticLevel::Error,
+            "null pointer passed to wasmsh_runtime_handle_json".into(),
+        )];
+        let json = serde_json::to_string(&err).unwrap_or_else(|_| "[]".to_string());
+        return alloc_cstring(&json);
     }
 
     let json_str = unsafe { CStr::from_ptr(json_ptr) }
@@ -50,7 +55,14 @@ pub extern "C" fn wasmsh_runtime_handle_json(
 
     let cmd: HostCommand = match serde_json::from_str(json_str) {
         Ok(c) => c,
-        Err(_) => return alloc_cstring("[]"),
+        Err(e) => {
+            let err = vec![WorkerEvent::Diagnostic(
+                DiagnosticLevel::Error,
+                format!("invalid JSON command: {e}"),
+            )];
+            let json = serde_json::to_string(&err).unwrap_or_else(|_| "[]".to_string());
+            return alloc_cstring(&json);
+        }
     };
 
     let rt = unsafe { &mut (*handle).runtime };

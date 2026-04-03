@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 
 export const DEFAULT_WORKSPACE_DIR = "/workspace";
 
+/** Default request timeout in milliseconds (5 minutes). */
+const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+
 const packageDir = path.dirname(fileURLToPath(import.meta.url));
 
 function encodeBase64(bytes) {
@@ -23,8 +26,25 @@ function normalizeInitialFiles(initialFiles = []) {
 }
 
 class RequestClient {
-  constructor(sendRequest) {
-    this._sendRequest = sendRequest;
+  constructor(sendRequest, timeoutMs = DEFAULT_TIMEOUT_MS) {
+    this._sendRaw = sendRequest;
+    this._timeoutMs = timeoutMs;
+  }
+
+  _sendRequest(method, params) {
+    const promise = this._sendRaw(method, params);
+    if (!this._timeoutMs || this._timeoutMs <= 0) {
+      return promise;
+    }
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        setTimeout(
+          () => reject(new Error(`wasmsh: request '${method}' timed out after ${this._timeoutMs}ms`)),
+          this._timeoutMs,
+        );
+      }),
+    ]);
   }
 
   async run(command) {
@@ -52,7 +72,7 @@ class RequestClient {
 }
 
 class NodeSession extends RequestClient {
-  constructor(child) {
+  constructor(child, timeoutMs) {
     let nextId = 1;
     const pending = new Map();
     const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
@@ -105,7 +125,7 @@ class NodeSession extends RequestClient {
         pending.set(id, { resolve, reject });
         child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
       });
-    });
+    }, timeoutMs);
 
     this._child = child;
     this._rl = rl;
@@ -125,7 +145,7 @@ class NodeSession extends RequestClient {
 }
 
 class BrowserWorkerSession extends RequestClient {
-  constructor(worker) {
+  constructor(worker, timeoutMs) {
     let nextId = 1;
     const pending = new Map();
 
@@ -158,7 +178,7 @@ class BrowserWorkerSession extends RequestClient {
         pending.set(id, { resolve, reject });
         worker.postMessage({ id, method, params });
       });
-    });
+    }, timeoutMs);
 
     this._worker = worker;
   }
@@ -197,7 +217,7 @@ export async function createNodeSession(options = {}) {
     },
   );
 
-  const session = new NodeSession(child);
+  const session = new NodeSession(child, options.timeoutMs);
   await session._sendRequest("init", {
     stepBudget: options.stepBudget ?? 0,
     initialFiles: normalizeInitialFiles(options.initialFiles),
@@ -209,7 +229,7 @@ export async function createNodeSession(options = {}) {
 export async function createBrowserWorkerSession(options) {
   const worker =
     options.worker ?? new Worker(resolveBrowserWorkerPath(), { name: "wasmsh-pyodide" });
-  const session = new BrowserWorkerSession(worker);
+  const session = new BrowserWorkerSession(worker, options.timeoutMs);
   await session._sendRequest("init", {
     assetBaseUrl: options.assetBaseUrl,
     stepBudget: options.stepBudget ?? 0,

@@ -127,11 +127,9 @@ fn read_script_file(path: &str) -> String {
     if fp.is_null() {
         return String::new();
     }
-    let mut buf = vec![0u8; 65536];
-    let n = unsafe { libc::fread(buf.as_mut_ptr().cast(), 1, buf.len(), fp) };
+    let data = read_fp_to_vec(fp);
     unsafe { libc::fclose(fp) };
-    buf.truncate(n);
-    String::from_utf8_lossy(&buf).into_owned()
+    String::from_utf8_lossy(&data).into_owned()
 }
 
 /// Escape a string as a Python triple-quoted string literal.
@@ -152,10 +150,22 @@ fn read_temp_file(path: &str) -> Vec<u8> {
     if fp.is_null() {
         return Vec::new();
     }
-    let mut buf = vec![0u8; 65536];
-    let n = unsafe { libc::fread(buf.as_mut_ptr().cast(), 1, buf.len(), fp) };
+    let data = read_fp_to_vec(fp);
     unsafe { libc::fclose(fp) };
     unsafe { libc::unlink(c_path.as_ptr()) };
-    buf.truncate(n);
-    buf
+    data
+}
+
+/// Read all bytes from a libc FILE* in a loop.
+fn read_fp_to_vec(fp: *mut libc::FILE) -> Vec<u8> {
+    let mut result = Vec::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = unsafe { libc::fread(buf.as_mut_ptr().cast(), 1, buf.len(), fp) };
+        if n == 0 {
+            break;
+        }
+        result.extend_from_slice(&buf[..n]);
+    }
+    result
 }

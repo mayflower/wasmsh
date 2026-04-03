@@ -3,15 +3,18 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import { createFullModule } from "./lib/node-module.mjs";
+import {
+  buildRunResult,
+  encodeBase64,
+  extractStream,
+  getVersion,
+} from "./lib/protocol.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function resolveDefaultAssetDir() {
   return resolve(__dirname, "assets");
 }
-
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
 
 function parseArgs(argv) {
   const options = {};
@@ -23,38 +26,6 @@ function parseArgs(argv) {
     }
   }
   return options;
-}
-
-function extractStream(events, key) {
-  const bytes = [];
-  for (const event of events) {
-    if (event && typeof event === "object" && key in event) {
-      bytes.push(...event[key]);
-    }
-  }
-  return new Uint8Array(bytes);
-}
-
-function getExitCode(events) {
-  for (const event of events) {
-    if (event && typeof event === "object" && "Exit" in event) {
-      return event.Exit;
-    }
-  }
-  return null;
-}
-
-function getVersion(events) {
-  for (const event of events) {
-    if (event && typeof event === "object" && "Version" in event) {
-      return event.Version;
-    }
-  }
-  return null;
-}
-
-function encodeBytes(bytes) {
-  return Buffer.from(bytes).toString("base64");
 }
 
 class WasmshNodeHost {
@@ -108,15 +79,7 @@ class WasmshNodeHost {
 
   async run({ command }) {
     const events = this.sendHostCommand({ Run: { input: command } });
-    const stdout = decoder.decode(extractStream(events, "Stdout"));
-    const stderr = decoder.decode(extractStream(events, "Stderr"));
-    return {
-      events,
-      stdout,
-      stderr,
-      output: stdout + stderr,
-      exitCode: getExitCode(events),
-    };
+    return buildRunResult(events);
   }
 
   async writeFile({ path, contentBase64 }) {
@@ -132,11 +95,12 @@ class WasmshNodeHost {
   async readFile({ path }) {
     const events = this.sendHostCommand({ ReadFile: { path } });
     const content = extractStream(events, "Stdout");
-    return { events, contentBase64: encodeBytes(content) };
+    return { events, contentBase64: encodeBase64(content) };
   }
 
   async listDir({ path }) {
     const events = this.sendHostCommand({ ListDir: { path } });
+    const decoder = new TextDecoder();
     return {
       events,
       output: decoder.decode(extractStream(events, "Stdout")),

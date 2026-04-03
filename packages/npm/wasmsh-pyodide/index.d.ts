@@ -26,6 +26,8 @@ export interface NodeSessionOptions {
   nodeExecutable?: string;
   stepBudget?: number;
   initialFiles?: InitialFileInput[];
+  /** Request timeout in milliseconds (default: 300000 = 5 minutes). 0 disables. */
+  timeoutMs?: number;
 }
 
 export interface BrowserSessionOptions {
@@ -33,6 +35,8 @@ export interface BrowserSessionOptions {
   worker?: Worker;
   stepBudget?: number;
   initialFiles?: InitialFileInput[];
+  /** Request timeout in milliseconds (default: 300000 = 5 minutes). 0 disables. */
+  timeoutMs?: number;
 }
 
 export interface WasmshSession {

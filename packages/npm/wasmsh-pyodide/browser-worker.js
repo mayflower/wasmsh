@@ -1,4 +1,73 @@
+// Browser workers loaded via importScripts() cannot use ES module imports.
+// Inline the protocol helpers here (canonical versions in lib/protocol.mjs).
+
 const decoder = new TextDecoder();
+
+function extractStream(events, key) {
+  const chunks = [];
+  let total = 0;
+  for (const event of events) {
+    if (event && typeof event === "object" && key in event) {
+      const chunk = event[key];
+      chunks.push(chunk);
+      total += chunk.length;
+    }
+  }
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return result;
+}
+
+function getExitCode(events) {
+  for (const event of events) {
+    if (event && typeof event === "object" && "Exit" in event) {
+      return event.Exit;
+    }
+  }
+  return null;
+}
+
+function getVersion(events) {
+  for (const event of events) {
+    if (event && typeof event === "object" && "Version" in event) {
+      return event.Version;
+    }
+  }
+  return null;
+}
+
+function encodeBase64(bytes) {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+function decodeBase64(text) {
+  const binary = atob(text);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function buildRunResult(events) {
+  const stdout = decoder.decode(extractStream(events, "Stdout"));
+  const stderr = decoder.decode(extractStream(events, "Stderr"));
+  return {
+    events,
+    stdout,
+    stderr,
+    output: stdout + stderr,
+    exitCode: getExitCode(events),
+  };
+}
 
 let bootPromise = null;
 let moduleRef = null;
@@ -51,11 +120,7 @@ function createNetworkStubs(module) {
 
         // Encode response body as base64
         const respBytes = new Uint8Array(xhr.response || new ArrayBuffer(0));
-        let binary = "";
-        for (const byte of respBytes) {
-          binary += String.fromCharCode(byte);
-        }
-        const bodyBase64 = btoa(binary);
+        const bodyBase64 = encodeBase64(respBytes);
 
         result = JSON.stringify({
           status: xhr.status,
@@ -71,51 +136,6 @@ function createNetworkStubs(module) {
       return resultPtr;
     },
   };
-}
-
-function extractStream(events, key) {
-  const bytes = [];
-  for (const event of events) {
-    if (event && typeof event === "object" && key in event) {
-      bytes.push(...event[key]);
-    }
-  }
-  return new Uint8Array(bytes);
-}
-
-function getExitCode(events) {
-  for (const event of events) {
-    if (event && typeof event === "object" && "Exit" in event) {
-      return event.Exit;
-    }
-  }
-  return null;
-}
-
-function getVersion(events) {
-  for (const event of events) {
-    if (event && typeof event === "object" && "Version" in event) {
-      return event.Version;
-    }
-  }
-  return null;
-}
-
-function encodeBase64(bytes) {
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
-}
-
-function decodeBase64(text) {
-  const binary = atob(text);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
 }
 
 function sendHostCommand(command) {
@@ -251,15 +271,7 @@ const methods = {
 
   async run({ command }) {
     const events = sendHostCommand({ Run: { input: command } });
-    const stdout = decoder.decode(extractStream(events, "Stdout"));
-    const stderr = decoder.decode(extractStream(events, "Stderr"));
-    return {
-      events,
-      stdout,
-      stderr,
-      output: stdout + stderr,
-      exitCode: getExitCode(events),
-    };
+    return buildRunResult(events);
   },
 
   async writeFile({ path, contentBase64 }) {
@@ -282,6 +294,7 @@ const methods = {
 
   async listDir({ path }) {
     const events = sendHostCommand({ ListDir: { path } });
+    const decoder = new TextDecoder();
     return {
       events,
       output: decoder.decode(extractStream(events, "Stdout")),

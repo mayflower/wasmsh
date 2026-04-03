@@ -24,10 +24,25 @@ struct OpenFile {
     fp: *mut libc::FILE,
     path: String,
     writable: bool,
+    append: bool,
 }
 
 fn to_cstring(path: &str) -> Result<CString, FsError> {
     CString::new(path).map_err(|_| FsError::Io("path contains null byte".into()))
+}
+
+/// Map the current libc errno to the closest `FsError` variant.
+fn errno_to_fs_error(path: &str) -> FsError {
+    let err = std::io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(libc::ENOENT) => FsError::NotFound(path.to_string()),
+        Some(libc::EACCES | libc::EPERM) => FsError::PermissionDenied(path.to_string()),
+        Some(libc::EEXIST) => FsError::AlreadyExists(path.to_string()),
+        Some(libc::EISDIR) => FsError::IsADirectory(path.to_string()),
+        Some(libc::ENOTDIR) => FsError::NotADirectory(path.to_string()),
+        Some(libc::ENOTEMPTY) => FsError::Io(format!("directory not empty: {path}")),
+        _ => FsError::Io(format!("{err}: {path}")),
+    }
 }
 
 /// Recursively create parent directories (like `mkdir -p`).
@@ -108,6 +123,7 @@ impl Vfs for EmscriptenFs {
                 fp,
                 path: path.to_string(),
                 writable: opts.write || opts.append,
+                append: opts.append,
             },
         );
         Ok(FileHandle(h))
@@ -141,9 +157,21 @@ impl Vfs for EmscriptenFs {
         if !of.writable {
             return Err(FsError::PermissionDenied(of.path.clone()));
         }
-        // Truncate and write from beginning
-        unsafe { libc::fseek(of.fp, 0, libc::SEEK_SET) };
+        if of.append {
+            // Append mode: seek to end, write there.
+            unsafe { libc::fseek(of.fp, 0, libc::SEEK_END) };
+        } else {
+            // Overwrite mode: truncate to the written length.
+            unsafe { libc::fseek(of.fp, 0, libc::SEEK_SET) };
+        }
         let written = unsafe { libc::fwrite(data.as_ptr().cast(), 1, data.len(), of.fp) };
+        if !of.append {
+            // Truncate any leftover content from a previous longer write.
+            let pos = unsafe { libc::ftell(of.fp) };
+            if pos >= 0 {
+                unsafe { libc::ftruncate(libc::fileno(of.fp), pos) };
+            }
+        }
         unsafe { libc::fflush(of.fp) };
         if written != data.len() {
             return Err(FsError::Io("short write".into()));
@@ -199,7 +227,7 @@ impl Vfs for EmscriptenFs {
         let cpath = to_cstring(path)?;
         let rc = unsafe { libc::mkdir(cpath.as_ptr(), 0o755) };
         if rc != 0 {
-            return Err(FsError::Io(format!("mkdir failed: {path}")));
+            return Err(errno_to_fs_error(path));
         }
         Ok(())
     }
@@ -207,7 +235,7 @@ impl Vfs for EmscriptenFs {
     fn remove_file(&mut self, path: &str) -> Result<(), FsError> {
         let cpath = to_cstring(path)?;
         if unsafe { libc::unlink(cpath.as_ptr()) } != 0 {
-            return Err(FsError::NotFound(path.to_string()));
+            return Err(errno_to_fs_error(path));
         }
         Ok(())
     }
@@ -215,7 +243,7 @@ impl Vfs for EmscriptenFs {
     fn remove_dir(&mut self, path: &str) -> Result<(), FsError> {
         let cpath = to_cstring(path)?;
         if unsafe { libc::rmdir(cpath.as_ptr()) } != 0 {
-            return Err(FsError::NotFound(path.to_string()));
+            return Err(errno_to_fs_error(path));
         }
         Ok(())
     }
