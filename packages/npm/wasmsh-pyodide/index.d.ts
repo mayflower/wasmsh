@@ -26,6 +26,8 @@ export interface NodeSessionOptions {
   nodeExecutable?: string;
   stepBudget?: number;
   initialFiles?: InitialFileInput[];
+  /** Hostnames allowed for network access (empty = deny all). */
+  allowedHosts?: string[];
   /** Request timeout in milliseconds (default: 300000 = 5 minutes). 0 disables. */
   timeoutMs?: number;
 }
@@ -35,8 +37,28 @@ export interface BrowserSessionOptions {
   worker?: Worker;
   stepBudget?: number;
   initialFiles?: InitialFileInput[];
+  /** Hostnames allowed for network access (empty = deny all). */
+  allowedHosts?: string[];
   /** Request timeout in milliseconds (default: 300000 = 5 minutes). 0 disables. */
   timeoutMs?: number;
+}
+
+export interface InstallPythonPackagesOptions {
+  /** Install dependencies (default: true). */
+  deps?: boolean;
+  /** Continue installing after failures (default: false). */
+  keepGoing?: boolean;
+  /** Allow pre-release versions (default: false). */
+  pre?: boolean;
+  /** Reinstall packages even if already installed (default: false). */
+  reinstall?: boolean;
+}
+
+export interface InstallResult {
+  /** Successfully installed requirements. */
+  installed: Array<{ requirement: string }>;
+  /** Original requirements as passed. */
+  requirements: string[];
 }
 
 export interface WasmshSession {
@@ -44,6 +66,22 @@ export interface WasmshSession {
   writeFile(path: string, content: Uint8Array): Promise<{ events: unknown[] }>;
   readFile(path: string): Promise<ReadFileResult>;
   listDir(path: string): Promise<ListDirResult>;
+  /**
+   * Install Python packages into the sandbox.
+   *
+   * Supported requirement formats:
+   * - `emfs:/path/to/wheel.whl` — install from the in-sandbox Emscripten filesystem
+   *
+   * Not yet supported:
+   * - HTTP(S) URLs
+   * - Package names (e.g., "requests")
+   *
+   * Security: `file:` URIs are rejected. Network installs will require `allowedHosts`.
+   */
+  installPythonPackages(
+    requirements: string | string[],
+    options?: InstallPythonPackagesOptions,
+  ): Promise<InstallResult>;
   close(): Promise<void>;
 }
 

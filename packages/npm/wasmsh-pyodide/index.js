@@ -69,6 +69,13 @@ class RequestClient {
   async listDir(pathname) {
     return this._sendRequest("listDir", { path: pathname });
   }
+
+  async installPythonPackages(requirements, options) {
+    return this._sendRequest("installPythonPackages", {
+      requirements,
+      options: options ?? {},
+    });
+  }
 }
 
 class NodeSession extends RequestClient {

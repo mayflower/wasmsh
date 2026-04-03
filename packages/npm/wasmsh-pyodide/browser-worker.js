@@ -73,6 +73,38 @@ let bootPromise = null;
 let moduleRef = null;
 let runtimeHandle = null;
 let assetBaseUrl = null;
+let sessionAllowedHosts = [];
+
+/**
+ * Check if a URL's host is in the allowlist.
+ * Mirrors the Rust HostAllowlist semantics.
+ */
+function isHostAllowed(url, allowedHosts) {
+  if (!allowedHosts || allowedHosts.length === 0) return false;
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  const host = parsed.hostname.toLowerCase();
+  const port = parsed.port ? Number(parsed.port) : null;
+  for (const pattern of allowedHosts) {
+    const colonIdx = pattern.lastIndexOf(":");
+    let patHost, patPort;
+    if (colonIdx > 0 && /^\d+$/.test(pattern.slice(colonIdx + 1))) {
+      patHost = pattern.slice(0, colonIdx).toLowerCase();
+      patPort = Number(pattern.slice(colonIdx + 1));
+    } else {
+      patHost = pattern.toLowerCase();
+      patPort = null;
+    }
+    if (patPort !== null && port !== patPort) continue;
+    if (patHost.startsWith("*.")) {
+      const suffix = patHost.slice(2);
+      if (host === suffix || host.endsWith(`.${suffix}`)) return true;
+    } else {
+      if (host === patHost) return true;
+    }
+  }
+  return false;
+}
 
 const SENTINEL_MARKER = {};
 const sentinelStubs = {
@@ -224,6 +256,7 @@ async function boot(baseUrl) {
             module.ENV.PYTHONPATH = "/lib/python3.13/python_stdlib.zip";
             module.ENV.PYTHONHOME = "/";
           }
+          module.FS.mkdirTree("/lib/python3.13/site-packages");
           module.FS.mkdirTree("/workspace");
         },
       ],
@@ -255,6 +288,7 @@ const methods = {
     allowedHosts = [],
   }) {
     await ensureBooted(baseUrl);
+    sessionAllowedHosts = allowedHosts;
     const events = sendHostCommand({
       Init: { step_budget: stepBudget, allowed_hosts: allowedHosts },
     });
@@ -299,6 +333,67 @@ const methods = {
       events,
       output: decoder.decode(extractStream(events, "Stdout")),
     };
+  },
+
+  async installPythonPackages({ requirements, options = {} }) {
+    const reqs = typeof requirements === "string" ? [requirements] : requirements;
+    if (!Array.isArray(reqs)) {
+      throw new Error("requirements must be a string or array of strings");
+    }
+
+    const installed = [];
+    for (const req of reqs) {
+      if (/^file:/i.test(req)) {
+        throw new Error(`file: URIs are not supported for security: ${req}`);
+      }
+
+      if (req.startsWith("emfs:")) {
+        const wheelPath = req.slice(5);
+        const result = methods.run({
+          command: `python3 << 'WASMSH_PIP_EOF'
+import zipfile, os, sys
+sp = '/lib/python3.13/site-packages'
+os.makedirs(sp, exist_ok=True)
+if sp not in sys.path:
+    sys.path.insert(0, sp)
+whl = '${wheelPath.replace(/'/g, "'\\''")}'
+if not os.path.isfile(whl):
+    print('ERR:wheel not found: ' + whl, file=sys.stderr)
+    sys.exit(1)
+with zipfile.ZipFile(whl) as zf:
+    zf.extractall(sp)
+print('OK')
+WASMSH_PIP_EOF`,
+        });
+        if (result.exitCode !== 0) {
+          throw new Error(
+            `Failed to install ${req}: ${result.stderr || result.output}`,
+          );
+        }
+        installed.push({ requirement: req });
+      } else if (/^https?:\/\//i.test(req)) {
+        if (!isHostAllowed(req, sessionAllowedHosts)) {
+          throw new Error(
+            `Host not allowed for package install: ${req}. ` +
+            "Configure allowedHosts when creating the session.",
+          );
+        }
+        throw new Error(
+          `HTTP(S) URL installs are not yet implemented: ${req}. Use emfs: URLs for local wheel files.`,
+        );
+      } else {
+        if (sessionAllowedHosts.length === 0) {
+          throw new Error(
+            `Package name installs require network access: ${req}. ` +
+            "Configure allowedHosts (e.g., ['pypi.org', 'files.pythonhosted.org']) when creating the session.",
+          );
+        }
+        throw new Error(
+          `Package name installs are not yet implemented: ${req}. Use emfs: URLs for local wheel files.`,
+        );
+      }
+    }
+    return { installed, requirements: reqs };
   },
 
   async close() {

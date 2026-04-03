@@ -160,6 +160,7 @@ export async function createFullModule() {
         m.ENV.PYTHONPATH = "/lib/python3.13/python_stdlib.zip";
         m.ENV.PYTHONHOME = "/";
       }
+      m.FS.mkdirTree("/lib/python3.13/site-packages");
       m.FS.mkdirTree("/workspace");
     }],
     onRuntimeInitialized() { resolveModule(this); },

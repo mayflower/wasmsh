@@ -78,6 +78,35 @@ const result = await session.readFile("/workspace/output.txt");
 const text = new TextDecoder().decode(result.content);
 ```
 
+### Install Python packages
+
+Use `installPythonPackages` to add pure-Python wheels into the sandbox.
+Packages are installed into `/lib/python3.13/site-packages` and become
+importable from subsequent `python3` commands in the same session.
+
+```js
+// Upload a wheel and install from the in-sandbox filesystem
+await session.writeFile("/tmp/my_pkg-1.0-py3-none-any.whl", wheelBytes);
+await session.installPythonPackages("emfs:/tmp/my_pkg-1.0-py3-none-any.whl");
+
+// The package is now importable
+const result = await session.run('python3 -c "import my_pkg; print(my_pkg.__version__)"');
+```
+
+Multiple requirements can be passed as an array:
+
+```js
+await session.installPythonPackages([
+  "emfs:/tmp/pkg_a-1.0-py3-none-any.whl",
+  "emfs:/tmp/pkg_b-2.0-py3-none-any.whl",
+]);
+```
+
+**Security**: Installs are session-local and do not persist between sessions.
+`file:` URIs are rejected to prevent host filesystem access. Network-based
+installs (HTTP URLs, package names) require `allowedHosts` to be configured
+when creating the session and are not yet implemented.
+
 ### List directory contents
 
 ```js
@@ -121,6 +150,7 @@ Create a session backed by a Node.js child process running the wasmsh host.
 | `nodeExecutable` | `string` | `process.execPath` | Path to Node.js binary |
 | `stepBudget` | `number` | `0` (unlimited) | VM step budget per command |
 | `initialFiles` | `Array<{path, content}>` | `[]` | Files to seed before init |
+| `allowedHosts` | `string[]` | `[]` | Hostnames allowed for network access |
 
 ### `createBrowserWorkerSession(options): Promise<WasmshSession>`
 
@@ -134,6 +164,7 @@ Create a session backed by a browser Web Worker.
 | `worker` | `Worker` | auto-created | Pre-existing Worker instance |
 | `stepBudget` | `number` | `0` (unlimited) | VM step budget per command |
 | `initialFiles` | `Array<{path, content}>` | `[]` | Files to seed before init |
+| `allowedHosts` | `string[]` | `[]` | Hostnames allowed for network access |
 
 ### `WasmshSession`
 
@@ -145,6 +176,7 @@ Returned by both `createNodeSession` and `createBrowserWorkerSession`.
 | `writeFile(path, content)` | `Promise<{events}>` | Write a `Uint8Array` to the sandbox |
 | `readFile(path)` | `Promise<ReadFileResult>` | Read a file as `Uint8Array` |
 | `listDir(path)` | `Promise<ListDirResult>` | List directory entries |
+| `installPythonPackages(reqs, opts?)` | `Promise<InstallResult>` | Install Python wheel(s) into the sandbox |
 | `close()` | `Promise<void>` | Shut down the session and release resources |
 
 ### `RunResult`
