@@ -75,6 +75,10 @@ just build-pyodide                                   # Pyodide wasm (needs emcc)
 | [Supported Features](SUPPORTED.md) | Complete syntax and command matrix |
 | [Examples](examples/) | Standalone and TypeScript usage |
 
+## Acknowledgements
+
+The Pyodide integration would not be possible without the outstanding work of the [Pyodide](https://pyodide.org/) team. They brought CPython to WebAssembly and built an ecosystem that makes running Python in the browser practical and reliable. wasmsh links directly into their Emscripten module, sharing the interpreter and filesystem — a testament to how well-designed their architecture is. Thank you to everyone who contributes to Pyodide.
+
 ## License
 
 [Apache-2.0](LICENSE)
