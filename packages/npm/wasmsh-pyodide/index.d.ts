@@ -56,7 +56,13 @@ export interface InstallPythonPackagesOptions {
 
 export interface InstallResult {
   /** Successfully installed requirements. */
-  installed: Array<{ requirement: string }>;
+  installed: Array<{
+    requirement: string;
+    /** Resolved package name (present for package-name installs). */
+    name?: string;
+    /** Resolved version (present for package-name installs). */
+    version?: string;
+  }>;
   /** Original requirements as passed. */
   requirements: string[];
 }
@@ -71,10 +77,10 @@ export interface WasmshSession {
    *
    * Supported requirement formats:
    * - `emfs:/path/to/wheel.whl` — install from the in-sandbox Emscripten filesystem
+   * - `https://host/pkg-1.0-py3-none-any.whl` — download and install (requires allowedHosts)
+   * - `"six"` — resolve from PyPI and install (requires allowedHosts incl. pypi.org)
    *
-   * Not yet supported:
-   * - HTTP(S) URLs
-   * - Package names (e.g., "requests")
+   * Only pure-Python wheels (py3-none-any) are supported.
    *
    * Security: `file:` URIs are rejected. Network installs will require `allowedHosts`.
    */

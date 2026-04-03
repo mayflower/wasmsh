@@ -102,10 +102,27 @@ await session.installPythonPackages([
 ]);
 ```
 
+Install from HTTP URLs or by package name (requires `allowedHosts`):
+
+```js
+const session = await createNodeSession({
+  allowedHosts: ["pypi.org", "files.pythonhosted.org"],
+});
+
+// Install by package name (resolved from PyPI)
+await session.installPythonPackages("six");
+
+// Install from direct URL
+await session.installPythonPackages(
+  "https://files.pythonhosted.org/packages/.../my_pkg-1.0-py3-none-any.whl",
+);
+```
+
 **Security**: Installs are session-local and do not persist between sessions.
 `file:` URIs are rejected to prevent host filesystem access. Network-based
 installs (HTTP URLs, package names) require `allowedHosts` to be configured
-when creating the session and are not yet implemented.
+when creating the session. Only pure-Python wheels (`py3-none-any`) are
+supported; C extension packages like numpy are not available.
 
 ### List directory contents
 

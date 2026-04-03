@@ -341,16 +341,10 @@ const methods = {
       throw new Error("requirements must be a string or array of strings");
     }
 
-    const installed = [];
-    for (const req of reqs) {
-      if (/^file:/i.test(req)) {
-        throw new Error(`file: URIs are not supported for security: ${req}`);
-      }
-
-      if (req.startsWith("emfs:")) {
-        const wheelPath = req.slice(5);
-        const result = methods.run({
-          command: `python3 << 'WASMSH_PIP_EOF'
+    function extractWheel(wheelPath) {
+      const events = sendHostCommand({
+        Run: {
+          input: `python3 << 'WASMSH_PIP_EOF'
 import zipfile, os, sys
 sp = '/lib/python3.13/site-packages'
 os.makedirs(sp, exist_ok=True)
@@ -364,12 +358,74 @@ with zipfile.ZipFile(whl) as zf:
     zf.extractall(sp)
 print('OK')
 WASMSH_PIP_EOF`,
-        });
-        if (result.exitCode !== 0) {
-          throw new Error(
-            `Failed to install ${req}: ${result.stderr || result.output}`,
-          );
+        },
+      });
+      const exit = events.find((e) => "Exit" in e);
+      if (exit && exit.Exit !== 0) {
+        const stderr = decoder.decode(extractStream(events, "Stderr"));
+        throw new Error(`Failed to extract wheel ${wheelPath}: ${stderr}`);
+      }
+    }
+
+    async function downloadWheel(url) {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to download ${url}: HTTP ${response.status}`);
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      const filename = url.split("/").pop() || "downloaded.whl";
+      const fsPath = `/tmp/_wasmsh_pip_${filename}`;
+      sendHostCommand({
+        WriteFile: { path: fsPath, data: Array.from(bytes) },
+      });
+      return fsPath;
+    }
+
+    async function resolvePackageName(name) {
+      const apiUrl = `https://pypi.org/pypi/${encodeURIComponent(name)}/json`;
+      if (!isHostAllowed(apiUrl, sessionAllowedHosts)) {
+        throw new Error(
+          "Host 'pypi.org' not in allowedHosts. " +
+          "Add 'pypi.org' and 'files.pythonhosted.org' to allowedHosts.",
+        );
+      }
+      const response = await fetch(apiUrl);
+      if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error(`Package '${name}' not found on PyPI`);
         }
+        throw new Error(`PyPI lookup failed for '${name}': HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      const urls = data.urls || [];
+      const wheel = urls.find(
+        (u) =>
+          u.packagetype === "bdist_wheel" &&
+          /-(py2\.py3|py3)-none-any\.whl$/i.test(u.filename),
+      );
+      if (!wheel) {
+        throw new Error(
+          `No pure-Python wheel found for '${name}'. ` +
+          "Only pure-Python packages (py3-none-any) are supported.",
+        );
+      }
+      if (!isHostAllowed(wheel.url, sessionAllowedHosts)) {
+        throw new Error(
+          `Download host not allowed for '${name}': ${wheel.url}. ` +
+          "Add 'files.pythonhosted.org' to allowedHosts.",
+        );
+      }
+      return { url: wheel.url, version: data.info?.version, filename: wheel.filename };
+    }
+
+    const installed = [];
+    for (const req of reqs) {
+      if (/^file:/i.test(req)) {
+        throw new Error(`file: URIs are not supported for security: ${req}`);
+      }
+
+      if (req.startsWith("emfs:")) {
+        extractWheel(req.slice(5));
         installed.push({ requirement: req });
       } else if (/^https?:\/\//i.test(req)) {
         if (!isHostAllowed(req, sessionAllowedHosts)) {
@@ -378,9 +434,9 @@ WASMSH_PIP_EOF`,
             "Configure allowedHosts when creating the session.",
           );
         }
-        throw new Error(
-          `HTTP(S) URL installs are not yet implemented: ${req}. Use emfs: URLs for local wheel files.`,
-        );
+        const fsPath = await downloadWheel(req);
+        extractWheel(fsPath);
+        installed.push({ requirement: req });
       } else {
         if (sessionAllowedHosts.length === 0) {
           throw new Error(
@@ -388,9 +444,14 @@ WASMSH_PIP_EOF`,
             "Configure allowedHosts (e.g., ['pypi.org', 'files.pythonhosted.org']) when creating the session.",
           );
         }
-        throw new Error(
-          `Package name installs are not yet implemented: ${req}. Use emfs: URLs for local wheel files.`,
-        );
+        const resolved = await resolvePackageName(req);
+        const fsPath = await downloadWheel(resolved.url);
+        extractWheel(fsPath);
+        installed.push({
+          requirement: req,
+          name: req,
+          version: resolved.version,
+        });
       }
     }
     return { installed, requirements: reqs };

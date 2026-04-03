@@ -7,6 +7,7 @@
  *
  * Skip: SKIP_PYODIDE=1
  */
+import http from "node:http";
 import { describe, it, after } from "node:test";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
@@ -233,6 +234,81 @@ describe("installPythonPackages (Node)", () => {
         "emfs:/tmp/wasmsh_test_fixture-0.1.0-py3-none-any.whl",
       );
       assert.ok(result.installed.length > 0);
+    },
+  );
+
+  // ── HTTP(S) URL install via local server ─────────────────────
+
+  it(
+    "installs a wheel from HTTP URL via local server",
+    { skip: SKIP, timeout: 120_000 },
+    async () => {
+      // Start a local HTTP server serving the wheel fixture
+      const wheelBytes = readFileSync(WHEEL_PATH);
+      const server = http.createServer((req, res) => {
+        res.writeHead(200, { "Content-Type": "application/octet-stream" });
+        res.end(wheelBytes);
+      });
+      await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
+      const port = server.address().port;
+
+      try {
+        const session = await openSession({
+          allowedHosts: [`127.0.0.1:${port}`],
+        });
+        const url = `http://127.0.0.1:${port}/wasmsh_test_fixture-0.1.0-py3-none-any.whl`;
+        const result = await session.installPythonPackages(url);
+        assert.ok(result.installed.length > 0);
+
+        // Verify the package is importable
+        const run = await session.run(
+          "python3 -c \"from wasmsh_test_fixture import GREETING; print(GREETING)\"",
+        );
+        assert.equal(run.exitCode, 0, `python3 failed: ${run.stderr}`);
+        assert.ok(run.stdout.includes("hello from wasmsh_test_fixture"));
+      } finally {
+        server.close();
+      }
+    },
+  );
+
+  // ── PyPI package name install ────────────────────────────────
+
+  it(
+    "installs a pure-Python package by name from PyPI",
+    { skip: SKIP || process.env.SKIP_NETWORK === "1", timeout: 120_000 },
+    async () => {
+      const session = await openSession({
+        allowedHosts: ["pypi.org", "files.pythonhosted.org"],
+      });
+      // six is a tiny pure-Python package with no dependencies
+      const result = await session.installPythonPackages("six");
+      assert.ok(result.installed.length > 0);
+      assert.ok(result.installed[0].version, "should include resolved version");
+
+      const run = await session.run(
+        "python3 -c \"import six; print(six.__version__)\"",
+      );
+      assert.equal(run.exitCode, 0, `python3 failed: ${run.stderr}`);
+      assert.ok(run.stdout.trim().length > 0, "should print version");
+    },
+  );
+
+  it(
+    "rejects non-existent package from PyPI",
+    { skip: SKIP || process.env.SKIP_NETWORK === "1", timeout: 120_000 },
+    async () => {
+      const session = await openSession({
+        allowedHosts: ["pypi.org", "files.pythonhosted.org"],
+      });
+      await assert.rejects(
+        () =>
+          session.installPythonPackages(
+            "wasmsh-nonexistent-package-xyz-123456",
+          ),
+        /not found/i,
+        "should report package not found",
+      );
     },
   );
 });
