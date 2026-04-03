@@ -199,6 +199,30 @@ async function boot(baseUrl) {
     stdlibBytes = new Uint8Array(await stdlibResponse.arrayBuffer());
   }
 
+  // Fetch bundled wheel files (micropip, packaging) and lockfile
+  const bundledWheels = [];
+  let lockfileBytes = null;
+  try {
+    const lockResp = await fetch(`${assetBaseUrl}/pyodide-lock.json`);
+    if (lockResp.ok) {
+      lockfileBytes = new Uint8Array(await lockResp.arrayBuffer());
+      const lockData = JSON.parse(new TextDecoder().decode(lockfileBytes));
+      // Fetch micropip + packaging wheels listed in lockfile
+      for (const name of ["micropip", "packaging"]) {
+        const pkg = lockData.packages?.[name];
+        if (pkg?.file_name) {
+          const whlResp = await fetch(`${assetBaseUrl}/${pkg.file_name}`);
+          if (whlResp.ok) {
+            bundledWheels.push({
+              name: pkg.file_name,
+              data: new Uint8Array(await whlResp.arrayBuffer()),
+            });
+          }
+        }
+      }
+    }
+  } catch { /* lockfile or wheels unavailable */ }
+
   moduleRef = await new Promise((resolve, reject) => {
     factory({
       noInitialRun: true,
@@ -257,6 +281,27 @@ async function boot(baseUrl) {
             module.ENV.PYTHONHOME = "/";
           }
           module.FS.mkdirTree("/lib/python3.13/site-packages");
+
+          // Mount lockfile
+          if (lockfileBytes) {
+            module.FS.writeFile("/lib/pyodide-lock.json", lockfileBytes);
+          }
+
+          // Mount bundled wheels and add to PYTHONPATH
+          const wheelPaths = [];
+          for (const whl of bundledWheels) {
+            const fsPath = `/lib/python3.13/${whl.name}`;
+            module.FS.writeFile(fsPath, whl.data);
+            wheelPaths.push(fsPath);
+          }
+          if (wheelPaths.length > 0) {
+            module.ENV.PYTHONPATH = [
+              "/lib/python3.13/python_stdlib.zip",
+              "/lib/python3.13/site-packages",
+              ...wheelPaths,
+            ].join(":");
+          }
+
           module.FS.mkdirTree("/workspace");
         },
       ],

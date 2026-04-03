@@ -185,6 +185,32 @@ for f in dist/pyodide.js dist/pyodide.mjs dist/package.json dist/python_stdlib.z
     [ -f "$f" ] && cp "$f" "$DIST_DIR/" || true
 done
 
+# ── Fetch micropip + packaging + lockfile from Pyodide CDN ─────
+# micropip is tagged "always" in standard Pyodide — every sandbox
+# should have it available via `import micropip` out of the box.
+PYODIDE_CDN="https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full"
+
+echo "Fetching pyodide-lock.json from CDN..."
+if [ ! -f "$DIST_DIR/pyodide-lock.json" ]; then
+    curl -sSL "$PYODIDE_CDN/pyodide-lock.json" -o "$DIST_DIR/pyodide-lock.json"
+fi
+
+echo "Fetching micropip + packaging wheels from CDN..."
+for whl_name in micropip packaging; do
+    # Extract the wheel filename from the lockfile
+    whl_file=$(python3 -c "
+import json, sys
+lock = json.load(open('$DIST_DIR/pyodide-lock.json'))
+pkg = lock['packages'].get('$whl_name')
+if pkg: print(pkg['file_name'])
+else: sys.exit(1)
+" 2>/dev/null) || continue
+    if [ -n "$whl_file" ] && [ ! -f "$DIST_DIR/$whl_file" ]; then
+        echo "  Downloading $whl_file ..."
+        curl -sSL "$PYODIDE_CDN/$whl_file" -o "$DIST_DIR/$whl_file"
+    fi
+done
+
 echo "=== Custom Pyodide build complete ==="
 echo "Distribution: $DIST_DIR"
 ls -lh "$DIST_DIR/"

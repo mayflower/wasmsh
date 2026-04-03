@@ -1,48 +1,7 @@
-import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-
-const SENTINEL_MARKER = Symbol("wasmsh-sentinel");
-const sentinelStubs = {
-  create_sentinel: () => SENTINEL_MARKER,
-  is_sentinel: (value) => (value === SENTINEL_MARKER ? 1 : 0),
-};
-
-function loadFactory(distDir) {
-  const require = createRequire(import.meta.url);
-  require(resolve(distDir, "pyodide.asm.js"));
-  const factory = globalThis._createPyodideModule;
-  if (typeof factory !== "function") {
-    throw new Error("_createPyodideModule not found");
-  }
-  return factory;
-}
-
-function makeApi(distDir) {
-  return {
-    tests: [],
-    config: { jsglobals: globalThis, indexURL: distDir },
-    fatal_error: () => {},
-    on_fatal: () => {},
-    initializeStreams: () => {},
-    finalizeBootstrap: () => {},
-    version: "0.0.0",
-    lockfile_info: {},
-    loadBinaryFile: (filePath) => {
-      const full = resolve(distDir, filePath);
-      if (!existsSync(full)) {
-        throw new Error(`Required Pyodide asset not found: ${full}`);
-      }
-      return readFileSync(full);
-    },
-    runtimeEnv: {
-      IN_NODE: true,
-      IN_BROWSER: false,
-      IN_BROWSER_MAIN_THREAD: false,
-    },
-  };
-}
+import { pathToFileURL } from "node:url";
 
 const fetchHelperPath = resolve(
   new URL(".", import.meta.url).pathname,
@@ -97,78 +56,77 @@ function createNetworkStubsNode(moduleRef) {
 // Module reference for network fetch closure. Set in createFullModule().
 let _nodeModuleRef = null;
 
-function makeInstantiateWasm(distDir, onError) {
-  return function instantiateWasm(imports, successCallback) {
-    imports.sentinel = sentinelStubs;
-    // Provide network fetch in env namespace (Emscripten default for extern "C").
-    // Uses the module-level _nodeModuleRef which is set after boot.
-    if (!imports.env) {
-      imports.env = {};
-    }
-    imports.env.wasmsh_js_http_fetch = (...args) => {
-      if (!_nodeModuleRef) return 0;
-      return createNetworkStubsNode(_nodeModuleRef).wasmsh_js_http_fetch(...args);
-    };
-    const wasmBytes = readFileSync(resolve(distDir, "pyodide.asm.wasm"));
-    WebAssembly.instantiate(wasmBytes, imports)
-      .then(({ instance }) => {
-        successCallback(instance, wasmBytes);
-      })
-      .catch(onError);
-    return {};
-  };
-}
-
+/**
+ * Boot via Pyodide's standard `loadPyodide()` to get the full API
+ * (runPythonAsync, loadPackage, pyimport, micropip support).
+ *
+ * We monkey-patch WebAssembly.instantiate to inject our wasmsh network
+ * stubs and sentinel imports, then restore it after boot.
+ */
 export async function createFullModule(distDir) {
-  const factory = loadFactory(distDir);
+  // Import loadPyodide from the packaged pyodide.mjs
+  const pyodideMjs = resolve(distDir, "pyodide.mjs");
+  const { loadPyodide } = await import(pathToFileURL(pyodideMjs).href);
 
-  let resolveModule;
-  let rejectModule;
-  const modulePromise = new Promise((resolvePromise, rejectPromise) => {
-    resolveModule = resolvePromise;
-    rejectModule = rejectPromise;
-  });
+  // Patch WebAssembly.instantiate to inject wasmsh imports
+  const origInstantiate = WebAssembly.instantiate;
+  const SENTINEL_MARKER = Symbol("wasmsh-sentinel");
+  WebAssembly.instantiate = async function (binary, imports) {
+    if (imports) {
+      // Inject sentinel stubs
+      if (!imports.sentinel) {
+        imports.sentinel = {
+          create_sentinel: () => SENTINEL_MARKER,
+          is_sentinel: (value) => (value === SENTINEL_MARKER ? 1 : 0),
+        };
+      }
+      // Inject wasmsh network fetch
+      if (!imports.env) imports.env = {};
+      if (!imports.env.wasmsh_js_http_fetch) {
+        imports.env.wasmsh_js_http_fetch = (...args) => {
+          if (!_nodeModuleRef) return 0;
+          return createNetworkStubsNode(_nodeModuleRef).wasmsh_js_http_fetch(...args);
+        };
+      }
+    }
+    return origInstantiate.call(this, binary, imports);
+  };
 
-  const logs = [];
-
-  factory({
-    noInitialRun: true,
-    thisProgram: "wasmsh-pyodide",
-    locateFile: (path) => resolve(distDir, path),
-    print: (text) => logs.push(text),
-    printErr: (text) => logs.push(`[stderr] ${text}`),
-    API: makeApi(distDir),
-    instantiateWasm: makeInstantiateWasm(distDir, rejectModule),
-    preRun: [
-      (module) => {
-        const stdlibZip = resolve(distDir, "python_stdlib.zip");
-        if (existsSync(stdlibZip)) {
-          const zipData = readFileSync(stdlibZip);
-          module.FS.mkdirTree("/lib/python3.13");
-          module.FS.writeFile("/lib/python3.13/python_stdlib.zip", zipData);
-          module.ENV.PYTHONPATH = "/lib/python3.13/python_stdlib.zip";
-          module.ENV.PYTHONHOME = "/";
-        }
-        module.FS.mkdirTree("/lib/python3.13/site-packages");
-        module.FS.mkdirTree("/workspace");
-      },
-    ],
-    onRuntimeInitialized() {
-      resolveModule(this);
-    },
-  }).catch((err) => {
-    rejectModule(err);
-  });
-
-  const module = await modulePromise;
-  if (typeof module.ccall !== "function") {
-    throw new Error("Module.ccall not available");
+  let pyodide;
+  try {
+    pyodide = await loadPyodide({
+      indexURL: distDir + "/",
+      // Suppress prompts and version check (our build ID won't match CDN)
+      checkAPIVersion: false,
+      _sysExecutable: "wasmsh-pyodide",
+      args: [],
+      env: { HOME: "/workspace", PYTHONHOME: "/" },
+      stdout: () => {},
+      stderr: () => {},
+    });
+  } finally {
+    // Restore original WebAssembly.instantiate
+    WebAssembly.instantiate = origInstantiate;
   }
 
-  // Bind the module reference so network fetch stubs can access WASM memory.
-  _nodeModuleRef = module;
+  // The underlying Emscripten module is accessible via pyodide._module
+  const module = pyodide._module;
+  if (!module || typeof module.ccall !== "function") {
+    throw new Error("Pyodide module ccall not available");
+  }
 
-  module.callMain([]);
-  module._logs = logs;
+  _nodeModuleRef = module;
+  module.FS.mkdirTree("/workspace");
+
+  // Pre-load micropip so `import micropip` works immediately.
+  // The wheel file is in the assets dir and indexed in pyodide-lock.json.
+  try {
+    await pyodide.loadPackage("micropip");
+  } catch {
+    // micropip not available in this dist — not fatal
+  }
+
+  // Attach the pyodide API to the module so the host can use it
+  module._pyodide = pyodide;
   return module;
 }

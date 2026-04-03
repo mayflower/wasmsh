@@ -150,104 +150,16 @@ class WasmshNodeHost {
     };
   }
 
-  /**
-   * Extract a wheel at `wheelPath` (already on the Emscripten FS) into
-   * site-packages so it becomes importable by Python.
-   */
-  _extractWheel(wheelPath) {
-    const result = this.sendHostCommand({
-      Run: {
-        input: `python3 << 'WASMSH_PIP_EOF'
-import zipfile, os, sys
-sp = '/lib/python3.13/site-packages'
-os.makedirs(sp, exist_ok=True)
-if sp not in sys.path:
-    sys.path.insert(0, sp)
-whl = '${wheelPath.replace(/'/g, "'\\''")}'
-if not os.path.isfile(whl):
-    print('ERR:wheel not found: ' + whl, file=sys.stderr)
-    sys.exit(1)
-with zipfile.ZipFile(whl) as zf:
-    zf.extractall(sp)
-print('OK')
-WASMSH_PIP_EOF`,
-      },
-    });
-    const exit = result.find((e) => "Exit" in e);
-    if (exit && exit.Exit !== 0) {
-      const stderr = new TextDecoder().decode(extractStream(result, "Stderr"));
-      throw new Error(`Failed to extract wheel ${wheelPath}: ${stderr}`);
-    }
-  }
-
-  /**
-   * Download a wheel from an HTTP(S) URL and write it to a temp path
-   * on the Emscripten FS.  Returns the FS path.
-   */
-  async _downloadWheel(url) {
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`Failed to download ${url}: HTTP ${response.status}`);
-    }
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    const filename = url.split("/").pop() || "downloaded.whl";
-    const fsPath = `/tmp/_wasmsh_pip_${filename}`;
-    this.sendHostCommand({
-      WriteFile: { path: fsPath, data: Array.from(bytes) },
-    });
-    return fsPath;
-  }
-
-  /**
-   * Resolve a package name to a pure-Python wheel URL via the PyPI JSON API.
-   * Checks pypi.org and files.pythonhosted.org against the allowlist.
-   */
-  async _resolvePackageName(name) {
-    const pypiHost = "pypi.org";
-    const filesHost = "files.pythonhosted.org";
-    const apiUrl = `https://${pypiHost}/pypi/${encodeURIComponent(name)}/json`;
-    if (!isHostAllowed(apiUrl, this._allowedHosts)) {
-      throw new Error(
-        `Host '${pypiHost}' not in allowedHosts. ` +
-        "Add 'pypi.org' and 'files.pythonhosted.org' to allowedHosts.",
-      );
-    }
-    const response = await fetch(apiUrl);
-    if (!response.ok) {
-      if (response.status === 404) {
-        throw new Error(`Package '${name}' not found on PyPI`);
-      }
-      throw new Error(`PyPI lookup failed for '${name}': HTTP ${response.status}`);
-    }
-    const data = await response.json();
-    // Find a compatible pure-Python wheel from the latest version's URLs
-    const urls = data.urls || [];
-    const wheel = urls.find(
-      (u) =>
-        u.packagetype === "bdist_wheel" &&
-        /-(py2\.py3|py3)-none-any\.whl$/i.test(u.filename),
-    );
-    if (!wheel) {
-      throw new Error(
-        `No pure-Python wheel found for '${name}'. ` +
-        "Only pure-Python packages (py3-none-any) are supported.",
-      );
-    }
-    // Validate the download URL host
-    if (!isHostAllowed(wheel.url, this._allowedHosts)) {
-      throw new Error(
-        `Download host not allowed for '${name}': ${wheel.url}. ` +
-        `Add '${filesHost}' to allowedHosts.`,
-      );
-    }
-    return { url: wheel.url, version: data.info?.version, filename: wheel.filename };
-  }
-
   async installPythonPackages({ requirements, options = {} }) {
     await this.ensureBooted();
     const reqs = typeof requirements === "string" ? [requirements] : requirements;
     if (!Array.isArray(reqs)) {
       throw new Error("requirements must be a string or array of strings");
+    }
+
+    const pyodide = this.module._pyodide;
+    if (!pyodide) {
+      throw new Error("Pyodide API not available — cannot install packages");
     }
 
     const installed = [];
@@ -257,37 +169,40 @@ WASMSH_PIP_EOF`,
         throw new Error(`file: URIs are not supported for security: ${req}`);
       }
 
-      if (req.startsWith("emfs:")) {
-        // Local wheel install from the in-process Emscripten filesystem
-        this._extractWheel(req.slice(5));
-        installed.push({ requirement: req });
-      } else if (/^https?:\/\//i.test(req)) {
-        // Direct HTTP(S) wheel URL
-        if (!isHostAllowed(req, this._allowedHosts)) {
+      if (req.startsWith("emfs:") || /^https?:\/\//i.test(req)) {
+        // emfs: and HTTP(S) URLs go directly to micropip
+        if (/^https?:\/\//i.test(req) && !isHostAllowed(req, this._allowedHosts)) {
           throw new Error(
             `Host not allowed for package install: ${req}. ` +
             "Configure allowedHosts when creating the session.",
           );
         }
-        const fsPath = await this._downloadWheel(req);
-        this._extractWheel(fsPath);
+        const micropip = pyodide.pyimport("micropip");
+        await micropip.install(req, { deps: options.deps ?? true });
         installed.push({ requirement: req });
       } else {
-        // Package name — resolve via PyPI
+        // Package name — use micropip which checks Pyodide lockfile then PyPI
         if (this._allowedHosts.length === 0) {
           throw new Error(
             `Package name installs require network access: ${req}. ` +
-            "Configure allowedHosts (e.g., ['pypi.org', 'files.pythonhosted.org']) when creating the session.",
+            "Configure allowedHosts (e.g., ['cdn.jsdelivr.net', 'pypi.org', 'files.pythonhosted.org']) when creating the session.",
           );
         }
-        const resolved = await this._resolvePackageName(req);
-        const fsPath = await this._downloadWheel(resolved.url);
-        this._extractWheel(fsPath);
-        installed.push({
-          requirement: req,
-          name: req,
-          version: resolved.version,
-        });
+        const micropip = pyodide.pyimport("micropip");
+        await micropip.install(req, { deps: options.deps ?? true });
+        // Get installed version
+        let version;
+        try {
+          const pkgList = micropip.list().toJs();
+          const normalized = req.toLowerCase().replace(/-/g, "_").replace(/[>=<!\s].*/g, "");
+          for (const [name, info] of pkgList) {
+            if (name.toLowerCase().replace(/-/g, "_") === normalized) {
+              version = info.get("version");
+              break;
+            }
+          }
+        } catch { /* version lookup failed */ }
+        installed.push({ requirement: req, name: req, version });
       }
     }
     return { installed, requirements: reqs };
