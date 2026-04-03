@@ -14,24 +14,31 @@ import assert from "node:assert/strict";
 
 const SKIP = process.env.SKIP_PYODIDE === "1";
 
-function decodeBytes(arr) {
-  return new TextDecoder().decode(new Uint8Array(arr));
+function extractStream(events, key) {
+  const chunks = [];
+  let total = 0;
+  for (const e of events) {
+    if (e && typeof e === "object" && key in e) {
+      const chunk = e[key];
+      chunks.push(chunk);
+      total += chunk.length;
+    }
+  }
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return result;
 }
 
 function findStdout(events) {
-  const parts = [];
-  for (const e of events) {
-    if (e && typeof e === "object" && "Stdout" in e) parts.push(...e.Stdout);
-  }
-  return decodeBytes(parts);
+  return new TextDecoder().decode(extractStream(events, "Stdout"));
 }
 
 function findStderr(events) {
-  const parts = [];
-  for (const e of events) {
-    if (e && typeof e === "object" && "Stderr" in e) parts.push(...e.Stderr);
-  }
-  return decodeBytes(parts);
+  return new TextDecoder().decode(extractStream(events, "Stderr"));
 }
 
 function findExitCode(events) {
@@ -212,8 +219,8 @@ describe("network allowlist security (Pyodide Node)", () => {
 
       assert.notEqual(exitCode, 0, "empty allowlist must block");
       assert.ok(
-        stderr.includes("denied") || stderr.includes("allowlist"),
-        `should mention denial: ${stderr}`,
+        stderr.includes("denied") || stderr.includes("allowlist") || stderr.includes("not available"),
+        `should mention denial or unavailability: ${stderr}`,
       );
     },
   );

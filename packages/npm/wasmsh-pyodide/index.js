@@ -118,7 +118,12 @@ class NodeSession extends RequestClient {
       pending.clear();
     });
 
+    let closed = false;
+
     super((method, params) => {
+      if (closed) {
+        return Promise.reject(new Error("wasmsh: session is closed"));
+      }
       const id = nextId;
       nextId += 1;
       return new Promise((resolve, reject) => {
@@ -129,12 +134,14 @@ class NodeSession extends RequestClient {
 
     this._child = child;
     this._rl = rl;
+    this._setClosed = () => { closed = true; };
   }
 
   async close() {
     try {
-      await this._sendRequest("close", {});
+      await this._sendRaw("close", {});
     } finally {
+      this._setClosed();
       this._rl.close();
       this._child.stdin.end();
       if (!this._child.killed) {
