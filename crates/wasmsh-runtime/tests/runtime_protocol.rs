@@ -167,3 +167,23 @@ fn run_recovers_after_exit_builtin() {
     assert_eq!(get_stdout(&events), "recovered\n");
     assert_eq!(get_exit(&events), 0);
 }
+
+#[test]
+fn single_quoted_glob_not_expanded() {
+    let mut rt = WorkerRuntime::new();
+    rt.handle_command(HostCommand::Init {
+        step_budget: 0,
+        allowed_hosts: vec![],
+    });
+    // Create a file whose name matches [a-z]*
+    rt.handle_command(HostCommand::WriteFile {
+        path: "/testfile".into(),
+        data: vec![],
+    });
+    // Single-quoted string must NOT be glob-expanded
+    let events = rt.handle_command(HostCommand::Run {
+        input: "echo '[a-z]*'".into(),
+    });
+    assert_eq!(get_stdout(&events), "[a-z]*\n");
+    assert_eq!(get_exit(&events), 0);
+}

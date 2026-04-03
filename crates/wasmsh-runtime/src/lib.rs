@@ -799,18 +799,21 @@ impl WorkerRuntime {
             return;
         }
 
-        // Brace expansion must be suppressed for quoted words (POSIX + bash behavior).
-        let argv: Vec<String> = expanded
+        // Brace and glob expansion must be suppressed for quoted words (POSIX + bash).
+        let tagged: Vec<(String, bool)> = expanded
             .into_iter()
             .flat_map(|ew| {
                 if ew.was_quoted {
-                    vec![ew.text]
+                    vec![(ew.text, true)]
                 } else {
                     wasmsh_expand::expand_braces(&ew.text)
+                        .into_iter()
+                        .map(|s| (s, false))
+                        .collect()
                 }
             })
             .collect();
-        let argv = self.expand_globs(argv);
+        let argv = self.expand_globs_tagged(tagged);
 
         for assignment in &exec.env {
             self.execute_assignment(&assignment.name, assignment.value.as_ref());
@@ -2493,6 +2496,30 @@ impl WorkerRuntime {
     /// Supports: basic glob (`*`, `?`, `[...]`), globstar (`**`), nullglob,
     /// dotglob, and extglob patterns.
     /// When `set -f` (noglob) is active, glob expansion is skipped entirely.
+    /// Expand globs in argv, skipping entries tagged as quoted.
+    fn expand_globs_tagged(&mut self, argv: Vec<(String, bool)>) -> Vec<String> {
+        if self.vm.state.get_var("SHOPT_f").as_deref() == Some("1") {
+            return argv.into_iter().map(|(s, _)| s).collect();
+        }
+        let nullglob = self.get_shopt_value("nullglob");
+        let dotglob = self.get_shopt_value("dotglob");
+        let globstar = self.get_shopt_value("globstar");
+        let extglob = self.get_shopt_value("extglob");
+
+        let mut result = Vec::new();
+        for (arg, quoted) in argv {
+            if quoted {
+                result.push(arg);
+            } else {
+                result.extend(
+                    self.expand_glob_arg(arg, nullglob, dotglob, globstar, extglob),
+                );
+            }
+        }
+        result.truncate(Self::MAX_GLOB_RESULTS);
+        result
+    }
+
     fn expand_globs(&mut self, argv: Vec<String>) -> Vec<String> {
         if self.vm.state.get_var("SHOPT_f").as_deref() == Some("1") {
             return argv;

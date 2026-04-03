@@ -169,7 +169,7 @@ impl Vfs for EmscriptenFs {
             // Truncate any leftover content from a previous longer write.
             let pos = unsafe { libc::ftell(of.fp) };
             if pos >= 0 {
-                unsafe { libc::ftruncate(libc::fileno(of.fp), pos) };
+                unsafe { libc::ftruncate(libc::fileno(of.fp), pos as libc::off_t) };
             }
         }
         unsafe { libc::fflush(of.fp) };
