@@ -192,7 +192,7 @@ jobs:
   publish-npm:
     name: publish npm
     needs: build-pyodide
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 15
     environment: npm-publish
     permissions:
