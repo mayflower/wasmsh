@@ -368,14 +368,14 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "wasmsh-ast"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "smol_str",
 ]
 
 [[package]]
 name = "wasmsh-builtins"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "indexmap",
  "smol_str",
@@ -385,7 +385,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-expand"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "smol_str",
  "wasmsh-ast",
@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-fs"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "libc",
  "thiserror",
@@ -402,7 +402,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-hir"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "smol_str",
  "wasmsh-ast",
@@ -410,21 +410,21 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-ir"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "smol_str",
 ]
 
 [[package]]
 name = "wasmsh-lex"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "wasmsh-ast",
 ]
 
 [[package]]
 name = "wasmsh-parse"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "wasmsh-ast",
  "wasmsh-lex",
@@ -432,7 +432,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-protocol"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "serde",
 ]
@@ -452,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-runtime"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "indexmap",
  "smol_str",
@@ -470,7 +470,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-state"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "indexmap",
  "smol_str",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-utils"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "indexmap",
  "url",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-vm"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "wasmsh-builtins",
  "wasmsh-ir",
