@@ -7,24 +7,20 @@
 import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 
+import { extractStream } from "../../../packages/npm/wasmsh-pyodide/lib/protocol.mjs";
+
 const SKIP = process.env.SKIP_PYODIDE === "1";
 
 function decodeStdout(events) {
-  const parts = [];
-  for (const e of events) {
-    if ("Stdout" in e) parts.push(...e.Stdout);
-  }
-  if (parts.length === 0) return null;
-  return new TextDecoder().decode(new Uint8Array(parts));
+  const bytes = extractStream(events, "Stdout");
+  if (bytes.length === 0) return null;
+  return new TextDecoder().decode(bytes);
 }
 
 function decodeStderr(events) {
-  const parts = [];
-  for (const e of events) {
-    if ("Stderr" in e) parts.push(...e.Stderr);
-  }
-  if (parts.length === 0) return null;
-  return new TextDecoder().decode(new Uint8Array(parts));
+  const bytes = extractStream(events, "Stderr");
+  if (bytes.length === 0) return null;
+  return new TextDecoder().decode(bytes);
 }
 
 describe("python command in wasmsh", () => {

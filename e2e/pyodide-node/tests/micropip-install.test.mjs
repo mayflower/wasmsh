@@ -8,11 +8,13 @@
  * Skip: SKIP_PYODIDE=1
  */
 import http from "node:http";
-import { describe, it, after } from "node:test";
+import { describe, it } from "node:test";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
+
+import { createSessionTracker } from "./test-session-helper.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_DIR = resolve(__dirname, "../../../packages/npm/wasmsh-pyodide");
@@ -34,25 +36,7 @@ if (!SKIP) {
 }
 
 describe("installPythonPackages (Node)", () => {
-  const sessions = [];
-  after(async () => {
-    for (const s of sessions) {
-      try {
-        await s.close();
-      } catch {
-        // ignore cleanup errors
-      }
-    }
-  });
-
-  async function openSession(options = {}) {
-    const session = await createNodeSession({
-      assetDir: ASSETS_DIR,
-      ...options,
-    });
-    sessions.push(session);
-    return session;
-  }
+  const openSession = SKIP ? null : createSessionTracker(createNodeSession, ASSETS_DIR);
 
   // ── API existence ────────────────────────────────────────────
 

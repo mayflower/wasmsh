@@ -2,6 +2,7 @@ import { dirname, resolve } from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
+import { isHostAllowed } from "./lib/allowlist.mjs";
 import { createFullModule } from "./lib/node-module.mjs";
 import {
   buildRunResult,
@@ -9,6 +10,7 @@ import {
   extractStream,
   getVersion,
 } from "./lib/protocol.mjs";
+import { createRuntimeBridge } from "./lib/runtime-bridge.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -28,79 +30,27 @@ function parseArgs(argv) {
   return options;
 }
 
-/**
- * Check if a URL's host is in the allowlist.
- * Mirrors the Rust HostAllowlist semantics: exact host, wildcard subdomain
- * (*.example.com), host:port.  Empty list denies all.
- */
-function isHostAllowed(url, allowedHosts) {
-  if (!allowedHosts || allowedHosts.length === 0) {
-    return false;
-  }
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return false;
-  }
-  const host = parsed.hostname.toLowerCase();
-  const port = parsed.port ? Number(parsed.port) : null;
-
-  for (const pattern of allowedHosts) {
-    const colonIdx = pattern.lastIndexOf(":");
-    let patHost, patPort;
-    if (colonIdx > 0 && /^\d+$/.test(pattern.slice(colonIdx + 1))) {
-      patHost = pattern.slice(0, colonIdx).toLowerCase();
-      patPort = Number(pattern.slice(colonIdx + 1));
-    } else {
-      patHost = pattern.toLowerCase();
-      patPort = null;
-    }
-
-    if (patPort !== null && port !== patPort) continue;
-
-    if (patHost.startsWith("*.")) {
-      const suffix = patHost.slice(2);
-      if (host === suffix || host.endsWith(`.${suffix}`)) return true;
-    } else {
-      if (host === patHost) return true;
-    }
-  }
-  return false;
-}
-
 class WasmshNodeHost {
   constructor(assetDir) {
     this.assetDir = assetDir;
     this.module = null;
-    this.runtimeHandle = null;
+    this.runtimeBridge = null;
     this._allowedHosts = [];
   }
 
   async ensureBooted() {
-    if (this.module && this.runtimeHandle !== null) {
+    if (this.module && this.runtimeBridge) {
       return;
     }
     this.module = await createFullModule(this.assetDir);
-    this.runtimeHandle = this.module.ccall("wasmsh_runtime_new", "number", [], []);
+    this.runtimeBridge = createRuntimeBridge(this.module);
   }
 
   sendHostCommand(command) {
-    if (!this.module || this.runtimeHandle === null) {
+    if (!this.module || !this.runtimeBridge) {
       throw new Error("runtime not initialized");
     }
-    const json = JSON.stringify(command);
-    const jsonPtr = this.module.stringToNewUTF8(json);
-    const resultPtr = this.module.ccall(
-      "wasmsh_runtime_handle_json",
-      "number",
-      ["number", "number"],
-      [this.runtimeHandle, jsonPtr],
-    );
-    this.module._free(jsonPtr);
-    const resultStr = this.module.UTF8ToString(resultPtr);
-    this.module.ccall("wasmsh_runtime_free_string", null, ["number"], [resultPtr]);
-    return JSON.parse(resultStr);
+    return this.runtimeBridge.sendHostCommand(command);
   }
 
   async init({ stepBudget = 0, initialFiles = [], allowedHosts = [] } = {}) {
@@ -143,10 +93,9 @@ class WasmshNodeHost {
 
   async listDir({ path }) {
     const events = this.sendHostCommand({ ListDir: { path } });
-    const decoder = new TextDecoder();
     return {
       events,
-      output: decoder.decode(extractStream(events, "Stdout")),
+      output: Buffer.from(extractStream(events, "Stdout")).toString("utf-8"),
     };
   }
 
@@ -188,11 +137,11 @@ class WasmshNodeHost {
   }
 
   async close() {
-    if (this.module && this.runtimeHandle !== null) {
-      this.module.ccall("wasmsh_runtime_free", null, ["number"], [this.runtimeHandle]);
+    if (this.runtimeBridge) {
+      this.runtimeBridge.close();
     }
     this.module = null;
-    this.runtimeHandle = null;
+    this.runtimeBridge = null;
     return { closed: true };
   }
 }

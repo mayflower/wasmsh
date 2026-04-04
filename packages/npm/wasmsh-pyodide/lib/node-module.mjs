@@ -3,6 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { createRuntimeBridge } from "./runtime-bridge.mjs";
+
 const fetchHelperPath = resolve(
   new URL(".", import.meta.url).pathname,
   "fetch-helper.mjs",
@@ -13,7 +15,7 @@ const fetchHelperPath = resolve(
  * fetch-helper.mjs. Request data is passed via stdin (no argv size limits).
  * Returns a JSON object with {status, headers, body_base64}.
  */
-function syncHttpFetchNode(url, method, headersJson, bodyBase64, followRedirects) {
+export function syncHttpFetchNode(url, method, headersJson, bodyBase64, followRedirects) {
   const input = JSON.stringify({
     url,
     method,
@@ -80,9 +82,9 @@ export async function createFullModule(distDir) {
           is_sentinel: (value) => (value === SENTINEL_MARKER ? 1 : 0),
         };
       }
-      // Inject wasmsh network fetch
+      // Inject wasmsh network fetch (replace Emscripten stubs too)
       if (!imports.env) imports.env = {};
-      if (!imports.env.wasmsh_js_http_fetch) {
+      if (!imports.env.wasmsh_js_http_fetch || imports.env.wasmsh_js_http_fetch.stub) {
         imports.env.wasmsh_js_http_fetch = (...args) => {
           if (!_nodeModuleRef) return 0;
           return createNetworkStubsNode(_nodeModuleRef).wasmsh_js_http_fetch(...args);
@@ -128,5 +130,6 @@ export async function createFullModule(distDir) {
 
   // Attach the pyodide API to the module so the host can use it
   module._pyodide = pyodide;
+  createRuntimeBridge(module);
   return module;
 }

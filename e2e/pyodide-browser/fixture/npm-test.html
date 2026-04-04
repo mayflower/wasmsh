@@ -4,8 +4,8 @@
 <body>
   <p id="status">loading</p>
   <script>
-    // Load the npm package's browser-worker.js instead of the raw pyodide-worker.js
-    const workerUrl = "../../packages/npm/wasmsh-pyodide/browser-worker.js";
+    // Load the npm package's browser-worker.js via symlink in fixture dir
+    const workerUrl = "./wasmsh-pyodide/browser-worker.js";
     const worker = new Worker(workerUrl);
     window._npmWorker = worker;
     window._npmWorkerReady = false;
@@ -29,9 +29,11 @@
       });
     };
 
-    // Init the worker with the dist path pointing at the symlinked assets
+    // Init the worker with an absolute URL so the worker can resolve assets
+    // regardless of its own script location.
+    var baseUrl = new URL("./dist", window.location.href).href;
     window._npmSend("init", {
-      assetBaseUrl: "./dist",
+      assetBaseUrl: baseUrl,
       stepBudget: 0,
       initialFiles: [],
     }).then(function () {

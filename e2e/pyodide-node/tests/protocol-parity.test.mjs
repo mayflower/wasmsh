@@ -11,13 +11,14 @@
 import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 
+import { extractStream } from "../../../packages/npm/wasmsh-pyodide/lib/protocol.mjs";
+
 const SKIP = process.env.SKIP_PYODIDE === "1";
 
-/** Decode a Stdout byte array to string. */
 function decodeStdout(events) {
-  const evt = events.find((e) => "Stdout" in e);
-  if (!evt) return null;
-  return new TextDecoder().decode(new Uint8Array(evt.Stdout));
+  const bytes = extractStream(events, "Stdout");
+  if (bytes.length === 0) return null;
+  return new TextDecoder().decode(bytes);
 }
 
 describe("protocol parity: Pyodide runtime", () => {

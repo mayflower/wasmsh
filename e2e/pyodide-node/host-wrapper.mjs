@@ -8,12 +8,14 @@
  */
 import { resolve, dirname } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
+import { createFullModule as createPackagedFullModule, syncHttpFetchNode } from "../../packages/npm/wasmsh-pyodide/lib/node-module.mjs";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DIST = resolve(__dirname, "../../dist/pyodide-custom");
+const NPM_ASSETS_DIR = resolve(__dirname, "../../packages/npm/wasmsh-pyodide/assets");
 
 // Sentinel stubs matching src/core/sentinel.wat exports.
 const SENTINEL_MARKER = Symbol("sentinel");
@@ -52,31 +54,6 @@ function makeApi() {
 
 // Module reference for the network fetch closure (set after boot).
 let _moduleRef = null;
-
-const fetchHelperPath = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  "../../packages/npm/wasmsh-pyodide/lib/fetch-helper.mjs",
-);
-
-function syncHttpFetchNode(url, method, headersJson, bodyBase64, followRedirects) {
-  const input = JSON.stringify({
-    url,
-    method,
-    headers: JSON.parse(headersJson || "[]"),
-    body_base64: bodyBase64 || null,
-    follow_redirects: Boolean(followRedirects),
-  });
-  try {
-    const out = execFileSync(
-      process.execPath,
-      [fetchHelperPath],
-      { timeout: 30000, encoding: "utf-8", input, stdio: ["pipe", "pipe", "ignore"] },
-    );
-    return JSON.parse(out);
-  } catch (e) {
-    return { status: 0, headers: [], body_base64: "", error: e.message };
-  }
-}
 
 function makeInstantiateWasm() {
   return function instantiateWasm(imports, successCallback) {
@@ -132,48 +109,11 @@ export async function createProbeModule() {
 }
 
 /**
- * Full module — boots CPython interpreter so Python code can run.
+ * Full module — use the packaged npm runtime boot path so e2e covers the
+ * same loader/runtime wiring that ships to users.
  */
 export async function createFullModule() {
-  const factory = loadFactory();
-
-  let resolveModule;
-  const modulePromise = new Promise((ok) => { resolveModule = ok; });
-
-  const logs = [];
-
-  factory({
-    noInitialRun: true,
-    thisProgram: "wasmsh-probe",
-    locateFile: (path) => resolve(DIST, path),
-    print: (text) => logs.push(text),
-    printErr: (text) => logs.push("[stderr] " + text),
-    API: makeApi(),
-    instantiateWasm: makeInstantiateWasm(),
-    preRun: [(m) => {
-      // Mount Python stdlib zip and set env BEFORE Python init.
-      const stdlibZip = resolve(DIST, "python_stdlib.zip");
-      if (existsSync(stdlibZip)) {
-        const zipData = readFileSync(stdlibZip);
-        m.FS.mkdirTree("/lib/python3.13");
-        m.FS.writeFile("/lib/python3.13/python_stdlib.zip", zipData);
-        m.ENV.PYTHONPATH = "/lib/python3.13/python_stdlib.zip";
-        m.ENV.PYTHONHOME = "/";
-      }
-      m.FS.mkdirTree("/lib/python3.13/site-packages");
-      m.FS.mkdirTree("/workspace");
-    }],
-    onRuntimeInitialized() { resolveModule(this); },
-  }).catch(() => {});
-
-  const mod = await modulePromise;
-  if (typeof mod.ccall !== "function") throw new Error("Module.ccall not available");
+  const mod = await createPackagedFullModule(NPM_ASSETS_DIR);
   _moduleRef = mod;
-
-  // Boot CPython. callMain([]) runs main() which inits the interpreter.
-  // (preRun already mounted stdlib and set PYTHONPATH/PYTHONHOME.)
-  mod.callMain([]);
-
-  mod._logs = logs;
   return mod;
 }

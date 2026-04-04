@@ -10,11 +10,13 @@
  *
  * Skip: SKIP_PYODIDE=1 or SKIP_NETWORK=1
  */
-import { describe, it, after } from "node:test";
+import { describe, it } from "node:test";
 import { existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
+
+import { createSessionTracker } from "./test-session-helper.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_DIR = resolve(__dirname, "../../../packages/npm/wasmsh-pyodide");
@@ -37,21 +39,8 @@ const ALLOWED_HOSTS = [
 ];
 
 describe("Pyodide packages", () => {
-  const sessions = [];
-  after(async () => {
-    for (const s of sessions) {
-      try { await s.close(); } catch { /* ignore */ }
-    }
-  });
-
-  async function openSession() {
-    const session = await createNodeSession({
-      assetDir: ASSETS_DIR,
-      allowedHosts: ALLOWED_HOSTS,
-    });
-    sessions.push(session);
-    return session;
-  }
+  const openSession = SKIP ? null : createSessionTracker(createNodeSession, ASSETS_DIR);
+  const openNetworkSession = SKIP ? null : async () => openSession({ allowedHosts: ALLOWED_HOSTS });
 
   // ── Pure-Python packages (always work) ───────────────────────
 
@@ -63,13 +52,11 @@ describe("Pyodide packages", () => {
     ["packaging", "import packaging; print(packaging.__version__)"],
     ["beautifulsoup4", "import bs4; print(bs4.__version__)"],
     ["networkx", "import networkx; print(networkx.__version__)"],
-    ["jsonschema", "import jsonschema; print(jsonschema.__version__)"],
     ["idna", "import idna; print(idna.__version__)"],
     ["certifi", "import certifi; print(certifi.__version__)"],
-    ["pydantic", "import pydantic; print(pydantic.__version__)"],
   ]) {
     it(pkg, { skip: SKIP, timeout: 120_000 }, async () => {
-      const s = await openSession();
+      const s = await openNetworkSession();
       await s.installPythonPackages(pkg);
       const r = await s.run(`python3 -c "${importCheck}"`);
       assert.equal(r.exitCode, 0, `import failed: ${r.stderr}`);
@@ -80,7 +67,7 @@ describe("Pyodide packages", () => {
   // ── C extension with pure-Python fallback ────────────────────
 
   it("pyyaml", { skip: SKIP, timeout: 120_000 }, async () => {
-    const s = await openSession();
+    const s = await openNetworkSession();
     await s.installPythonPackages("pyyaml");
     const r = await s.run('python3 -c "import yaml; print(yaml.__version__)"');
     assert.equal(r.exitCode, 0, `import failed: ${r.stderr}`);
@@ -91,13 +78,15 @@ describe("Pyodide packages", () => {
   // CPython symbols exported via MAIN_MODULE=1.
 
   for (const [pkg, importMod] of [
+    ["jsonschema", "jsonschema"],
+    ["pydantic", "pydantic"],
     ["regex", "regex"],
     ["numpy", "numpy"],
     ["pandas", "pandas"],
     ["scipy", "scipy"],
   ]) {
     it(`${pkg} — install succeeds, import needs MAIN_MODULE=1`, { skip: SKIP, timeout: 180_000 }, async () => {
-      const s = await openSession();
+      const s = await openNetworkSession();
       const result = await s.installPythonPackages(pkg);
       assert.ok(result.installed.length > 0, "install should succeed");
       const r = await s.run(`python3 -c "import ${importMod}"`);

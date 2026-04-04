@@ -312,10 +312,12 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    /// Consume until matching `))` for `$((...))`.
+    /// Consume until matching `))` for `$((...))`, tracking nested parens,
+    /// quotes, and backslash escapes.
     fn consume_arithmetic(&mut self) -> Result<(), LexerError> {
         let start = self.pos.saturating_sub(3);
-        let mut depth: u32 = 1;
+        let mut paren_depth: u32 = 0;
+        let mut dbl_depth: u32 = 1;
         loop {
             match self.peek() {
                 None => {
@@ -328,19 +330,31 @@ impl<'src> Lexer<'src> {
                     self.pos += 1;
                     if self.peek() == Some(b'(') {
                         self.pos += 1;
-                        depth += 1;
+                        dbl_depth += 1;
+                    } else {
+                        paren_depth += 1;
                     }
                 }
                 Some(b')') => {
-                    self.pos += 1;
-                    if self.peek() == Some(b')') {
+                    if paren_depth > 0 {
+                        // Close a single nested paren first
                         self.pos += 1;
-                        depth -= 1;
-                        if depth == 0 {
+                        paren_depth -= 1;
+                    } else if self.peek_ahead(1) == Some(b')') {
+                        self.pos += 2;
+                        dbl_depth -= 1;
+                        if dbl_depth == 0 {
                             return Ok(());
                         }
+                    } else {
+                        // Stray `)` inside arithmetic — consume as literal
+                        self.pos += 1;
                     }
                 }
+                Some(b'\'') => self.consume_single_quoted()?,
+                Some(b'"') => self.consume_double_quoted()?,
+                Some(b'\\') => self.consume_backslash(),
+                Some(b'$') => self.consume_dollar()?,
                 Some(_) => self.pos += 1,
             }
         }
@@ -442,8 +456,9 @@ impl<'src> Lexer<'src> {
     }
 
     fn consume_word_dollar(&mut self) -> Result<(), LexerError> {
-        if self.peek_ahead(1) == Some(b'"') {
-            self.pos += 1;
+        // $"..." locale quoting — consume $ then handle the double quote
+        if self.peek_ahead(1) == Some(b'"') && self.peek_ahead(2) != Some(b'(') {
+            self.pos += 1; // skip $
             self.consume_double_quoted()
         } else {
             self.consume_dollar()
@@ -587,7 +602,10 @@ impl<'src> Lexer<'src> {
                         });
                     }
                 }
+                Some(b'\'') => self.consume_single_quoted()?,
+                Some(b'"') => self.consume_double_quoted()?,
                 Some(b'\\') => self.consume_backslash(),
+                Some(b'$') => self.consume_dollar()?,
                 Some(_) => self.pos += 1,
             }
         }
@@ -976,5 +994,60 @@ mod tests {
         let toks = tokens_with_text("$\"hello\"");
         assert_eq!(toks.len(), 1);
         assert_eq!(toks[0].1, "$\"hello\"");
+    }
+
+    // --- Arithmetic nested parens ---
+
+    #[test]
+    fn arithmetic_nested_single_parens() {
+        let toks = tokens_with_text("echo $((1 + (2 * 3)))");
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[1].1, "$((1 + (2 * 3)))");
+    }
+
+    #[test]
+    fn arithmetic_deeply_nested_parens() {
+        let toks = tokens_with_text("echo $(( ((1+2)) + (3) ))");
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[1].1, "$(( ((1+2)) + (3) ))");
+    }
+
+    #[test]
+    fn arithmetic_with_dollar_expansion() {
+        let toks = tokens_with_text("echo $(($x + ${y}))");
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[1].1, "$(($x + ${y}))");
+    }
+
+    #[test]
+    fn arithmetic_with_quotes() {
+        // Quotes inside arithmetic are unusual but shouldn't break the lexer
+        let toks = tokens_with_text("echo $((\"1\" + 2))");
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[1].1, "$((\"1\" + 2))");
+    }
+
+    // --- Process substitution with quotes ---
+
+    #[test]
+    fn process_subst_with_double_quote() {
+        // The ")" inside quotes must not terminate the process substitution
+        let toks = tokens_with_text(r#"<(grep ")" file)"#);
+        assert_eq!(toks.len(), 1);
+        assert_eq!(toks[0].1, r#"<(grep ")" file)"#);
+    }
+
+    #[test]
+    fn process_subst_with_single_quote() {
+        let toks = tokens_with_text("<(echo ')')");
+        assert_eq!(toks.len(), 1);
+        assert_eq!(toks[0].1, "<(echo ')')");
+    }
+
+    #[test]
+    fn process_subst_with_dollar() {
+        let toks = tokens_with_text("<(echo $HOME)");
+        assert_eq!(toks.len(), 1);
+        assert_eq!(toks[0].1, "<(echo $HOME)");
     }
 }

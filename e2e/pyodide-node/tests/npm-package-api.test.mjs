@@ -6,11 +6,13 @@
  *
  * Skip: SKIP_PYODIDE=1
  */
-import { describe, it, after } from "node:test";
+import { describe, it } from "node:test";
 import { existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
+
+import { createSessionTracker } from "./test-session-helper.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_DIR = resolve(__dirname, "../../../packages/npm/wasmsh-pyodide");
@@ -26,26 +28,7 @@ if (!SKIP) {
 }
 
 describe("createNodeSession API", () => {
-  // Track sessions for cleanup
-  const sessions = [];
-  after(async () => {
-    for (const s of sessions) {
-      try {
-        await s.close();
-      } catch {
-        // ignore cleanup errors
-      }
-    }
-  });
-
-  async function openSession(options = {}) {
-    const session = await createNodeSession({
-      assetDir: ASSETS_DIR,
-      ...options,
-    });
-    sessions.push(session);
-    return session;
-  }
+  const openSession = SKIP ? null : createSessionTracker(createNodeSession, ASSETS_DIR);
 
   it("returns a session with expected methods", { skip: SKIP, timeout: 60_000 }, async () => {
     const session = await openSession();
