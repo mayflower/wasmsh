@@ -121,8 +121,14 @@ await session.installPythonPackages(
 **Security**: Installs are session-local and do not persist between sessions.
 `file:` URIs are rejected to prevent host filesystem access. Network-based
 installs (HTTP URLs, package names) require `allowedHosts` to be configured
-when creating the session. Only pure-Python wheels (`py3-none-any`) are
-supported; C extension packages like numpy are not available.
+when creating the session.
+
+**Node.js**: Uses Pyodide's micropip under the hood. Supports both pure-Python
+and Pyodide-compiled packages from the CDN (`cdn.jsdelivr.net`). C extension
+imports (numpy, pandas) require the MAIN_MODULE=1 build flag (not yet enabled).
+
+**Browser**: Uses manual wheel extraction. Only pure-Python wheels
+(`py3-none-any`) are supported.
 
 ### List directory contents
 

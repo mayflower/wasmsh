@@ -373,7 +373,6 @@ const methods = {
 
   async listDir({ path }) {
     const events = sendHostCommand({ ListDir: { path } });
-    const decoder = new TextDecoder();
     return {
       events,
       output: decoder.decode(extractStream(events, "Stdout")),

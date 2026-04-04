@@ -7,7 +7,7 @@
  *   createFullModule()       — boots Python interpreter (for FS tests)
  */
 import { resolve, dirname } from "node:path";
-import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -161,30 +161,6 @@ export async function createFullModule() {
         m.ENV.PYTHONHOME = "/";
       }
       m.FS.mkdirTree("/lib/python3.13/site-packages");
-
-      // Mount lockfile and bundled wheels (micropip, packaging)
-      const lockFile = resolve(DIST, "pyodide-lock.json");
-      if (existsSync(lockFile)) {
-        m.FS.writeFile("/lib/pyodide-lock.json", readFileSync(lockFile));
-      }
-      const wheelPaths = [];
-      try {
-        for (const f of readdirSync(DIST)) {
-          if (f.endsWith(".whl")) {
-            const fsPath = `/lib/python3.13/${f}`;
-            m.FS.writeFile(fsPath, readFileSync(resolve(DIST, f)));
-            wheelPaths.push(fsPath);
-          }
-        }
-      } catch { /* no bundled wheels */ }
-      if (wheelPaths.length > 0) {
-        m.ENV.PYTHONPATH = [
-          "/lib/python3.13/python_stdlib.zip",
-          "/lib/python3.13/site-packages",
-          ...wheelPaths,
-        ].join(":");
-      }
-
       m.FS.mkdirTree("/workspace");
     }],
     onRuntimeInitialized() { resolveModule(this); },

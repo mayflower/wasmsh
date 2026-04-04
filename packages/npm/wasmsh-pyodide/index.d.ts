@@ -46,12 +46,6 @@ export interface BrowserSessionOptions {
 export interface InstallPythonPackagesOptions {
   /** Install dependencies (default: true). */
   deps?: boolean;
-  /** Continue installing after failures (default: false). */
-  keepGoing?: boolean;
-  /** Allow pre-release versions (default: false). */
-  pre?: boolean;
-  /** Reinstall packages even if already installed (default: false). */
-  reinstall?: boolean;
 }
 
 export interface InstallResult {

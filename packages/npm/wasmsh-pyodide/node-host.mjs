@@ -161,49 +161,28 @@ class WasmshNodeHost {
     if (!pyodide) {
       throw new Error("Pyodide API not available — cannot install packages");
     }
+    const micropip = pyodide.pyimport("micropip");
 
     const installed = [];
     for (const req of reqs) {
-      // Security: reject file: URIs to prevent host filesystem escape
       if (/^file:/i.test(req)) {
         throw new Error(`file: URIs are not supported for security: ${req}`);
       }
-
-      if (req.startsWith("emfs:") || /^https?:\/\//i.test(req)) {
-        // emfs: and HTTP(S) URLs go directly to micropip
-        if (/^https?:\/\//i.test(req) && !isHostAllowed(req, this._allowedHosts)) {
-          throw new Error(
-            `Host not allowed for package install: ${req}. ` +
-            "Configure allowedHosts when creating the session.",
-          );
-        }
-        const micropip = pyodide.pyimport("micropip");
-        await micropip.install(req, { deps: options.deps ?? true });
-        installed.push({ requirement: req });
-      } else {
-        // Package name — use micropip which checks Pyodide lockfile then PyPI
-        if (this._allowedHosts.length === 0) {
-          throw new Error(
-            `Package name installs require network access: ${req}. ` +
-            "Configure allowedHosts (e.g., ['cdn.jsdelivr.net', 'pypi.org', 'files.pythonhosted.org']) when creating the session.",
-          );
-        }
-        const micropip = pyodide.pyimport("micropip");
-        await micropip.install(req, { deps: options.deps ?? true });
-        // Get installed version
-        let version;
-        try {
-          const pkgList = micropip.list().toJs();
-          const normalized = req.toLowerCase().replace(/-/g, "_").replace(/[>=<!\s].*/g, "");
-          for (const [name, info] of pkgList) {
-            if (name.toLowerCase().replace(/-/g, "_") === normalized) {
-              version = info.get("version");
-              break;
-            }
-          }
-        } catch { /* version lookup failed */ }
-        installed.push({ requirement: req, name: req, version });
+      if (/^https?:\/\//i.test(req) && !isHostAllowed(req, this._allowedHosts)) {
+        throw new Error(
+          `Host not allowed for package install: ${req}. ` +
+          "Configure allowedHosts when creating the session.",
+        );
       }
+      if (!req.startsWith("emfs:") && !/^https?:\/\//i.test(req) && this._allowedHosts.length === 0) {
+        throw new Error(
+          `Package name installs require network access: ${req}. ` +
+          "Configure allowedHosts (e.g., ['cdn.jsdelivr.net', 'pypi.org', 'files.pythonhosted.org']) when creating the session.",
+        );
+      }
+
+      await micropip.install(req, { deps: options.deps !== false });
+      installed.push({ requirement: req });
     }
     return { installed, requirements: reqs };
   }
