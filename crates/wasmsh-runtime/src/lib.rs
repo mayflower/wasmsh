@@ -2511,9 +2511,7 @@ impl WorkerRuntime {
             if quoted {
                 result.push(arg);
             } else {
-                result.extend(
-                    self.expand_glob_arg(arg, nullglob, dotglob, globstar, extglob),
-                );
+                result.extend(self.expand_glob_arg(arg, nullglob, dotglob, globstar, extglob));
             }
         }
         result.truncate(Self::MAX_GLOB_RESULTS);
