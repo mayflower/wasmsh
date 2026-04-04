@@ -71,8 +71,43 @@ class WasmshNodeHost {
   }
 
   async run({ command }) {
+    // Intercept pip/pip3 install commands and route through micropip.
+    // python3 -c "await micropip.install()" doesn't work because
+    // PyRun_SimpleString doesn't support top-level await.
+    const pipMatch = command.match(
+      /^\s*(?:pip3?|python3?\s+-m\s+pip)\s+install\s+(.+)$/,
+    );
+    if (pipMatch) {
+      return this._handlePipInstall(pipMatch[1]);
+    }
     const events = this.sendHostCommand({ Run: { input: command } });
     return buildRunResult(events);
+  }
+
+  async _handlePipInstall(argsStr) {
+    // Parse package names from pip install args (skip flags like -q, --upgrade)
+    const packages = argsStr
+      .split(/\s+/)
+      .filter((a) => a && !a.startsWith("-"));
+    if (packages.length === 0) {
+      return {
+        events: [],
+        stdout: "",
+        stderr: "Usage: pip install <package> [package ...]\n",
+        output: "Usage: pip install <package> [package ...]\n",
+        exitCode: 1,
+      };
+    }
+    try {
+      await this.installPythonPackages({ requirements: packages });
+      const msg = packages
+        .map((p) => `Successfully installed ${p}`)
+        .join("\n") + "\n";
+      return { events: [], stdout: msg, stderr: "", output: msg, exitCode: 0 };
+    } catch (err) {
+      const msg = `ERROR: ${err.message}\n`;
+      return { events: [], stdout: "", stderr: msg, output: msg, exitCode: 1 };
+    }
   }
 
   async writeFile({ path, contentBase64 }) {

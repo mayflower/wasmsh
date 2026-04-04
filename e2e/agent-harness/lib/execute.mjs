@@ -11,6 +11,26 @@ import { HumanMessage } from "@langchain/core/messages";
 const MODEL = "claude-sonnet-4-5-20250929";
 const MAX_AGENT_TIMEOUT = 300_000; // 5 minutes per task
 
+/** Categories that need network access for micropip package installation. */
+const NETWORK_CATEGORIES = new Set(["python-packages", "combined"]);
+
+/** Hosts required for micropip installs from the Pyodide CDN and PyPI. */
+const PACKAGE_ALLOWED_HOSTS = [
+  "cdn.jsdelivr.net",
+  "pypi.org",
+  "files.pythonhosted.org",
+];
+
+const SANDBOX_SYSTEM_PROMPT = `You are working in a wasmsh sandbox — a WASM-based shell environment with Python 3.13 via Pyodide.
+
+Key facts:
+- Install Python packages with: pip install <package>  (works like normal pip)
+- Only pure-Python packages work (no numpy, pandas, scipy). Use: beautifulsoup4, pyyaml, jinja2, networkx, attrs, click, six, toml, tomli, markupsafe, chardet, pyparsing, more-itertools, etc.
+- Python stdlib is fully available (json, csv, re, os, pathlib, collections, itertools, sqlite3, xml, html, etc.)
+- 88 shell utilities are available (grep, sed, awk, jq, find, tar, curl, etc.)
+- No apt, npm, docker, git, ssh
+- All files should be under /workspace/`;
+
 /**
  * Extract tool call trace from the agent's message history.
  * Returns an array of { tool, input, output } objects.
@@ -74,7 +94,10 @@ export { formatToolTrace };
 
 export async function executeTask(task) {
   const { createSandbox } = await import("./session.mjs");
-  const sandbox = await createSandbox();
+  const needsNetwork = NETWORK_CATEGORIES.has(task.category);
+  const sandbox = await createSandbox(
+    needsNetwork ? { allowedHosts: PACKAGE_ALLOWED_HOSTS } : {},
+  );
   const startTime = Date.now();
   const toolTrace = [];
 
@@ -92,6 +115,7 @@ export async function executeTask(task) {
     const agent = createDeepAgent({
       model: MODEL,
       backend: sandbox,
+      systemPrompt: SANDBOX_SYSTEM_PROMPT,
       filesystemOptions: {
         humanMessageTokenLimitBeforeEvict: null,
       },

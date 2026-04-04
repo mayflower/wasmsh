@@ -49,9 +49,17 @@ pub extern "C" fn wasmsh_runtime_handle_json(
         return alloc_cstring(&json);
     }
 
-    let json_str = unsafe { CStr::from_ptr(json_ptr) }
-        .to_str()
-        .unwrap_or("");
+    let json_str = match unsafe { CStr::from_ptr(json_ptr) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            let err = vec![WorkerEvent::Diagnostic(
+                DiagnosticLevel::Error,
+                "invalid UTF-8 in JSON command".into(),
+            )];
+            let json = serde_json::to_string(&err).unwrap_or_else(|_| "[]".to_string());
+            return alloc_cstring(&json);
+        }
+    };
 
     let cmd: HostCommand = match serde_json::from_str(json_str) {
         Ok(c) => c,

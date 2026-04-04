@@ -6,16 +6,16 @@ import { ChatAnthropic } from "@langchain/anthropic";
 import { formatToolTrace } from "./execute.mjs";
 
 const SYSTEM_PROMPT = `You are diagnosing a test failure in wasmsh, a WASM shell sandbox.
-The sandbox provides bash-like shell (88 utilities including awk, sed, grep, jq, find, tar, curl, etc.) and Python 3.13 via Pyodide.
+The sandbox provides bash-like shell (88 utilities including awk, sed, grep, jq, find, tar, curl, etc.) and Python 3.13 via Pyodide with micropip for installing pure-Python packages at runtime.
 
 An LLM agent was given a task. It used tools (execute, write_file, read_file, edit_file, ls, grep, glob) against the sandbox. The verification command did not output "PASS".
 
 You will see the FULL tool call trace — every command the agent ran and every response the sandbox returned.
 
 Classify the failure as exactly one of:
-- sandbox_bug: The sandbox didn't behave like a real bash+Python environment would. This includes: "command not found" for standard commands, syntax not parsed that bash would accept (process substitution, arrays, etc.), utilities producing wrong output, Python stdlib modules failing to import, unexpected exit codes from correct commands, shell features not working. If a verification command fails because wasmsh can't parse valid bash syntax, that's sandbox_bug. If a utility exists but gives wrong results, that's sandbox_bug.
-- llm_mistake: The sandbox behaved exactly like real bash would, but the agent wrote incorrect logic. The agent's commands would also fail on a real Linux system.
-- test_issue: ONLY use this if the task is literally impossible (contradictory requirements, expects files that don't exist and weren't seeded). Do NOT use this just because the verification uses advanced bash features — if wasmsh can't run valid bash, that's sandbox_bug.
+- sandbox_bug: The sandbox didn't behave like a real bash+Python environment would. This includes: "command not found" for standard commands, syntax not parsed that bash would accept (process substitution, arrays, etc.), utilities producing wrong output, Python stdlib modules failing to import, micropip.install() failing for packages that should work (pure-Python wheels), installed packages failing to import, unexpected exit codes from correct commands, shell features not working. If a verification command fails because wasmsh can't parse valid bash syntax, that's sandbox_bug. If a utility exists but gives wrong results, that's sandbox_bug. If micropip installs a package but import fails, that's sandbox_bug.
+- llm_mistake: The sandbox behaved exactly like real bash would, but the agent wrote incorrect logic. The agent's commands would also fail on a real Linux system. This includes: trying to install packages that require C extensions (numpy, pandas, scipy, regex) which need MAIN_MODULE=1 — the agent should have used a pure-Python alternative. Also includes: wrong micropip syntax, importing a module before installing it, or using the wrong package name.
+- test_issue: ONLY use this if the task is literally impossible (contradictory requirements, expects files that don't exist and weren't seeded, asks for a C-extension-only package with no pure-Python alternative). Do NOT use this just because the verification uses advanced bash features — if wasmsh can't run valid bash, that's sandbox_bug.
 - timeout: The task exceeded time limits.
 
 IMPORTANT: Bias toward sandbox_bug. The whole point is to find gaps in wasmsh. If there's any doubt whether the sandbox or the agent is at fault, classify as sandbox_bug. Only use llm_mistake if you're certain the same commands would fail on a real Linux bash shell.

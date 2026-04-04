@@ -74,6 +74,14 @@ impl EmscriptenFs {
     }
 }
 
+impl Drop for EmscriptenFs {
+    fn drop(&mut self) {
+        for of in self.open_files.drain() {
+            unsafe { libc::fclose(of.1.fp) };
+        }
+    }
+}
+
 impl Default for EmscriptenFs {
     fn default() -> Self {
         Self::new()

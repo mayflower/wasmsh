@@ -82,6 +82,7 @@ function createNetworkStubs(module) {
       try {
         const xhr = new XMLHttpRequest();
         xhr.open(method, url, false); // synchronous — works in Web Workers
+        xhr.timeout = 30000;
         const headers = JSON.parse(headersJson || "[]");
         for (const [key, value] of headers) {
           xhr.setRequestHeader(key, value);
@@ -228,8 +229,40 @@ const methods = {
   },
 
   async run({ command }) {
+    // Intercept pip/pip3 install commands and route through micropip.
+    const pipMatch = command.match(
+      /^\s*(?:pip3?|python3?\s+-m\s+pip)\s+install\s+(.+)$/,
+    );
+    if (pipMatch) {
+      return this._handlePipInstall(pipMatch[1]);
+    }
     const events = sendHostCommand({ Run: { input: command } });
     return protocol().buildRunResult(events);
+  },
+
+  async _handlePipInstall(argsStr) {
+    const packages = argsStr
+      .split(/\s+/)
+      .filter((a) => a && !a.startsWith("-"));
+    if (packages.length === 0) {
+      return {
+        events: [],
+        stdout: "",
+        stderr: "Usage: pip install <package> [package ...]\n",
+        output: "Usage: pip install <package> [package ...]\n",
+        exitCode: 1,
+      };
+    }
+    try {
+      await methods.installPythonPackages({ requirements: packages });
+      const msg = packages
+        .map((p) => `Successfully installed ${p}`)
+        .join("\n") + "\n";
+      return { events: [], stdout: msg, stderr: "", output: msg, exitCode: 0 };
+    } catch (err) {
+      const msg = `ERROR: ${err.message}\n`;
+      return { events: [], stdout: "", stderr: msg, output: msg, exitCode: 1 };
+    }
   },
 
   async writeFile({ path, contentBase64 }) {

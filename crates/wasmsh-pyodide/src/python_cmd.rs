@@ -5,10 +5,26 @@
 //! to `io.StringIO` objects, then read back via temp files.
 
 use std::ffi::CString;
+use std::sync::atomic::{AtomicU64, Ordering};
 use wasmsh_runtime::ExternalCommandResult;
 
 extern "C" {
     fn PyRun_SimpleString(command: *const std::os::raw::c_char) -> std::os::raw::c_int;
+}
+
+/// Monotonic counter for unique temp file names (avoids collisions between
+/// concurrent or sequential python invocations).
+static INVOCATION_ID: AtomicU64 = AtomicU64::new(0);
+
+/// RAII guard that closes a libc `FILE*` on drop.
+struct FileGuard(*mut libc::FILE);
+
+impl Drop for FileGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { libc::fclose(self.0) };
+        }
+    }
 }
 
 /// Handle python/python3 commands. Returns `None` for non-python commands.
@@ -22,19 +38,26 @@ pub fn handle_python_command(
     }
 
     let code = extract_code(argv, stdin)?;
+    let id = INVOCATION_ID.fetch_add(1, Ordering::Relaxed);
+    let stdout_path = format!("/tmp/_wasmsh_py_stdout_{id}");
+    let stderr_path = format!("/tmp/_wasmsh_py_stderr_{id}");
+    let exit_path = format!("/tmp/_wasmsh_py_exit_{id}");
 
-    // Wrap user code: capture stdout/stderr to StringIO, write to temp files.
+    // Encode user code as base64 and decode in Python. This avoids any
+    // string-escaping issues (triple-quotes, backslashes, null bytes).
+    let code_b64 = base64_encode(code.as_bytes());
+
     let wrapped = format!(
         concat!(
-            "import sys, io as _wasmsh_io\n",
+            "import sys, io as _wasmsh_io, base64 as _wasmsh_b64\n",
             "_wasmsh_old_stdout = sys.stdout\n",
             "_wasmsh_old_stderr = sys.stderr\n",
             "sys.stdout = _wasmsh_io.StringIO()\n",
             "sys.stderr = _wasmsh_io.StringIO()\n",
             "_wasmsh_exit_code = 0\n",
             "try:\n",
-            "    _wasmsh_code = compile({code_repr}, \"<string>\", \"exec\")\n",
-            "    exec(_wasmsh_code)\n",   // noqa: safe — runs user-provided shell input
+            "    _wasmsh_code = compile(_wasmsh_b64.b64decode({code_b64!r}).decode(), \"<string>\", \"exec\")\n",
+            "    exec(_wasmsh_code)\n",
             "except SystemExit as _e:\n",
             "    _wasmsh_exit_code = _e.code if isinstance(_e.code, int) else 1\n",
             "except BaseException:\n",
@@ -45,14 +68,17 @@ pub fn handle_python_command(
             "_wasmsh_stderr_val = sys.stderr.getvalue()\n",
             "sys.stdout = _wasmsh_old_stdout\n",
             "sys.stderr = _wasmsh_old_stderr\n",
-            "with open(\"/tmp/_wasmsh_py_stdout\", \"w\") as _f:\n",
+            "with open({stdout_path!r}, \"w\") as _f:\n",
             "    _f.write(_wasmsh_stdout_val)\n",
-            "with open(\"/tmp/_wasmsh_py_stderr\", \"w\") as _f:\n",
+            "with open({stderr_path!r}, \"w\") as _f:\n",
             "    _f.write(_wasmsh_stderr_val)\n",
-            "with open(\"/tmp/_wasmsh_py_exit\", \"w\") as _f:\n",
+            "with open({exit_path!r}, \"w\") as _f:\n",
             "    _f.write(str(_wasmsh_exit_code))\n",
         ),
-        code_repr = python_repr(&code),
+        code_b64 = code_b64,
+        stdout_path = stdout_path,
+        stderr_path = stderr_path,
+        exit_path = exit_path,
     );
 
     let c_wrapped = match CString::new(wrapped) {
@@ -68,9 +94,9 @@ pub fn handle_python_command(
 
     let rc = unsafe { PyRun_SimpleString(c_wrapped.as_ptr()) };
 
-    let stdout_bytes = read_temp_file("/tmp/_wasmsh_py_stdout");
-    let stderr_bytes = read_temp_file("/tmp/_wasmsh_py_stderr");
-    let exit_str = read_temp_file("/tmp/_wasmsh_py_exit");
+    let stdout_bytes = read_temp_file(&stdout_path);
+    let stderr_bytes = read_temp_file(&stderr_path);
+    let exit_str = read_temp_file(&exit_path);
     let status = if rc != 0 {
         1
     } else {
@@ -117,7 +143,7 @@ fn extract_code(argv: &[String], stdin: Option<&[u8]>) -> Option<String> {
     Some(String::new())
 }
 
-/// Read a script file from the Emscripten filesystem via libc (non-destructive).
+/// Read a script file from the Emscripten filesystem via libc.
 fn read_script_file(path: &str) -> String {
     let c_path = match CString::new(path) {
         Ok(c) => c,
@@ -127,17 +153,9 @@ fn read_script_file(path: &str) -> String {
     if fp.is_null() {
         return String::new();
     }
-    let data = read_fp_to_vec(fp);
-    unsafe { libc::fclose(fp) };
+    let guard = FileGuard(fp);
+    let data = read_fp_to_vec(guard.0);
     String::from_utf8_lossy(&data).into_owned()
-}
-
-/// Escape a string as a Python triple-quoted string literal.
-fn python_repr(s: &str) -> String {
-    let escaped = s
-        .replace('\\', "\\\\")
-        .replace("\"\"\"", "\\\"\\\"\\\"");
-    format!("\"\"\"{}\"\"\"", escaped)
 }
 
 /// Read a temp file via libc and clean it up.
@@ -150,8 +168,9 @@ fn read_temp_file(path: &str) -> Vec<u8> {
     if fp.is_null() {
         return Vec::new();
     }
-    let data = read_fp_to_vec(fp);
-    unsafe { libc::fclose(fp) };
+    let guard = FileGuard(fp);
+    let data = read_fp_to_vec(guard.0);
+    drop(guard); // close before unlink
     unsafe { libc::unlink(c_path.as_ptr()) };
     data
 }
@@ -168,4 +187,29 @@ fn read_fp_to_vec(fp: *mut libc::FILE) -> Vec<u8> {
         result.extend_from_slice(&buf[..n]);
     }
     result
+}
+
+/// Minimal base64 encoder (no external dependency needed in this crate).
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(CHARS[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
