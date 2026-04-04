@@ -9,7 +9,7 @@
 
 ## What it does
 
-A sandboxed shell with 88 utilities (grep, sed, awk, jq, tar, curl, …), Python 3.13, and a virtual filesystem — all running in-process as WebAssembly. No OS processes, no network access unless explicitly allowed, step budgets to prevent runaway execution.
+A sandboxed shell with 88 utilities (grep, sed, awk, jq, tar, curl, …), Python 3.13 with pip/micropip for installing pure-Python packages, and a virtual filesystem — all running in-process as WebAssembly. No OS processes, no network access unless explicitly allowed, step budgets to prevent runaway execution.
 
 Two build targets from one codebase:
 - **Standalone** (`wasm32-unknown-unknown`) — browser Web Worker

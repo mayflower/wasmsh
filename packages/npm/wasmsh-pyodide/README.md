@@ -123,12 +123,25 @@ await session.installPythonPackages(
 installs (HTTP URLs, package names) require `allowedHosts` to be configured
 when creating the session.
 
-**Node.js**: Uses Pyodide's micropip under the hood. Supports both pure-Python
-and Pyodide-compiled packages from the CDN (`cdn.jsdelivr.net`). C extension
-imports (numpy, pandas) require the MAIN_MODULE=1 build flag (not yet enabled).
+Both Node.js and browser modes use Pyodide's micropip under the hood. Supports
+pure-Python wheels and Pyodide pre-compiled packages from the CDN
+(`cdn.jsdelivr.net`). C extension imports (numpy, pandas) require the
+`MAIN_MODULE=1` build flag (not yet enabled).
 
-**Browser**: Uses manual wheel extraction. Only pure-Python wheels
-(`py3-none-any`) are supported.
+### Use pip from shell commands
+
+Shell commands like `pip install` are intercepted and routed through micropip
+automatically. This means LLM agents and scripts can use the familiar pip
+workflow:
+
+```js
+await session.run("pip install pyyaml");
+await session.run('python3 -c "import yaml; print(yaml.dump({\"key\": \"value\"}))"');
+```
+
+Supported forms: `pip install`, `pip3 install`, `python3 -m pip install`.
+Only the `install` subcommand is supported. Flags like `-q` and `--upgrade`
+are ignored; package names are extracted and passed to micropip.
 
 ### List directory contents
 
@@ -238,9 +251,10 @@ and a CPython interpreter sharing the same in-process POSIX filesystem.
 ### What this is not
 
 This is **not** a Linux container. There is no kernel, no real process isolation,
-and no package manager. The command set is the wasmsh utility suite (86 commands
-including jq, awk, rg, fd, diff, tar, gzip) plus `python`/`python3`. System
-binaries like `apt`, `docker`, or `systemctl` are not available.
+and no OS-level package manager. The command set is the wasmsh utility suite (88
+commands including jq, awk, rg, fd, diff, tar, gzip) plus `python`/`python3`
+and `pip`/`pip3` (backed by micropip). System binaries like `apt`, `docker`, or
+`systemctl` are not available.
 
 ### How it works
 

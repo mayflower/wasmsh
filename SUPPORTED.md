@@ -442,8 +442,31 @@ Arithmetic is available in `$(( ))`, `(( ))`, `let`, and `declare -i` contexts. 
 | Command | Flags | Description |
 |---------|-------|-------------|
 | `python` / `python3` | `-c CODE` | Run Python code in-process; stdin from heredoc/pipe also supported |
+| `pip` / `pip3` | `install PKG [PKG ...]` | Install pure-Python packages via micropip |
 
 Python stdout and stderr are captured and surfaced as normal `Stdout`/`Stderr` worker events. File I/O from Python goes through the same Emscripten filesystem the shell uses.
+
+### Python package installation (micropip)
+
+The Pyodide build includes [micropip](https://micropip.pyodide.org/) for installing Python packages at runtime. Packages are installed into the in-process virtual filesystem and become importable immediately.
+
+**Supported install methods:**
+- `pip install <package>` — resolved from Pyodide CDN or PyPI
+- `pip install https://host/pkg-1.0-py3-none-any.whl` — direct URL (requires `allowedHosts`)
+- Session API: `session.installPythonPackages("package")` from JavaScript
+
+**What works:**
+- Pure-Python wheels (`py3-none-any`): six, attrs, click, packaging, beautifulsoup4, networkx, idna, certifi, pyyaml, jinja2, toml, tomli, markupsafe, chardet, pyparsing, more-itertools, decorator, wrapt, pluggy, and many others
+- Pyodide pre-compiled packages with pure-Python fallbacks (e.g., pyyaml)
+
+**What doesn't work yet:**
+- C extension packages that require `dlopen` (numpy, pandas, scipy, regex) — install succeeds but import fails because the build uses `MAIN_MODULE=2`. Switching to `MAIN_MODULE=1` with explicit symbol filtering would enable these.
+
+**Security:**
+- Network installs require `allowedHosts` configured at session creation
+- `file:` URIs are rejected
+- `emfs:` installs (from the in-sandbox filesystem) always work
+- Installs are session-local and do not persist
 
 ---
 
@@ -455,5 +478,5 @@ Python stdout and stderr are captured and surfaced as normal `Stdout`/`Stderr` w
 - No TTY/terminal emulation
 - No full job control (`fg`, `bg`, `jobs`); `&` parses but runs synchronously
 - No POSIX signal delivery; only EXIT and ERR trap handlers are executed
-- No process substitution `<(cmd)` or coprocesses
+- No coprocesses
 - GPL/AGPL/SSPL code is forbidden in the core
