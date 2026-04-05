@@ -1,17 +1,31 @@
 {
   "name": "@mayflowergmbh/wasmsh-pyodide",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Pyodide-backed wasmsh runtime package for Node.js and browser workers",
   "type": "module",
   "main": "./index.js",
   "exports": {
-    ".": "./index.js",
+    ".": {
+      "types": "./index.d.ts",
+      "browser": "./browser.js",
+      "import": "./index.js",
+      "default": "./index.js"
+    },
+    "./browser": {
+      "types": "./index.d.ts",
+      "default": "./browser.js"
+    },
+    "./node": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
     "./package.json": "./package.json",
     "./node-host": "./node-host.mjs",
     "./browser-worker": "./browser-worker.js"
   },
   "files": [
     "assets/**/*",
+    "browser.js",
     "browser-worker.js",
     "index.d.ts",
     "index.js",

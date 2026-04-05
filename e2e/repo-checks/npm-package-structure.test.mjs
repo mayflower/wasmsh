@@ -17,11 +17,30 @@ describe("npm package: package.json", () => {
   const pkg = JSON.parse(readFileSync(resolve(PKG_DIR, "package.json"), "utf-8"));
 
   it("has correct package name", () => {
-    assert.equal(pkg.name, "wasmsh-pyodide");
+    assert.equal(pkg.name, "@mayflowergmbh/wasmsh-pyodide");
   });
 
   it("exports root entry", () => {
-    assert.equal(pkg.exports["."], "./index.js");
+    assert.deepEqual(pkg.exports["."], {
+      types: "./index.d.ts",
+      browser: "./browser.js",
+      import: "./index.js",
+      default: "./index.js",
+    });
+  });
+
+  it("exports browser subpath", () => {
+    assert.deepEqual(pkg.exports["./browser"], {
+      types: "./index.d.ts",
+      default: "./browser.js",
+    });
+  });
+
+  it("exports node subpath", () => {
+    assert.deepEqual(pkg.exports["./node"], {
+      types: "./index.d.ts",
+      default: "./index.js",
+    });
   });
 
   it("exports node-host subpath", () => {
@@ -65,6 +84,35 @@ describe("npm package: index.js exports", () => {
   it("exports DEFAULT_WORKSPACE_DIR as /workspace", async () => {
     const mod = await import(resolve(PKG_DIR, "index.js"));
     assert.equal(mod.DEFAULT_WORKSPACE_DIR, "/workspace");
+  });
+});
+
+describe("npm package: browser.js exports", () => {
+  it("file exists", () => {
+    assert.ok(existsSync(resolve(PKG_DIR, "browser.js")));
+  });
+
+  it("does not import node builtins", () => {
+    const content = readFileSync(resolve(PKG_DIR, "browser.js"), "utf-8");
+    assert.ok(!content.includes("node:child_process"));
+    assert.ok(!content.includes("node:path"));
+    assert.ok(!content.includes("node:readline"));
+    assert.ok(!content.includes("node:url"));
+  });
+
+  it("exports createBrowserWorkerSession", async () => {
+    const mod = await import(resolve(PKG_DIR, "browser.js"));
+    assert.equal(typeof mod.createBrowserWorkerSession, "function");
+  });
+
+  it("exports createNodeSession stub", async () => {
+    const mod = await import(resolve(PKG_DIR, "browser.js"));
+    assert.equal(typeof mod.createNodeSession, "function");
+  });
+
+  it("exports resolveBrowserWorkerPath", async () => {
+    const mod = await import(resolve(PKG_DIR, "browser.js"));
+    assert.equal(typeof mod.resolveBrowserWorkerPath, "function");
   });
 });
 
