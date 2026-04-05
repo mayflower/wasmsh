@@ -15,6 +15,8 @@ const fetchHelperPath = resolve(
  * fetch-helper.mjs. Request data is passed via stdin (no argv size limits).
  * Returns a JSON object with {status, headers, body_base64}.
  */
+const IS_DENO = typeof globalThis.Deno !== "undefined";
+
 export function syncHttpFetchNode(url, method, headersJson, bodyBase64, followRedirects) {
   const input = JSON.stringify({
     url,
@@ -24,9 +26,15 @@ export function syncHttpFetchNode(url, method, headersJson, bodyBase64, followRe
     follow_redirects: Boolean(followRedirects),
   });
   try {
+    // Under Deno, the fetch-helper subprocess needs --allow-net to make
+    // outbound requests. Extract the hostname and grant only that host.
+    const host = new URL(url).hostname;
+    const args = IS_DENO
+      ? ["run", `--allow-net=${host}`, fetchHelperPath]
+      : [fetchHelperPath];
     const out = execFileSync(
       process.execPath,
-      [fetchHelperPath],
+      args,
       { timeout: 30000, encoding: "utf-8", input, stdio: ["pipe", "pipe", "ignore"] },
     );
     return JSON.parse(out);
