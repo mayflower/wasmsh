@@ -180,13 +180,9 @@ mkdir -p "$DIST_DIR"
 cp dist/pyodide.asm.js "$DIST_DIR/"
 cp dist/pyodide.asm.wasm "$DIST_DIR/"
 
-# Patch pyodide.asm.js for Deno compatibility:
-# Emscripten detects ENVIRONMENT_IS_NODE via process.versions.node, which
-# is also true under Deno's Node compat layer. But the Node code path uses
-# require("fs") which fails in Deno's ESM context. Exclude Deno from the
-# Node detection so it falls through to the browser/worker path instead.
-"$SED" -i 's|typeof process=="object"&&process.versions?.node&&process.type!="renderer"|typeof process=="object"\&\&process.versions?.node\&\&process.type!="renderer"\&\&typeof Deno=="undefined"|' "$DIST_DIR/pyodide.asm.js"
-echo "  Patched ENVIRONMENT_IS_NODE to exclude Deno."
+# NOTE: Deno compat is handled at runtime in node-module.mjs by pre-loading
+# pyodide.asm.js via createRequire() before loadPyodide runs. No build-time
+# patching of ENVIRONMENT_IS_NODE is needed.
 
 # Copy pyodide.js loader and supporting files if they exist
 for f in dist/pyodide.js dist/pyodide.mjs dist/package.json dist/python_stdlib.zip dist/pyodide-lock.json dist/repodata.json; do
