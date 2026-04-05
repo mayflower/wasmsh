@@ -1,8 +1,8 @@
 # wasmsh-pyodide
 
-Pyodide-backed wasmsh runtime for Node.js and browser Web Workers. Provides both
-bash-compatible shell execution and Python 3 inside the same in-process sandbox,
-with a shared filesystem rooted at `/workspace`.
+Pyodide-backed wasmsh runtime for Node.js, Deno, and browser Web Workers.
+Provides both bash-compatible shell execution and Python 3 inside the same
+in-process sandbox, with a shared filesystem rooted at `/workspace`.
 
 ## Getting started
 
@@ -12,7 +12,7 @@ with a shared filesystem rooted at `/workspace`.
 npm install wasmsh-pyodide
 ```
 
-Requires Node.js 20+.
+Requires Node.js 20+ or Deno 2+.
 
 ### Run your first command (Node.js)
 

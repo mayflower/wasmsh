@@ -42,8 +42,8 @@ Returns the path to a specific asset file within the distribution directory.
 ### `get_node_host_script() -> Path`
 
 Returns the path to the packaged `node-host.mjs` script. This is the
-entrypoint that `langchain-wasmsh` launches as a Node.js child process to host
-the Pyodide/Emscripten runtime.
+entrypoint that `langchain-wasmsh` launches as a Deno or Node.js subprocess
+to host the Pyodide/Emscripten runtime.
 
 ## Explanation
 
