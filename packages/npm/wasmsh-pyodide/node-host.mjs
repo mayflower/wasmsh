@@ -1,6 +1,12 @@
+import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+
+// Polyfill CJS globals for Deno — Emscripten's pyodide.asm.js expects them.
+if (typeof globalThis.require === "undefined") {
+  globalThis.require = createRequire(import.meta.url);
+}
 
 import { isHostAllowed } from "./lib/allowlist.mjs";
 import { createFullModule } from "./lib/node-module.mjs";
@@ -41,6 +47,12 @@ class WasmshNodeHost {
   async ensureBooted() {
     if (this.module && this.runtimeBridge) {
       return;
+    }
+    // Polyfill __dirname/__filename for Deno — pyodide.asm.js needs them
+    // to resolve its own location within the asset directory.
+    if (typeof globalThis.__dirname === "undefined") {
+      globalThis.__dirname = this.assetDir;
+      globalThis.__filename = resolve(this.assetDir, "pyodide.asm.js");
     }
     this.module = await createFullModule(this.assetDir);
     this.runtimeBridge = createRuntimeBridge(this.module);

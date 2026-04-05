@@ -1,9 +1,17 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { createRuntimeBridge } from "./runtime-bridge.mjs";
+
+// Deno's Node compat layer exposes `process` (so Emscripten detects
+// ENVIRONMENT_IS_NODE) but does not provide CJS globals in ESM context.
+// pyodide.asm.js uses `require("fs")` in its Node path.
+if (typeof globalThis.require === "undefined") {
+  globalThis.require = createRequire(import.meta.url);
+}
 
 const fetchHelperPath = resolve(
   new URL(".", import.meta.url).pathname,
@@ -74,6 +82,13 @@ let _nodeModuleRef = null;
  * stubs and sentinel imports, then restore it after boot.
  */
 export async function createFullModule(distDir) {
+  // Polyfill __dirname/__filename for Deno — pyodide.asm.js needs them to
+  // resolve its own location. Must point to the assets dir, not this module.
+  const savedDirname = globalThis.__dirname;
+  const savedFilename = globalThis.__filename;
+  globalThis.__dirname = distDir;
+  globalThis.__filename = resolve(distDir, "pyodide.asm.js");
+
   // Import loadPyodide from the packaged pyodide.mjs
   const pyodideMjs = resolve(distDir, "pyodide.mjs");
   const { loadPyodide } = await import(pathToFileURL(pyodideMjs).href);
@@ -115,8 +130,10 @@ export async function createFullModule(distDir) {
       stderr: () => {},
     });
   } finally {
-    // Restore original WebAssembly.instantiate
+    // Restore original WebAssembly.instantiate and CJS globals
     WebAssembly.instantiate = origInstantiate;
+    globalThis.__dirname = savedDirname;
+    globalThis.__filename = savedFilename;
   }
 
   // The underlying Emscripten module is accessible via pyodide._module
