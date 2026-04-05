@@ -89,6 +89,15 @@ export async function createFullModule(distDir) {
   globalThis.__dirname = distDir;
   globalThis.__filename = resolve(distDir, "pyodide.asm.js");
 
+  // Under Deno, pyodide.mjs's nodeLoadScript uses import() which loads
+  // pyodide.asm.js as ESM — but the glue is CJS and calls require("fs").
+  // Pre-load it via createRequire so _createPyodideModule is already
+  // defined as a global, skipping nodeLoadScript entirely.
+  if (IS_DENO && typeof globalThis._createPyodideModule === "undefined") {
+    const denoRequire = createRequire(resolve(distDir, "package.json"));
+    denoRequire("./pyodide.asm.js");
+  }
+
   // Import loadPyodide from the packaged pyodide.mjs
   const pyodideMjs = resolve(distDir, "pyodide.mjs");
   const { loadPyodide } = await import(pathToFileURL(pyodideMjs).href);
