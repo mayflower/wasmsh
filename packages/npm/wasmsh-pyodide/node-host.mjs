@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -37,7 +37,10 @@ function parseArgs(argv) {
   return options;
 }
 
-/** Cache of package names available in the bundled pyodide-lock.json. */
+/** Cache of package names whose wheel files are actually present in assets.
+ *  Only packages with a local wheel are considered "bundled" — the lockfile
+ *  may list hundreds of packages from the Pyodide CDN that we don't ship.
+ *  Valid for the lifetime of this process (one subprocess per session). */
 let _bundledPackagesCache = null;
 
 function loadBundledPackageNames(assetDir) {
@@ -45,7 +48,12 @@ function loadBundledPackageNames(assetDir) {
   try {
     const lockPath = resolve(assetDir, "pyodide-lock.json");
     const lock = JSON.parse(readFileSync(lockPath, "utf-8"));
-    _bundledPackagesCache = new Set(Object.keys(lock.packages || {}));
+    const localFiles = new Set(readdirSync(assetDir));
+    _bundledPackagesCache = new Set(
+      Object.entries(lock.packages || {})
+        .filter(([, entry]) => localFiles.has(entry.file_name))
+        .map(([name]) => name),
+    );
   } catch {
     _bundledPackagesCache = new Set();
   }

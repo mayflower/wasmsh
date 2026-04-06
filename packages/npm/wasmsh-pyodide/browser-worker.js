@@ -16,6 +16,7 @@ let runtimeBridgeHelpers = null;
 let runtimeBridge = null;
 let assetBaseUrl = null;
 let sessionAllowedHosts = [];
+/** Map of lockfile package name → wheel file_name, or null before boot. */
 let bundledPackageNames = null;
 
 function resolveHelperUrl(relativePath) {
@@ -192,15 +193,24 @@ async function boot(baseUrl) {
     // micropip not available — not fatal
   }
 
-  // Cache bundled package names from the lockfile (already loaded by Pyodide).
+  // Cache the lockfile package metadata (name → file_name) for per-install
+  // bundled package checks.  We don't HEAD-check all 376 packages upfront;
+  // instead, installPythonPackages checks the specific requested package's
+  // wheel availability on demand.
   try {
-    const resp = await fetch(`${assetBaseUrl}/pyodide-lock.json`);
+    const lockUrl = `${assetBaseUrl}/pyodide-lock.json`;
+    // Pyodide caches the lockfile; re-reading from cache is near-free.
+    const resp = await fetch(lockUrl);
     if (resp.ok) {
       const lock = await resp.json();
-      bundledPackageNames = new Set(Object.keys(lock.packages || {}));
+      bundledPackageNames = new Map(
+        Object.entries(lock.packages || {}).map(
+          ([name, entry]) => [name, entry.file_name],
+        ),
+      );
     }
   } catch {
-    bundledPackageNames = new Set();
+    bundledPackageNames = new Map();
   }
 
   module._pyodide = pyodide;
@@ -313,19 +323,28 @@ const methods = {
       throw new Error("Pyodide API not available — cannot install packages");
     }
 
-    const bundled = bundledPackageNames || new Set();
+    const lockfileEntries = bundledPackageNames || new Map();
     const installed = [];
     for (const req of reqs) {
       if (/^file:/i.test(req)) {
         throw new Error(`file: URIs are not supported for security: ${req}`);
       }
 
-      // Bundled packages: resolve offline via pyodide.loadPackage()
+      // Bundled packages: if the lockfile lists the package AND its wheel
+      // file is actually served locally, resolve offline via loadPackage().
       const isPlainName = !req.startsWith("emfs:") && !/^https?:\/\//i.test(req);
-      if (isPlainName && bundled.has(req)) {
-        await pyodideRef.loadPackage(req);
-        installed.push({ requirement: req });
-        continue;
+      if (isPlainName && lockfileEntries.has(req)) {
+        const fileName = lockfileEntries.get(req);
+        let isLocal = false;
+        try {
+          const r = await fetch(`${assetBaseUrl}/${fileName}`, { method: "HEAD" });
+          isLocal = r.ok;
+        } catch { /* not available */ }
+        if (isLocal) {
+          await pyodideRef.loadPackage(req);
+          installed.push({ requirement: req });
+          continue;
+        }
       }
 
       if (/^https?:\/\//i.test(req) && !allowlist().isHostAllowed(req, sessionAllowedHosts)) {
