@@ -205,6 +205,102 @@ async function ensureBooted(baseUrl) {
   await bootPromise;
 }
 
+function pipResult(stdout, stderr, exitCode) {
+  return { events: [], stdout, stderr, output: stdout + stderr, exitCode };
+}
+
+async function handlePipCommand(command) {
+  const PIP_PREFIX_RE = /^\s*(?:pip3?|python3?\s+-m\s+pip)(?:\s+|$)/;
+  if (!PIP_PREFIX_RE.test(command)) return null;
+
+  const installMatch = command.match(
+    /^\s*(?:pip3?|python3?\s+-m\s+pip)\s+install\s+(.+)$/,
+  );
+  if (installMatch) {
+    const packages = installMatch[1]
+      .split(/\s+/)
+      .filter((a) => a && !a.startsWith("-"));
+    if (packages.length === 0) {
+      return pipResult("", "Usage: pip install <package> [package ...]\n", 1);
+    }
+    try {
+      await methods.installPythonPackages({ requirements: packages });
+      const msg = packages.map((p) => `Successfully installed ${p}`).join("\n") + "\n";
+      return pipResult(msg, "", 0);
+    } catch (err) {
+      return pipResult("", `ERROR: ${err.message}\n`, 1);
+    }
+  }
+
+  if (!pyodideRef) {
+    return pipResult("", "ERROR: Pyodide not initialized\n", 1);
+  }
+
+  const uninstallMatch = command.match(
+    /^\s*(?:pip3?|python3?\s+-m\s+pip)\s+uninstall\s+(.+)$/,
+  );
+  if (uninstallMatch) {
+    const packages = uninstallMatch[1]
+      .split(/\s+/)
+      .filter((a) => a && !a.startsWith("-"));
+    if (packages.length === 0) {
+      return pipResult("", "Usage: pip uninstall <package> [package ...]\n", 1);
+    }
+    try {
+      const micropip = pyodideRef.pyimport("micropip");
+      micropip.uninstall(packages);
+      const msg = packages.map((p) => `Successfully uninstalled ${p}`).join("\n") + "\n";
+      return pipResult(msg, "", 0);
+    } catch (err) {
+      return pipResult("", `ERROR: ${err.message}\n`, 1);
+    }
+  }
+
+  if (/^\s*(?:pip3?|python3?\s+-m\s+pip)\s+list\b/.test(command)) {
+    try {
+      const micropip = pyodideRef.pyimport("micropip");
+      const pkgDict = micropip.list();
+      const entries = [];
+      for (const name of pkgDict.keys()) {
+        const pkg = pkgDict.get(name);
+        entries.push({ name, version: pkg.version });
+      }
+      pkgDict.destroy();
+      entries.sort((a, b) => a.name.localeCompare(b.name));
+      const nameW = Math.max(7, ...entries.map((e) => e.name.length));
+      const verW = Math.max(7, ...entries.map((e) => e.version.length));
+      let out = `${"Package".padEnd(nameW)} ${"Version".padEnd(verW)}\n`;
+      out += `${"-".repeat(nameW)} ${"-".repeat(verW)}\n`;
+      for (const e of entries) {
+        out += `${e.name.padEnd(nameW)} ${e.version.padEnd(verW)}\n`;
+      }
+      return pipResult(out, "", 0);
+    } catch (err) {
+      return pipResult("", `ERROR: ${err.message}\n`, 1);
+    }
+  }
+
+  if (/^\s*(?:pip3?|python3?\s+-m\s+pip)\s+freeze\b/.test(command)) {
+    try {
+      const micropip = pyodideRef.pyimport("micropip");
+      const frozen = micropip.freeze();
+      return pipResult(frozen + "\n", "", 0);
+    } catch (err) {
+      return pipResult("", `ERROR: ${err.message}\n`, 1);
+    }
+  }
+
+  // Bare pip or unsupported subcommand — show usage help
+  const msg =
+    "Usage: pip <command> [options]\n\n" +
+    "Commands:\n" +
+    "  install     Install packages\n" +
+    "  uninstall   Uninstall packages\n" +
+    "  list        List installed packages\n" +
+    "  freeze      Output installed packages in lockfile format\n";
+  return pipResult(msg, "", 0);
+}
+
 const methods = {
   async init({
     assetBaseUrl: baseUrl,
@@ -229,40 +325,12 @@ const methods = {
   },
 
   async run({ command }) {
-    // Intercept pip/pip3 install commands and route through micropip.
-    const pipMatch = command.match(
-      /^\s*(?:pip3?|python3?\s+-m\s+pip)\s+install\s+(.+)$/,
-    );
-    if (pipMatch) {
-      return this._handlePipInstall(pipMatch[1]);
-    }
+    // Intercept pip commands — PyRun_SimpleString doesn't support
+    // top-level await so we route through the JS install path instead.
+    const pipR = await handlePipCommand(command);
+    if (pipR) return pipR;
     const events = sendHostCommand({ Run: { input: command } });
     return protocol().buildRunResult(events);
-  },
-
-  async _handlePipInstall(argsStr) {
-    const packages = argsStr
-      .split(/\s+/)
-      .filter((a) => a && !a.startsWith("-"));
-    if (packages.length === 0) {
-      return {
-        events: [],
-        stdout: "",
-        stderr: "Usage: pip install <package> [package ...]\n",
-        output: "Usage: pip install <package> [package ...]\n",
-        exitCode: 1,
-      };
-    }
-    try {
-      await methods.installPythonPackages({ requirements: packages });
-      const msg = packages
-        .map((p) => `Successfully installed ${p}`)
-        .join("\n") + "\n";
-      return { events: [], stdout: msg, stderr: "", output: msg, exitCode: 0 };
-    } catch (err) {
-      const msg = `ERROR: ${err.message}\n`;
-      return { events: [], stdout: "", stderr: msg, output: msg, exitCode: 1 };
-    }
   },
 
   async writeFile({ path, contentBase64 }) {
