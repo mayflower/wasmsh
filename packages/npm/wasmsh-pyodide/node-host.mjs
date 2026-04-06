@@ -9,8 +9,14 @@ if (typeof globalThis.require === "undefined") {
   globalThis.require = createRequire(import.meta.url);
 }
 
-import { isHostAllowed } from "./lib/allowlist.mjs";
 import { createFullModule } from "./lib/node-module.mjs";
+import {
+  installPackages,
+  parsePipInstall,
+  formatPipResult,
+  formatPipError,
+  PIP_USAGE_ERROR,
+} from "./lib/install.mjs";
 import {
   buildRunResult,
   encodeBase64,
@@ -120,43 +126,20 @@ class WasmshNodeHost {
   }
 
   async run({ command }) {
-    // Intercept pip/pip3 install commands and route through micropip.
-    // python3 -c "await micropip.install()" doesn't work because
-    // PyRun_SimpleString doesn't support top-level await.
-    const pipMatch = command.match(
-      /^\s*(?:pip3?|python3?\s+-m\s+pip)\s+install\s+(.+)$/,
-    );
-    if (pipMatch) {
-      return this._handlePipInstall(pipMatch[1]);
+    // Intercept pip install commands — PyRun_SimpleString doesn't support
+    // top-level await so we route through the JS install path instead.
+    const packages = parsePipInstall(command);
+    if (packages !== null) {
+      if (packages.length === 0) return PIP_USAGE_ERROR;
+      try {
+        await this.installPythonPackages({ requirements: packages });
+        return formatPipResult(packages);
+      } catch (err) {
+        return formatPipError(err);
+      }
     }
     const events = this.sendHostCommand({ Run: { input: command } });
     return buildRunResult(events);
-  }
-
-  async _handlePipInstall(argsStr) {
-    // Parse package names from pip install args (skip flags like -q, --upgrade)
-    const packages = argsStr
-      .split(/\s+/)
-      .filter((a) => a && !a.startsWith("-"));
-    if (packages.length === 0) {
-      return {
-        events: [],
-        stdout: "",
-        stderr: "Usage: pip install <package> [package ...]\n",
-        output: "Usage: pip install <package> [package ...]\n",
-        exitCode: 1,
-      };
-    }
-    try {
-      await this.installPythonPackages({ requirements: packages });
-      const msg = packages
-        .map((p) => `Successfully installed ${p}`)
-        .join("\n") + "\n";
-      return { events: [], stdout: msg, stderr: "", output: msg, exitCode: 0 };
-    } catch (err) {
-      const msg = `ERROR: ${err.message}\n`;
-      return { events: [], stdout: "", stderr: msg, output: msg, exitCode: 1 };
-    }
   }
 
   async writeFile({ path, contentBase64 }) {
@@ -196,45 +179,11 @@ class WasmshNodeHost {
     }
 
     const bundled = loadBundledPackageNames(this.assetDir);
-    const installed = [];
-    for (const req of reqs) {
-      if (/^file:/i.test(req)) {
-        throw new Error(`file: URIs are not supported for security: ${req}`);
-      }
-
-      // Bundled packages: resolve offline via pyodide.loadPackage()
-      const isPlainName = !req.startsWith("emfs:") && !/^https?:\/\//i.test(req);
-      if (isPlainName && bundled.has(req)) {
-        try {
-          await pyodide.loadPackage(req);
-        } catch (err) {
-          throw new Error(
-            `Failed to load bundled package '${req}' from local assets: ${err.message}. ` +
-            "This may indicate a corrupt wheel file or missing symbol exports in the build.",
-          );
-        }
-        installed.push({ requirement: req });
-        continue;
-      }
-
-      if (/^https?:\/\//i.test(req) && !isHostAllowed(req, this._allowedHosts)) {
-        throw new Error(
-          `Host not allowed for package install: ${req}. ` +
-          "Configure allowedHosts when creating the session.",
-        );
-      }
-      if (isPlainName && this._allowedHosts.length === 0) {
-        throw new Error(
-          `Package name installs require network access: ${req}. ` +
-          "Configure allowedHosts (e.g., ['cdn.jsdelivr.net', 'pypi.org', 'files.pythonhosted.org']) when creating the session.",
-        );
-      }
-
-      const micropip = pyodide.pyimport("micropip");
-      await micropip.install(req, { deps: options.deps !== false });
-      installed.push({ requirement: req });
-    }
-    return { installed, requirements: reqs };
+    return installPackages(reqs, pyodide, {
+      isBundled: (name) => bundled.has(name),
+      allowedHosts: this._allowedHosts,
+      deps: options.deps,
+    });
   }
 
   async close() {

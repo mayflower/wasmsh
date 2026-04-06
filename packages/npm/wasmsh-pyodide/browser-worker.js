@@ -11,15 +11,14 @@ let moduleRef = null;
 let pyodideRef = null;
 let helperModulesPromise = null;
 let protocolHelpers = null;
-let allowlistHelpers = null;
 let runtimeBridgeHelpers = null;
+let installHelpers = null;
 let runtimeBridge = null;
 let assetBaseUrl = null;
 let sessionAllowedHosts = [];
-/** Map of lockfile package name → wheel file_name.  Map (not Set) because
- *  the browser path needs the file_name to issue a per-install HEAD request
- *  for the wheel — unlike Node which checks via readdirSync at boot. */
-let bundledPackageNames = new Map();
+/** Set of package names whose wheel files are actually served locally.
+ *  Built at boot by batch HEAD-checking all lockfile entries in parallel. */
+let bundledPackageNames = new Set();
 
 function resolveHelperUrl(relativePath) {
   return new URL(relativePath, self.location.href).href;
@@ -29,12 +28,12 @@ async function ensureHelperModules() {
   if (!helperModulesPromise) {
     helperModulesPromise = Promise.all([
       import(resolveHelperUrl("./lib/protocol.mjs")),
-      import(resolveHelperUrl("./lib/allowlist.mjs")),
       import(resolveHelperUrl("./lib/runtime-bridge.mjs")),
-    ]).then(([protocol, allowlist, runtimeBridgeModule]) => {
+      import(resolveHelperUrl("./lib/install.mjs")),
+    ]).then(([protocol, runtimeBridgeModule, install]) => {
       protocolHelpers = protocol;
-      allowlistHelpers = allowlist;
       runtimeBridgeHelpers = runtimeBridgeModule;
+      installHelpers = install;
     }).catch((error) => {
       helperModulesPromise = null;
       throw error;
@@ -48,13 +47,6 @@ function protocol() {
     throw new Error("protocol helpers not initialized");
   }
   return protocolHelpers;
-}
-
-function allowlist() {
-  if (!allowlistHelpers) {
-    throw new Error("allowlist helpers not initialized");
-  }
-  return allowlistHelpers;
 }
 
 function runtimeBridgeModule() {
@@ -195,29 +187,34 @@ async function boot(baseUrl) {
     // micropip not available — not fatal
   }
 
-  // Cache the lockfile package metadata (name → file_name) for per-install
-  // bundled package checks.  We don't HEAD-check all packages upfront;
-  // instead, installPythonPackages checks the specific requested package's
-  // wheel availability on demand.
+  // Build the set of bundled packages whose wheel files are actually served
+  // locally.  We read the lockfile (the browser HTTP cache likely already has
+  // it from loadPyodide) and then batch-HEAD all wheel file_names in parallel.
+  // Only packages with a locally available wheel are considered "bundled".
   try {
     const lockUrl = `${assetBaseUrl}/pyodide-lock.json`;
-    // The browser HTTP cache likely already has this from loadPyodide();
-    // re-fetching is near-free.
     const resp = await fetch(lockUrl);
     if (resp.ok) {
       const lock = await resp.json();
-      bundledPackageNames = new Map(
-        Object.entries(lock.packages || {}).map(
-          ([name, entry]) => [name, entry.file_name],
-        ),
-      );
+      const entries = Object.entries(lock.packages || {});
+      const checks = entries.map(async ([name, entry]) => {
+        if (!entry.file_name) return null;
+        try {
+          const r = await fetch(`${assetBaseUrl}/${entry.file_name}`, { method: "HEAD" });
+          return r.ok ? name : null;
+        } catch {
+          return null;
+        }
+      });
+      const results = await Promise.all(checks);
+      bundledPackageNames = new Set(results.filter(Boolean));
     } else {
       console.warn(`[wasmsh] Could not fetch bundled package index: HTTP ${resp.status}`);
-      bundledPackageNames = new Map();
+      bundledPackageNames = new Set();
     }
   } catch (err) {
     console.warn(`[wasmsh] Failed to load bundled package index: ${err.message}`);
-    bundledPackageNames = new Map();
+    bundledPackageNames = new Set();
   }
 
   module._pyodide = pyodide;
@@ -258,40 +255,19 @@ const methods = {
   },
 
   async run({ command }) {
-    // Intercept pip/pip3 install commands and route through micropip.
-    const pipMatch = command.match(
-      /^\s*(?:pip3?|python3?\s+-m\s+pip)\s+install\s+(.+)$/,
-    );
-    if (pipMatch) {
-      return this._handlePipInstall(pipMatch[1]);
+    const { parsePipInstall, PIP_USAGE_ERROR, formatPipResult, formatPipError } = installHelpers;
+    const packages = parsePipInstall(command);
+    if (packages !== null) {
+      if (packages.length === 0) return PIP_USAGE_ERROR;
+      try {
+        await methods.installPythonPackages({ requirements: packages });
+        return formatPipResult(packages);
+      } catch (err) {
+        return formatPipError(err);
+      }
     }
     const events = sendHostCommand({ Run: { input: command } });
     return protocol().buildRunResult(events);
-  },
-
-  async _handlePipInstall(argsStr) {
-    const packages = argsStr
-      .split(/\s+/)
-      .filter((a) => a && !a.startsWith("-"));
-    if (packages.length === 0) {
-      return {
-        events: [],
-        stdout: "",
-        stderr: "Usage: pip install <package> [package ...]\n",
-        output: "Usage: pip install <package> [package ...]\n",
-        exitCode: 1,
-      };
-    }
-    try {
-      await methods.installPythonPackages({ requirements: packages });
-      const msg = packages
-        .map((p) => `Successfully installed ${p}`)
-        .join("\n") + "\n";
-      return { events: [], stdout: msg, stderr: "", output: msg, exitCode: 0 };
-    } catch (err) {
-      const msg = `ERROR: ${err.message}\n`;
-      return { events: [], stdout: "", stderr: msg, output: msg, exitCode: 1 };
-    }
   },
 
   async writeFile({ path, contentBase64 }) {
@@ -330,57 +306,11 @@ const methods = {
       throw new Error("Pyodide API not available — cannot install packages");
     }
 
-    const lockfileEntries = bundledPackageNames;
-    const installed = [];
-    for (const req of reqs) {
-      if (/^file:/i.test(req)) {
-        throw new Error(`file: URIs are not supported for security: ${req}`);
-      }
-
-      // Bundled packages: if the lockfile lists the package AND its wheel
-      // file is actually served locally, resolve offline via loadPackage().
-      const isPlainName = !req.startsWith("emfs:") && !/^https?:\/\//i.test(req);
-      if (isPlainName && lockfileEntries.has(req)) {
-        const fileName = lockfileEntries.get(req);
-        let isLocal = false;
-        try {
-          const r = await fetch(`${assetBaseUrl}/${fileName}`, { method: "HEAD" });
-          isLocal = r.ok;
-        } catch (err) {
-          console.warn(`[wasmsh] HEAD check failed for bundled ${req} (${fileName}): ${err.message}`);
-        }
-        if (isLocal) {
-          try {
-            await pyodideRef.loadPackage(req);
-          } catch (err) {
-            throw new Error(
-              `Failed to load bundled package '${req}' from local assets: ${err.message}. ` +
-              "This may indicate a corrupt wheel file or missing symbol exports in the build.",
-            );
-          }
-          installed.push({ requirement: req });
-          continue;
-        }
-      }
-
-      if (/^https?:\/\//i.test(req) && !allowlist().isHostAllowed(req, sessionAllowedHosts)) {
-        throw new Error(
-          `Host not allowed for package install: ${req}. ` +
-          "Configure allowedHosts when creating the session.",
-        );
-      }
-      if (isPlainName && sessionAllowedHosts.length === 0) {
-        throw new Error(
-          `Package name installs require network access: ${req}. ` +
-          "Configure allowedHosts (e.g., ['cdn.jsdelivr.net', 'pypi.org', 'files.pythonhosted.org']) when creating the session.",
-        );
-      }
-
-      const micropip = pyodideRef.pyimport("micropip");
-      await micropip.install(req, { deps: options.deps !== false });
-      installed.push({ requirement: req });
-    }
-    return { installed, requirements: reqs };
+    return installHelpers.installPackages(reqs, pyodideRef, {
+      isBundled: (name) => bundledPackageNames.has(name),
+      allowedHosts: sessionAllowedHosts,
+      deps: options.deps,
+    });
   },
 
   async close() {
@@ -391,6 +321,7 @@ const methods = {
     moduleRef = null;
     pyodideRef = null;
     bootPromise = null;
+    bundledPackageNames = new Set();
     return { closed: true };
   },
 };
