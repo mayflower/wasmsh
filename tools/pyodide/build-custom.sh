@@ -219,9 +219,15 @@ fi
 # There are two EXPORTED_FUNCTIONS lines: one in LDFLAGS_BASE ("-s ...")
 # and one in MAIN_MODULE_LDFLAGS ("-s..." without space). Patch both so
 # the later one doesn't override the first.
+#
+# Also add -Wno-error=undefined: our combined export list comes from the
+# standard Pyodide CDN build, which links some libs/symbols our custom
+# build does not (e.g. _Exit from full libc). Without this flag, emcc
+# fails hard on the first missing exported symbol. With it, missing
+# exports become warnings and the wasm just skips them.
 if [ -f "$EXPORT_RESPONSE" ] && ! grep -q "exported-functions.json" Makefile.envs; then
-    "$SED" -i "s|-s EXPORTED_FUNCTIONS='\$(EXPORTS)'|-s EXPORTED_FUNCTIONS=@$EXPORT_RESPONSE|g" Makefile.envs
-    "$SED" -i "s|-sEXPORTED_FUNCTIONS='\$(EXPORTS)'|-sEXPORTED_FUNCTIONS=@$EXPORT_RESPONSE|g" Makefile.envs
+    "$SED" -i "s|-s EXPORTED_FUNCTIONS='\$(EXPORTS)'|-s EXPORTED_FUNCTIONS=@$EXPORT_RESPONSE -Wno-error=undefined|g" Makefile.envs
+    "$SED" -i "s|-sEXPORTED_FUNCTIONS='\$(EXPORTS)'|-sEXPORTED_FUNCTIONS=@$EXPORT_RESPONSE -Wno-error=undefined|g" Makefile.envs
     echo "  Patched EXPORTED_FUNCTIONS to use @response file."
 fi
 
