@@ -80,9 +80,39 @@ const text = new TextDecoder().decode(result.content);
 
 ### Install Python packages
 
-Use `installPythonPackages` to add pure-Python wheels into the sandbox.
+Use `installPythonPackages` to add Python packages into the sandbox.
 Packages are installed into `/lib/python3.13/site-packages` and become
 importable from subsequent `python3` commands in the same session.
+
+#### Bundled packages (offline, no network required)
+
+Some packages are bundled with the runtime and can be installed offline.
+These are listed in the local `pyodide-lock.json` and resolve via
+`pyodide.loadPackage()` without requiring `allowedHosts`:
+
+```js
+// DuckDB is bundled — works offline, no allowedHosts needed
+await session.installPythonPackages("duckdb");
+
+await session.run(`python3 -c "
+import duckdb
+con = duckdb.connect('/workspace/demo.duckdb')
+con.sql('create table t as select 42 as x')
+print(con.sql('select * from t').fetchall())
+"`);
+```
+
+The `pip install` shell command also uses the bundled path automatically:
+
+```js
+await session.run("pip install duckdb");
+```
+
+Database files created by DuckDB live on the shared Emscripten filesystem
+at `/workspace/...` and are visible to all subsequent shell and Python
+commands in the same session.
+
+#### Local wheel files
 
 ```js
 // Upload a wheel and install from the in-sandbox filesystem
@@ -102,7 +132,9 @@ await session.installPythonPackages([
 ]);
 ```
 
-Install from HTTP URLs or by package name (requires `allowedHosts`):
+#### Network installs (requires allowedHosts)
+
+Install from HTTP URLs or by package name:
 
 ```js
 const session = await createNodeSession({
@@ -118,15 +150,13 @@ await session.installPythonPackages(
 );
 ```
 
+**Install resolution order**: plain package names are first checked against the
+bundled `pyodide-lock.json`. If the package is bundled, it loads offline. If not,
+it falls through to micropip which requires `allowedHosts`.
+
 **Security**: Installs are session-local and do not persist between sessions.
 `file:` URIs are rejected to prevent host filesystem access. Network-based
-installs (HTTP URLs, package names) require `allowedHosts` to be configured
-when creating the session.
-
-Both Node.js and browser modes use Pyodide's micropip under the hood. Supports
-pure-Python wheels and Pyodide pre-compiled packages from the CDN
-(`cdn.jsdelivr.net`). C extension imports (numpy, pandas) require the
-`MAIN_MODULE=1` build flag (not yet enabled).
+installs (HTTP URLs, non-bundled package names) require `allowedHosts`.
 
 ### Use pip from shell commands
 
@@ -279,3 +309,29 @@ of the session.
 
 The sandbox root is always `/workspace`. Files seeded via `initialFiles` or
 `writeFile` are available to both bash and Python immediately.
+
+### Bundled packages
+
+Some compiled Python packages are bundled with the runtime in the local
+`pyodide-lock.json`. These packages can be installed offline without network
+access. Currently bundled:
+
+- **DuckDB** (`duckdb` v1.5.0) — in-process SQL analytics database
+
+The bundled wheel lives in `packages/npm/wasmsh-pyodide/assets/`. The lockfile
+at `packages/npm/wasmsh-pyodide/assets/pyodide-lock.json` indexes it. The asset
+packaging script (`tools/pyodide/package-runtime-assets.mjs`) preserves both
+the wheel file and lockfile across Pyodide rebuilds.
+
+#### Bumping or adding bundled packages
+
+1. Place the new `.whl` in `packages/npm/wasmsh-pyodide/assets/`
+2. Add/update the entry in `packages/npm/wasmsh-pyodide/assets/pyodide-lock.json`
+   (name, version, file_name, sha256, imports, depends)
+3. Run `just package-pyodide-runtime` to copy to the Python package
+4. Run `just test-e2e-pyodide-node` to verify
+
+For DuckDB specifically, matching wheels are published at
+[xlwings/duckdb-pyodide](https://github.com/xlwings/duckdb-pyodide) for each
+Pyodide release. Choose the wheel matching the repo's pinned Pyodide version
+and Python ABI (see `tools/pyodide/versions.env`).

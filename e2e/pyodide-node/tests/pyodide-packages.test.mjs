@@ -73,9 +73,12 @@ describe("Pyodide packages", () => {
     assert.equal(r.exitCode, 0, `import failed: ${r.stderr}`);
   });
 
-  // ── C extension packages (need MAIN_MODULE=1 for dlopen) ─────
+  // ── C extension packages (need standard export list for dlopen) ─
   // Install succeeds but import fails because .so side modules need
-  // CPython symbols exported via MAIN_MODULE=1.
+  // CPython / C++ symbols exported by the main module.  The custom build
+  // uses MAIN_MODULE=2; once rebuilt with the standard export list from
+  // build-custom.sh, these imports should work.
+  // See also: e2e/pyodide-node/tests/duckdb.test.mjs for bundled DuckDB.
 
   for (const [pkg, importMod] of [
     ["jsonschema", "jsonschema"],

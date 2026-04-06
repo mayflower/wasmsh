@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
+import { readFileSync } from "node:fs";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -34,6 +35,21 @@ function parseArgs(argv) {
     }
   }
   return options;
+}
+
+/** Cache of package names available in the bundled pyodide-lock.json. */
+let _bundledPackagesCache = null;
+
+function loadBundledPackageNames(assetDir) {
+  if (_bundledPackagesCache) return _bundledPackagesCache;
+  try {
+    const lockPath = resolve(assetDir, "pyodide-lock.json");
+    const lock = JSON.parse(readFileSync(lockPath, "utf-8"));
+    _bundledPackagesCache = new Set(Object.keys(lock.packages || {}));
+  } catch {
+    _bundledPackagesCache = new Set();
+  }
+  return _bundledPackagesCache;
 }
 
 class WasmshNodeHost {
@@ -157,26 +173,36 @@ class WasmshNodeHost {
     if (!pyodide) {
       throw new Error("Pyodide API not available — cannot install packages");
     }
-    const micropip = pyodide.pyimport("micropip");
 
+    const bundled = loadBundledPackageNames(this.assetDir);
     const installed = [];
     for (const req of reqs) {
       if (/^file:/i.test(req)) {
         throw new Error(`file: URIs are not supported for security: ${req}`);
       }
+
+      // Bundled packages: resolve offline via pyodide.loadPackage()
+      const isPlainName = !req.startsWith("emfs:") && !/^https?:\/\//i.test(req);
+      if (isPlainName && bundled.has(req)) {
+        await pyodide.loadPackage(req);
+        installed.push({ requirement: req });
+        continue;
+      }
+
       if (/^https?:\/\//i.test(req) && !isHostAllowed(req, this._allowedHosts)) {
         throw new Error(
           `Host not allowed for package install: ${req}. ` +
           "Configure allowedHosts when creating the session.",
         );
       }
-      if (!req.startsWith("emfs:") && !/^https?:\/\//i.test(req) && this._allowedHosts.length === 0) {
+      if (isPlainName && this._allowedHosts.length === 0) {
         throw new Error(
           `Package name installs require network access: ${req}. ` +
           "Configure allowedHosts (e.g., ['cdn.jsdelivr.net', 'pypi.org', 'files.pythonhosted.org']) when creating the session.",
         );
       }
 
+      const micropip = pyodide.pyimport("micropip");
       await micropip.install(req, { deps: options.deps !== false });
       installed.push({ requirement: req });
     }
