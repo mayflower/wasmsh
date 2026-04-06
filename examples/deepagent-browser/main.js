@@ -79,6 +79,14 @@ class BrowserSandbox extends BaseSandbox {
       assetBaseUrl: this._assetBaseUrl,
       stepBudget: 0,
       initialFiles: [],
+      // Allow the agent to install Python packages via `pip install`.
+      // wasmsh 0.5.5+ intercepts pip commands and routes them through
+      // micropip.  Network installs need these hosts allowlisted.
+      allowedHosts: [
+        "cdn.jsdelivr.net",
+        "pypi.org",
+        "files.pythonhosted.org",
+      ],
     });
   }
 

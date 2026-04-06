@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "latest",
-    "@mayflowergmbh/wasmsh-pyodide": "latest",
+    "@mayflowergmbh/wasmsh-pyodide": "^0.5.5",
     "deepagents": "latest",
     "@langchain/anthropic": "latest",
     "@langchain/core": "latest"

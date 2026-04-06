@@ -24,7 +24,25 @@ Open `http://localhost:5173`, enter your Anthropic API key, and click Run.
 4. All shell/Python execution happens in the Web Worker
 5. LLM calls go directly to Anthropic's API (CORS enabled via `dangerouslyAllowBrowser`)
 
-No data leaves your browser except the LLM API calls.
+Data leaves your browser only for LLM API calls and package installs
+(`pip install` via Pyodide's micropip, fetched from PyPI / jsDelivr CDN).
+
+## Python package support
+
+wasmsh 0.5.5+ intercepts `pip` commands so the agent can install Python
+packages with the familiar workflow:
+
+```
+pip install pyyaml
+pip list
+pip freeze
+pip uninstall pyyaml
+```
+
+`pip install` routes through Pyodide's micropip.  The sandbox is
+initialized with `allowedHosts` for PyPI, jsDelivr, and
+files.pythonhosted.org, so the agent can install any pure-Python wheel
+or Pyodide-compatible compiled wheel.
 
 ## Architecture
 
