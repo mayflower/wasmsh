@@ -40,21 +40,34 @@ function parseArgs(argv) {
 /** Cache of package names whose wheel files are actually present in assets.
  *  Only packages with a local wheel are considered "bundled" — the lockfile
  *  may list hundreds of packages from the Pyodide CDN that we don't ship.
- *  Valid for the lifetime of this process (one subprocess per session). */
+ *  Set (not Map) because the Node path checks file existence at cache-build
+ *  time via readdirSync.  Valid for the lifetime of this process (the asset
+ *  directory is immutable once the host subprocess starts). */
 let _bundledPackagesCache = null;
 
 function loadBundledPackageNames(assetDir) {
   if (_bundledPackagesCache) return _bundledPackagesCache;
+  const lockPath = resolve(assetDir, "pyodide-lock.json");
   try {
-    const lockPath = resolve(assetDir, "pyodide-lock.json");
-    const lock = JSON.parse(readFileSync(lockPath, "utf-8"));
+    const raw = readFileSync(lockPath, "utf-8");
+    let lock;
+    try {
+      lock = JSON.parse(raw);
+    } catch (parseErr) {
+      process.stderr.write(`[wasmsh] Failed to parse ${lockPath}: ${parseErr.message}\n`);
+      _bundledPackagesCache = new Set();
+      return _bundledPackagesCache;
+    }
     const localFiles = new Set(readdirSync(assetDir));
     _bundledPackagesCache = new Set(
       Object.entries(lock.packages || {})
-        .filter(([, entry]) => localFiles.has(entry.file_name))
+        .filter(([, entry]) => entry.file_name && localFiles.has(entry.file_name))
         .map(([name]) => name),
     );
-  } catch {
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      process.stderr.write(`[wasmsh] Failed to load bundled package index from ${lockPath}: ${err.message}\n`);
+    }
     _bundledPackagesCache = new Set();
   }
   return _bundledPackagesCache;
@@ -192,7 +205,14 @@ class WasmshNodeHost {
       // Bundled packages: resolve offline via pyodide.loadPackage()
       const isPlainName = !req.startsWith("emfs:") && !/^https?:\/\//i.test(req);
       if (isPlainName && bundled.has(req)) {
-        await pyodide.loadPackage(req);
+        try {
+          await pyodide.loadPackage(req);
+        } catch (err) {
+          throw new Error(
+            `Failed to load bundled package '${req}' from local assets: ${err.message}. ` +
+            "This may indicate a corrupt wheel file or missing symbol exports in the build.",
+          );
+        }
         installed.push({ requirement: req });
         continue;
       }

@@ -175,13 +175,22 @@ EXPORT_RESPONSE="$PYODIDE_SRC/exported-functions.json"
 if [ ! -f "$STANDARD_EXPORTS" ]; then
     echo "Downloading standard Pyodide wasm for export list..."
     STANDARD_WASM="$(mktemp)"
-    curl -sSL "$PYODIDE_CDN/pyodide.asm.wasm" -o "$STANDARD_WASM"
+    curl -fsSL "$PYODIDE_CDN/pyodide.asm.wasm" -o "$STANDARD_WASM"
     python3 "$SCRIPT_DIR/extract-standard-exports.py" "$STANDARD_WASM" > "$STANDARD_EXPORTS"
     rm -f "$STANDARD_WASM"
-    echo "  Extracted $(wc -l < "$STANDARD_EXPORTS") standard function exports."
+    EXPORT_COUNT=$(wc -l < "$STANDARD_EXPORTS")
+    if [ "$EXPORT_COUNT" -lt 100 ]; then
+        echo "ERROR: Only $EXPORT_COUNT exports extracted from standard Pyodide wasm."
+        echo "Expected thousands. The downloaded file may be corrupt or the wrong version."
+        rm -f "$STANDARD_EXPORTS"
+        exit 1
+    fi
+    echo "  Extracted $EXPORT_COUNT standard function exports."
 fi
 
-# Build combined JSON export array for Emscripten @response file
+# Build combined JSON export array for Emscripten @response file.
+# The extracted list is cached per Pyodide version to avoid
+# re-downloading on subsequent builds.
 python3 -c "
 import json
 symbols = set()
@@ -200,6 +209,11 @@ with open('$EXPORT_RESPONSE', 'w') as f:
     json.dump(sorted(symbols), f)
 print(f'  Combined export list: {len(symbols)} symbols.')
 "
+
+if [ ! -f "$EXPORT_RESPONSE" ]; then
+    echo "ERROR: Failed to generate combined export list at $EXPORT_RESPONSE"
+    exit 1
+fi
 
 # Patch Makefile.envs to use the response file instead of inline EXPORTS.
 # There are two EXPORTED_FUNCTIONS lines: one in LDFLAGS_BASE ("-s ...")

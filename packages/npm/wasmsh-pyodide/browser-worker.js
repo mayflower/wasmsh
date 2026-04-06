@@ -16,8 +16,10 @@ let runtimeBridgeHelpers = null;
 let runtimeBridge = null;
 let assetBaseUrl = null;
 let sessionAllowedHosts = [];
-/** Map of lockfile package name → wheel file_name, or null before boot. */
-let bundledPackageNames = null;
+/** Map of lockfile package name → wheel file_name.  Map (not Set) because
+ *  the browser path needs the file_name to issue a per-install HEAD request
+ *  for the wheel — unlike Node which checks via readdirSync at boot. */
+let bundledPackageNames = new Map();
 
 function resolveHelperUrl(relativePath) {
   return new URL(relativePath, self.location.href).href;
@@ -194,12 +196,13 @@ async function boot(baseUrl) {
   }
 
   // Cache the lockfile package metadata (name → file_name) for per-install
-  // bundled package checks.  We don't HEAD-check all 376 packages upfront;
+  // bundled package checks.  We don't HEAD-check all packages upfront;
   // instead, installPythonPackages checks the specific requested package's
   // wheel availability on demand.
   try {
     const lockUrl = `${assetBaseUrl}/pyodide-lock.json`;
-    // Pyodide caches the lockfile; re-reading from cache is near-free.
+    // The browser HTTP cache likely already has this from loadPyodide();
+    // re-fetching is near-free.
     const resp = await fetch(lockUrl);
     if (resp.ok) {
       const lock = await resp.json();
@@ -208,8 +211,12 @@ async function boot(baseUrl) {
           ([name, entry]) => [name, entry.file_name],
         ),
       );
+    } else {
+      console.warn(`[wasmsh] Could not fetch bundled package index: HTTP ${resp.status}`);
+      bundledPackageNames = new Map();
     }
-  } catch {
+  } catch (err) {
+    console.warn(`[wasmsh] Failed to load bundled package index: ${err.message}`);
     bundledPackageNames = new Map();
   }
 
@@ -323,7 +330,7 @@ const methods = {
       throw new Error("Pyodide API not available — cannot install packages");
     }
 
-    const lockfileEntries = bundledPackageNames || new Map();
+    const lockfileEntries = bundledPackageNames;
     const installed = [];
     for (const req of reqs) {
       if (/^file:/i.test(req)) {
@@ -339,9 +346,18 @@ const methods = {
         try {
           const r = await fetch(`${assetBaseUrl}/${fileName}`, { method: "HEAD" });
           isLocal = r.ok;
-        } catch { /* not available */ }
+        } catch (err) {
+          console.warn(`[wasmsh] HEAD check failed for bundled ${req} (${fileName}): ${err.message}`);
+        }
         if (isLocal) {
-          await pyodideRef.loadPackage(req);
+          try {
+            await pyodideRef.loadPackage(req);
+          } catch (err) {
+            throw new Error(
+              `Failed to load bundled package '${req}' from local assets: ${err.message}. ` +
+              "This may indicate a corrupt wheel file or missing symbol exports in the build.",
+            );
+          }
           installed.push({ requirement: req });
           continue;
         }

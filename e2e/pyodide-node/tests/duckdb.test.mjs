@@ -55,6 +55,36 @@ describe("DuckDB integration (Pyodide Node)", () => {
     assert.equal(result.installed[0].requirement, "duckdb");
   });
 
+  // ── Bundled vs non-bundled boundary ────────────────────────
+
+  it("bundled packages bypass allowedHosts, non-bundled still require them", { skip: SKIP, timeout: 120_000 }, async () => {
+    const s = await openSession({ allowedHosts: [] });
+
+    // Bundled package succeeds offline
+    const ok = await s.installPythonPackages("duckdb");
+    assert.equal(ok.installed[0].requirement, "duckdb");
+
+    // Non-bundled package is correctly rejected
+    await assert.rejects(
+      () => s.installPythonPackages("flask"),
+      /require.*network/i,
+      "non-bundled package should require allowedHosts",
+    );
+  });
+
+  it("mixed bundled + non-bundled: bundled installs before non-bundled fails", { skip: SKIP, timeout: 120_000 }, async () => {
+    const s = await openSession({ allowedHosts: [] });
+
+    // Install duckdb alone first (succeeds)
+    await s.installPythonPackages("duckdb");
+
+    // Then try a non-bundled package (fails)
+    await assert.rejects(
+      () => s.installPythonPackages("flask"),
+      /require.*network/i,
+    );
+  });
+
   // ── Import + query ─────────────────────────────────────────
 
   it("import duckdb succeeds after install", { skip: SKIP_IMPORT, timeout: 120_000 }, async () => {

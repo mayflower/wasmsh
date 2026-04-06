@@ -81,7 +81,7 @@ const text = new TextDecoder().decode(result.content);
 ### Install Python packages
 
 Use `installPythonPackages` to add Python packages into the sandbox.
-Packages are installed into `/lib/python3.13/site-packages` and become
+Packages are installed into Pyodide's `site-packages` directory and become
 importable from subsequent `python3` commands in the same session.
 
 #### Bundled packages (offline, no network required)
@@ -169,7 +169,8 @@ await session.run("pip install pyyaml");
 await session.run('python3 -c "import yaml; print(yaml.dump({\"key\": \"value\"}))"');
 ```
 
-Supported forms: `pip install`, `pip3 install`, `python3 -m pip install`.
+Supported forms: `pip install`, `pip3 install`, `python -m pip install`,
+`python3 -m pip install`.
 Only the `install` subcommand is supported. Flags like `-q` and `--upgrade`
 are ignored; package names are extracted and passed to micropip.
 
