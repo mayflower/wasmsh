@@ -10,13 +10,7 @@ if (typeof globalThis.require === "undefined") {
 }
 
 import { createFullModule } from "./lib/node-module.mjs";
-import {
-  installPackages,
-  parsePipInstall,
-  formatPipResult,
-  formatPipError,
-  PIP_USAGE_ERROR,
-} from "./lib/install.mjs";
+import { installPackages, handlePipCommand } from "./lib/install.mjs";
 import {
   buildRunResult,
   encodeBase64,
@@ -126,17 +120,15 @@ class WasmshNodeHost {
   }
 
   async run({ command }) {
-    // Intercept pip install commands — PyRun_SimpleString doesn't support
+    // Intercept pip commands — PyRun_SimpleString doesn't support
     // top-level await so we route through the JS install path instead.
-    const packages = parsePipInstall(command);
-    if (packages !== null) {
-      if (packages.length === 0) return PIP_USAGE_ERROR;
-      try {
-        await this.installPythonPackages({ requirements: packages });
-        return formatPipResult(packages);
-      } catch (err) {
-        return formatPipError(err);
-      }
+    const pyodide = this.module?._pyodide;
+    if (pyodide) {
+      const pipResult = await handlePipCommand(
+        command, pyodide,
+        (opts) => this.installPythonPackages(opts),
+      );
+      if (pipResult) return pipResult;
     }
     const events = this.sendHostCommand({ Run: { input: command } });
     return buildRunResult(events);

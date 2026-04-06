@@ -1,15 +1,32 @@
 /**
  * Shared package install resolution logic for Node and browser paths.
  *
- * Handles bundled-package detection, allowlist enforcement, and micropip
- * fallback.  Platform-specific details (how to check if a wheel is locally
+ * Handles bundled-package detection, allowlist enforcement, micropip
+ * fallback, and pip subcommand dispatch (install, uninstall, list, freeze).
+ * Platform-specific details (how to check if a wheel is locally
  * available) are injected via the `isBundled` callback.
  */
 import { isHostAllowed } from "./allowlist.mjs";
 
-/** Regex matching pip install commands intercepted by the shell layer. */
-export const PIP_INSTALL_RE =
+/** Regex matching any pip invocation — used to intercept before the shell. */
+const PIP_PREFIX_RE =
+  /^\s*(?:pip3?|python3?\s+-m\s+pip)(?:\s+|$)/;
+
+/** Regex matching pip install with arguments. */
+const PIP_INSTALL_RE =
   /^\s*(?:pip3?|python3?\s+-m\s+pip)\s+install\s+(.+)$/;
+
+/** Regex matching pip uninstall with arguments. */
+const PIP_UNINSTALL_RE =
+  /^\s*(?:pip3?|python3?\s+-m\s+pip)\s+uninstall\s+(.+)$/;
+
+/** Regex matching pip list. */
+const PIP_LIST_RE =
+  /^\s*(?:pip3?|python3?\s+-m\s+pip)\s+list\b/;
+
+/** Regex matching pip freeze. */
+const PIP_FREEZE_RE =
+  /^\s*(?:pip3?|python3?\s+-m\s+pip)\s+freeze\b/;
 
 /**
  * Install one or more Python packages.
@@ -77,38 +94,113 @@ export async function installPackages(reqs, pyodide, opts) {
 }
 
 /**
- * Parse a pip install command string into package names.
- * Returns null if the command is not a pip install.
+ * Try to handle a shell command as a pip invocation.
+ *
+ * Returns a RunResult if the command was a pip command (install, uninstall,
+ * list, freeze, or unsupported subcommand).  Returns null if the command
+ * is not a pip invocation at all.
+ *
+ * @param {string} command         Shell command string
+ * @param {object} pyodide         The Pyodide API object
+ * @param {(opts: {requirements: string[]}) => Promise<any>} installFn
+ *   The host's installPythonPackages method (for install subcommand).
+ * @returns {Promise<object|null>}  RunResult or null
  */
-export function parsePipInstall(command) {
-  const m = command.match(PIP_INSTALL_RE);
-  if (!m) return null;
-  return m[1]
-    .split(/\s+/)
-    .filter((a) => a && !a.startsWith("-"));
-}
+export async function handlePipCommand(command, pyodide, installFn) {
+  // Not a pip command at all — let the shell handle it
+  if (!PIP_PREFIX_RE.test(command)) return null;
 
-/**
- * Format the result of a pip install for shell output.
- */
-export function formatPipResult(packages) {
+  // pip install <packages>
+  const installMatch = command.match(PIP_INSTALL_RE);
+  if (installMatch) {
+    const packages = installMatch[1]
+      .split(/\s+/)
+      .filter((a) => a && !a.startsWith("-"));
+    if (packages.length === 0) {
+      return shellResult("", "Usage: pip install <package> [package ...]\n", 1);
+    }
+    try {
+      await installFn({ requirements: packages });
+      const msg = packages.map((p) => `Successfully installed ${p}`).join("\n") + "\n";
+      return shellResult(msg, "", 0);
+    } catch (err) {
+      return shellResult("", `ERROR: ${err.message}\n`, 1);
+    }
+  }
+
+  // pip uninstall <packages>
+  const uninstallMatch = command.match(PIP_UNINSTALL_RE);
+  if (uninstallMatch) {
+    const packages = uninstallMatch[1]
+      .split(/\s+/)
+      .filter((a) => a && !a.startsWith("-"));
+    if (packages.length === 0) {
+      return shellResult("", "Usage: pip uninstall <package> [package ...]\n", 1);
+    }
+    try {
+      const micropip = pyodide.pyimport("micropip");
+      micropip.uninstall(packages);
+      const msg = packages.map((p) => `Successfully uninstalled ${p}`).join("\n") + "\n";
+      return shellResult(msg, "", 0);
+    } catch (err) {
+      return shellResult("", `ERROR: ${err.message}\n`, 1);
+    }
+  }
+
+  // pip list
+  if (PIP_LIST_RE.test(command)) {
+    try {
+      const micropip = pyodide.pyimport("micropip");
+      const pkgDict = micropip.list();
+      const entries = [];
+      for (const name of pkgDict.keys()) {
+        const pkg = pkgDict.get(name);
+        entries.push({ name, version: pkg.version, source: pkg.source });
+      }
+      pkgDict.destroy();
+      entries.sort((a, b) => a.name.localeCompare(b.name));
+
+      const nameW = Math.max(7, ...entries.map((e) => e.name.length));
+      const verW = Math.max(7, ...entries.map((e) => e.version.length));
+      let out = `${"Package".padEnd(nameW)} ${"Version".padEnd(verW)}\n`;
+      out += `${"-".repeat(nameW)} ${"-".repeat(verW)}\n`;
+      for (const e of entries) {
+        out += `${e.name.padEnd(nameW)} ${e.version.padEnd(verW)}\n`;
+      }
+      return shellResult(out, "", 0);
+    } catch (err) {
+      return shellResult("", `ERROR: ${err.message}\n`, 1);
+    }
+  }
+
+  // pip freeze
+  if (PIP_FREEZE_RE.test(command)) {
+    try {
+      const micropip = pyodide.pyimport("micropip");
+      const frozen = micropip.freeze();
+      return shellResult(frozen + "\n", "", 0);
+    } catch (err) {
+      return shellResult("", `ERROR: ${err.message}\n`, 1);
+    }
+  }
+
+  // pip (no args) or unsupported subcommand (pip show, pip search, etc.)
   const msg =
-    packages.map((p) => `Successfully installed ${p}`).join("\n") + "\n";
-  return { events: [], stdout: msg, stderr: "", output: msg, exitCode: 0 };
+    "Usage: pip <command> [options]\n\n" +
+    "Commands:\n" +
+    "  install     Install packages\n" +
+    "  uninstall   Uninstall packages\n" +
+    "  list        List installed packages\n" +
+    "  freeze      Output installed packages in lockfile format\n";
+  return shellResult(msg, "", 0);
 }
 
-/**
- * Format a pip install error for shell output.
- */
-export function formatPipError(err) {
-  const msg = `ERROR: ${err.message}\n`;
-  return { events: [], stdout: "", stderr: msg, output: msg, exitCode: 1 };
+function shellResult(stdout, stderr, exitCode) {
+  return {
+    events: [],
+    stdout,
+    stderr,
+    output: stdout + stderr,
+    exitCode,
+  };
 }
-
-export const PIP_USAGE_ERROR = {
-  events: [],
-  stdout: "",
-  stderr: "Usage: pip install <package> [package ...]\n",
-  output: "Usage: pip install <package> [package ...]\n",
-  exitCode: 1,
-};

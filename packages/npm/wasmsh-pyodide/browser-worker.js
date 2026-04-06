@@ -255,16 +255,12 @@ const methods = {
   },
 
   async run({ command }) {
-    const { parsePipInstall, PIP_USAGE_ERROR, formatPipResult, formatPipError } = installHelpers;
-    const packages = parsePipInstall(command);
-    if (packages !== null) {
-      if (packages.length === 0) return PIP_USAGE_ERROR;
-      try {
-        await methods.installPythonPackages({ requirements: packages });
-        return formatPipResult(packages);
-      } catch (err) {
-        return formatPipError(err);
-      }
+    if (pyodideRef) {
+      const pipResult = await installHelpers.handlePipCommand(
+        command, pyodideRef,
+        (opts) => methods.installPythonPackages(opts),
+      );
+      if (pipResult) return pipResult;
     }
     const events = sendHostCommand({ Run: { input: command } });
     return protocol().buildRunResult(events);
