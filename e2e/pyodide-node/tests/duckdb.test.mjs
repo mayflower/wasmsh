@@ -178,13 +178,13 @@ print(result)
     const s = await openSession();
     await s.installPythonPackages("duckdb");
 
-    const r = await s.run(`python3 -c "
+    const r = await s.run(`python3 << 'PY'
 import duckdb
 con = duckdb.connect('/workspace/multi.duckdb')
 con.sql('create table users(id int, name varchar)')
-con.sql(\"insert into users values (1, 'alice'), (2, 'bob')\")
+con.sql("insert into users values (1, 'alice'), (2, 'bob')")
 con.sql('create table orders(user_id int, amount decimal(10,2))')
-con.sql(\"insert into orders values (1, 50.00), (1, 30.00), (2, 100.00)\")
+con.sql("insert into orders values (1, 50.00), (1, 30.00), (2, 100.00)")
 result = con.sql('''
     select u.name, sum(o.amount) as total
     from users u join orders o on u.id = o.user_id
@@ -193,7 +193,7 @@ result = con.sql('''
 ''').fetchall()
 print(result)
 con.close()
-"`);
+PY`);
     assert.equal(r.exitCode, 0, `join query failed: ${r.stderr}`);
     assert.ok(r.stdout.includes("bob"), `expected bob: ${r.stdout}`);
     assert.ok(r.stdout.includes("100"), `expected 100: ${r.stdout}`);
@@ -207,13 +207,13 @@ con.close()
     await s.installPythonPackages("duckdb");
 
     // Create data and export to CSV
-    const create = await s.run(`python3 -c "
+    const create = await s.run(`python3 << 'PY'
 import duckdb
 con = duckdb.connect()
 con.sql('create table data as select i as id, i * 10 as value from range(3) t(i)')
-con.sql(\"copy data to '/workspace/output.csv' (header, delimiter ',')\")
+con.sql("copy data to '/workspace/output.csv' (header, delimiter ',')")
 print('exported')
-"`);
+PY`);
     assert.equal(create.exitCode, 0, `export failed: ${create.stderr}`);
 
     // Read the CSV with shell tools
@@ -234,14 +234,14 @@ print('exported')
     const s = await openSession();
     await s.installPythonPackages("duckdb");
 
-    const r = await s.run(`python3 -c "
+    const r = await s.run(`python3 << 'PY'
 import duckdb
 data = [{'city': 'Berlin', 'pop': 3700000},
         {'city': 'Munich', 'pop': 1500000},
         {'city': 'Hamburg', 'pop': 1900000}]
 result = duckdb.sql('select city, pop from data where pop > 1800000 order by pop desc').fetchall()
 print(result)
-"`);
+PY`);
     assert.equal(r.exitCode, 0, `python data query failed: ${r.stderr}`);
     assert.ok(r.stdout.includes("Berlin"), `expected Berlin: ${r.stdout}`);
     assert.ok(r.stdout.includes("Hamburg"), `expected Hamburg: ${r.stdout}`);

@@ -172,17 +172,17 @@ PY`);
     await s.writeFile("/workspace/people.csv", new TextEncoder().encode(csv));
 
     // Agent queries the uploaded data
-    const r = await s.run(`python3 -c "
+    const r = await s.run(`python3 << 'PY'
 import duckdb
-result = duckdb.sql(\"\"\"
+result = duckdb.sql("""
     select city, count(*) as n, round(avg(age), 1) as avg_age
     from read_csv_auto('/workspace/people.csv')
     group by city
     order by n desc, city
-\"\"\").fetchall()
+""").fetchall()
 for row in result:
     print(f'{row[0]}: {row[1]} people, avg age {row[2]}')
-"`);
+PY`);
     assert.equal(r.exitCode, 0, `query failed: ${r.stderr}`);
     assert.ok(r.stdout.includes("Berlin: 2 people"));
     assert.ok(r.stdout.includes("Hamburg: 1 people"));
