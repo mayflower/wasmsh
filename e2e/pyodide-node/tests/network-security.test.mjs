@@ -12,26 +12,9 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 
-const SKIP = process.env.SKIP_PYODIDE === "1";
+import { extractStream, getExitCode } from "../../../packages/npm/wasmsh-pyodide/lib/protocol.mjs";
 
-function extractStream(events, key) {
-  const chunks = [];
-  let total = 0;
-  for (const e of events) {
-    if (e && typeof e === "object" && key in e) {
-      const chunk = e[key];
-      chunks.push(chunk);
-      total += chunk.length;
-    }
-  }
-  const result = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return result;
-}
+const SKIP = process.env.SKIP_PYODIDE === "1";
 
 function findStdout(events) {
   return new TextDecoder().decode(extractStream(events, "Stdout"));
@@ -42,10 +25,7 @@ function findStderr(events) {
 }
 
 function findExitCode(events) {
-  for (const e of events) {
-    if (e && typeof e === "object" && "Exit" in e) return e.Exit;
-  }
-  return null;
+  return getExitCode(events);
 }
 
 describe("network allowlist security (Pyodide Node)", () => {

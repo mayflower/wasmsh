@@ -3,20 +3,14 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
+import { decodeBase64, encodeBase64 } from "./lib/protocol.mjs";
+
 export const DEFAULT_WORKSPACE_DIR = "/workspace";
 
 /** Default request timeout in milliseconds (5 minutes). */
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 
 const packageDir = path.dirname(fileURLToPath(import.meta.url));
-
-function encodeBase64(bytes) {
-  return Buffer.from(bytes).toString("base64");
-}
-
-function decodeBase64(text) {
-  return new Uint8Array(Buffer.from(text, "base64"));
-}
 
 function normalizeInitialFiles(initialFiles = []) {
   return initialFiles.map((file) => ({
@@ -36,15 +30,17 @@ class RequestClient {
     if (!this._timeoutMs || this._timeoutMs <= 0) {
       return promise;
     }
-    return Promise.race([
-      promise,
-      new Promise((_, reject) => {
-        setTimeout(
-          () => reject(new Error(`wasmsh: request '${method}' timed out after ${this._timeoutMs}ms`)),
-          this._timeoutMs,
-        );
-      }),
-    ]);
+    let timeoutId;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(
+        () => reject(new Error(`wasmsh: request '${method}' timed out after ${this._timeoutMs}ms`)),
+        this._timeoutMs,
+      );
+      timeoutId.unref?.();
+    });
+    return Promise.race([promise, timeoutPromise]).finally(() => {
+      clearTimeout(timeoutId);
+    });
   }
 
   async run(command) {

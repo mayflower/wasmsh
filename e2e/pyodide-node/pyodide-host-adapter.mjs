@@ -11,6 +11,7 @@
  *   adapter.destroy();
  */
 import { createProbeModule, createFullModule } from "./host-wrapper.mjs";
+import { createRuntimeBridge } from "../../packages/npm/wasmsh-pyodide/lib/runtime-bridge.mjs";
 
 /**
  * Create a host adapter backed by a wasmsh runtime inside Pyodide.
@@ -25,27 +26,10 @@ export async function createHostAdapter(opts = {}) {
   const mod = opts.fullPython
     ? await createFullModule()
     : await createProbeModule();
-
-  const handle = mod.ccall("wasmsh_runtime_new", "number", [], []);
-  if (handle === 0) throw new Error("wasmsh_runtime_new returned null");
+  const runtimeBridge = createRuntimeBridge(mod);
 
   // Init immediately
-  const initEvents = sendRaw({ Init: { step_budget: stepBudget } });
-
-  function sendRaw(cmd) {
-    const json = typeof cmd === "string" ? JSON.stringify(cmd) : JSON.stringify(cmd);
-    const jsonPtr = mod.stringToNewUTF8(json);
-    const resultPtr = mod.ccall(
-      "wasmsh_runtime_handle_json",
-      "number",
-      ["number", "number"],
-      [handle, jsonPtr],
-    );
-    mod._free(jsonPtr);
-    const resultStr = mod.UTF8ToString(resultPtr);
-    mod.ccall("wasmsh_runtime_free_string", null, ["number"], [resultPtr]);
-    return JSON.parse(resultStr);
-  }
+  const initEvents = runtimeBridge.sendHostCommand({ Init: { step_budget: stepBudget } });
 
   return {
     /** The events returned by Init (includes Version). */
@@ -53,12 +37,12 @@ export async function createHostAdapter(opts = {}) {
 
     /** Send a HostCommand and return the WorkerEvent array. */
     send(cmd) {
-      return Promise.resolve(sendRaw(cmd));
+      return Promise.resolve(runtimeBridge.sendHostCommand(cmd));
     },
 
     /** Free the underlying runtime. */
     destroy() {
-      mod.ccall("wasmsh_runtime_free", null, ["number"], [handle]);
+      runtimeBridge.close();
     },
   };
 }

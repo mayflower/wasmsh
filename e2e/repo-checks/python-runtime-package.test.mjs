@@ -16,6 +16,7 @@ const PY_PKG_DIR = resolve(
   "../../packages/python/wasmsh-pyodide-runtime",
 );
 const NPM_PKG_DIR = resolve(__dirname, "../../packages/npm/wasmsh-pyodide");
+const PY_ASSETS_DIR = resolve(PY_PKG_DIR, "wasmsh_pyodide_runtime/assets");
 
 describe("python package: pyproject.toml", () => {
   const toml = readFileSync(resolve(PY_PKG_DIR, "pyproject.toml"), "utf-8");
@@ -131,4 +132,44 @@ describe("packaging script", () => {
       "should copy lib/ into Python assets",
     );
   });
+});
+
+describe("python package: generated asset parity", () => {
+  const copiedRuntimeFiles = [
+    "node-host.mjs",
+    "lib/allowlist.mjs",
+    "lib/fetch-helper.mjs",
+    "lib/node-module.mjs",
+    "lib/protocol.mjs",
+    "lib/runtime-bridge.mjs",
+  ];
+  const packagedArtifacts = [
+    "pyodide-lock.json",
+    "micropip-0.11.0-py3-none-any.whl",
+    "packaging-24.2-py3-none-any.whl",
+  ];
+
+  for (const relativePath of copiedRuntimeFiles) {
+    it(`${relativePath} matches the npm runtime source`, () => {
+      const npmSource = readFileSync(resolve(NPM_PKG_DIR, relativePath), "utf-8");
+      const pythonAsset = readFileSync(resolve(PY_ASSETS_DIR, relativePath), "utf-8");
+      assert.equal(
+        pythonAsset,
+        npmSource,
+        `${relativePath} in the Python package is out of sync; run package-pyodide-runtime`,
+      );
+    });
+  }
+
+  for (const relativePath of packagedArtifacts) {
+    it(`${relativePath} is copied into the Python runtime assets`, () => {
+      const npmAsset = readFileSync(resolve(NPM_PKG_DIR, "assets", relativePath));
+      const pythonAsset = readFileSync(resolve(PY_ASSETS_DIR, relativePath));
+      assert.deepEqual(
+        pythonAsset,
+        npmAsset,
+        `${relativePath} in the Python package is out of sync; run package-pyodide-runtime`,
+      );
+    });
+  }
 });
