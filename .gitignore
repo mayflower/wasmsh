@@ -8,4 +8,5 @@ proptest-regressions/
 CLAUDE.md
 fuzz/target/
 examples/typescript/node_modules/
+tools/pyodide/standard-exports-*.cache
 pkg/

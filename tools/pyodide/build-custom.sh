@@ -169,7 +169,7 @@ echo "  Installed autoreconf wrapper to patch libffi configure.ac."
 # a @response file.  This avoids MAIN_MODULE=1 which would also
 # export Rust symbols containing '$' that break emcc JS glue.
 PYODIDE_CDN="https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full"
-STANDARD_EXPORTS="$SCRIPT_DIR/standard-exports.cache"
+STANDARD_EXPORTS="$SCRIPT_DIR/standard-exports-${PYODIDE_VERSION}.cache"
 EXPORT_RESPONSE="$PYODIDE_SRC/exported-functions.json"
 
 if [ ! -f "$STANDARD_EXPORTS" ]; then
@@ -201,9 +201,13 @@ with open('$EXPORT_RESPONSE', 'w') as f:
 print(f'  Combined export list: {len(symbols)} symbols.')
 "
 
-# Patch Makefile.envs to use the response file instead of inline EXPORTS
+# Patch Makefile.envs to use the response file instead of inline EXPORTS.
+# There are two EXPORTED_FUNCTIONS lines: one in LDFLAGS_BASE ("-s ...")
+# and one in MAIN_MODULE_LDFLAGS ("-s..." without space). Patch both so
+# the later one doesn't override the first.
 if [ -f "$EXPORT_RESPONSE" ] && ! grep -q "exported-functions.json" Makefile.envs; then
-    "$SED" -i "s|-s EXPORTED_FUNCTIONS='\$(EXPORTS)'|-s EXPORTED_FUNCTIONS=@$EXPORT_RESPONSE|" Makefile.envs
+    "$SED" -i "s|-s EXPORTED_FUNCTIONS='\$(EXPORTS)'|-s EXPORTED_FUNCTIONS=@$EXPORT_RESPONSE|g" Makefile.envs
+    "$SED" -i "s|-sEXPORTED_FUNCTIONS='\$(EXPORTS)'|-sEXPORTED_FUNCTIONS=@$EXPORT_RESPONSE|g" Makefile.envs
     echo "  Patched EXPORTED_FUNCTIONS to use @response file."
 fi
 
