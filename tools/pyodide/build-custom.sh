@@ -120,8 +120,9 @@ else
 fi
 
 # MAIN_MODULE=1 exports ALL symbols incl. Rust mangled names with '$'
-# which emcc rejects. Switch to MAIN_MODULE=2 (explicit exports only).
-# This is fine for a minimal probe distribution (no dynamic pkg loading).
+# which emcc rejects.  Keep MAIN_MODULE=2 (explicit exports only) and
+# add the standard Pyodide export list so compiled side modules
+# (DuckDB, numpy, etc.) can resolve CPython / libc / C++ symbols.
 if grep -q "MAIN_MODULE=1" Makefile.envs; then
     "$SED" -i 's|-s MAIN_MODULE=1|-s MAIN_MODULE=2|' Makefile.envs
     echo "  Switched MAIN_MODULE from 1 to 2 (explicit exports)."
@@ -159,6 +160,71 @@ chmod +x "$WRAPPER_DIR/autoreconf"
 export PATH="$WRAPPER_DIR:$PATH"
 echo "  Installed autoreconf wrapper to patch libffi configure.ac."
 
+# ── Generate comprehensive export list for compiled packages ──
+# MAIN_MODULE=2 only exports explicitly listed functions.  Compiled
+# side modules (DuckDB, numpy, etc.) need CPython / libc / C++ stdlib
+# symbols that MAIN_MODULE=1 would export automatically.  We download
+# the standard Pyodide CDN wasm, extract its full export list, merge
+# with wasmsh-specific exports, and patch EXPORTED_FUNCTIONS to use
+# a @response file.  This avoids MAIN_MODULE=1 which would also
+# export Rust symbols containing '$' that break emcc JS glue.
+PYODIDE_CDN="https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full"
+STANDARD_EXPORTS="$SCRIPT_DIR/standard-exports-${PYODIDE_VERSION}.cache"
+EXPORT_RESPONSE="$PYODIDE_SRC/exported-functions.json"
+
+if [ ! -f "$STANDARD_EXPORTS" ]; then
+    echo "Downloading standard Pyodide wasm for export list..."
+    STANDARD_WASM="$(mktemp)"
+    curl -fsSL "$PYODIDE_CDN/pyodide.asm.wasm" -o "$STANDARD_WASM"
+    python3 "$SCRIPT_DIR/extract-standard-exports.py" "$STANDARD_WASM" > "$STANDARD_EXPORTS"
+    rm -f "$STANDARD_WASM"
+    EXPORT_COUNT=$(wc -l < "$STANDARD_EXPORTS")
+    if [ "$EXPORT_COUNT" -lt 100 ]; then
+        echo "ERROR: Only $EXPORT_COUNT exports extracted from standard Pyodide wasm."
+        echo "Expected thousands. The downloaded file may be corrupt or the wrong version."
+        rm -f "$STANDARD_EXPORTS"
+        exit 1
+    fi
+    echo "  Extracted $EXPORT_COUNT standard function exports."
+fi
+
+# Build combined JSON export array for Emscripten @response file.
+# The extracted list is cached per Pyodide version to avoid
+# re-downloading on subsequent builds.
+python3 -c "
+import json
+symbols = set()
+symbols.add('_main')
+for name in ['_wasmsh_probe_version','_wasmsh_probe_write_text',
+             '_wasmsh_probe_file_equals','_wasmsh_runtime_new',
+             '_wasmsh_runtime_handle_json','_wasmsh_runtime_free',
+             '_wasmsh_runtime_free_string']:
+    symbols.add(name)
+with open('$STANDARD_EXPORTS') as f:
+    for line in f:
+        sym = line.strip()
+        if sym:
+            symbols.add(sym)
+with open('$EXPORT_RESPONSE', 'w') as f:
+    json.dump(sorted(symbols), f)
+print(f'  Combined export list: {len(symbols)} symbols.')
+"
+
+if [ ! -f "$EXPORT_RESPONSE" ]; then
+    echo "ERROR: Failed to generate combined export list at $EXPORT_RESPONSE"
+    exit 1
+fi
+
+# Patch Makefile.envs to use the response file instead of inline EXPORTS.
+# There are two EXPORTED_FUNCTIONS lines: one in LDFLAGS_BASE ("-s ...")
+# and one in MAIN_MODULE_LDFLAGS ("-s..." without space). Patch both so
+# the later one doesn't override the first.
+if [ -f "$EXPORT_RESPONSE" ] && ! grep -q "exported-functions.json" Makefile.envs; then
+    "$SED" -i "s|-s EXPORTED_FUNCTIONS='\$(EXPORTS)'|-s EXPORTED_FUNCTIONS=@$EXPORT_RESPONSE|g" Makefile.envs
+    "$SED" -i "s|-sEXPORTED_FUNCTIONS='\$(EXPORTS)'|-sEXPORTED_FUNCTIONS=@$EXPORT_RESPONSE|g" Makefile.envs
+    echo "  Patched EXPORTED_FUNCTIONS to use @response file."
+fi
+
 # ── Build CPython + core ────────────────────────────────────
 echo "Building Pyodide core (this takes a while on first run)..."
 
@@ -192,7 +258,6 @@ done
 # ── Fetch micropip + packaging + lockfile from Pyodide CDN ─────
 # micropip is tagged "always" in standard Pyodide — every sandbox
 # should have it available via `import micropip` out of the box.
-PYODIDE_CDN="https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full"
 
 echo "Fetching pyodide-lock.json from CDN..."
 if [ ! -f "$DIST_DIR/pyodide-lock.json" ]; then

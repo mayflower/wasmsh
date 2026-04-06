@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
+import { readFileSync, readdirSync } from "node:fs";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -8,8 +9,8 @@ if (typeof globalThis.require === "undefined") {
   globalThis.require = createRequire(import.meta.url);
 }
 
-import { isHostAllowed } from "./lib/allowlist.mjs";
 import { createFullModule } from "./lib/node-module.mjs";
+import { installPackages, handlePipCommand } from "./lib/install.mjs";
 import {
   buildRunResult,
   encodeBase64,
@@ -24,10 +25,6 @@ function resolveDefaultAssetDir() {
   return resolve(__dirname, "assets");
 }
 
-function pipResult(stdout, stderr, exitCode) {
-  return { events: [], stdout, stderr, output: stdout + stderr, exitCode };
-}
-
 function parseArgs(argv) {
   const options = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -38,6 +35,42 @@ function parseArgs(argv) {
     }
   }
   return options;
+}
+
+/** Cache of package names whose wheel files are actually present in assets.
+ *  Only packages with a local wheel are considered "bundled" — the lockfile
+ *  may list hundreds of packages from the Pyodide CDN that we don't ship.
+ *  Set (not Map) because the Node path checks file existence at cache-build
+ *  time via readdirSync.  Valid for the lifetime of this process (the asset
+ *  directory is immutable once the host subprocess starts). */
+let _bundledPackagesCache = null;
+
+function loadBundledPackageNames(assetDir) {
+  if (_bundledPackagesCache) return _bundledPackagesCache;
+  const lockPath = resolve(assetDir, "pyodide-lock.json");
+  try {
+    const raw = readFileSync(lockPath, "utf-8");
+    let lock;
+    try {
+      lock = JSON.parse(raw);
+    } catch (parseErr) {
+      process.stderr.write(`[wasmsh] Failed to parse ${lockPath}: ${parseErr.message}\n`);
+      _bundledPackagesCache = new Set();
+      return _bundledPackagesCache;
+    }
+    const localFiles = new Set(readdirSync(assetDir));
+    _bundledPackagesCache = new Set(
+      Object.entries(lock.packages || {})
+        .filter(([, entry]) => entry.file_name && localFiles.has(entry.file_name))
+        .map(([name]) => name),
+    );
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      process.stderr.write(`[wasmsh] Failed to load bundled package index from ${lockPath}: ${err.message}\n`);
+    }
+    _bundledPackagesCache = new Set();
+  }
+  return _bundledPackagesCache;
 }
 
 class WasmshNodeHost {
@@ -89,103 +122,16 @@ class WasmshNodeHost {
   async run({ command }) {
     // Intercept pip commands — PyRun_SimpleString doesn't support
     // top-level await so we route through the JS install path instead.
-    const pipResult = await this._handlePipCommand(command);
-    if (pipResult) return pipResult;
+    const pyodide = this.module?._pyodide;
+    if (pyodide) {
+      const pipResult = await handlePipCommand(
+        command, pyodide,
+        (opts) => this.installPythonPackages(opts),
+      );
+      if (pipResult) return pipResult;
+    }
     const events = this.sendHostCommand({ Run: { input: command } });
     return buildRunResult(events);
-  }
-
-  async _handlePipCommand(command) {
-    const PIP_PREFIX_RE = /^\s*(?:pip3?|python3?\s+-m\s+pip)(?:\s+|$)/;
-    if (!PIP_PREFIX_RE.test(command)) return null;
-
-    const installMatch = command.match(
-      /^\s*(?:pip3?|python3?\s+-m\s+pip)\s+install\s+(.+)$/,
-    );
-    if (installMatch) {
-      const packages = installMatch[1]
-        .split(/\s+/)
-        .filter((a) => a && !a.startsWith("-"));
-      if (packages.length === 0) {
-        return pipResult("", "Usage: pip install <package> [package ...]\n", 1);
-      }
-      try {
-        await this.installPythonPackages({ requirements: packages });
-        const msg = packages.map((p) => `Successfully installed ${p}`).join("\n") + "\n";
-        return pipResult(msg, "", 0);
-      } catch (err) {
-        return pipResult("", `ERROR: ${err.message}\n`, 1);
-      }
-    }
-
-    const pyodide = this.module?._pyodide;
-    if (!pyodide) {
-      return pipResult("", "ERROR: Pyodide not initialized\n", 1);
-    }
-
-    const uninstallMatch = command.match(
-      /^\s*(?:pip3?|python3?\s+-m\s+pip)\s+uninstall\s+(.+)$/,
-    );
-    if (uninstallMatch) {
-      const packages = uninstallMatch[1]
-        .split(/\s+/)
-        .filter((a) => a && !a.startsWith("-"));
-      if (packages.length === 0) {
-        return pipResult("", "Usage: pip uninstall <package> [package ...]\n", 1);
-      }
-      try {
-        const micropip = pyodide.pyimport("micropip");
-        micropip.uninstall(packages);
-        const msg = packages.map((p) => `Successfully uninstalled ${p}`).join("\n") + "\n";
-        return pipResult(msg, "", 0);
-      } catch (err) {
-        return pipResult("", `ERROR: ${err.message}\n`, 1);
-      }
-    }
-
-    if (/^\s*(?:pip3?|python3?\s+-m\s+pip)\s+list\b/.test(command)) {
-      try {
-        const micropip = pyodide.pyimport("micropip");
-        const pkgDict = micropip.list();
-        const entries = [];
-        for (const name of pkgDict.keys()) {
-          const pkg = pkgDict.get(name);
-          entries.push({ name, version: pkg.version });
-        }
-        pkgDict.destroy();
-        entries.sort((a, b) => a.name.localeCompare(b.name));
-        const nameW = Math.max(7, ...entries.map((e) => e.name.length));
-        const verW = Math.max(7, ...entries.map((e) => e.version.length));
-        let out = `${"Package".padEnd(nameW)} ${"Version".padEnd(verW)}\n`;
-        out += `${"-".repeat(nameW)} ${"-".repeat(verW)}\n`;
-        for (const e of entries) {
-          out += `${e.name.padEnd(nameW)} ${e.version.padEnd(verW)}\n`;
-        }
-        return pipResult(out, "", 0);
-      } catch (err) {
-        return pipResult("", `ERROR: ${err.message}\n`, 1);
-      }
-    }
-
-    if (/^\s*(?:pip3?|python3?\s+-m\s+pip)\s+freeze\b/.test(command)) {
-      try {
-        const micropip = pyodide.pyimport("micropip");
-        const frozen = micropip.freeze();
-        return pipResult(frozen + "\n", "", 0);
-      } catch (err) {
-        return pipResult("", `ERROR: ${err.message}\n`, 1);
-      }
-    }
-
-    // Bare pip or unsupported subcommand — show usage help
-    const msg =
-      "Usage: pip <command> [options]\n\n" +
-      "Commands:\n" +
-      "  install     Install packages\n" +
-      "  uninstall   Uninstall packages\n" +
-      "  list        List installed packages\n" +
-      "  freeze      Output installed packages in lockfile format\n";
-    return pipResult(msg, "", 0);
   }
 
   async writeFile({ path, contentBase64 }) {
@@ -223,30 +169,13 @@ class WasmshNodeHost {
     if (!pyodide) {
       throw new Error("Pyodide API not available — cannot install packages");
     }
-    const micropip = pyodide.pyimport("micropip");
 
-    const installed = [];
-    for (const req of reqs) {
-      if (/^file:/i.test(req)) {
-        throw new Error(`file: URIs are not supported for security: ${req}`);
-      }
-      if (/^https?:\/\//i.test(req) && !isHostAllowed(req, this._allowedHosts)) {
-        throw new Error(
-          `Host not allowed for package install: ${req}. ` +
-          "Configure allowedHosts when creating the session.",
-        );
-      }
-      if (!req.startsWith("emfs:") && !/^https?:\/\//i.test(req) && this._allowedHosts.length === 0) {
-        throw new Error(
-          `Package name installs require network access: ${req}. ` +
-          "Configure allowedHosts (e.g., ['cdn.jsdelivr.net', 'pypi.org', 'files.pythonhosted.org']) when creating the session.",
-        );
-      }
-
-      await micropip.install(req, { deps: options.deps !== false });
-      installed.push({ requirement: req });
-    }
-    return { installed, requirements: reqs };
+    const bundled = loadBundledPackageNames(this.assetDir);
+    return installPackages(reqs, pyodide, {
+      isBundled: (name) => bundled.has(name),
+      allowedHosts: this._allowedHosts,
+      deps: options.deps,
+    });
   }
 
   async close() {

@@ -11,11 +11,14 @@ let moduleRef = null;
 let pyodideRef = null;
 let helperModulesPromise = null;
 let protocolHelpers = null;
-let allowlistHelpers = null;
 let runtimeBridgeHelpers = null;
+let installHelpers = null;
 let runtimeBridge = null;
 let assetBaseUrl = null;
 let sessionAllowedHosts = [];
+/** Set of package names whose wheel files are actually served locally.
+ *  Built at boot by batch HEAD-checking all lockfile entries in parallel. */
+let bundledPackageNames = new Set();
 
 function resolveHelperUrl(relativePath) {
   return new URL(relativePath, self.location.href).href;
@@ -25,12 +28,12 @@ async function ensureHelperModules() {
   if (!helperModulesPromise) {
     helperModulesPromise = Promise.all([
       import(resolveHelperUrl("./lib/protocol.mjs")),
-      import(resolveHelperUrl("./lib/allowlist.mjs")),
       import(resolveHelperUrl("./lib/runtime-bridge.mjs")),
-    ]).then(([protocol, allowlist, runtimeBridgeModule]) => {
+      import(resolveHelperUrl("./lib/install.mjs")),
+    ]).then(([protocol, runtimeBridgeModule, install]) => {
       protocolHelpers = protocol;
-      allowlistHelpers = allowlist;
       runtimeBridgeHelpers = runtimeBridgeModule;
+      installHelpers = install;
     }).catch((error) => {
       helperModulesPromise = null;
       throw error;
@@ -44,13 +47,6 @@ function protocol() {
     throw new Error("protocol helpers not initialized");
   }
   return protocolHelpers;
-}
-
-function allowlist() {
-  if (!allowlistHelpers) {
-    throw new Error("allowlist helpers not initialized");
-  }
-  return allowlistHelpers;
 }
 
 function runtimeBridgeModule() {
@@ -191,6 +187,36 @@ async function boot(baseUrl) {
     // micropip not available — not fatal
   }
 
+  // Build the set of bundled packages whose wheel files are actually served
+  // locally.  We read the lockfile (the browser HTTP cache likely already has
+  // it from loadPyodide) and then batch-HEAD all wheel file_names in parallel.
+  // Only packages with a locally available wheel are considered "bundled".
+  try {
+    const lockUrl = `${assetBaseUrl}/pyodide-lock.json`;
+    const resp = await fetch(lockUrl);
+    if (resp.ok) {
+      const lock = await resp.json();
+      const entries = Object.entries(lock.packages || {});
+      const checks = entries.map(async ([name, entry]) => {
+        if (!entry.file_name) return null;
+        try {
+          const r = await fetch(`${assetBaseUrl}/${entry.file_name}`, { method: "HEAD" });
+          return r.ok ? name : null;
+        } catch {
+          return null;
+        }
+      });
+      const results = await Promise.all(checks);
+      bundledPackageNames = new Set(results.filter(Boolean));
+    } else {
+      console.warn(`[wasmsh] Could not fetch bundled package index: HTTP ${resp.status}`);
+      bundledPackageNames = new Set();
+    }
+  } catch (err) {
+    console.warn(`[wasmsh] Failed to load bundled package index: ${err.message}`);
+    bundledPackageNames = new Set();
+  }
+
   module._pyodide = pyodide;
   runtimeBridge = runtimeBridgeModule().createRuntimeBridge(module);
 }
@@ -203,102 +229,6 @@ async function ensureBooted(baseUrl) {
     });
   }
   await bootPromise;
-}
-
-function pipResult(stdout, stderr, exitCode) {
-  return { events: [], stdout, stderr, output: stdout + stderr, exitCode };
-}
-
-async function handlePipCommand(command) {
-  const PIP_PREFIX_RE = /^\s*(?:pip3?|python3?\s+-m\s+pip)(?:\s+|$)/;
-  if (!PIP_PREFIX_RE.test(command)) return null;
-
-  const installMatch = command.match(
-    /^\s*(?:pip3?|python3?\s+-m\s+pip)\s+install\s+(.+)$/,
-  );
-  if (installMatch) {
-    const packages = installMatch[1]
-      .split(/\s+/)
-      .filter((a) => a && !a.startsWith("-"));
-    if (packages.length === 0) {
-      return pipResult("", "Usage: pip install <package> [package ...]\n", 1);
-    }
-    try {
-      await methods.installPythonPackages({ requirements: packages });
-      const msg = packages.map((p) => `Successfully installed ${p}`).join("\n") + "\n";
-      return pipResult(msg, "", 0);
-    } catch (err) {
-      return pipResult("", `ERROR: ${err.message}\n`, 1);
-    }
-  }
-
-  if (!pyodideRef) {
-    return pipResult("", "ERROR: Pyodide not initialized\n", 1);
-  }
-
-  const uninstallMatch = command.match(
-    /^\s*(?:pip3?|python3?\s+-m\s+pip)\s+uninstall\s+(.+)$/,
-  );
-  if (uninstallMatch) {
-    const packages = uninstallMatch[1]
-      .split(/\s+/)
-      .filter((a) => a && !a.startsWith("-"));
-    if (packages.length === 0) {
-      return pipResult("", "Usage: pip uninstall <package> [package ...]\n", 1);
-    }
-    try {
-      const micropip = pyodideRef.pyimport("micropip");
-      micropip.uninstall(packages);
-      const msg = packages.map((p) => `Successfully uninstalled ${p}`).join("\n") + "\n";
-      return pipResult(msg, "", 0);
-    } catch (err) {
-      return pipResult("", `ERROR: ${err.message}\n`, 1);
-    }
-  }
-
-  if (/^\s*(?:pip3?|python3?\s+-m\s+pip)\s+list\b/.test(command)) {
-    try {
-      const micropip = pyodideRef.pyimport("micropip");
-      const pkgDict = micropip.list();
-      const entries = [];
-      for (const name of pkgDict.keys()) {
-        const pkg = pkgDict.get(name);
-        entries.push({ name, version: pkg.version });
-      }
-      pkgDict.destroy();
-      entries.sort((a, b) => a.name.localeCompare(b.name));
-      const nameW = Math.max(7, ...entries.map((e) => e.name.length));
-      const verW = Math.max(7, ...entries.map((e) => e.version.length));
-      let out = `${"Package".padEnd(nameW)} ${"Version".padEnd(verW)}\n`;
-      out += `${"-".repeat(nameW)} ${"-".repeat(verW)}\n`;
-      for (const e of entries) {
-        out += `${e.name.padEnd(nameW)} ${e.version.padEnd(verW)}\n`;
-      }
-      return pipResult(out, "", 0);
-    } catch (err) {
-      return pipResult("", `ERROR: ${err.message}\n`, 1);
-    }
-  }
-
-  if (/^\s*(?:pip3?|python3?\s+-m\s+pip)\s+freeze\b/.test(command)) {
-    try {
-      const micropip = pyodideRef.pyimport("micropip");
-      const frozen = micropip.freeze();
-      return pipResult(frozen + "\n", "", 0);
-    } catch (err) {
-      return pipResult("", `ERROR: ${err.message}\n`, 1);
-    }
-  }
-
-  // Bare pip or unsupported subcommand — show usage help
-  const msg =
-    "Usage: pip <command> [options]\n\n" +
-    "Commands:\n" +
-    "  install     Install packages\n" +
-    "  uninstall   Uninstall packages\n" +
-    "  list        List installed packages\n" +
-    "  freeze      Output installed packages in lockfile format\n";
-  return pipResult(msg, "", 0);
 }
 
 const methods = {
@@ -325,10 +255,13 @@ const methods = {
   },
 
   async run({ command }) {
-    // Intercept pip commands — PyRun_SimpleString doesn't support
-    // top-level await so we route through the JS install path instead.
-    const pipR = await handlePipCommand(command);
-    if (pipR) return pipR;
+    if (pyodideRef) {
+      const pipResult = await installHelpers.handlePipCommand(
+        command, pyodideRef,
+        (opts) => methods.installPythonPackages(opts),
+      );
+      if (pipResult) return pipResult;
+    }
     const events = sendHostCommand({ Run: { input: command } });
     return protocol().buildRunResult(events);
   },
@@ -368,30 +301,12 @@ const methods = {
     if (!pyodideRef) {
       throw new Error("Pyodide API not available — cannot install packages");
     }
-    const micropip = pyodideRef.pyimport("micropip");
 
-    const installed = [];
-    for (const req of reqs) {
-      if (/^file:/i.test(req)) {
-        throw new Error(`file: URIs are not supported for security: ${req}`);
-      }
-      if (/^https?:\/\//i.test(req) && !allowlist().isHostAllowed(req, sessionAllowedHosts)) {
-        throw new Error(
-          `Host not allowed for package install: ${req}. ` +
-          "Configure allowedHosts when creating the session.",
-        );
-      }
-      if (!req.startsWith("emfs:") && !/^https?:\/\//i.test(req) && sessionAllowedHosts.length === 0) {
-        throw new Error(
-          `Package name installs require network access: ${req}. ` +
-          "Configure allowedHosts (e.g., ['cdn.jsdelivr.net', 'pypi.org', 'files.pythonhosted.org']) when creating the session.",
-        );
-      }
-
-      await micropip.install(req, { deps: options.deps !== false });
-      installed.push({ requirement: req });
-    }
-    return { installed, requirements: reqs };
+    return installHelpers.installPackages(reqs, pyodideRef, {
+      isBundled: (name) => bundledPackageNames.has(name),
+      allowedHosts: sessionAllowedHosts,
+      deps: options.deps,
+    });
   },
 
   async close() {
@@ -402,6 +317,7 @@ const methods = {
     moduleRef = null;
     pyodideRef = null;
     bootPromise = null;
+    bundledPackageNames = new Set();
     return { closed: true };
   },
 };

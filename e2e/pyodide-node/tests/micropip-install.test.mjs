@@ -134,10 +134,12 @@ describe("installPythonPackages (Node)", () => {
     { skip: SKIP, timeout: 120_000 },
     async () => {
       const session = await openSession({ allowedHosts: [] });
+      // Use a package NOT in the bundled lockfile — bundled packages
+      // resolve offline and do not require allowedHosts.
       await assert.rejects(
-        () => session.installPythonPackages("requests"),
+        () => session.installPythonPackages("flask"),
         /require.*network|not.*supported/i,
-        "should reject package name installs without allowedHosts",
+        "should reject non-bundled package name installs without allowedHosts",
       );
     },
   );
