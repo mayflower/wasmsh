@@ -20,7 +20,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.8"
+version = "0.5.9"
 edition = "2021"
 rust-version = "1.89"
 license = "Apache-2.0"
@@ -49,21 +49,21 @@ ureq = "2"
 # Internal crates. The `version` field is consumed by `cargo publish` and
 # the `path` field by local workspace builds.  Kept in lockstep with the
 # [workspace.package].version above — `tools/bump-version.sh` bumps both.
-wasmsh-ast = { version = "0.5.8", path = "crates/wasmsh-ast" }
-wasmsh-lex = { version = "0.5.8", path = "crates/wasmsh-lex" }
-wasmsh-parse = { version = "0.5.8", path = "crates/wasmsh-parse" }
-wasmsh-expand = { version = "0.5.8", path = "crates/wasmsh-expand" }
-wasmsh-hir = { version = "0.5.8", path = "crates/wasmsh-hir" }
-wasmsh-ir = { version = "0.5.8", path = "crates/wasmsh-ir" }
-wasmsh-vm = { version = "0.5.8", path = "crates/wasmsh-vm" }
-wasmsh-state = { version = "0.5.8", path = "crates/wasmsh-state" }
-wasmsh-fs = { version = "0.5.8", path = "crates/wasmsh-fs" }
-wasmsh-builtins = { version = "0.5.8", path = "crates/wasmsh-builtins" }
-wasmsh-utils = { version = "0.5.8", path = "crates/wasmsh-utils" }
-wasmsh-runtime = { version = "0.5.8", path = "crates/wasmsh-runtime" }
-wasmsh-browser = { version = "0.5.8", path = "crates/wasmsh-browser" }
-wasmsh-protocol = { version = "0.5.8", path = "crates/wasmsh-protocol" }
-wasmsh-testkit = { version = "0.5.8", path = "crates/wasmsh-testkit" }
+wasmsh-ast = { version = "0.5.9", path = "crates/wasmsh-ast" }
+wasmsh-lex = { version = "0.5.9", path = "crates/wasmsh-lex" }
+wasmsh-parse = { version = "0.5.9", path = "crates/wasmsh-parse" }
+wasmsh-expand = { version = "0.5.9", path = "crates/wasmsh-expand" }
+wasmsh-hir = { version = "0.5.9", path = "crates/wasmsh-hir" }
+wasmsh-ir = { version = "0.5.9", path = "crates/wasmsh-ir" }
+wasmsh-vm = { version = "0.5.9", path = "crates/wasmsh-vm" }
+wasmsh-state = { version = "0.5.9", path = "crates/wasmsh-state" }
+wasmsh-fs = { version = "0.5.9", path = "crates/wasmsh-fs" }
+wasmsh-builtins = { version = "0.5.9", path = "crates/wasmsh-builtins" }
+wasmsh-utils = { version = "0.5.9", path = "crates/wasmsh-utils" }
+wasmsh-runtime = { version = "0.5.9", path = "crates/wasmsh-runtime" }
+wasmsh-browser = { version = "0.5.9", path = "crates/wasmsh-browser" }
+wasmsh-protocol = { version = "0.5.9", path = "crates/wasmsh-protocol" }
+wasmsh-testkit = { version = "0.5.9", path = "crates/wasmsh-testkit" }
 
 # ── Workspace Lints ──────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 {
   "name": "@mayflowergmbh/wasmsh-pyodide",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "description": "Pyodide-backed wasmsh runtime package for Node.js and browser workers",
   "type": "module",
   "main": "./index.js",
