@@ -20,6 +20,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
@@ -43,7 +46,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
@@ -92,7 +95,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-unknown-emscripten
       - uses: Swatinem/rust-cache@v2
@@ -106,8 +109,8 @@ jobs:
           node-version: "22"
       - name: Install just
         uses: extractions/setup-just@v2
-      - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y build-essential wget ccache pkg-config xz-utils autoconf automake libtool
+      - name: Install Pyodide build deps
+        run: sudo apt-get install -y wget ccache xz-utils autoconf automake libtool
       - name: Build custom Pyodide
         run: just build-pyodide
         env:
@@ -160,7 +163,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - name: Publish workspace crates (sequential, respecting rate limits)
         env:

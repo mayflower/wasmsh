@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-unknown-unknown
 
@@ -104,7 +104,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-unknown-unknown
 
@@ -139,7 +139,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-unknown-emscripten
 
@@ -158,8 +158,8 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@v2
 
-      - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y build-essential wget ccache pkg-config xz-utils autoconf automake libtool
+      - name: Install Pyodide build deps
+        run: sudo apt-get install -y wget ccache xz-utils autoconf automake libtool
 
       - name: Build custom Pyodide
         run: just build-pyodide
@@ -183,4 +183,3 @@ jobs:
         with:
           name: wasmsh-pyodide
           path: dist/pyodide-custom/
-

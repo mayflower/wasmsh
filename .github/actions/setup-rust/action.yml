@@ -1,0 +1,36 @@
+name: Setup Rust toolchain (k8s runner)
+description: >-
+  Install the Rust toolchain and the system build dependencies needed
+  for cargo to compile build scripts on the bare `mayflower-k8s-runners`
+  pool.  Bundles `dtolnay/rust-toolchain@stable` with the apt-get
+  install of `build-essential` (gcc, cc, libc-dev, make) and
+  `pkg-config`, which github-hosted ubuntu-latest runners ship by
+  default but the k8s runner image does not.
+
+inputs:
+  toolchain:
+    description: Rust toolchain to install (default stable).
+    required: false
+    default: stable
+  targets:
+    description: Comma-separated list of additional rustup targets.
+    required: false
+    default: ""
+  components:
+    description: Comma-separated list of additional rustup components.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install build essentials (gcc, cc, libc-dev, pkg-config)
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        targets: ${{ inputs.targets }}
+        components: ${{ inputs.components }}
