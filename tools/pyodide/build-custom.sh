@@ -134,6 +134,19 @@ if [ ! -f "$RUNTIME_LIB" ]; then
 fi
 echo "Runtime lib: $RUNTIME_LIB ($(du -h "$RUNTIME_LIB" | cut -f1))"
 
+# We patch the Pyodide Makefile to inject $RUNTIME_LIB into the link
+# command, but we cannot make it a true `make` dependency without forking
+# the upstream rule.  When the wasmsh source changes, cargo correctly
+# updates $RUNTIME_LIB but `make` still thinks `dist/pyodide.asm.wasm` is
+# up to date and skips the relink — silently shipping a wasm that does
+# not contain the new code.  Defend against that here: if the staticlib
+# is newer than the wasm, force a relink by deleting the wasm output.
+PYODIDE_DIST_WASM="$PYODIDE_SRC/dist/pyodide.asm.wasm"
+if [ -f "$PYODIDE_DIST_WASM" ] && [ "$RUNTIME_LIB" -nt "$PYODIDE_DIST_WASM" ]; then
+    echo "Runtime lib is newer than $PYODIDE_DIST_WASM — forcing relink."
+    rm -f "$PYODIDE_DIST_WASM" "$PYODIDE_SRC/dist/pyodide.asm.js"
+fi
+
 # ── Patch Pyodide to link the runtime staticlib ────────────
 #
 # Every sed patch below uses a post-sed verification: the `check` function

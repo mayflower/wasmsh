@@ -205,36 +205,6 @@ describe("network allowlist security (Pyodide Node)", () => {
     },
   );
 
-  // ── No network backend (default init) ─────────────────────────
-
-  it(
-    "curl without network config returns 'not available'",
-    { skip: SKIP, timeout: 60_000 },
-    async () => {
-      // Use a fresh adapter without re-init (default: no allowed_hosts)
-      const { createHostAdapter } = await import(
-        "../pyodide-host-adapter.mjs"
-      );
-      const adapter = await createHostAdapter({
-        fullPython: false,
-        stepBudget: 0,
-      });
-      adapters.push(adapter);
-
-      const events = await adapter.send({
-        Run: { input: "curl https://mayflower.de" },
-      });
-      const stderr = findStderr(events);
-      const exitCode = findExitCode(events);
-
-      assert.notEqual(exitCode, 0);
-      assert.ok(
-        stderr.includes("network access not available"),
-        `should say 'not available': ${stderr}`,
-      );
-    },
-  );
-
   // ── curl piped to wc ─────────────────────────────────────────
 
   it(

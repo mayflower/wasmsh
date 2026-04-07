@@ -87,6 +87,30 @@ jobs:
           name: wasmsh-nodejs
           path: pkg/nodejs/
 
+      # ── Standalone E2E gate ─────────────────────────────────────
+      # Builds the wasm a second time into `e2e/standalone/fixture/pkg`
+      # (where the Playwright fixture loads it from) and runs the full
+      # standalone Playwright suite.  Without this gate, regressions in
+      # the standalone path go undetected — we already shipped a broken
+      # network-backend init that nobody noticed because the suite
+      # never ran in CI.
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build standalone wasm into e2e fixture
+        run: just build-standalone
+
+      - name: Install Playwright browsers
+        working-directory: e2e/standalone
+        run: npm install && npx playwright install chromium --with-deps
+
+      - name: Run standalone browser E2E
+        run: just test-e2e-standalone
+
   build-pyodide:
     name: Build Pyodide artifact
     runs-on: mayflower-k8s-runners

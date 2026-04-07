@@ -2109,19 +2109,19 @@ mod wasm_bindings {
             }
         }
 
-        /// Initialize the shell with a step budget and optional network allowlist.
+        /// Initialize the shell with a step budget and a network allowlist.
         /// `allowed_hosts_json` is a JSON array of host patterns (default `"[]"`).
-        /// Returns a JSON array of events.
+        /// An empty allowlist creates a backend that denies every host, so
+        /// callers get a `host denied` error instead of `network access not
+        /// available`.  Returns a JSON array of events.
         pub fn init(&mut self, step_budget: u64, allowed_hosts_json: &str) -> String {
             let allowed_hosts: Vec<String> =
                 serde_json::from_str(allowed_hosts_json).unwrap_or_default();
 
-            if !allowed_hosts.is_empty() {
-                let backend = BrowserNetworkBackend {
-                    allowlist: HostAllowlist::new(allowed_hosts.clone()),
-                };
-                self.runtime.set_network_backend(Box::new(backend));
-            }
+            let backend = BrowserNetworkBackend {
+                allowlist: HostAllowlist::new(allowed_hosts.clone()),
+            };
+            self.runtime.set_network_backend(Box::new(backend));
 
             let events = self.runtime.handle_command(HostCommand::Init {
                 step_budget,

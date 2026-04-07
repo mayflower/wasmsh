@@ -2,9 +2,19 @@
  * Network allowlist security tests — standalone browser (wasm-bindgen).
  *
  * Verifies that curl/wget can only reach hosts in the allowed_hosts list.
- * Uses mayflower.de as the test target.
+ *
+ * The "allowed host" tests fetch a static fixture page served by the
+ * Playwright dev server itself (`fixture/cors-echo.html`).  Talking to
+ * a same-origin URL avoids the cross-origin problem with sync XHR
+ * (no CORS preflight, no opaque-response body) and removes the test
+ * dependency on any external network.  The "denied host" tests still
+ * use a fake external hostname because the allowlist check happens
+ * before any actual fetch is attempted.
  */
 import { test, expect } from "@playwright/test";
+
+const FIXTURE_HOST = "localhost:3100";
+const FIXTURE_URL = `http://${FIXTURE_HOST}/cors-echo.html`;
 
 function decodeBytes(arr: number[]): string {
   return new TextDecoder().decode(new Uint8Array(arr));
@@ -94,36 +104,40 @@ async function initAndRun(
 
 // ── Allowed host ────────────────────────────────────────────────
 
-test("curl to allowed host (mayflower.de) succeeds", async ({ page }) => {
+test("curl to allowed host (local fixture) succeeds", async ({ page }) => {
   await page.goto("/");
   const r = await initAndRun(
     page,
-    ["mayflower.de"],
-    "curl -sL https://mayflower.de",
+    [FIXTURE_HOST],
+    `curl -sL ${FIXTURE_URL}`,
   );
   expect(r.exitCode).toBe(0);
   expect(r.stdout.length).toBeGreaterThan(0);
   expect(r.stdout).toMatch(/<(!|html|HTML)/);
 });
 
-test("wget to allowed host (mayflower.de) succeeds", async ({ page }) => {
+test("wget to allowed host (local fixture) succeeds", async ({ page }) => {
   await page.goto("/");
   const r = await initAndRun(
     page,
-    ["mayflower.de"],
-    "wget -qO - https://mayflower.de",
+    [FIXTURE_HOST],
+    `wget -qO - ${FIXTURE_URL}`,
   );
   expect(r.exitCode).toBe(0);
   expect(r.stdout.length).toBeGreaterThan(0);
 });
 
 // ── Denied host ─────────────────────────────────────────────────
+//
+// The denied-host tests use fake external hostnames (example.com etc.).
+// No actual fetch is attempted because the allowlist check fails first,
+// so the tests do not depend on any external network being reachable.
 
 test("curl to denied host (example.com) is blocked", async ({ page }) => {
   await page.goto("/");
   const r = await initAndRun(
     page,
-    ["mayflower.de"],
+    [FIXTURE_HOST],
     "curl https://example.com",
   );
   expect(r.exitCode).not.toBe(0);
@@ -134,7 +148,7 @@ test("wget to denied host (example.com) is blocked", async ({ page }) => {
   await page.goto("/");
   const r = await initAndRun(
     page,
-    ["mayflower.de"],
+    [FIXTURE_HOST],
     "wget -qO - https://example.com",
   );
   expect(r.exitCode).not.toBe(0);
@@ -171,19 +185,23 @@ test("curl to similar-looking hostnames is blocked", async ({ page }) => {
 
 // ── Wildcard pattern ────────────────────────────────────────────
 
-test("wildcard *.mayflower.de allows base domain", async ({ page }) => {
+test("wildcard pattern allows base domain and blocks others", async ({
+  page,
+}) => {
   await page.goto("/");
+  // `*.localhost:3100` should match the bare host `localhost:3100`
+  // (HostAllowlist treats `*.X` as "X or any subdomain of X").
   const r = await initAndRun(
     page,
-    ["*.mayflower.de"],
-    "curl -sL https://mayflower.de",
+    [`*.${FIXTURE_HOST}`],
+    `curl -sL ${FIXTURE_URL}`,
   );
   expect(r.exitCode).toBe(0);
 
   // But example.com is still blocked
   const r2 = await initAndRun(
     page,
-    ["*.mayflower.de"],
+    [`*.${FIXTURE_HOST}`],
     "curl https://example.com",
   );
   expect(r2.exitCode).not.toBe(0);
@@ -193,58 +211,11 @@ test("wildcard *.mayflower.de allows base domain", async ({ page }) => {
 
 test("empty allowlist blocks all hosts", async ({ page }) => {
   await page.goto("/");
-  const r = await initAndRun(page, [], "curl https://mayflower.de");
+  // An empty allowlist creates a backend that denies every host.
+  // See `WasmShell::init` in crates/wasmsh-browser/src/lib.rs.
+  const r = await initAndRun(page, [], `curl ${FIXTURE_URL}`);
   expect(r.exitCode).not.toBe(0);
   expect(r.stderr).toMatch(/denied|allowlist/);
-});
-
-// ── No network backend (default) ────────────────────────────────
-
-test("curl without network returns 'not available'", async ({ page }) => {
-  await page.goto("/");
-
-  // Init without allowed_hosts (empty list = no backend)
-  const r = await page.evaluate(async () => {
-    const worker = (window as any).createShellWorker();
-    function send(msg: any): Promise<any[]> {
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(
-          () => reject(new Error("timeout")),
-          15_000,
-        );
-        worker.onmessage = (e: MessageEvent) => {
-          clearTimeout(timeout);
-          resolve(e.data.events);
-        };
-        worker.onerror = (e: ErrorEvent) => {
-          clearTimeout(timeout);
-          reject(new Error(e.message));
-        };
-        worker.postMessage(msg);
-      });
-    }
-    await send({ type: "Init", step_budget: 0 });
-    const events = await send({
-      type: "Run",
-      input: "curl https://mayflower.de",
-    });
-    worker.terminate();
-    const stderr: number[] = [];
-    let exit: number | null = null;
-    for (const e of events) {
-      if (e && typeof e === "object") {
-        if ("Stderr" in e) stderr.push(...e.Stderr);
-        if ("Exit" in e) exit = e.Exit;
-      }
-    }
-    return {
-      stderr: new TextDecoder().decode(new Uint8Array(stderr)),
-      exitCode: exit,
-    };
-  });
-
-  expect(r.exitCode).not.toBe(0);
-  expect(r.stderr).toContain("network access not available");
 });
 
 // ── curl | wc pipeline ──────────────────────────────────────────
@@ -253,8 +224,8 @@ test("curl piped to wc works with allowed host", async ({ page }) => {
   await page.goto("/");
   const r = await initAndRun(
     page,
-    ["mayflower.de"],
-    "curl -sL https://mayflower.de | wc -l",
+    [FIXTURE_HOST],
+    `curl -sL ${FIXTURE_URL} | wc -l`,
   );
   expect(r.exitCode).toBe(0);
   const lines = parseInt(r.stdout.trim(), 10);

@@ -76,15 +76,16 @@ pub extern "C" fn wasmsh_runtime_handle_json(
 
     let rt = unsafe { &mut (*handle).runtime };
 
-    // On Init with allowed_hosts, configure the network backend.
+    // On Init, always configure a network backend.  An empty allowlist
+    // creates a backend that denies every host via `HostAllowlist::check`,
+    // which is more useful than no backend at all (callers get a
+    // `host denied` error instead of `network access not available`).
     if let HostCommand::Init {
         ref allowed_hosts, ..
     } = cmd
     {
-        if !allowed_hosts.is_empty() {
-            let backend = network::PyodideNetworkBackend::new(allowed_hosts.clone());
-            rt.set_network_backend(Box::new(backend));
-        }
+        let backend = network::PyodideNetworkBackend::new(allowed_hosts.clone());
+        rt.set_network_backend(Box::new(backend));
     }
 
     let events = rt.handle_command(cmd);

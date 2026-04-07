@@ -2,12 +2,22 @@
  * Network allowlist security tests — Pyodide browser (Emscripten).
  *
  * Verifies that curl/wget can only reach hosts in the allowed_hosts list.
- * Uses mayflower.de as the test target.
+ *
+ * The "allowed host" tests fetch a static fixture page served by the
+ * Playwright dev server itself (`fixture/cors-echo.html`).  Talking to
+ * a same-origin URL avoids the cross-origin problem with sync XHR
+ * (no CORS preflight, no opaque-response body) and removes the test
+ * dependency on any external network.  The "denied host" tests still
+ * use a fake external hostname because the allowlist check happens
+ * before any actual fetch is attempted.
  *
  * Tests run through the Pyodide browser worker which uses Emscripten's
  * extern "C" FFI for network calls (wasmsh_js_http_fetch → sync XHR).
  */
 import { test, expect } from "@playwright/test";
+
+const FIXTURE_HOST = "localhost:3200";
+const FIXTURE_URL = `http://${FIXTURE_HOST}/cors-echo.html`;
 
 function decodeBytes(arr: number[]): string {
   return new TextDecoder().decode(new Uint8Array(arr));
@@ -84,27 +94,31 @@ async function run(page: any, command: string) {
 
 // ── Allowed host ────────────────────────────────────────────────
 
-test("curl to allowed host (mayflower.de) succeeds", async ({ page }) => {
-  await initWithHosts(page, ["mayflower.de"]);
-  const r = await run(page, "curl -sL https://mayflower.de");
+test("curl to allowed host (local fixture) succeeds", async ({ page }) => {
+  await initWithHosts(page, [FIXTURE_HOST]);
+  const r = await run(page, `curl -sL ${FIXTURE_URL}`);
 
   expect(r.exitCode).toBe(0);
   expect(r.stdout.length).toBeGreaterThan(0);
   expect(r.stdout).toMatch(/<(!|html|HTML)/);
 });
 
-test("wget to allowed host (mayflower.de) succeeds", async ({ page }) => {
-  await initWithHosts(page, ["mayflower.de"]);
-  const r = await run(page, "wget -qO - https://mayflower.de");
+test("wget to allowed host (local fixture) succeeds", async ({ page }) => {
+  await initWithHosts(page, [FIXTURE_HOST]);
+  const r = await run(page, `wget -qO - ${FIXTURE_URL}`);
 
   expect(r.exitCode).toBe(0);
   expect(r.stdout.length).toBeGreaterThan(0);
 });
 
 // ── Denied host ─────────────────────────────────────────────────
+//
+// The denied-host tests use fake external hostnames (example.com etc.).
+// No actual fetch is attempted because the allowlist check fails first,
+// so the tests do not depend on any external network being reachable.
 
 test("curl to denied host (example.com) is blocked", async ({ page }) => {
-  await initWithHosts(page, ["mayflower.de"]);
+  await initWithHosts(page, [FIXTURE_HOST]);
   const r = await run(page, "curl https://example.com");
 
   expect(r.exitCode).not.toBe(0);
@@ -112,7 +126,7 @@ test("curl to denied host (example.com) is blocked", async ({ page }) => {
 });
 
 test("wget to denied host (example.com) is blocked", async ({ page }) => {
-  await initWithHosts(page, ["mayflower.de"]);
+  await initWithHosts(page, [FIXTURE_HOST]);
   const r = await run(page, "wget -qO - https://example.com");
 
   expect(r.exitCode).not.toBe(0);
@@ -146,11 +160,13 @@ test("curl to similar-looking hostnames is blocked", async ({ page }) => {
 
 // ── Wildcard pattern ────────────────────────────────────────────
 
-test("wildcard *.mayflower.de allows base domain but blocks others", async ({
+test("wildcard pattern allows base domain and blocks others", async ({
   page,
 }) => {
-  await initWithHosts(page, ["*.mayflower.de"]);
-  const r = await run(page, "curl -sL https://mayflower.de");
+  // `*.localhost:3200` should match the bare host `localhost:3200`
+  // (HostAllowlist treats `*.X` as "X or any subdomain of X").
+  await initWithHosts(page, [`*.${FIXTURE_HOST}`]);
+  const r = await run(page, `curl -sL ${FIXTURE_URL}`);
   expect(r.exitCode).toBe(0);
 
   const r2 = await run(page, "curl https://example.com");
@@ -160,8 +176,10 @@ test("wildcard *.mayflower.de allows base domain but blocks others", async ({
 // ── Empty allowlist ─────────────────────────────────────────────
 
 test("empty allowlist blocks all hosts", async ({ page }) => {
+  // An empty allowlist creates a backend that denies every host.
+  // See `wasmsh_runtime_command` in crates/wasmsh-pyodide/src/lib.rs.
   await initWithHosts(page, []);
-  const r = await run(page, "curl https://mayflower.de");
+  const r = await run(page, `curl ${FIXTURE_URL}`);
 
   expect(r.exitCode).not.toBe(0);
   expect(r.stderr).toMatch(/denied|allowlist/);
@@ -170,8 +188,8 @@ test("empty allowlist blocks all hosts", async ({ page }) => {
 // ── curl piped to wc ────────────────────────────────────────────
 
 test("curl piped to wc works with allowed host", async ({ page }) => {
-  await initWithHosts(page, ["mayflower.de"]);
-  const r = await run(page, "curl -sL https://mayflower.de | wc -l");
+  await initWithHosts(page, [FIXTURE_HOST]);
+  const r = await run(page, `curl -sL ${FIXTURE_URL} | wc -l`);
 
   expect(r.exitCode).toBe(0);
   const lines = parseInt(r.stdout.trim(), 10);
