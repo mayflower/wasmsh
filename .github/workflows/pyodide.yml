@@ -33,6 +33,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ── Tier-2 cache: Pyodide source + emsdk ────────────────────
+      # The Pyodide build is the dominant cost in CI (~30 min).  Most
+      # of that time is the emsdk install (~5 min) and the CPython +
+      # libffi + pyodide-build builds.  Both are version-locked: they
+      # only need to rebuild when `tools/pyodide/versions.env` changes
+      # (the single source of truth for PYODIDE_VERSION + EMSCRIPTEN
+      # _VERSION).  Cache the whole `pyodide-src/` tree keyed on its
+      # hash so subsequent CI runs skip straight to the wasmsh staticlib
+      # build + final emcc relink.
+      #
+      # Safety: even if a cached pyodide.asm.wasm contains stale code,
+      # build-custom.sh deletes it when the freshly-built wasmsh
+      # staticlib is newer (see "Runtime lib is newer than" guard
+      # added in 0e447bb).  Per-patch idempotency from b1ad993 means
+      # cached patched files don't double-apply on re-run.
+      #
+      # No `restore-keys` fallback: a versions.env bump must rebuild
+      # from scratch, not silently reuse an old emsdk install.
+      - name: Cache Pyodide source + emsdk
+        uses: actions/cache@v4
+        with:
+          path: tools/pyodide/pyodide-src
+          key: pyodide-toolchain-${{ runner.os }}-${{ hashFiles('tools/pyodide/versions.env') }}
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-emscripten
