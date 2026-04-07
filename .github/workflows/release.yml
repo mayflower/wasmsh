@@ -231,10 +231,18 @@ jobs:
           done
 
   # ── Publish npm package (trusted publishing via OIDC) ─────
+  # MUST run on a github-hosted runner (`ubuntu-latest`).  npm publish
+  # with sigstore provenance refuses self-hosted runners — when
+  # `id-token: write` + the npm-publish environment trusted publisher
+  # config is in effect, npm auto-enables provenance and the registry
+  # rejects bundles built on `self-hosted` (or k8s) runners with:
+  #   "Error verifying sigstore provenance bundle: Unsupported GitHub
+  #    Actions runner environment: 'self-hosted'. Only 'github-hosted'
+  #    runners are supported when publishing with provenance."
   publish-npm:
     name: publish npm
     needs: build-pyodide
-    runs-on: mayflower-k8s-runners
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: npm-publish
     permissions:
@@ -266,10 +274,15 @@ jobs:
           }
 
   # ── Publish Python package to PyPI (trusted publishing) ───
+  # MUST run on a github-hosted runner (`ubuntu-latest`).  PyPI
+  # trusted publishing via OIDC requires the GHA OIDC token endpoint
+  # at `run-actions-1-azure-eastus.actions.githubusercontent.com`,
+  # which is not reachable from the k8s runner pool (30s SSL handshake
+  # timeout in v0.5.9 release run).
   publish-pypi:
     name: publish pypi
     needs: build-pyodide
-    runs-on: mayflower-k8s-runners
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: pypi-publish
     permissions:
