@@ -26,12 +26,26 @@ const SKIP = process.env.SKIP_EMSCRIPTEN === "1";
 
 describe("wasmsh-pyodide-probe emscripten build", () => {
   it("build script produces the staticlib artifact", { skip: SKIP }, () => {
-    const output = execFileSync("bash", [BUILD_SCRIPT], {
-      cwd: REPO_ROOT,
-      encoding: "utf-8",
-      timeout: 300_000,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    let output;
+    try {
+      output = execFileSync("bash", [BUILD_SCRIPT], {
+        cwd: REPO_ROOT,
+        encoding: "utf-8",
+        timeout: 300_000,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      // execFileSync throws a NodeError on non-zero exit.  Re-throw with
+      // the captured stdout/stderr inlined into the message so the CI log
+      // shows the actual build failure instead of just "Command failed".
+      const stdout = err.stdout?.toString?.() ?? "";
+      const stderr = err.stderr?.toString?.() ?? "";
+      throw new Error(
+        `build-probe.sh failed with exit ${err.status ?? "?"}:\n` +
+          `--- stdout ---\n${stdout}\n` +
+          `--- stderr ---\n${stderr}`,
+      );
+    }
 
     console.log(output);
 
