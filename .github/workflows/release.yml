@@ -16,7 +16,7 @@ jobs:
   # ── Validate before release ────────────────────────────────
   validate:
     name: validate
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +39,7 @@ jobs:
   build-standalone:
     name: build standalone wasm32
     needs: validate
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -156,7 +156,7 @@ jobs:
   publish-crates:
     name: publish crates.io
     needs: [validate, build-standalone, build-pyodide]
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -207,7 +207,7 @@ jobs:
   publish-npm:
     name: publish npm
     needs: build-pyodide
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 15
     environment: npm-publish
     permissions:
@@ -242,7 +242,7 @@ jobs:
   publish-pypi:
     name: publish pypi
     needs: build-pyodide
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 15
     environment: pypi-publish
     permissions:
@@ -271,7 +271,7 @@ jobs:
   release:
     name: github release
     needs: [build-standalone, build-pyodide, publish-crates, publish-npm, publish-pypi]
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

@@ -17,7 +17,7 @@ jobs:
   # ── Format ─────────────────────────────────────────────────
   fmt:
     name: rustfmt
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -26,7 +26,7 @@ jobs:
   # ── Clippy (native) ────────────────────────────────────────
   clippy:
     name: clippy (native)
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -38,7 +38,7 @@ jobs:
   # ── Clippy (wasm32) ────────────────────────────────────────
   clippy-wasm:
     name: clippy (wasm32)
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -71,7 +71,7 @@ jobs:
   # (no std::fs, no OS processes). Single-platform CI is sufficient.
   test:
     name: test
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -91,7 +91,7 @@ jobs:
   # ── Wasm build ─────────────────────────────────────────────
   wasm-build:
     name: wasm32 build
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -156,7 +156,7 @@ jobs:
   # ── MSRV ───────────────────────────────────────────────────
   msrv:
     name: MSRV (1.89)
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -169,7 +169,7 @@ jobs:
   # ── License and advisory audit ─────────────────────────────
   deny:
     name: cargo deny
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -178,7 +178,7 @@ jobs:
   # ── Code coverage ──────────────────────────────────────────
   coverage:
     name: coverage
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -249,7 +249,7 @@ jobs:
   # ── Documentation build ────────────────────────────────────
   docs:
     name: docs
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -264,7 +264,7 @@ jobs:
   # ── Feature powerset check ─────────────────────────────────
   feature-check:
     name: Feature combinations
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -279,7 +279,7 @@ jobs:
   # ── Dead dependency detection ──────────────────────────────
   machete:
     name: Dead dependencies
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -289,7 +289,7 @@ jobs:
   # ── Semver compatibility ────────────────────────────────────
   semver:
     name: Semver check
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 20
     continue-on-error: true
     steps:
@@ -304,7 +304,7 @@ jobs:
     name: CI passed
     if: always()
     needs: [fmt, clippy, clippy-wasm, test, wasm-build, msrv, deny, docs, feature-check, machete]
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     steps:
       - name: Check all jobs
         run: |

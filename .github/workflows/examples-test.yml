@@ -12,7 +12,7 @@ env:
 jobs:
   test-typescript:
     name: TypeScript example
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +43,7 @@ jobs:
 
   test-python:
     name: Python example
-    runs-on: ubuntu-latest
+    runs-on: mayflower-k8s-runners
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
