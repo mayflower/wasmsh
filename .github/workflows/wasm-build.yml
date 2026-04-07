@@ -87,19 +87,42 @@ jobs:
           name: wasmsh-nodejs
           path: pkg/nodejs/
 
-      # ── Standalone E2E gate ─────────────────────────────────────
-      # Builds the wasm a second time into `e2e/standalone/fixture/pkg`
-      # (where the Playwright fixture loads it from) and runs the full
-      # standalone Playwright suite.  Without this gate, regressions in
-      # the standalone path go undetected — we already shipped a broken
-      # network-backend init that nobody noticed because the suite
-      # never ran in CI.
-      - name: Install just
-        uses: extractions/setup-just@v2
+  # ── Standalone browser E2E gate ─────────────────────────────────
+  # Builds the wasm into `e2e/standalone/fixture/pkg` and runs the full
+  # standalone Playwright suite.  Runs on the k8s runner (not
+  # ubuntu-latest) because the GitHub-hosted runners don't reliably
+  # have enough memory/CPU for the wasm worker init + Playwright +
+  # chromium combo: workers time out and `WebAssembly.Table.grow()`
+  # fails on tight memory.  The k8s runner has the same beefier specs
+  # as the Pyodide build job and runs the same browser stack cleanly.
+  #
+  # Without this gate, regressions in the standalone path go undetected
+  # — we already shipped a broken network-backend init that nobody
+  # noticed because the suite never ran in CI.
+  e2e-standalone:
+    name: Standalone browser E2E
+    runs-on: mayflower-k8s-runners
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: standalone-e2e
 
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Install just
+        uses: extractions/setup-just@v2
 
       - name: Build standalone wasm into e2e fixture
         run: just build-standalone
