@@ -56,13 +56,22 @@ jobs:
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y build-essential wget ccache pkg-config xz-utils autoconf automake libtool
 
-      - name: Build custom Pyodide (includes probe + runtime)
+      - name: Build custom Pyodide (links wasmsh runtime staticlib)
         run: just build-pyodide
         env:
           SED: sed
           # Pyodide's libffi build calls autoreconf which needs libtool m4 macros.
           # Pre-copy the system libtool.m4 into the libffi checkout during build.
           PYODIDE_JOBS: "3"
+
+      # Build-contract canary: proves that a standalone wasmsh staticlib
+      # (`wasmsh-pyodide-probe`) compiles cleanly for
+      # `wasm32-unknown-emscripten` in isolation, without depending on the
+      # full Pyodide build pipeline. Catches regressions in emscripten
+      # toolchain / target bring-up before they hide behind the much
+      # slower Pyodide build.
+      - name: Run emscripten build-contract test
+        run: just test-emscripten-probe
 
       - name: Run Pyodide Node E2E
         run: just test-e2e-pyodide-node

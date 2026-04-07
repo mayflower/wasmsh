@@ -1,11 +1,20 @@
 //! Build-time / E2E probe helpers exposed via the C ABI.
 //!
-//! These three functions used to live in the standalone `wasmsh-pyodide-probe`
-//! crate, which was linked alongside `wasmsh-pyodide` into the Pyodide wasm.
-//! With `MAIN_MODULE=1` Emscripten uses `--whole-archive` and the duplicate
-//! `wasmsh-protocol` / `serde_core` symbols pulled in by both staticlibs
-//! caused link failures. Folding the probe entry points into this crate keeps
-//! exactly one copy of each transitive dependency in the final wasm.
+//! These three functions are also exported by the standalone
+//! `wasmsh-pyodide-probe` staticlib (used by the e2e/build-contract test
+//! to prove wasmsh compiles for `wasm32-unknown-emscripten` in isolation).
+//! In the Pyodide production build we link a single staticlib instead of
+//! both, because emscripten's `--whole-archive` (enabled by
+//! `MAIN_MODULE=1`) treats any dep shared by two staticlibs — here
+//! `wasmsh-protocol` and its transitive `serde_core` — as a
+//! duplicate-symbol link error.  Folding the probe entry points into this
+//! crate keeps exactly one copy of each transitive dependency in the
+//! final wasm.
+//!
+//! ⚠️ Keep this file in sync with `crates/wasmsh-pyodide-probe/src/lib.rs`.
+//! Any semantic change made here MUST also be applied to the standalone
+//! crate, otherwise the build-contract test and the production wasm
+//! silently diverge.
 //!
 //! All three functions go through libc, which routes through Emscripten's
 //! POSIX VFS — the same filesystem CPython sees inside Pyodide.
@@ -32,9 +41,12 @@ pub extern "C" fn wasmsh_probe_version() -> *const c_char {
 ///
 /// Returns 0 on success, -1 on failure.
 ///
-/// # Safety
-///
-/// Caller must ensure both pointers are valid, non-null, null-terminated.
+/// This function is exposed as a safe Rust `extern "C" fn` because only
+/// C / JS callers can reach it — Rust callers would need to dereference
+/// `*const c_char` themselves.  Null pointers are checked explicitly and
+/// return `-1`; any other invariant violation (non-null-terminated or
+/// dangling pointer) is unchecked and is the C caller's responsibility.
+/// The raw dereferences live inside `unsafe` blocks in the body.
 #[no_mangle]
 pub extern "C" fn wasmsh_probe_write_text(path: *const c_char, text: *const c_char) -> i32 {
     if path.is_null() || text.is_null() {
@@ -60,11 +72,14 @@ pub extern "C" fn wasmsh_probe_write_text(path: *const c_char, text: *const c_ch
 
 /// Check whether the file at `path` has exactly the content `expected`.
 ///
-/// Returns 1 if equal, 0 if not equal or on error.
+/// Returns 1 if equal, 0 if not equal, the file cannot be opened, or the
+/// file is larger than the internal 64 KiB read buffer.  **Note:** the
+/// "not equal" and "error" paths both return 0 — this is intentional for
+/// the test helper, but callers should not use this to distinguish
+/// missing files from content mismatches.
 ///
-/// # Safety
-///
-/// Caller must ensure both pointers are valid, non-null, null-terminated.
+/// See [`wasmsh_probe_write_text`] for the null-pointer / lifetime
+/// contract; this function applies the same conventions.
 #[no_mangle]
 pub extern "C" fn wasmsh_probe_file_equals(path: *const c_char, expected: *const c_char) -> i32 {
     if path.is_null() || expected.is_null() {

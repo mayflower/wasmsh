@@ -61,4 +61,28 @@ describe("version sync across all packages", () => {
     );
     assert.equal(v, cargoWorkspace, "python package version mismatch");
   });
+
+  it("workspace internal dep pins match workspace version", () => {
+    // `[workspace.dependencies]` has one entry per internal crate in
+    // the form `wasmsh-foo = { version = "X.Y.Z", path = "..." }`.
+    // `cargo publish` consumes the `version` field (not `path`), so any
+    // drift between these pins and the workspace package version means
+    // published crates pin each other at a stale version number.
+    // `tools/bump-version.sh` bumps both in lockstep — this test catches
+    // a future change that forgets to keep them aligned.
+    const cargo = readToml("Cargo.toml");
+    const re = /^(wasmsh-[a-z_-]+)\s*=\s*\{\s*version\s*=\s*"([^"]+)"/gm;
+    const mismatches = [];
+    for (const [, name, version] of cargo.matchAll(re)) {
+      if (version !== cargoWorkspace) {
+        mismatches.push(`${name} pinned at ${version} (expected ${cargoWorkspace})`);
+      }
+    }
+    assert.equal(
+      mismatches.length,
+      0,
+      `workspace internal dep pins out of sync with workspace version ${cargoWorkspace}:\n  ` +
+        mismatches.join("\n  "),
+    );
+  });
 });

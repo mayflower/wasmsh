@@ -114,6 +114,16 @@ jobs:
           SED: sed
       - name: Package runtime assets
         run: just package-pyodide-runtime
+      # Build-contract canary — see comment in .github/workflows/pyodide.yml.
+      - name: Run emscripten build-contract test
+        run: just test-emscripten-probe
+      # Gate the release on the Pyodide E2E suite.  The build step alone is
+      # not sufficient: v0.5.7 and v0.5.8 both produced "successful" wasm
+      # artifacts that failed to load compiled side modules at runtime.
+      # Running the full e2e suite against the freshly built wasm is the
+      # thing that would have caught both regressions before publish.
+      - name: Run Pyodide Node E2E against the built wasm
+        run: just test-e2e-pyodide-node
       - name: Package Pyodide dist artifact
         env:
           TAG_NAME: ${{ github.ref_name }}
@@ -138,9 +148,14 @@ jobs:
           path: "wasmsh-pyodide-*.tar.gz"
 
   # ── Publish Rust crates to crates.io ──────────────────────
+  # Gated on build-pyodide so the whole release either lands together or
+  # not at all.  Historically publish-crates ran in parallel with
+  # build-pyodide, and at v0.5.8 the crates landed on crates.io while
+  # build-pyodide failed — leaving 15 orphaned crates that could only be
+  # yanked.  Never again.
   publish-crates:
     name: publish crates.io
-    needs: [validate, build-standalone]
+    needs: [validate, build-standalone, build-pyodide]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:

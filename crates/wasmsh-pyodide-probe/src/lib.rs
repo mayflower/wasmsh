@@ -1,11 +1,21 @@
 //! Minimal probe crate for `wasm32-unknown-emscripten`.
 //!
-//! Exposes C ABI functions for testing same-module integration with Pyodide.
-//! This crate is **not** part of the cargo workspace (`[workspace.exclude]`)
-//! so that developers without `emcc` installed are unaffected.
+//! Exposes C ABI functions for testing same-module integration with
+//! Pyodide.  This crate is **not** part of the cargo workspace
+//! (`[workspace.exclude]`) so that developers without `emcc` installed
+//! are unaffected.
 //!
-//! All functions use the Emscripten POSIX filesystem (libc), which is the
-//! same filesystem Python sees — proving shared FS access.
+//! ⚠️ The three probe functions are also defined in
+//! `crates/wasmsh-pyodide/src/probe.rs`, which is the copy that actually
+//! ends up linked into the production Pyodide wasm.  This standalone
+//! crate exists solely for the `e2e/build-contract` test, which builds
+//! it in isolation to prove that any wasmsh crate compiles cleanly for
+//! the emscripten target.  Any semantic change here MUST also be applied
+//! to the in-tree copy, otherwise the test and the shipped wasm silently
+//! diverge.
+//!
+//! All functions use the Emscripten POSIX filesystem (libc), which is
+//! the same filesystem Python sees — proving shared FS access.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -27,12 +37,13 @@ pub extern "C" fn wasmsh_probe_version() -> *const c_char {
 
 /// Write `text` to the file at `path` using POSIX libc.
 ///
-/// Both `path` and `text` must be valid null-terminated C strings.
 /// Returns 0 on success, -1 on failure.
 ///
-/// # Safety
-///
-/// Caller must ensure both pointers are valid, non-null, null-terminated.
+/// This function is exposed as a safe Rust `extern "C" fn` because only
+/// C / JS callers can reach it — Rust callers would need to dereference
+/// `*const c_char` themselves.  Null pointers are checked explicitly and
+/// return `-1`; any other invariant violation (non-null-terminated or
+/// dangling pointer) is unchecked and is the C caller's responsibility.
 #[no_mangle]
 pub extern "C" fn wasmsh_probe_write_text(path: *const c_char, text: *const c_char) -> i32 {
     if path.is_null() || text.is_null() {
@@ -59,12 +70,14 @@ pub extern "C" fn wasmsh_probe_write_text(path: *const c_char, text: *const c_ch
 
 /// Check whether the file at `path` has exactly the content `expected`.
 ///
-/// Both `path` and `expected` must be valid null-terminated C strings.
-/// Returns 1 if equal, 0 if not equal or on error.
+/// Returns 1 if equal, 0 if not equal, the file cannot be opened, or the
+/// file is larger than the internal 64 KiB read buffer.  **Note:** the
+/// "not equal" and "error" paths both return 0 — this is intentional for
+/// the test helper, but callers should not use this to distinguish
+/// missing files from content mismatches.
 ///
-/// # Safety
-///
-/// Caller must ensure both pointers are valid, non-null, null-terminated.
+/// See [`wasmsh_probe_write_text`] for the null-pointer / lifetime
+/// contract; this function applies the same conventions.
 #[no_mangle]
 pub extern "C" fn wasmsh_probe_file_equals(path: *const c_char, expected: *const c_char) -> i32 {
     if path.is_null() || expected.is_null() {

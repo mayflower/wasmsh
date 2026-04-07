@@ -38,9 +38,17 @@ sedi() {
 
 echo "Bumping all packages to $VERSION ..."
 
-# Rust workspace
+# Rust workspace. Two places need bumping in Cargo.toml:
+#   1. [workspace.package].version — the version inherited by all member
+#      crates via `version.workspace = true`.
+#   2. The internal-dep block in [workspace.dependencies] — every
+#      `wasmsh-* = { version = "X.Y.Z", path = "..." }` entry. `cargo
+#      publish` consumes the `version` field, not `path`, so these must
+#      move in lockstep with #1 or published crates will pin each other
+#      at an older version than what they actually ship with.
 sedi "s/^version = \".*\"/version = \"$VERSION\"/" "$REPO_ROOT/Cargo.toml"
-echo "  Cargo.toml (workspace)"
+sedi -E "s/^(wasmsh-[a-z_-]+ = \{ version = )\"[0-9]+\.[0-9]+\.[0-9]+\"/\1\"$VERSION\"/" "$REPO_ROOT/Cargo.toml"
+echo "  Cargo.toml (workspace + internal dep pins)"
 
 # Excluded Rust crates
 for crate in wasmsh-pyodide-probe wasmsh-pyodide; do
