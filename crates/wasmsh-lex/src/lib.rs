@@ -336,19 +336,8 @@ impl<'src> Lexer<'src> {
                     }
                 }
                 Some(b')') => {
-                    if paren_depth > 0 {
-                        // Close a single nested paren first
-                        self.pos += 1;
-                        paren_depth -= 1;
-                    } else if self.peek_ahead(1) == Some(b')') {
-                        self.pos += 2;
-                        dbl_depth -= 1;
-                        if dbl_depth == 0 {
-                            return Ok(());
-                        }
-                    } else {
-                        // Stray `)` inside arithmetic — consume as literal
-                        self.pos += 1;
+                    if self.consume_arithmetic_close_paren(&mut paren_depth, &mut dbl_depth) {
+                        return Ok(());
                     }
                 }
                 Some(b'\'') => self.consume_single_quoted()?,
@@ -358,6 +347,30 @@ impl<'src> Lexer<'src> {
                 Some(_) => self.pos += 1,
             }
         }
+    }
+
+    /// Handle a `)` byte inside `$((...))`.  Returns `true` when the
+    /// outermost `))` has been consumed and the caller should return
+    /// `Ok(())`; `false` if more input is still expected.
+    fn consume_arithmetic_close_paren(
+        &mut self,
+        paren_depth: &mut u32,
+        dbl_depth: &mut u32,
+    ) -> bool {
+        if *paren_depth > 0 {
+            // Close a single nested paren first
+            self.pos += 1;
+            *paren_depth -= 1;
+            return false;
+        }
+        if self.peek_ahead(1) == Some(b')') {
+            self.pos += 2;
+            *dbl_depth -= 1;
+            return *dbl_depth == 0;
+        }
+        // Stray `)` inside arithmetic — consume as literal
+        self.pos += 1;
+        false
     }
 
     /// Consume until matching `}` for `${...}`, tracking nested braces and quotes.
