@@ -17,6 +17,7 @@ use wasmsh_protocol::{DiagnosticLevel, HostCommand, WorkerEvent};
 use wasmsh_runtime::WorkerRuntime;
 
 mod network;
+mod probe;
 mod python_cmd;
 
 /// Opaque handle wrapping a `WorkerRuntime`.

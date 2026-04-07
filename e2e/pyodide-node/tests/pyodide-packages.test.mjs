@@ -4,9 +4,9 @@
  * These use the real micropip (pre-installed via loadPyodide) to install
  * packages from the Pyodide CDN or PyPI into the sandbox.
  *
- * C extension packages require MAIN_MODULE=1 for dlopen. Those that fail
- * to import document the current limitation and will pass once the build
- * switches to MAIN_MODULE=1 + EXPORT_ALL=0.
+ * Both pure-Python and C extension packages are expected to import
+ * successfully now that the wasm is built with MAIN_MODULE=1 (compiled
+ * side modules can resolve CPython / libc / libstdc++ symbols at runtime).
  *
  * Skip: SKIP_PYODIDE=1 or SKIP_NETWORK=1
  */
@@ -73,9 +73,10 @@ describe("Pyodide packages", () => {
     assert.equal(r.exitCode, 0, `import failed: ${r.stderr}`);
   });
 
-  // ── C extension packages (need MAIN_MODULE=1 for dlopen) ─────
-  // Install succeeds but import fails because .so side modules need
-  // CPython symbols exported via MAIN_MODULE=1.
+  // ── Compiled C extension packages (load .so side modules) ────
+  // These ship .cpython-*-pyodide_*-wasm32.so binaries that resolve
+  // CPython / libc / libstdc++ symbols at runtime against the main
+  // module. They only work because the wasm is built with MAIN_MODULE=1.
 
   for (const [pkg, importMod] of [
     ["jsonschema", "jsonschema"],
@@ -85,13 +86,13 @@ describe("Pyodide packages", () => {
     ["pandas", "pandas"],
     ["scipy", "scipy"],
   ]) {
-    it(`${pkg} — install succeeds, import needs MAIN_MODULE=1`, { skip: SKIP, timeout: 180_000 }, async () => {
+    it(`${pkg} — install + import compiled side module`, { skip: SKIP, timeout: 180_000 }, async () => {
       const s = await openNetworkSession();
       const result = await s.installPythonPackages(pkg);
       assert.ok(result.installed.length > 0, "install should succeed");
-      const r = await s.run(`python3 -c "import ${importMod}"`);
-      // Currently fails: dlopen can't resolve CPython symbols
-      assert.notEqual(r.exitCode, 0, "expected import failure with MAIN_MODULE=2");
+      const r = await s.run(`python3 -c "import ${importMod}; print('ok')"`);
+      assert.equal(r.exitCode, 0, `import failed: ${r.stderr}`);
+      assert.ok(r.stdout.includes("ok"), `unexpected stdout: ${r.stdout}`);
     });
   }
 });

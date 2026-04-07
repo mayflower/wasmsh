@@ -9,4 +9,3 @@ CLAUDE.md
 fuzz/target/
 examples/typescript/node_modules/
 pkg/
-tools/pyodide/standard-exports-*.cache

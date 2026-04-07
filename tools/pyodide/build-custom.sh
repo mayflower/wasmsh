@@ -8,7 +8,6 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/versions.env"
 PYODIDE_SRC="$SCRIPT_DIR/pyodide-src"
 DIST_DIR="$REPO_ROOT/dist/pyodide-custom"
-PROBE_BUILD="$SCRIPT_DIR/probe-build"
 
 export PATH="$HOME/.cargo/bin:$(rustc --print sysroot 2>/dev/null)/bin:$PATH"
 
@@ -67,26 +66,24 @@ else
     export SED=sed
 fi
 
-# ── Build Rust crates with Pyodide's emsdk ──────────────────
-echo "Building Rust crates with Pyodide's emsdk..."
+# ── Build the wasmsh-pyodide runtime staticlib ──────────────
+# We used to also build a separate `wasmsh-pyodide-probe` staticlib and link
+# both into the Pyodide wasm. But because both crates pulled in
+# `wasmsh-protocol` (and therefore `serde_core`) independently,
+# `MAIN_MODULE=1` (which uses `--whole-archive`) hit duplicate symbol errors.
+# The probe's three C ABI helpers now live inside `wasmsh-pyodide` itself
+# (see `src/probe.rs`), so we only need to build and link one staticlib.
+#
+# `-C symbol-mangling-version=v0` is required: with `MAIN_MODULE=1` Emscripten
+# attempts to expose every linked symbol to the JS side, and the legacy Rust
+# mangling produces names containing `$` (e.g.
+# `_ZN68_$LT$serde_json..read..StrRead$u20$as$u20$...`) which emcc rejects as
+# invalid JS identifiers. The v0 mangling scheme uses only `[A-Za-z0-9_]`.
+echo "Building wasmsh-pyodide runtime staticlib with Pyodide's emsdk..."
 rustup target add wasm32-unknown-emscripten 2>/dev/null || true
 
-# Build the probe crate
-CARGO_TARGET_DIR="$PROBE_BUILD" \
-cargo build \
-    --manifest-path "$REPO_ROOT/crates/wasmsh-pyodide-probe/Cargo.toml" \
-    --target wasm32-unknown-emscripten \
-    --release
-
-PROBE_LIB="$PROBE_BUILD/wasm32-unknown-emscripten/release/libwasmsh_pyodide_probe.a"
-if [ ! -f "$PROBE_LIB" ]; then
-    echo "ERROR: Probe lib not found at $PROBE_LIB"
-    exit 1
-fi
-echo "Probe lib: $PROBE_LIB ($(du -h "$PROBE_LIB" | cut -f1))"
-
-# Build the wasmsh-pyodide runtime crate
 PYODIDE_BUILD="$SCRIPT_DIR/pyodide-build"
+RUSTFLAGS="-C symbol-mangling-version=v0 ${RUSTFLAGS:-}" \
 CARGO_TARGET_DIR="$PYODIDE_BUILD" \
 cargo build \
     --manifest-path "$REPO_ROOT/crates/wasmsh-pyodide/Cargo.toml" \
@@ -100,13 +97,13 @@ if [ ! -f "$RUNTIME_LIB" ]; then
 fi
 echo "Runtime lib: $RUNTIME_LIB ($(du -h "$RUNTIME_LIB" | cut -f1))"
 
-# ── Patch Pyodide to link the probe ────────────────────────
+# ── Patch Pyodide to link the runtime staticlib ────────────
 echo "Patching Pyodide Makefile..."
 
-# Add both staticlibs to the link command
-if ! grep -q "wasmsh_pyodide_probe" Makefile; then
-    "$SED" -i "s|\$(CXX) -o dist/pyodide.asm.js -lpyodide src/core/main.o|\$(CXX) -o dist/pyodide.asm.js -lpyodide src/core/main.o $PROBE_LIB $RUNTIME_LIB|" Makefile
-    echo "  Patched link command to include probe + runtime libs."
+# Add the runtime staticlib to the Pyodide link command.
+if ! grep -q "libwasmsh_pyodide" Makefile; then
+    "$SED" -i "s|\$(CXX) -o dist/pyodide.asm.js -lpyodide src/core/main.o|\$(CXX) -o dist/pyodide.asm.js -lpyodide src/core/main.o $RUNTIME_LIB|" Makefile
+    echo "  Patched link command to include the wasmsh runtime lib."
 else
     echo "  Link command already patched."
 fi
@@ -119,19 +116,65 @@ else
     echo "  ccall already in EXPORTED_RUNTIME_METHODS."
 fi
 
-# MAIN_MODULE=1 exports ALL symbols incl. Rust mangled names with '$'
-# which emcc rejects.  Keep MAIN_MODULE=2 (explicit exports only) and
-# add the standard Pyodide export list so compiled side modules
-# (DuckDB, numpy, etc.) can resolve CPython / libc / C++ symbols.
-if grep -q "MAIN_MODULE=1" Makefile.envs; then
-    "$SED" -i 's|-s MAIN_MODULE=1|-s MAIN_MODULE=2|' Makefile.envs
-    echo "  Switched MAIN_MODULE from 1 to 2 (explicit exports)."
-fi
+# Keep MAIN_MODULE=1 (upstream Pyodide default) so compiled side modules
+# (numpy, pandas, DuckDB, …) can resolve CPython / libc / C++ symbols
+# automatically.  An earlier attempt switched to MAIN_MODULE=2 to avoid
+# Rust legacy mangling that produces '$' in symbol names; we now keep
+# MAIN_MODULE=1 because (a) our crates are built with v0 mangling
+# (RUSTFLAGS above) and (b) we patch emscripten.py below to filter the
+# remaining `$`-bearing symbols that come from precompiled std out of
+# the JS bindings list.
 
-# Add probe + runtime symbols to EXPORTED_FUNCTIONS
+# Add probe + runtime symbols to EXPORTED_FUNCTIONS so they survive
+# tree-shaking and are reachable via ccall.  MAIN_MODULE=1 also exports
+# everything else automatically.
 if ! grep -q "wasmsh_probe_version" Makefile.envs; then
     "$SED" -i 's|EXPORTS=_main|EXPORTS=_main \\\n   ,_wasmsh_probe_version \\\n   ,_wasmsh_probe_write_text \\\n   ,_wasmsh_probe_file_equals \\\n   ,_wasmsh_runtime_new \\\n   ,_wasmsh_runtime_handle_json \\\n   ,_wasmsh_runtime_free \\\n   ,_wasmsh_runtime_free_string|' Makefile.envs
     echo "  Added wasmsh_probe_* and wasmsh_runtime_* to EXPORTS."
+fi
+
+# Patch upstream emscripten to filter out exports whose names are not valid
+# JS identifiers, instead of erroring out. Rust's precompiled std library
+# uses legacy mangling that produces symbol names containing `$` and `..`
+# (e.g. `_ZN72_$LT$$RF$str$u20$as$u20$alloc..ffi..c_str...$E`), which em++
+# rejects when generating Module bindings. The patched code drops them from
+# the JS bindings list while leaving them in the wasm exports table — so
+# dynamic linking from compiled side modules can still resolve them, while
+# the JS glue stays valid.
+export EMSCRIPTEN_PY="$PYODIDE_SRC/emsdk/emsdk/upstream/emscripten/tools/emscripten.py"
+if ! grep -q "wasmsh patch: filter invalid identifier exports" "$EMSCRIPTEN_PY"; then
+    python3 - <<'PYEOF'
+import os, pathlib
+p = pathlib.Path(os.environ["EMSCRIPTEN_PY"])
+src = p.read_text()
+old = (
+    "  # Rust side modules may have exported symbols that are not valid\n"
+    "  # identifiers. They are meant to be called from native code in the main\n"
+    "  # module not from JavaScript anyways, so don't perform this check on them.\n"
+    "  if not settings.SIDE_MODULE:\n"
+    "    for n in unexpected_exports:\n"
+    "      if not n.isidentifier():\n"
+    "        exit_with_error(f'invalid export name: {n}')\n"
+)
+new = (
+    "  # wasmsh patch: filter invalid identifier exports instead of erroring.\n"
+    "  # Rust side/main modules link std library code using legacy mangling\n"
+    "  # which produces symbol names containing '$' and '..'. Such symbols\n"
+    "  # are meant to be reachable via wasm dynamic linking, not JavaScript,\n"
+    "  # so we drop them from the JS bindings list while leaving them in the\n"
+    "  # wasm exports table.\n"
+    "  unexpected_exports = [e for e in unexpected_exports if e.isidentifier()]\n"
+)
+if old not in src:
+    raise SystemExit("ERROR: emscripten.py does not contain the expected block to patch")
+p.write_text(src.replace(old, new))
+print("  Patched emscripten.py to filter invalid identifier exports.")
+PYEOF
+    # Invalidate Python bytecode cache so the patched module is reloaded.
+    find "$PYODIDE_SRC/emsdk/emsdk/upstream/emscripten/tools" \
+        -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+else
+    echo "  emscripten.py already patched."
 fi
 
 # Add runtime methods needed by the FS test harness.
@@ -160,76 +203,7 @@ chmod +x "$WRAPPER_DIR/autoreconf"
 export PATH="$WRAPPER_DIR:$PATH"
 echo "  Installed autoreconf wrapper to patch libffi configure.ac."
 
-# ── Generate comprehensive export list for compiled packages ──
-# MAIN_MODULE=2 only exports explicitly listed functions.  Compiled
-# side modules (DuckDB, numpy, etc.) need CPython / libc / C++ stdlib
-# symbols that MAIN_MODULE=1 would export automatically.  We download
-# the standard Pyodide CDN wasm, extract its full export list, merge
-# with wasmsh-specific exports, and patch EXPORTED_FUNCTIONS to use
-# a @response file.  This avoids MAIN_MODULE=1 which would also
-# export Rust symbols containing '$' that break emcc JS glue.
 PYODIDE_CDN="https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full"
-STANDARD_EXPORTS="$SCRIPT_DIR/standard-exports-${PYODIDE_VERSION}.cache"
-EXPORT_RESPONSE="$PYODIDE_SRC/exported-functions.json"
-
-if [ ! -f "$STANDARD_EXPORTS" ]; then
-    echo "Downloading standard Pyodide wasm for export list..."
-    STANDARD_WASM="$(mktemp)"
-    curl -fsSL "$PYODIDE_CDN/pyodide.asm.wasm" -o "$STANDARD_WASM"
-    python3 "$SCRIPT_DIR/extract-standard-exports.py" "$STANDARD_WASM" > "$STANDARD_EXPORTS"
-    rm -f "$STANDARD_WASM"
-    EXPORT_COUNT=$(wc -l < "$STANDARD_EXPORTS")
-    if [ "$EXPORT_COUNT" -lt 100 ]; then
-        echo "ERROR: Only $EXPORT_COUNT exports extracted from standard Pyodide wasm."
-        echo "Expected thousands. The downloaded file may be corrupt or the wrong version."
-        rm -f "$STANDARD_EXPORTS"
-        exit 1
-    fi
-    echo "  Extracted $EXPORT_COUNT standard function exports."
-fi
-
-# Build combined JSON export array for Emscripten @response file.
-# The extracted list is cached per Pyodide version to avoid
-# re-downloading on subsequent builds.
-python3 -c "
-import json
-symbols = set()
-symbols.add('_main')
-for name in ['_wasmsh_probe_version','_wasmsh_probe_write_text',
-             '_wasmsh_probe_file_equals','_wasmsh_runtime_new',
-             '_wasmsh_runtime_handle_json','_wasmsh_runtime_free',
-             '_wasmsh_runtime_free_string']:
-    symbols.add(name)
-with open('$STANDARD_EXPORTS') as f:
-    for line in f:
-        sym = line.strip()
-        if sym:
-            symbols.add(sym)
-with open('$EXPORT_RESPONSE', 'w') as f:
-    json.dump(sorted(symbols), f)
-print(f'  Combined export list: {len(symbols)} symbols.')
-"
-
-if [ ! -f "$EXPORT_RESPONSE" ]; then
-    echo "ERROR: Failed to generate combined export list at $EXPORT_RESPONSE"
-    exit 1
-fi
-
-# Patch Makefile.envs to use the response file instead of inline EXPORTS.
-# There are two EXPORTED_FUNCTIONS lines: one in LDFLAGS_BASE ("-s ...")
-# and one in MAIN_MODULE_LDFLAGS ("-s..." without space). Patch both so
-# the later one doesn't override the first.
-#
-# Also add -Wno-error=undefined: our combined export list comes from the
-# standard Pyodide CDN build, which links some libs/symbols our custom
-# build does not (e.g. _Exit from full libc). Without this flag, emcc
-# fails hard on the first missing exported symbol. With it, missing
-# exports become warnings and the wasm just skips them.
-if [ -f "$EXPORT_RESPONSE" ] && ! grep -q "exported-functions.json" Makefile.envs; then
-    "$SED" -i "s|-s EXPORTED_FUNCTIONS='\$(EXPORTS)'|-s EXPORTED_FUNCTIONS=@$EXPORT_RESPONSE -Wno-error=undefined|g" Makefile.envs
-    "$SED" -i "s|-sEXPORTED_FUNCTIONS='\$(EXPORTS)'|-sEXPORTED_FUNCTIONS=@$EXPORT_RESPONSE -Wno-error=undefined|g" Makefile.envs
-    echo "  Patched EXPORTED_FUNCTIONS to use @response file."
-fi
 
 # ── Build CPython + core ────────────────────────────────────
 echo "Building Pyodide core (this takes a while on first run)..."
