@@ -25,6 +25,10 @@ on:
       - 'e2e/pyodide-browser/**'
       - 'e2e/build-contract/**'
 
+concurrency:
+  group: pyodide-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     name: Pyodide build + E2E

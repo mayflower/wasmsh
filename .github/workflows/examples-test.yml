@@ -9,6 +9,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+concurrency:
+  group: examples-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test-typescript:
     name: TypeScript example

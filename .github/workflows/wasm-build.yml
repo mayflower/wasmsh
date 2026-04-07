@@ -13,6 +13,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+concurrency:
+  group: wasm-build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-wasm:
     name: Build WASM artifacts
