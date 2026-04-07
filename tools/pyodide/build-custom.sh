@@ -110,10 +110,13 @@ fi
 # from its inlined generics.  Those are filtered separately by the
 # emscripten.py patch further down in this script.
 echo "Building wasmsh-pyodide runtime staticlib with Pyodide's emsdk..."
-# `rustup target add` is idempotent. We keep `|| true` for the no-op case
-# on airgapped machines where the target is already installed and rustup
-# can't reach the network, but we let stderr through so real errors are
-# visible in the build log.
+# `rustup target add` is idempotent: with the target already installed it
+# exits 0 even when offline (no network call is made).  `|| true` therefore
+# only matters when the target is missing AND rustup itself fails — we keep
+# it so a transient registry hiccup doesn't abort an otherwise-cached build.
+# stderr is intentionally NOT redirected so real failures stay visible in
+# the log; the `cargo build` below is the actual gate and will fail loudly
+# if the target wasn't installed.
 rustup target add wasm32-unknown-emscripten || true
 
 PYODIDE_BUILD="$SCRIPT_DIR/pyodide-build"

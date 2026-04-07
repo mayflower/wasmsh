@@ -33,6 +33,24 @@ const REPO = resolve(__dirname, "../..");
 const BUILD_SCRIPT = resolve(REPO, "tools/pyodide/build-custom.sh");
 const script = readFileSync(BUILD_SCRIPT, "utf-8");
 
+/**
+ * Scan non-comment lines of `script` for `predicate` and assert none match.
+ * Failure message lists each offending line with its line number, plus
+ * `header` and (optional) `footer` for context.
+ */
+function assertNoLineMatches(predicate, header, footer = "") {
+  const offending = script
+    .split("\n")
+    .map((line, i) => ({ line, i: i + 1 }))
+    .filter(({ line }) => {
+      if (line.trim().startsWith("#")) return false; // skip comment lines
+      return predicate(line);
+    });
+  if (offending.length === 0) return;
+  const detail = offending.map((o) => `  line ${o.i}: ${o.line}`).join("\n");
+  assert.fail(`${header}:\n${detail}${footer ? `\n${footer}` : ""}`);
+}
+
 describe("tools/pyodide/build-custom.sh invariants", () => {
   // ── Forbidden approaches (regressions of v0.5.7) ─────────────
 
@@ -43,20 +61,10 @@ describe("tools/pyodide/build-custom.sh invariants", () => {
     // If you need to sed something that contains the literal text
     // "MAIN_MODULE=2" (e.g. a comment explaining why we don't use it),
     // that's fine — but a real `-s MAIN_MODULE=2` flag is not.
-    const lines = script.split("\n");
-    const offending = lines
-      .map((line, i) => ({ line, i: i + 1 }))
-      .filter(({ line }) => {
-        if (line.trim().startsWith("#")) return false; // comment line
-        return /-s\s*MAIN_MODULE\s*=\s*2/.test(line) ||
-          /\bMAIN_MODULE=2\b/.test(line);
-      });
-    assert.equal(
-      offending.length,
-      0,
-      "MAIN_MODULE=2 reintroduced in build-custom.sh:\n" +
-        offending.map((o) => `  line ${o.i}: ${o.line}`).join("\n") +
-        "\nSee v0.5.7 regression history in commit log before changing this.",
+    assertNoLineMatches(
+      (line) => /-s\s*MAIN_MODULE\s*=\s*2/.test(line) || /\bMAIN_MODULE=2\b/.test(line),
+      "MAIN_MODULE=2 reintroduced in build-custom.sh",
+      "See v0.5.7 regression history in commit log before changing this.",
     );
   });
 
@@ -65,19 +73,10 @@ describe("tools/pyodide/build-custom.sh invariants", () => {
     // into warnings, which meant a downloaded CDN export list that
     // referenced symbols our build didn't link silently dropped them.
     // Runtime dlopen of numpy.so then died with "bad export type".
-    const lines = script.split("\n");
-    const offending = lines
-      .map((line, i) => ({ line, i: i + 1 }))
-      .filter(({ line }) => {
-        if (line.trim().startsWith("#")) return false;
-        return /-Wno-error=undefined/.test(line);
-      });
-    assert.equal(
-      offending.length,
-      0,
-      "-Wno-error=undefined reintroduced in build-custom.sh:\n" +
-        offending.map((o) => `  line ${o.i}: ${o.line}`).join("\n") +
-        "\nThis silently drops required exports; fix the real symbol issue instead.",
+    assertNoLineMatches(
+      (line) => /-Wno-error=undefined/.test(line),
+      "-Wno-error=undefined reintroduced in build-custom.sh",
+      "This silently drops required exports; fix the real symbol issue instead.",
     );
   });
 
@@ -86,18 +85,9 @@ describe("tools/pyodide/build-custom.sh invariants", () => {
     // the standard Pyodide CDN wasm.  That list contains symbols our
     // custom build does not link, which combined with the previous two
     // anti-patterns produced a broken wasm.
-    const lines = script.split("\n");
-    const offending = lines
-      .map((line, i) => ({ line, i: i + 1 }))
-      .filter(({ line }) => {
-        if (line.trim().startsWith("#")) return false;
-        return /extract-standard-exports|standard-exports-.*\.cache/.test(line);
-      });
-    assert.equal(
-      offending.length,
-      0,
-      "CDN export list extraction reintroduced:\n" +
-        offending.map((o) => `  line ${o.i}: ${o.line}`).join("\n"),
+    assertNoLineMatches(
+      (line) => /extract-standard-exports|standard-exports-.*\.cache/.test(line),
+      "CDN export list extraction reintroduced",
     );
   });
 
@@ -164,19 +154,10 @@ describe("tools/pyodide/build-custom.sh invariants", () => {
   it("uses curl -fsSL (not -sSL) for CDN downloads", () => {
     // Without -f, curl writes HTML error pages to .json / .whl files
     // on HTTP errors, producing a "successful" but broken artifact.
-    const lines = script.split("\n");
-    const offending = lines
-      .map((line, i) => ({ line, i: i + 1 }))
-      .filter(({ line }) => {
-        if (line.trim().startsWith("#")) return false;
-        return /\bcurl\b/.test(line) && !/curl\s+-[a-zA-Z]*f/.test(line);
-      });
-    assert.equal(
-      offending.length,
-      0,
-      "curl invocations missing -f flag in build-custom.sh:\n" +
-        offending.map((o) => `  line ${o.i}: ${o.line}`).join("\n") +
-        "\nWithout -f, HTTP 4xx/5xx error pages are silently written to the\n" +
+    assertNoLineMatches(
+      (line) => /\bcurl\b/.test(line) && !/curl\s+-[a-zA-Z]*f/.test(line),
+      "curl invocations missing -f flag in build-custom.sh",
+      "Without -f, HTTP 4xx/5xx error pages are silently written to the\n" +
         "output file as if successful.",
     );
   });
