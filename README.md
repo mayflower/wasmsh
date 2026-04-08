@@ -40,7 +40,10 @@ use wasmsh_runtime::WorkerRuntime;
 use wasmsh_protocol::HostCommand;
 
 let mut rt = WorkerRuntime::new();
-rt.handle_command(HostCommand::Init { step_budget: 100_000 });
+rt.handle_command(HostCommand::Init {
+    step_budget: 100_000,
+    allowed_hosts: vec![],
+});
 let events = rt.handle_command(HostCommand::Run { input: "echo hello".into() });
 // [Stdout(b"hello\n"), Exit(0)]
 ```
@@ -67,10 +70,10 @@ just build-pyodide                                   # Pyodide wasm (needs emcc)
 
 | | |
 |-|-|
-| [Tutorials](docs/tutorials/) | Step-by-step guides to get started |
-| [How-to Guides](docs/guides/) | Task-oriented recipes for common operations |
-| [Reference](docs/reference/) | Shell syntax, builtins, utilities, protocol |
-| [Explanation](docs/explanation/) | Architecture, design decisions, trade-offs |
+| [Tutorials](docs/tutorials/index.md) | Step-by-step on-ramps for [JavaScript](docs/tutorials/javascript-quickstart.md), [Python](docs/tutorials/python-quickstart.md), and [Rust](docs/tutorials/getting-started.md) |
+| [How-to Guides](docs/guides/index.md) | [Embedding](docs/guides/embedding.md), [Pyodide integration](docs/guides/pyodide-integration.md), [Adding a command](docs/guides/adding-commands.md), [Troubleshooting](docs/guides/troubleshooting.md) |
+| [Reference](docs/reference/index.md) | [Shell syntax](docs/reference/shell-syntax.md), [builtins](docs/reference/builtins.md), [utilities](docs/reference/utilities.md), [protocol](docs/reference/protocol.md), [sandbox](docs/reference/sandbox-and-capabilities.md) |
+| [Explanation](docs/explanation/index.md) | [Architecture](docs/explanation/architecture.md), [design decisions](docs/explanation/design-decisions.md), trade-offs |
 | [ADRs](docs/adr/) | Architectural Decision Records |
 | [Supported Features](SUPPORTED.md) | Complete syntax and command matrix |
 | [Examples](examples/) | Standalone and TypeScript usage |

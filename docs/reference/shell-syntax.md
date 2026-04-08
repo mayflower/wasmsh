@@ -1,6 +1,8 @@
 # Shell Syntax Reference
 
-Complete reference of shell syntax supported by wasmsh.
+Complete reference of shell syntax supported by wasmsh. For the canonical
+"what's done / what's not" matrix see [`SUPPORTED.md`](../../SUPPORTED.md)
+at the repository root.
 
 ## Commands
 
@@ -168,6 +170,8 @@ Performed in this order:
 {a..e}           # → a b c d e
 {z..a..-2}       # → z x v t r p n l j h f d b  (negative step)
 pre{A,B}suf      # → preAsuf preBsuf
+{a,b}{1,2}       # → a1 a2 b1 b2  (cartesian product when adjacent)
+{a,b}-{c,d}      # → a-c a-d b-c b-d
 ```
 
 ### Parameter Expansion Operators
@@ -214,6 +218,38 @@ pre{A,B}suf      # → preAsuf preBsuf
 | `$0` | Shell name (`wasmsh`) |
 | `$1`..`$9`, `${10}` | Positional parameters |
 
+### Dynamic Variables
+
+These variables are evaluated on every read rather than stored as fixed
+values. See [Sandbox and capabilities](sandbox-and-capabilities.md#recognised-environment-variables)
+for the full list and the variables that hosts can configure.
+
+| Variable | Meaning |
+|----------|---------|
+| `$RANDOM` | 16-bit value from an XorShift PRNG. Writable to reseed. |
+| `$LINENO` | Current source line being executed. |
+| `$SECONDS` | Seconds since shell init. Writable to reset the origin. |
+| `$FUNCNAME` | Current function name (within a function). |
+| `$BASH_SOURCE` | Current source file (within a `source`d file). |
+| `$PIPESTATUS` | Indexed array of exit codes from the most recent pipeline. |
+| `$BASH_REMATCH` | Capture groups from the most recent `[[ … =~ … ]]` match. `[0]` is the full match. |
+
+### Not Yet Implemented
+
+The following constructs are recognised parser-side but are not yet
+honoured by the runtime, or are not implemented at all:
+
+- Process substitution: `<(cmd)`, `>(cmd)`
+- Coprocesses: `coproc`
+- Background execution semantics: `cmd &` is parsed but the runtime
+  executes synchronously (the sandbox has no process table)
+- Signal handling beyond `EXIT` and `ERR` traps
+- The `time` keyword
+- `$$`, `$!`, `$_`, `$-`, `$BASHPID` special parameters
+
+For an authoritative list see the "Not Yet Implemented" section of
+[`SUPPORTED.md`](../../SUPPORTED.md).
+
 ## Redirections
 
 | Syntax | Meaning |
@@ -259,7 +295,8 @@ Supported in `$((...))` and `((...))`:
 - Decimal: `42`
 - Hexadecimal: `0xFF`, `0xff`
 - Octal: `0755`
-- Binary: `2#1010`
+- Binary: `2#1010`, `0b1010`
+- Arbitrary base: `N#digits` (e.g. `16#FF`, `36#zz`)
 
 ### Notes
 
@@ -302,3 +339,11 @@ Enabled with `shopt -s extglob` (on by default in wasmsh).
 | `!(pat)` | Anything that does not match `pat` |
 
 Multiple alternatives separated by `|` are supported: `*(foo|bar)`.
+
+## See Also
+
+- [`SUPPORTED.md`](../../SUPPORTED.md) — canonical compatibility matrix.
+- [Builtins reference](builtins.md) — commands that operate on the language constructs above.
+- [Utilities reference](utilities.md) — in-process commands that the syntax dispatches to.
+- [Sandbox and capabilities](sandbox-and-capabilities.md) — environment variables, dynamic variables, and what the sandbox enforces.
+- [Architecture: Pipeline](../explanation/architecture.md#pipeline-overview) — how source text becomes events.

@@ -120,7 +120,7 @@ All utilities operate on the in-process VFS (no OS calls).
 | `realpath`   | Done   | Resolve to absolute path |
 | `stat`       | Done   | Show file metadata |
 | `find`       | Done   | Search filesystem |
-| `chmod`      | Done   | Change file permissions (VFS metadata) |
+| `chmod`      | Stub   | Returns 0; the VFS has no permission model. |
 | `mktemp`     | Done   | Create a temporary file |
 
 ### Text utilities (14)

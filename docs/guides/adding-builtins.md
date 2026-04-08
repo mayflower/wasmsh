@@ -2,6 +2,11 @@
 
 How to implement a new shell builtin in wasmsh.
 
+> **Note**: For a more complete walkthrough that covers all three layers
+> (runtime intercept, builtin, utility) and explains how to choose between
+> them, see [Adding a command](adding-commands.md). This page is the
+> narrow recipe for the builtin layer.
+
 ## Step 1: Write the Implementation
 
 In `crates/wasmsh-builtins/src/lib.rs`, add a function with the `BuiltinFn` signature:
@@ -56,7 +61,13 @@ stdout = "hello from mycommand\n"
 
 ## Step 5: Special Runtime Handling
 
-If your builtin affects control flow (like `break`, `exit`, `eval`), intercept it in `WorkerRuntime::execute_command` in `crates/wasmsh-browser/src/lib.rs` before the general builtin dispatch.
+If your builtin affects control flow (like `break`, `exit`, `eval`) or
+must be intercepted before normal dispatch (like `declare`, `let`,
+`shopt`, `alias`, `source`, `mapfile`, `builtin`), intercept it in
+`crates/wasmsh-runtime/src/lib.rs` near the other `CMD_*` constants and
+the dispatch site rather than registering it as a builtin. See
+[Adding a command](adding-commands.md#recipe-3-add-a-runtime-intercept)
+for the full recipe.
 
 ## Available Context
 

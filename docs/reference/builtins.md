@@ -1,6 +1,34 @@
 # Builtin Command Reference
 
-Builtins execute in-process and can modify shell state directly.
+Builtins execute in-process and can modify shell state directly. They are
+distinct from utilities (which only operate on the VFS and streams) in
+that builtins have direct access to variables, scopes, traps, and
+positional parameters.
+
+## How to read this page
+
+- Each entry uses the format `## name [flags] arguments` where flags and
+  arguments use the conventional `[…]` for optional and `…` for repeated.
+- "Exit" describes the exit code semantics. The default convention is `0`
+  on success and `1` on generic failure.
+- Cross-references at the end of each entry point to related builtins
+  and reference pages.
+
+## Resolution order
+
+When the shell sees a command name, it resolves it in this order:
+
+1. Aliases (unless suppressed)
+2. Runtime intercepts (`declare`, `let`, `shopt`, `alias`, `source`,
+   `mapfile`, `builtin`, `local`, `exit`, `return`, `break`, `continue`,
+   `eval`)
+3. Shell functions
+4. Builtins (the entries on this page)
+5. Utilities ([reference](utilities.md))
+6. External command handler (host-provided, e.g. `python` in Pyodide)
+7. Otherwise: `command not found`, exit code `127`.
+
+`command -v name` and `type name` report which layer matched.
 
 ## `:` (colon)
 
@@ -194,7 +222,18 @@ Break out of or continue the next iteration of the enclosing loop.
 
 ## `eval` args...
 
-Concatenate arguments and execute as shell code.
+Concatenate arguments with single spaces and execute the result as shell
+code in the current scope. The evaluated text is re-parsed from scratch,
+so quoting rules apply twice.
+
+> **Caution**: `eval` is the most footgun-prone builtin. Any unquoted
+> expansion that ends up in the eval'd text becomes shell code. Treat any
+> input that came from outside the script (file contents, command output,
+> environment variables) as hostile and either avoid `eval` entirely or
+> sanitise the input first.
+
+**Exit**: the exit code of the last command in the evaluated text. `0` if
+the text is empty.
 
 ## `source` file / `.` file
 
@@ -215,4 +254,50 @@ Checks in that order, consistent with resolution priority.
 
 ## `getopts` optstring name
 
-Parse positional parameters for options. Sets `name` to the option character and `OPTIND` to the next index.
+Parse positional parameters for options. Sets `name` to the option
+character and `OPTIND` to the next index. Returns 0 while options remain,
+1 when there are no more options or on the special `--` terminator.
+
+`optstring` is a string of single-character options. A `:` after a
+character means the option takes an argument (placed in `OPTARG`). A
+leading `:` in `optstring` enables silent error reporting.
+
+Example — parse `-v`, `-n N`, and `-o file`:
+
+```sh
+verbose=0
+count=1
+output=
+while getopts ":vn:o:" opt; do
+    case $opt in
+        v)  verbose=1 ;;
+        n)  count="$OPTARG" ;;
+        o)  output="$OPTARG" ;;
+        \?) echo "unknown option: -$OPTARG" >&2; exit 2 ;;
+        :)  echo "option -$OPTARG requires an argument" >&2; exit 2 ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+echo "verbose=$verbose count=$count output=$output remaining=$*"
+```
+
+`OPTIND` is reset to `1` at the start of every shell session and after
+each `getopts` loop completes. Reset it manually when parsing the same
+positional parameters more than once.
+
+**Exit**: `0` while options remain; `1` when done; `2` on misuse.
+
+**See also**: [Sandbox and capabilities](sandbox-and-capabilities.md#recognised-environment-variables)
+for `OPTIND` semantics.
+
+## See Also
+
+- [Shell syntax reference](shell-syntax.md) for the language constructs
+  these builtins support.
+- [Utilities reference](utilities.md) for the in-process commands that
+  are *not* builtins.
+- [Sandbox and capabilities](sandbox-and-capabilities.md) for the
+  environment variables that builtins read and write.
+- [Adding a command](../guides/adding-commands.md) if you want to add a
+  new builtin.

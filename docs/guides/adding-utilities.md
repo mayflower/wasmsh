@@ -2,6 +2,11 @@
 
 How to implement a new shell utility (external command) in wasmsh.
 
+> **Note**: For a more complete walkthrough that covers all three layers
+> (runtime intercept, builtin, utility) and explains how to pick between
+> them, see [Adding a command](adding-commands.md). This page is the
+> narrow recipe for the utility layer.
+
 ## Builtins vs Utilities
 
 - **Builtins** modify shell state directly (cd, export, set)
