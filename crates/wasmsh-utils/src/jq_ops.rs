@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use crate::helpers::{emit_error, read_text, resolve_path};
+use crate::helpers::{collect_input_text, collect_path_text, resolve_path};
 use crate::UtilContext;
 
 // ---------------------------------------------------------------------------
@@ -5371,21 +5371,19 @@ fn collect_jq_input_texts(
         return Ok(vec![]);
     }
     if file_args.is_empty() {
-        let Some(data) = ctx.stdin else {
+        let data = collect_input_text(ctx, &[], "jq")?;
+        if data.is_empty() {
             ctx.output.stderr(b"jq: no input\n");
             return Err(1);
-        };
-        return Ok(vec![String::from_utf8_lossy(data).to_string()]);
+        }
+        return Ok(vec![data]);
     }
     let mut texts = Vec::new();
     for path in file_args {
         let full = resolve_path(ctx.cwd, path);
-        match read_text(ctx.fs, &full) {
+        match collect_path_text(ctx, &full, path, "jq") {
             Ok(text) => texts.push(text),
-            Err(e) => {
-                emit_error(ctx.output, "jq", path, &e);
-                return Err(1);
-            }
+            Err(status) => return Err(status),
         }
     }
     Ok(texts)
@@ -6075,7 +6073,7 @@ mod tests {
                 fs: &mut fs,
                 output: &mut out,
                 cwd: "/",
-                stdin: Some(input),
+                stdin: Some(crate::UtilStdin::from_bytes(input)),
                 state: None,
                 network: None,
             };
@@ -6096,7 +6094,7 @@ mod tests {
                 fs: &mut fs,
                 output: &mut out,
                 cwd: "/",
-                stdin: Some(input),
+                stdin: Some(crate::UtilStdin::from_bytes(input)),
                 state: None,
                 network: None,
             };
@@ -6137,7 +6135,7 @@ mod tests {
                 fs: &mut fs,
                 output: &mut out,
                 cwd: "/",
-                stdin: Some(input),
+                stdin: Some(crate::UtilStdin::from_bytes(input)),
                 state: None,
                 network: None,
             };
@@ -6178,7 +6176,7 @@ mod tests {
                 fs: &mut fs,
                 output: &mut out,
                 cwd: "/",
-                stdin: Some(input),
+                stdin: Some(crate::UtilStdin::from_bytes(input)),
                 state: None,
                 network: None,
             };
@@ -6200,7 +6198,7 @@ mod tests {
                 fs: &mut fs,
                 output: &mut out,
                 cwd: "/",
-                stdin,
+                stdin: stdin.map(crate::UtilStdin::from_bytes),
                 state: None,
                 network: None,
             };

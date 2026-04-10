@@ -5,16 +5,7 @@ import { test, expect } from "@playwright/test";
  */
 async function send(page: any, msg: any): Promise<any[]> {
   return page.evaluate(async (m: any) => {
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("worker timeout")), 60_000);
-      const worker = (window as any)._pyWorker;
-      worker.onmessage = (e: MessageEvent) => {
-        clearTimeout(timeout);
-        if (e.data.error) reject(new Error(e.data.error));
-        else resolve(e.data.events);
-      };
-      worker.postMessage(m);
-    });
+    return (window as any)._pySend(m);
   }, msg);
 }
 
@@ -26,11 +17,7 @@ function decodeBytes(arr: number[]): string {
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/");
-  // Wait for the worker to signal it's booted.
-  await page.waitForFunction(
-    () => (window as any)._pyWorkerReady === true,
-    { timeout: 90_000 },
-  );
+  await page.evaluate(() => (window as any)._pyWorkerReadyPromise);
 });
 
 // ── Tests ───────────────────────────────────────────────────

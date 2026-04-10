@@ -4,6 +4,8 @@
 //! no `std::fs` or OS process calls. They are resolved separately
 //! from shell builtins.
 
+use std::io::{Cursor, Read};
+
 use indexmap::IndexMap;
 use wasmsh_fs::BackendFs;
 use wasmsh_state::ShellState;
@@ -58,13 +60,52 @@ impl VecOutput {
     }
 }
 
+pub struct UtilStdin<'a> {
+    reader: Box<dyn Read + 'a>,
+}
+
+impl std::fmt::Debug for UtilStdin<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UtilStdin").finish_non_exhaustive()
+    }
+}
+
+impl<'a> UtilStdin<'a> {
+    #[must_use]
+    pub fn from_bytes(data: &'a [u8]) -> Self {
+        Self {
+            reader: Box::new(Cursor::new(data)),
+        }
+    }
+
+    #[must_use]
+    pub fn from_reader<R>(reader: R) -> Self
+    where
+        R: Read + 'a,
+    {
+        Self {
+            reader: Box::new(reader),
+        }
+    }
+
+    pub fn read_chunk(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.reader.read(buf)
+    }
+}
+
+impl Read for UtilStdin<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.read_chunk(buf)
+    }
+}
+
 /// Context passed to utility implementations.
 pub struct UtilContext<'a> {
     pub fs: &'a mut BackendFs,
     pub output: &'a mut dyn UtilOutput,
     pub cwd: &'a str,
-    /// Stdin data from pipe or here-doc. `None` if not connected.
-    pub stdin: Option<&'a [u8]>,
+    /// Stdin source from pipe or here-doc. `None` if not connected.
+    pub stdin: Option<UtilStdin<'a>>,
     /// Optional shell state access (for env/printenv/date).
     pub state: Option<&'a ShellState>,
     /// Optional network backend for curl/wget (None = no network access).
@@ -76,6 +117,13 @@ impl std::fmt::Debug for UtilContext<'_> {
         f.debug_struct("UtilContext")
             .field("cwd", &self.cwd)
             .finish_non_exhaustive()
+    }
+}
+
+impl UtilContext<'_> {
+    #[must_use]
+    pub fn has_stdin(&self) -> bool {
+        self.stdin.is_some()
     }
 }
 

@@ -75,8 +75,8 @@ function makeInstantiateWasm() {
       return _moduleRef.stringToNewUTF8(JSON.stringify(result));
     };
     const wasmBytes = readFileSync(resolve(DIST, "pyodide.asm.wasm"));
-    WebAssembly.instantiate(wasmBytes, imports).then(({ instance }) => {
-      successCallback(instance, wasmBytes);
+    WebAssembly.instantiate(wasmBytes, imports).then(({ instance, module }) => {
+      successCallback(instance, module);
     });
     return {};
   };
@@ -89,10 +89,15 @@ export async function createProbeModule() {
   const factory = loadFactory();
 
   let resolveModule;
-  const modulePromise = new Promise((ok) => { resolveModule = ok; });
+  let rejectModule;
+  const modulePromise = new Promise((resolve, reject) => {
+    resolveModule = resolve;
+    rejectModule = reject;
+  });
 
   factory({
     noInitialRun: true,
+    preRun: [],
     thisProgram: "wasmsh-probe",
     locateFile: (path) => resolve(DIST, path),
     print: () => {},
@@ -100,7 +105,7 @@ export async function createProbeModule() {
     API: makeApi(),
     instantiateWasm: makeInstantiateWasm(),
     onRuntimeInitialized() { resolveModule(this); },
-  }).catch(() => {});
+  }).catch(rejectModule);
 
   const mod = await modulePromise;
   if (typeof mod.ccall !== "function") throw new Error("Module.ccall not available");

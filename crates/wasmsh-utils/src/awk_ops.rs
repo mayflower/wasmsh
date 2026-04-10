@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::helpers::{emit_error, read_text, resolve_path};
+use crate::helpers::{collect_input_text, collect_path_text, resolve_path};
 use crate::UtilContext;
 
 // ---------------------------------------------------------------------------
@@ -3285,7 +3285,7 @@ fn gather_inputs(
     interp: &mut AwkInterpreter,
 ) -> Result<Vec<(String, String)>, i32> {
     if file_args.is_empty() {
-        return Ok(vec![(String::new(), stdin_text(ctx.stdin))]);
+        return Ok(vec![(String::new(), stdin_text(ctx)?)]);
     }
 
     let mut v = Vec::new();
@@ -3294,19 +3294,16 @@ fn gather_inputs(
             continue;
         }
         let full = resolve_path(ctx.cwd, path);
-        match read_text(ctx.fs, &full) {
+        match collect_path_text(ctx, &full, path, "awk") {
             Ok(text) => v.push(((*path).to_string(), text)),
-            Err(e) => {
-                emit_error(ctx.output, "awk", path, &e);
-                return Err(1);
-            }
+            Err(status) => return Err(status),
         }
     }
-    if let (true, Some(stdin_data)) = (v.is_empty(), ctx.stdin) {
-        v.push((
-            String::new(),
-            String::from_utf8_lossy(stdin_data).to_string(),
-        ));
+    if v.is_empty() {
+        let stdin_data = stdin_text(ctx)?;
+        if !stdin_data.is_empty() {
+            v.push((String::new(), stdin_data));
+        }
     }
     Ok(v)
 }
@@ -3397,12 +3394,9 @@ fn load_awk_program_text<'a>(
 ) -> Result<Option<String>, i32> {
     if let Some(file_path) = prog_file {
         let full = resolve_path(ctx.cwd, &file_path);
-        return match read_text(ctx.fs, &full) {
+        return match collect_path_text(ctx, &full, &file_path, "awk") {
             Ok(text) => Ok(Some(text)),
-            Err(e) => {
-                emit_error(ctx.output, "awk", &file_path, &e);
-                Err(1)
-            }
+            Err(status) => Err(status),
         };
     }
     let Some(arg) = args.first() else {
@@ -3412,10 +3406,8 @@ fn load_awk_program_text<'a>(
     Ok(Some((*arg).to_string()))
 }
 
-fn stdin_text(stdin: Option<&[u8]>) -> String {
-    stdin.map_or_else(String::new, |data| {
-        String::from_utf8_lossy(data).to_string()
-    })
+fn stdin_text(ctx: &mut UtilContext<'_>) -> Result<String, i32> {
+    collect_input_text(ctx, &[], "awk")
 }
 
 fn apply_awk_var_assignment(interp: &mut AwkInterpreter, path: &str) -> bool {
@@ -3515,7 +3507,7 @@ mod tests {
                 fs: &mut fs,
                 output: &mut output,
                 cwd: "/",
-                stdin: Some(stdin_data),
+                stdin: Some(crate::UtilStdin::from_bytes(stdin_data)),
                 state: None,
                 network: None,
             };
@@ -4173,7 +4165,7 @@ mod tests {
                 stdin: if stdin.is_empty() && input_path.is_some() {
                     None
                 } else {
-                    Some(stdin_data)
+                    Some(crate::UtilStdin::from_bytes(stdin_data))
                 },
                 state: None,
                 network: None,

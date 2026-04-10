@@ -3,7 +3,8 @@
 use wasmsh_fs::{OpenOptions, Vfs};
 
 use crate::helpers::{
-    emit_error, read_file_bytes, read_input_bytes, resolve_path, write_file_bytes,
+    collect_input_bytes, collect_input_text, emit_error, read_file_bytes, read_input_bytes,
+    resolve_path, stream_input_chunks, stream_input_lines, write_file_bytes,
 };
 use crate::UtilContext;
 
@@ -215,17 +216,9 @@ fn xxd_c_include(ctx: &mut UtilContext<'_>, data: &[u8], name: &str) {
 }
 
 fn xxd_reverse_read_input(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> Option<String> {
-    if !file_args.is_empty() {
-        let full = resolve_path(ctx.cwd, file_args[0]);
-        match crate::helpers::read_text(ctx.fs, &full) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                emit_error(ctx.output, "xxd", file_args[0], &e);
-                None
-            }
-        }
-    } else {
-        ctx.stdin.map(|d| String::from_utf8_lossy(d).to_string())
+    match collect_input_text(ctx, file_args, "xxd") {
+        Ok(text) => Some(text),
+        Err(_) => None,
     }
 }
 
@@ -251,19 +244,26 @@ fn xxd_hex_to_bytes(hex: &str) -> Vec<u8> {
 }
 
 fn xxd_reverse(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> i32 {
-    let Some(text) = xxd_reverse_read_input(ctx, file_args) else {
-        if file_args.is_empty() {
-            return 0;
-        }
-        return 1;
-    };
-
     let mut result = Vec::new();
-    for line in text.lines() {
-        let hex = xxd_extract_hex(line);
-        result.extend(xxd_hex_to_bytes(&hex));
+    if file_args.is_empty() {
+        if stream_input_lines(ctx, &[], "xxd", |line, _had_newline, _| {
+            let hex = xxd_extract_hex(line);
+            result.extend(xxd_hex_to_bytes(&hex));
+            Ok(())
+        })
+        .is_err()
+        {
+            return 1;
+        }
+    } else {
+        let Some(text) = xxd_reverse_read_input(ctx, file_args) else {
+            return 1;
+        };
+        for line in text.lines() {
+            let hex = xxd_extract_hex(line);
+            result.extend(xxd_hex_to_bytes(&hex));
+        }
     }
-
     ctx.output.stdout(&result);
     0
 }
@@ -455,11 +455,9 @@ pub(crate) fn util_dd(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
 fn dd_input_data(ctx: &mut UtilContext<'_>, args: &DdArgs<'_>) -> Result<Vec<u8>, i32> {
     if let Some(path) = args.input_file {
-        read_file_bytes(ctx, path, "dd")
-    } else if let Some(data) = ctx.stdin {
-        Ok(data.to_vec())
+        collect_input_bytes(ctx, &[path], "dd")
     } else {
-        Ok(Vec::new())
+        collect_input_bytes(ctx, &[], "dd")
     }
 }
 
@@ -551,25 +549,6 @@ fn parse_strings_flags(ctx: &mut UtilContext<'_>, argv: &[&str]) -> Result<(usiz
     Ok((min_len, consumed))
 }
 
-fn extract_printable_strings(ctx: &mut UtilContext<'_>, data: &[u8], min_len: usize) {
-    let mut current = String::new();
-    for &b in data {
-        if (0x20..=0x7E).contains(&b) {
-            current.push(b as char);
-        } else {
-            if current.len() >= min_len {
-                ctx.output.stdout(current.as_bytes());
-                ctx.output.stdout(b"\n");
-            }
-            current.clear();
-        }
-    }
-    if current.len() >= min_len {
-        ctx.output.stdout(current.as_bytes());
-        ctx.output.stdout(b"\n");
-    }
-}
-
 pub(crate) fn util_strings(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let (min_len, consumed) = match parse_strings_flags(ctx, argv) {
         Ok(v) => v,
@@ -577,12 +556,28 @@ pub(crate) fn util_strings(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     };
     let args = &argv[consumed..];
 
-    let data = match read_input_bytes(ctx, args, "strings") {
-        Ok(d) => d,
-        Err(status) => return status,
-    };
-
-    extract_printable_strings(ctx, &data, min_len);
+    let mut current = String::new();
+    let result = stream_input_chunks(ctx, args, "strings", |chunk, ctx| {
+        for &b in chunk {
+            if (0x20..=0x7E).contains(&b) {
+                current.push(b as char);
+            } else {
+                if current.len() >= min_len {
+                    ctx.output.stdout(current.as_bytes());
+                    ctx.output.stdout(b"\n");
+                }
+                current.clear();
+            }
+        }
+        Ok(())
+    });
+    if let Err(status) = result {
+        return status;
+    }
+    if current.len() >= min_len {
+        ctx.output.stdout(current.as_bytes());
+        ctx.output.stdout(b"\n");
+    }
     0
 }
 
@@ -738,15 +733,13 @@ pub(crate) fn util_split(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
 fn split_read_input<'a>(ctx: &mut UtilContext<'_>, args: &[&'a str]) -> (Vec<u8>, &'a str) {
     let prefix = if args.len() > 1 { args[1] } else { "x" };
-    if !args.is_empty() && args[0] != "-" {
-        match read_file_bytes(ctx, args[0], "split") {
-            Ok(d) => (d, prefix),
-            Err(_) => (Vec::new(), prefix),
-        }
+    let file_args = if !args.is_empty() && args[0] != "-" {
+        &args[..1]
     } else {
-        let data = ctx.stdin.map(<[u8]>::to_vec).unwrap_or_default();
-        (data, prefix)
-    }
+        &[][..]
+    };
+    let data = collect_input_bytes(ctx, file_args, "split").unwrap_or_default();
+    (data, prefix)
 }
 
 fn split_write_pieces(
@@ -1117,7 +1110,7 @@ mod tests {
                 fs,
                 output: &mut output,
                 cwd: "/",
-                stdin,
+                stdin: stdin.map(crate::UtilStdin::from_bytes),
                 state: None,
                 network: None,
             };

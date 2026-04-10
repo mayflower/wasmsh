@@ -3,18 +3,24 @@
 //! Platform-agnostic execution engine: parse → HIR → expand → execute.
 //! Used by `wasmsh-browser` (standalone WASM) and future embedding crates.
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::io::{Cursor, ErrorKind, Read};
+use std::rc::Rc;
+
 use indexmap::IndexMap;
 
 use wasmsh_ast::CaseTerminator;
 use wasmsh_ast::RedirectionOp;
 use wasmsh_expand::expand_words_argv;
-use wasmsh_fs::{BackendFs, OpenOptions, Vfs};
+use wasmsh_fs::{BackendFs, FileHandle, OpenOptions, Vfs, VfsWriteSink};
 use wasmsh_hir::{
     HirAndOr, HirAndOrOp, HirCommand, HirCompleteCommand, HirPipeline, HirRedirection,
 };
 use wasmsh_protocol::{DiagnosticLevel, HostCommand, WorkerEvent, PROTOCOL_VERSION};
 use wasmsh_state::ShellState;
 use wasmsh_utils::{UtilContext, UtilRegistry, VecOutput as UtilOutput};
+use wasmsh_vm::pipe::{PipeBuffer, ReadResult, WriteResult};
 use wasmsh_vm::Vm;
 
 /// Sentinel FD value for `&>` (redirect both stdout and stderr).
@@ -60,6 +66,7 @@ impl Default for BrowserConfig {
 const MAX_RECURSION_DEPTH: u32 = 100;
 
 /// Transient execution state, reset between top-level commands.
+#[derive(Clone)]
 struct ExecState {
     break_depth: u32,
     loop_continue: bool,
@@ -69,6 +76,10 @@ struct ExecState {
     recursion_depth: u32,
     /// Set when a resource limit (step budget, output limit, cancel) is hit.
     resource_exhausted: bool,
+    /// Set when word expansion reports a hard semantic error.
+    expansion_failed: bool,
+    /// Nested output capture scopes for pipelines and substitutions.
+    output_captures: Vec<OutputCapture>,
 }
 
 impl ExecState {
@@ -81,6 +92,8 @@ impl ExecState {
             local_save_stack: Vec::new(),
             recursion_depth: 0,
             resource_exhausted: false,
+            expansion_failed: false,
+            output_captures: Vec::new(),
         }
     }
 
@@ -90,7 +103,3290 @@ impl ExecState {
         self.exit_requested = None;
         self.errexit_suppressed = false;
         self.resource_exhausted = false;
+        self.expansion_failed = false;
+        self.output_captures.clear();
     }
+}
+
+const STREAMING_YES_MAX_LINES: usize = 65_536;
+const PIPEBUFFER_STREAMING_CAPACITY: usize = 1;
+
+#[derive(Clone, Debug, Default)]
+struct OutputCapture {
+    capture_stdout: bool,
+    capture_stderr: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CapturedOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+#[derive(Clone)]
+enum OutputDestination {
+    VisibleStdout,
+    VisibleStderr,
+    File {
+        path: String,
+        sink: Rc<RefCell<Box<dyn VfsWriteSink>>>,
+    },
+    ProcessSubst {
+        path: String,
+    },
+}
+
+impl std::fmt::Debug for OutputDestination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::VisibleStdout => f.write_str("VisibleStdout"),
+            Self::VisibleStderr => f.write_str("VisibleStderr"),
+            Self::File { path, .. } => f.debug_struct("File").field("path", path).finish(),
+            Self::ProcessSubst { path } => {
+                f.debug_struct("ProcessSubst").field("path", path).finish()
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LiveRedirectionScope {
+    stdout: OutputDestination,
+    stderr: OutputDestination,
+}
+
+struct RuntimeOutputRouter<'a> {
+    exec: &'a mut ExecState,
+    live_redirections: &'a mut Vec<LiveRedirectionScope>,
+    proc_subst_out_scopes: &'a mut Vec<Vec<PendingProcessSubstOut>>,
+    vm_stdout: &'a mut Vec<u8>,
+    vm_stderr: &'a mut Vec<u8>,
+    vm_output_bytes: &'a mut u64,
+    vm_output_limit: u64,
+    vm_diagnostics: &'a mut Vec<wasmsh_vm::DiagnosticEvent>,
+}
+
+impl RuntimeOutputRouter<'_> {
+    fn process_subst_out_sink_mut(&mut self, path: &str) -> Option<&mut PendingProcessSubstOut> {
+        for scope in self.proc_subst_out_scopes.iter_mut().rev() {
+            if let Some(index) = scope.iter().position(|sink| sink.path == path) {
+                return scope.get_mut(index);
+            }
+        }
+        None
+    }
+
+    fn append_visible_output_direct(&mut self, data: &[u8], stdout: bool) {
+        if stdout {
+            self.vm_stdout.extend_from_slice(data);
+        } else {
+            self.vm_stderr.extend_from_slice(data);
+        }
+    }
+
+    fn write_output_destination_direct(
+        &mut self,
+        destination: &OutputDestination,
+        data: &[u8],
+    ) -> bool {
+        match destination {
+            OutputDestination::VisibleStdout => {
+                self.append_visible_output_direct(data, true);
+                true
+            }
+            OutputDestination::VisibleStderr => {
+                self.append_visible_output_direct(data, false);
+                true
+            }
+            OutputDestination::ProcessSubst { path } => {
+                if let Some(sink) = self.process_subst_out_sink_mut(path) {
+                    sink.write(data);
+                }
+                false
+            }
+            OutputDestination::File { path, sink } => {
+                if let Err(err) = sink.borrow_mut().write(data) {
+                    let msg = format!("wasmsh: write error: {err}\n");
+                    self.append_visible_output_direct(msg.as_bytes(), false);
+                    self.vm_diagnostics.push(wasmsh_vm::DiagnosticEvent {
+                        level: wasmsh_vm::DiagLevel::Error,
+                        category: wasmsh_vm::DiagCategory::Filesystem,
+                        message: format!("write failed for {path}: {err}"),
+                    });
+                }
+                false
+            }
+        }
+    }
+
+    fn route_output(&mut self, data: &[u8], stdout: bool) -> bool {
+        let mut routed_stdout = stdout;
+        if let Some(scope) = self.live_redirections.last().cloned() {
+            let destination = if stdout { scope.stdout } else { scope.stderr };
+            match destination {
+                OutputDestination::VisibleStdout => {
+                    routed_stdout = true;
+                }
+                OutputDestination::VisibleStderr => {
+                    routed_stdout = false;
+                }
+                OutputDestination::File { .. } | OutputDestination::ProcessSubst { .. } => {
+                    return self.write_output_destination_direct(&destination, data);
+                }
+            }
+        }
+
+        for capture in self.exec.output_captures.iter_mut().rev() {
+            let should_capture = if routed_stdout {
+                capture.capture_stdout
+            } else {
+                capture.capture_stderr
+            };
+            if !should_capture {
+                continue;
+            }
+            if routed_stdout {
+                capture.stdout.extend_from_slice(data);
+            } else {
+                capture.stderr.extend_from_slice(data);
+            }
+            return false;
+        }
+
+        self.append_visible_output_direct(data, routed_stdout);
+        true
+    }
+
+    fn account_output(&mut self, bytes: usize) {
+        *self.vm_output_bytes += bytes as u64;
+        if self.exec.resource_exhausted {
+            return;
+        }
+        if self.vm_output_limit > 0 && *self.vm_output_bytes > self.vm_output_limit {
+            self.exec.resource_exhausted = true;
+            self.vm_diagnostics.push(wasmsh_vm::DiagnosticEvent {
+                level: wasmsh_vm::DiagLevel::Error,
+                category: wasmsh_vm::DiagCategory::Budget,
+                message: format!(
+                    "output limit exceeded: {} bytes (limit: {})",
+                    *self.vm_output_bytes, self.vm_output_limit
+                ),
+            });
+        }
+    }
+
+    fn write_stdout(&mut self, data: &[u8]) {
+        if self.route_output(data, true) {
+            self.account_output(data.len());
+        }
+    }
+
+    fn write_stderr(&mut self, data: &[u8]) {
+        if self.route_output(data, false) {
+            self.account_output(data.len());
+        }
+    }
+}
+
+struct RuntimeBuiltinSink<'a> {
+    router: &'a mut RuntimeOutputRouter<'a>,
+}
+
+impl wasmsh_builtins::OutputSink for RuntimeBuiltinSink<'_> {
+    fn stdout(&mut self, data: &[u8]) {
+        self.router.write_stdout(data);
+    }
+
+    fn stderr(&mut self, data: &[u8]) {
+        self.router.write_stderr(data);
+    }
+}
+
+struct RuntimeUtilSink<'a> {
+    router: &'a mut RuntimeOutputRouter<'a>,
+}
+
+impl wasmsh_utils::UtilOutput for RuntimeUtilSink<'_> {
+    fn stdout(&mut self, data: &[u8]) {
+        self.router.write_stdout(data);
+    }
+
+    fn stderr(&mut self, data: &[u8]) {
+        self.router.write_stderr(data);
+    }
+}
+
+fn resolve_path_from_cwd(cwd: &str, path: &str) -> String {
+    if path.starts_with('/') {
+        wasmsh_fs::normalize_path(path)
+    } else {
+        wasmsh_fs::normalize_path(&format!("{cwd}/{path}"))
+    }
+}
+
+struct PipeReader {
+    pipe: Rc<RefCell<PipeBuffer>>,
+}
+
+impl PipeReader {
+    fn new(pipe: Rc<RefCell<PipeBuffer>>) -> Self {
+        Self { pipe }
+    }
+}
+
+impl Read for PipeReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self.pipe.borrow_mut().read(buf) {
+            ReadResult::Read(read) => Ok(read),
+            ReadResult::WouldBlock => Err(std::io::Error::new(ErrorKind::WouldBlock, "pipe empty")),
+            ReadResult::Eof => Ok(0),
+        }
+    }
+}
+
+impl Drop for PipeReader {
+    fn drop(&mut self) {
+        self.pipe.borrow_mut().close_read();
+    }
+}
+
+enum PipeProcessPoll {
+    Ready,
+    PendingRead,
+    PendingWrite,
+    Exited,
+}
+
+struct LiveProcessSubstRunner {
+    isolated_runtime: Option<Box<WorkerRuntime>>,
+    source_pipe: Rc<RefCell<PipeBuffer>>,
+    processes: Vec<StreamingPipeProcess<'static>>,
+    finished: Vec<bool>,
+    final_pipe: Rc<RefCell<PipeBuffer>>,
+    stage_stderr: Vec<Rc<RefCell<Vec<u8>>>>,
+    stage_pipe_stderr: Vec<bool>,
+    captured_stdout: Vec<u8>,
+    captured_stderr: Vec<u8>,
+    captured_diagnostics: Vec<wasmsh_vm::DiagnosticEvent>,
+    done: bool,
+    synced_steps: u64,
+}
+
+struct LiveProcessSubstInReader {
+    isolated_runtime: Option<Box<WorkerRuntime>>,
+    processes: Vec<StreamingPipeProcess<'static>>,
+    finished: Vec<bool>,
+    final_pipe: Rc<RefCell<PipeBuffer>>,
+    stage_stderr: Vec<Rc<RefCell<Vec<u8>>>>,
+    stage_pipe_stderr: Vec<bool>,
+    flushed_stderr: Rc<RefCell<Vec<u8>>>,
+    flushed_diagnostics: Rc<RefCell<Vec<wasmsh_vm::DiagnosticEvent>>>,
+    done: bool,
+}
+
+impl LiveProcessSubstInReader {
+    fn finalize_stderr(&mut self) {
+        let mut flushed = self.flushed_stderr.borrow_mut();
+        for (idx, stderr) in self.stage_stderr.iter().enumerate() {
+            if self.stage_pipe_stderr[idx] {
+                continue;
+            }
+            let data = stderr.borrow();
+            if !data.is_empty() {
+                flushed.extend_from_slice(&data);
+            }
+        }
+        if let Some(runtime) = self.isolated_runtime.as_mut() {
+            self.flushed_diagnostics
+                .borrow_mut()
+                .extend(runtime.vm.diagnostics.drain(..));
+        }
+    }
+
+    fn pump(&mut self) -> bool {
+        if self.done {
+            return false;
+        }
+        let mut progressed = false;
+        if let Some(runtime) = self.isolated_runtime.as_mut() {
+            for idx in (0..self.processes.len()).rev() {
+                if self.finished[idx] {
+                    continue;
+                }
+                match self.processes[idx].poll(runtime.as_mut()) {
+                    PipeProcessPoll::Ready => progressed = true,
+                    PipeProcessPoll::PendingRead | PipeProcessPoll::PendingWrite => {}
+                    PipeProcessPoll::Exited => {
+                        self.finished[idx] = true;
+                        progressed = true;
+                    }
+                }
+            }
+        } else {
+            for idx in (0..self.processes.len()).rev() {
+                if self.finished[idx] {
+                    continue;
+                }
+                match self.processes[idx].poll_without_runtime() {
+                    PipeProcessPoll::Ready => progressed = true,
+                    PipeProcessPoll::PendingRead | PipeProcessPoll::PendingWrite => {}
+                    PipeProcessPoll::Exited => {
+                        self.finished[idx] = true;
+                        progressed = true;
+                    }
+                }
+            }
+        }
+        if self.finished.iter().all(|done| *done) {
+            self.finalize_stderr();
+            self.done = true;
+        }
+        progressed
+    }
+}
+
+impl Read for LiveProcessSubstInReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let read_result = {
+                let mut pipe = self.final_pipe.borrow_mut();
+                pipe.read(buf)
+            };
+            match read_result {
+                ReadResult::Read(read) => return Ok(read),
+                ReadResult::Eof if self.done => return Ok(0),
+                ReadResult::WouldBlock | ReadResult::Eof => {}
+            }
+
+            if !self.pump() {
+                if self.done {
+                    continue;
+                }
+                return Err(std::io::Error::new(
+                    ErrorKind::WouldBlock,
+                    "process substitution pipeline stalled",
+                ));
+            }
+        }
+    }
+}
+
+impl Drop for LiveProcessSubstInReader {
+    fn drop(&mut self) {
+        self.final_pipe.borrow_mut().close_read();
+        if let Some(runtime) = self.isolated_runtime.as_mut() {
+            for process in &mut self.processes {
+                process.close(runtime.as_mut());
+            }
+        } else {
+            for process in &mut self.processes {
+                process.close_without_runtime();
+            }
+        }
+    }
+}
+
+impl LiveProcessSubstRunner {
+    fn sync_isolated_runtime_with_parent(&mut self, parent: &mut WorkerRuntime) {
+        let Some(runtime) = self.isolated_runtime.as_mut() else {
+            return;
+        };
+        if parent.vm.cancellation_token().is_cancelled() {
+            runtime.vm.cancellation_token().cancel();
+        }
+        let current_steps = runtime.vm.steps;
+        if current_steps > self.synced_steps {
+            let delta = current_steps - self.synced_steps;
+            parent.vm.steps = parent.vm.steps.saturating_add(delta);
+            self.synced_steps = current_steps;
+            if parent.vm.steps > parent.vm.limits.step_limit && parent.vm.limits.step_limit > 0 {
+                parent.exec.resource_exhausted = true;
+                parent.vm.emit_diagnostic(
+                    wasmsh_vm::DiagLevel::Error,
+                    wasmsh_vm::DiagCategory::Budget,
+                    format!(
+                        "step budget exceeded: {} steps (limit: {})",
+                        parent.vm.steps, parent.vm.limits.step_limit
+                    ),
+                );
+                runtime.vm.cancellation_token().cancel();
+            }
+        }
+    }
+
+    fn drain_final_pipe(&mut self) -> bool {
+        let mut progressed = false;
+        loop {
+            let mut buffer = [0u8; 4096];
+            let read_result = {
+                let mut pipe = self.final_pipe.borrow_mut();
+                pipe.read(&mut buffer)
+            };
+            match read_result {
+                ReadResult::Read(read) => {
+                    self.captured_stdout.extend_from_slice(&buffer[..read]);
+                    progressed = true;
+                }
+                ReadResult::WouldBlock | ReadResult::Eof => break,
+            }
+        }
+        progressed
+    }
+
+    fn finalize_stderr(&mut self) {
+        for (idx, stderr) in self.stage_stderr.iter().enumerate() {
+            if self.stage_pipe_stderr[idx] {
+                continue;
+            }
+            let data = stderr.borrow();
+            if !data.is_empty() {
+                self.captured_stderr.extend_from_slice(&data);
+            }
+        }
+        if let Some(runtime) = self.isolated_runtime.as_mut() {
+            self.captured_diagnostics
+                .extend(runtime.vm.diagnostics.drain(..));
+        }
+    }
+
+    fn pump(&mut self, parent: Option<&mut WorkerRuntime>) -> bool {
+        if self.done {
+            return false;
+        }
+        let mut parent = parent;
+        let mut progressed = false;
+        if self.isolated_runtime.is_some() {
+            if let Some(parent_rt) = parent.as_deref_mut() {
+                self.sync_isolated_runtime_with_parent(parent_rt);
+            }
+            let runtime = self
+                .isolated_runtime
+                .as_mut()
+                .expect("isolated process substitution runtime missing");
+            for idx in (0..self.processes.len()).rev() {
+                if self.finished[idx] {
+                    continue;
+                }
+                match self.processes[idx].poll(runtime.as_mut()) {
+                    PipeProcessPoll::Ready => progressed = true,
+                    PipeProcessPoll::PendingRead | PipeProcessPoll::PendingWrite => {}
+                    PipeProcessPoll::Exited => {
+                        self.finished[idx] = true;
+                        progressed = true;
+                    }
+                }
+            }
+            if let Some(parent_rt) = parent.as_deref_mut() {
+                self.sync_isolated_runtime_with_parent(parent_rt);
+            }
+        } else {
+            for idx in (0..self.processes.len()).rev() {
+                if self.finished[idx] {
+                    continue;
+                }
+                match self.processes[idx].poll_without_runtime() {
+                    PipeProcessPoll::Ready => progressed = true,
+                    PipeProcessPoll::PendingRead | PipeProcessPoll::PendingWrite => {}
+                    PipeProcessPoll::Exited => {
+                        self.finished[idx] = true;
+                        progressed = true;
+                    }
+                }
+            }
+        }
+
+        if self.drain_final_pipe() {
+            progressed = true;
+        }
+
+        if self.finished.iter().all(|done| *done) {
+            self.finalize_stderr();
+            self.done = true;
+        }
+
+        progressed
+    }
+
+    fn write_input(&mut self, data: &[u8]) {
+        let mut offset = 0;
+        while offset < data.len() && !self.done {
+            let write_result = {
+                let mut pipe = self.source_pipe.borrow_mut();
+                pipe.write(&data[offset..])
+            };
+            match write_result {
+                WriteResult::Written(written) => {
+                    offset += written;
+                    let _ = self.pump(None);
+                }
+                WriteResult::WouldBlock(0) => {
+                    if !self.pump(None) {
+                        break;
+                    }
+                }
+                WriteResult::WouldBlock(written) => {
+                    offset += written;
+                    let _ = self.pump(None);
+                }
+                WriteResult::BrokenPipe => {
+                    self.source_pipe.borrow_mut().close_write();
+                    while self.pump(None) {}
+                    break;
+                }
+            }
+        }
+    }
+
+    fn write_input_with_parent(&mut self, parent: &mut WorkerRuntime, data: &[u8]) {
+        let mut offset = 0;
+        while offset < data.len() && !self.done {
+            let write_result = {
+                let mut pipe = self.source_pipe.borrow_mut();
+                pipe.write(&data[offset..])
+            };
+            match write_result {
+                WriteResult::Written(written) => {
+                    offset += written;
+                    let _ = self.pump(Some(parent));
+                }
+                WriteResult::WouldBlock(0) => {
+                    if !self.pump(Some(parent)) {
+                        break;
+                    }
+                }
+                WriteResult::WouldBlock(written) => {
+                    offset += written;
+                    let _ = self.pump(Some(parent));
+                }
+                WriteResult::BrokenPipe => {
+                    self.source_pipe.borrow_mut().close_write();
+                    while self.pump(Some(parent)) {}
+                    break;
+                }
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        if self.done {
+            return;
+        }
+        self.source_pipe.borrow_mut().close_write();
+        while self.pump(None) {}
+        if !self.done {
+            self.finalize_stderr();
+            self.done = true;
+        }
+        let _ = self.drain_final_pipe();
+    }
+
+    fn finish_with_parent(&mut self, parent: &mut WorkerRuntime) {
+        if self.done {
+            return;
+        }
+        self.source_pipe.borrow_mut().close_write();
+        while self.pump(Some(parent)) {}
+        if !self.done {
+            self.finalize_stderr();
+            self.done = true;
+        }
+        self.sync_isolated_runtime_with_parent(parent);
+        let _ = self.drain_final_pipe();
+    }
+}
+
+enum PendingProcessSubstOutMode {
+    Buffered { data: Vec<u8> },
+    Live { runner: LiveProcessSubstRunner },
+}
+
+struct PendingProcessSubstOut {
+    path: String,
+    inner: String,
+    mode: PendingProcessSubstOutMode,
+}
+
+impl std::fmt::Debug for PendingProcessSubstOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingProcessSubstOut")
+            .field("path", &self.path)
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
+    }
+}
+
+struct PendingProcessSubstIn {
+    path: String,
+    stderr: Option<Rc<RefCell<Vec<u8>>>>,
+    diagnostics: Option<Rc<RefCell<Vec<wasmsh_vm::DiagnosticEvent>>>>,
+}
+
+impl PendingProcessSubstOut {
+    fn clear(&mut self) {
+        match &mut self.mode {
+            PendingProcessSubstOutMode::Buffered { data } => data.clear(),
+            PendingProcessSubstOutMode::Live { .. } => {}
+        }
+    }
+
+    fn write(&mut self, data: &[u8]) {
+        match &mut self.mode {
+            PendingProcessSubstOutMode::Buffered { data: buffered } => {
+                buffered.extend_from_slice(data);
+            }
+            PendingProcessSubstOutMode::Live { runner } => runner.write_input(data),
+        }
+    }
+
+    fn write_with_parent(&mut self, runtime: &mut WorkerRuntime, data: &[u8]) {
+        match &mut self.mode {
+            PendingProcessSubstOutMode::Buffered { data: buffered } => {
+                buffered.extend_from_slice(data);
+            }
+            PendingProcessSubstOutMode::Live { runner } => {
+                if runner.isolated_runtime.is_some() {
+                    runner.write_input_with_parent(runtime, data);
+                } else {
+                    runner.write_input(data);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum BufferedPipelineCommand {
+    Argv(Vec<String>),
+    Hir(HirCommand),
+}
+
+enum StreamingPipeProcess<'a> {
+    Read(PipeReadProcess<'a>),
+    Head(HeadPipeProcess),
+    Tee(TeePipeProcess<'a>),
+    Buffered(BufferedPipeProcess),
+}
+
+impl<'a> StreamingPipeProcess<'a> {
+    fn poll(&mut self, runtime: &mut WorkerRuntime) -> PipeProcessPoll {
+        match self {
+            Self::Read(process) => process.poll(),
+            Self::Head(process) => process.poll(),
+            Self::Tee(process) => process.poll(),
+            Self::Buffered(process) => process.poll(runtime),
+        }
+    }
+
+    fn close(&mut self, runtime: &mut WorkerRuntime) {
+        match self {
+            Self::Tee(process) => process.close(),
+            Self::Buffered(process) => process.close(runtime),
+            Self::Read(_) | Self::Head(_) => {}
+        }
+    }
+
+    fn poll_without_runtime(&mut self) -> PipeProcessPoll {
+        match self {
+            Self::Read(process) => process.poll(),
+            Self::Head(process) => process.poll(),
+            Self::Tee(process) => process.poll(),
+            Self::Buffered(_) => {
+                unreachable!("buffered pipeline stage requires runtime access")
+            }
+        }
+    }
+
+    fn close_without_runtime(&mut self) {
+        match self {
+            Self::Tee(process) => process.close(),
+            Self::Read(_) | Self::Head(_) => {}
+            Self::Buffered(_) => {
+                unreachable!("buffered pipeline stage requires runtime access")
+            }
+        }
+    }
+}
+
+struct BufferedPipeProcess {
+    input: Option<Rc<RefCell<PipeBuffer>>>,
+    output: Rc<RefCell<PipeBuffer>>,
+    command: BufferedPipelineCommand,
+    pipe_stderr: bool,
+    pending_stdout: Vec<u8>,
+    pending_offset: usize,
+    finished: bool,
+    command_ran: bool,
+    stage_stderr: Rc<RefCell<Vec<u8>>>,
+    stage_status: Rc<RefCell<i32>>,
+    staging_path: Option<String>,
+    staging_handle: Option<FileHandle>,
+}
+
+impl BufferedPipeProcess {
+    fn new(
+        input: Option<Rc<RefCell<PipeBuffer>>>,
+        output: Rc<RefCell<PipeBuffer>>,
+        command: BufferedPipelineCommand,
+        pipe_stderr: bool,
+        stage_stderr: Rc<RefCell<Vec<u8>>>,
+        stage_status: Rc<RefCell<i32>>,
+    ) -> Self {
+        Self {
+            input,
+            output,
+            command,
+            pipe_stderr,
+            pending_stdout: Vec::new(),
+            pending_offset: 0,
+            finished: false,
+            command_ran: false,
+            stage_stderr,
+            stage_status,
+            staging_path: None,
+            staging_handle: None,
+        }
+    }
+
+    fn command_label(&self) -> String {
+        match &self.command {
+            BufferedPipelineCommand::Argv(argv) => argv
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "command".to_string()),
+            BufferedPipelineCommand::Hir(cmd) => match cmd {
+                HirCommand::Exec(_) => "exec".to_string(),
+                HirCommand::Assign(_) => "assign".to_string(),
+                HirCommand::RedirectOnly(_) => "redirect".to_string(),
+                HirCommand::If(_) => "if".to_string(),
+                HirCommand::While(_) => "while".to_string(),
+                HirCommand::Until(_) => "until".to_string(),
+                HirCommand::For(_) => "for".to_string(),
+                HirCommand::Subshell(_) => "subshell".to_string(),
+                HirCommand::Group(_) => "group".to_string(),
+                HirCommand::FunctionDef(_) => "function".to_string(),
+                HirCommand::Case(_) => "case".to_string(),
+                HirCommand::DoubleBracket(_) => "[[".to_string(),
+                HirCommand::ArithFor(_) => "arith-for".to_string(),
+                HirCommand::ArithCommand(_) => "arith".to_string(),
+                HirCommand::Select(_) => "select".to_string(),
+                _ => "command".to_string(),
+            },
+        }
+    }
+
+    fn ensure_staging_handle(
+        &mut self,
+        runtime: &mut WorkerRuntime,
+    ) -> Result<(String, FileHandle), String> {
+        if let (Some(path), Some(handle)) = (&self.staging_path, self.staging_handle) {
+            return Ok((path.clone(), handle));
+        }
+        let path = format!(
+            "/tmp/_wasmsh_pipe_{}",
+            WorkerRuntime::next_pending_input_id()
+        );
+        let create_handle = runtime
+            .fs
+            .open(&path, OpenOptions::write())
+            .map_err(|err| err.to_string())?;
+        runtime.fs.close(create_handle);
+        let handle = runtime
+            .fs
+            .open(&path, OpenOptions::append())
+            .map_err(|err| err.to_string())?;
+        self.staging_path = Some(path.clone());
+        self.staging_handle = Some(handle);
+        Ok((path, handle))
+    }
+
+    fn emit_error(
+        &mut self,
+        runtime: &mut WorkerRuntime,
+        cmd_name: &str,
+        err: &str,
+    ) -> PipeProcessPoll {
+        *self.stage_status.borrow_mut() = 1;
+        self.stage_stderr.borrow_mut().extend_from_slice(
+            format!("wasmsh: {cmd_name}: failed to stage pipeline input for streaming: {err}\n")
+                .as_bytes(),
+        );
+        self.output.borrow_mut().close_write();
+        self.close(runtime);
+        self.finished = true;
+        PipeProcessPoll::Exited
+    }
+
+    fn run_command(&mut self, runtime: &mut WorkerRuntime) -> PipeProcessPoll {
+        if let Some(handle) = self.staging_handle.take() {
+            runtime.fs.close(handle);
+        }
+        let cmd_name = self.command_label();
+        let saved_pending = runtime.pending_stdin.take();
+        if let Some(path) = self.staging_path.take() {
+            runtime.set_pending_input_file(path, true);
+        }
+        let (_, captured) =
+            runtime.with_output_capture(true, self.pipe_stderr, |runtime| match &self.command {
+                BufferedPipelineCommand::Argv(argv) => runtime.dispatch_command(&cmd_name, argv),
+                BufferedPipelineCommand::Hir(cmd) => runtime.execute_command(cmd),
+            });
+        *self.stage_status.borrow_mut() = runtime.vm.state.last_status;
+        if self.pipe_stderr {
+            self.pending_stdout = captured.stdout;
+            self.pending_stdout.extend_from_slice(&captured.stderr);
+        } else {
+            self.pending_stdout = captured.stdout;
+            self.stage_stderr
+                .borrow_mut()
+                .extend_from_slice(&captured.stderr);
+        }
+        runtime.clear_pending_input();
+        runtime.pending_stdin = saved_pending;
+        self.pending_offset = 0;
+        self.command_ran = true;
+        if self.pending_stdout.is_empty() {
+            self.output.borrow_mut().close_write();
+            self.finished = true;
+            PipeProcessPoll::Exited
+        } else {
+            PipeProcessPoll::Ready
+        }
+    }
+
+    fn close(&mut self, runtime: &mut WorkerRuntime) {
+        if let Some(handle) = self.staging_handle.take() {
+            runtime.fs.close(handle);
+        }
+        if let Some(path) = self.staging_path.take() {
+            let _ = runtime.fs.remove_file(&path);
+        }
+    }
+
+    fn poll(&mut self, runtime: &mut WorkerRuntime) -> PipeProcessPoll {
+        if self.finished {
+            return PipeProcessPoll::Exited;
+        }
+        loop {
+            if self.pending_offset < self.pending_stdout.len() {
+                let write_result = {
+                    let mut pipe = self.output.borrow_mut();
+                    pipe.write(&self.pending_stdout[self.pending_offset..])
+                };
+                match write_result {
+                    WriteResult::Written(written) => {
+                        self.pending_offset += written;
+                        if self.pending_offset == self.pending_stdout.len() {
+                            self.pending_stdout.clear();
+                            self.pending_offset = 0;
+                            if self.command_ran {
+                                self.output.borrow_mut().close_write();
+                                self.finished = true;
+                                return PipeProcessPoll::Exited;
+                            }
+                        }
+                        return PipeProcessPoll::Ready;
+                    }
+                    WriteResult::WouldBlock(0) => return PipeProcessPoll::PendingWrite,
+                    WriteResult::WouldBlock(written) => {
+                        self.pending_offset += written;
+                        return PipeProcessPoll::Ready;
+                    }
+                    WriteResult::BrokenPipe => {
+                        self.output.borrow_mut().close_write();
+                        self.finished = true;
+                        return PipeProcessPoll::Exited;
+                    }
+                }
+            }
+
+            if self.command_ran {
+                self.output.borrow_mut().close_write();
+                self.finished = true;
+                return PipeProcessPoll::Exited;
+            }
+
+            let Some(input) = &self.input else {
+                return self.run_command(runtime);
+            };
+            let cmd_name = self.command_label();
+            let mut scratch = [0u8; 4096];
+            let read_result = {
+                let mut input = input.borrow_mut();
+                input.read(&mut scratch)
+            };
+            match read_result {
+                ReadResult::Read(read) => {
+                    let (_, handle) = match self.ensure_staging_handle(runtime) {
+                        Ok(parts) => parts,
+                        Err(err) => return self.emit_error(runtime, &cmd_name, &err),
+                    };
+                    if let Err(err) = runtime.fs.write_file(handle, &scratch[..read]) {
+                        return self.emit_error(runtime, &cmd_name, &err.to_string());
+                    }
+                    return PipeProcessPoll::Ready;
+                }
+                ReadResult::WouldBlock => return PipeProcessPoll::PendingRead,
+                ReadResult::Eof => {
+                    input.borrow_mut().close_read();
+                    return self.run_command(runtime);
+                }
+            }
+        }
+    }
+}
+
+struct HeadPipeProcess {
+    input: Rc<RefCell<PipeBuffer>>,
+    output: Rc<RefCell<PipeBuffer>>,
+    mode: StreamingHeadMode,
+    pending: Vec<u8>,
+    pending_offset: usize,
+    lines_seen: usize,
+    input_closed: bool,
+    stream_complete: bool,
+    finished: bool,
+}
+
+impl HeadPipeProcess {
+    fn new(
+        input: Rc<RefCell<PipeBuffer>>,
+        output: Rc<RefCell<PipeBuffer>>,
+        mode: StreamingHeadMode,
+    ) -> Self {
+        Self {
+            input,
+            output,
+            mode,
+            pending: Vec::new(),
+            pending_offset: 0,
+            lines_seen: 0,
+            input_closed: false,
+            stream_complete: false,
+            finished: false,
+        }
+    }
+
+    fn close_input(&mut self) {
+        if !self.input_closed {
+            self.input.borrow_mut().close_read();
+            self.input_closed = true;
+        }
+    }
+
+    fn finish(&mut self) -> PipeProcessPoll {
+        self.close_input();
+        self.output.borrow_mut().close_write();
+        self.finished = true;
+        PipeProcessPoll::Exited
+    }
+
+    fn poll(&mut self) -> PipeProcessPoll {
+        if self.finished {
+            return PipeProcessPoll::Exited;
+        }
+        loop {
+            if self.pending_offset < self.pending.len() {
+                let write_result = {
+                    let mut pipe = self.output.borrow_mut();
+                    pipe.write(&self.pending[self.pending_offset..])
+                };
+                match write_result {
+                    WriteResult::Written(written) => {
+                        self.pending_offset += written;
+                        if self.pending_offset == self.pending.len() {
+                            self.pending.clear();
+                            self.pending_offset = 0;
+                            if self.stream_complete {
+                                return self.finish();
+                            }
+                        }
+                        return PipeProcessPoll::Ready;
+                    }
+                    WriteResult::WouldBlock(0) => return PipeProcessPoll::PendingWrite,
+                    WriteResult::WouldBlock(written) => {
+                        self.pending_offset += written;
+                        return PipeProcessPoll::Ready;
+                    }
+                    WriteResult::BrokenPipe => return self.finish(),
+                }
+            }
+
+            if self.stream_complete {
+                return self.finish();
+            }
+
+            let mut one = [0u8; 1];
+            let read_result = {
+                let mut input = self.input.borrow_mut();
+                input.read(&mut one)
+            };
+            match read_result {
+                ReadResult::Read(read) => {
+                    self.pending.extend_from_slice(&one[..read]);
+                    match &mut self.mode {
+                        StreamingHeadMode::Bytes(remaining) => {
+                            *remaining = remaining.saturating_sub(read);
+                            if *remaining == 0 {
+                                self.stream_complete = true;
+                                self.close_input();
+                            }
+                        }
+                        StreamingHeadMode::Lines(limit) => {
+                            if one[0] == b'\n' {
+                                self.lines_seen += 1;
+                                if self.lines_seen >= *limit {
+                                    self.stream_complete = true;
+                                    self.close_input();
+                                }
+                            }
+                        }
+                    }
+                }
+                ReadResult::WouldBlock => return PipeProcessPoll::PendingRead,
+                ReadResult::Eof => {
+                    self.stream_complete = true;
+                    self.close_input();
+                }
+            }
+        }
+    }
+}
+
+struct PipeReadProcess<'a> {
+    reader: Option<Box<dyn Read + 'a>>,
+    output: Rc<RefCell<PipeBuffer>>,
+    pending: Vec<u8>,
+    pending_offset: usize,
+    stderr_offset: usize,
+    finished: bool,
+    stderr: Rc<RefCell<Vec<u8>>>,
+    status: Rc<RefCell<i32>>,
+    label: &'static str,
+    pipe_stderr: bool,
+    reader_done: bool,
+}
+
+impl<'a> PipeReadProcess<'a> {
+    fn new(
+        reader: Box<dyn Read + 'a>,
+        output: Rc<RefCell<PipeBuffer>>,
+        stderr: Rc<RefCell<Vec<u8>>>,
+        status: Rc<RefCell<i32>>,
+        label: &'static str,
+        pipe_stderr: bool,
+    ) -> Self {
+        Self {
+            reader: Some(reader),
+            output,
+            pending: Vec::new(),
+            pending_offset: 0,
+            stderr_offset: 0,
+            finished: false,
+            stderr,
+            status,
+            label,
+            pipe_stderr,
+            reader_done: false,
+        }
+    }
+
+    fn finish(&mut self) -> PipeProcessPoll {
+        self.output.borrow_mut().close_write();
+        self.reader = None;
+        self.finished = true;
+        PipeProcessPoll::Exited
+    }
+
+    fn poll_stderr(&mut self) -> Option<PipeProcessPoll> {
+        if !self.pipe_stderr {
+            return None;
+        }
+        let len = self.stderr.borrow().len();
+        if self.stderr_offset >= len {
+            return None;
+        }
+        let chunk = {
+            let stderr = self.stderr.borrow();
+            stderr[self.stderr_offset..].to_vec()
+        };
+        let write_result = {
+            let mut output = self.output.borrow_mut();
+            output.write(&chunk)
+        };
+        match write_result {
+            WriteResult::Written(written) => {
+                self.stderr_offset += written;
+                Some(PipeProcessPoll::Ready)
+            }
+            WriteResult::WouldBlock(0) => Some(PipeProcessPoll::PendingWrite),
+            WriteResult::WouldBlock(written) => {
+                self.stderr_offset += written;
+                Some(PipeProcessPoll::Ready)
+            }
+            WriteResult::BrokenPipe => Some(self.finish()),
+        }
+    }
+
+    fn poll(&mut self) -> PipeProcessPoll {
+        if self.finished {
+            return PipeProcessPoll::Exited;
+        }
+        loop {
+            if self.pending_offset < self.pending.len() {
+                let write_result = {
+                    let mut pipe = self.output.borrow_mut();
+                    pipe.write(&self.pending[self.pending_offset..])
+                };
+                match write_result {
+                    WriteResult::Written(written) => {
+                        self.pending_offset += written;
+                        if self.pending_offset == self.pending.len() {
+                            self.pending.clear();
+                            self.pending_offset = 0;
+                        }
+                        return PipeProcessPoll::Ready;
+                    }
+                    WriteResult::WouldBlock(0) => return PipeProcessPoll::PendingWrite,
+                    WriteResult::WouldBlock(written) => {
+                        self.pending_offset += written;
+                        return PipeProcessPoll::Ready;
+                    }
+                    WriteResult::BrokenPipe => {
+                        return self.finish();
+                    }
+                }
+            }
+
+            if let Some(result) = self.poll_stderr() {
+                return result;
+            }
+
+            if self.reader_done {
+                return self.finish();
+            }
+
+            let mut buffer = [0u8; 4096];
+            let reader = self
+                .reader
+                .as_mut()
+                .expect("pipe read process polled after reader finished");
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    self.reader_done = true;
+                }
+                Ok(read) => {
+                    self.pending.extend_from_slice(&buffer[..read]);
+                }
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    return PipeProcessPoll::PendingRead;
+                }
+                Err(err) => {
+                    *self.status.borrow_mut() = 1;
+                    self.stderr.borrow_mut().extend_from_slice(
+                        format!(
+                            "wasmsh: {}: streaming pipeline read error: {err}\n",
+                            self.label
+                        )
+                        .as_bytes(),
+                    );
+                    self.reader_done = true;
+                }
+            }
+        }
+    }
+}
+
+struct TeePipeProcess<'a> {
+    reader: Option<Box<dyn Read + 'a>>,
+    output: Rc<RefCell<PipeBuffer>>,
+    pending: Vec<u8>,
+    pending_offset: usize,
+    stderr_offset: usize,
+    finished: bool,
+    stderr: Rc<RefCell<Vec<u8>>>,
+    status: Rc<RefCell<i32>>,
+    targets: Vec<TeeTarget>,
+    pipe_stderr: bool,
+    reader_done: bool,
+}
+
+impl<'a> TeePipeProcess<'a> {
+    fn new(
+        reader: Box<dyn Read + 'a>,
+        output: Rc<RefCell<PipeBuffer>>,
+        fs: &mut BackendFs,
+        cwd: &str,
+        stage: &StreamingTeeStage,
+        stderr: Rc<RefCell<Vec<u8>>>,
+        status: Rc<RefCell<i32>>,
+        pipe_stderr: bool,
+    ) -> Self {
+        let mut targets = Vec::new();
+        for path in &stage.paths {
+            let resolved = resolve_path_from_cwd(cwd, path);
+            match fs.open_write_sink(&resolved, stage.append) {
+                Ok(sink) => targets.push(TeeTarget {
+                    display_path: path.clone(),
+                    sink,
+                }),
+                Err(err) => {
+                    stderr
+                        .borrow_mut()
+                        .extend_from_slice(format!("tee: {path}: {err}\n").as_bytes());
+                    *status.borrow_mut() = 1;
+                }
+            }
+        }
+        Self {
+            reader: Some(reader),
+            output,
+            pending: Vec::new(),
+            pending_offset: 0,
+            stderr_offset: 0,
+            finished: false,
+            stderr,
+            status,
+            targets,
+            pipe_stderr,
+            reader_done: false,
+        }
+    }
+
+    fn close(&mut self) {
+        self.reader = None;
+        self.targets.clear();
+    }
+
+    fn finish(&mut self) -> PipeProcessPoll {
+        self.output.borrow_mut().close_write();
+        self.close();
+        self.finished = true;
+        PipeProcessPoll::Exited
+    }
+
+    fn write_targets(&mut self, chunk: &[u8]) {
+        for target in &mut self.targets {
+            if let Err(err) = target.sink.write(chunk) {
+                self.stderr
+                    .borrow_mut()
+                    .extend_from_slice(format!("tee: {}: {err}\n", target.display_path).as_bytes());
+                *self.status.borrow_mut() = 1;
+            }
+        }
+    }
+
+    fn poll(&mut self) -> PipeProcessPoll {
+        if self.finished {
+            return PipeProcessPoll::Exited;
+        }
+        loop {
+            if self.pending_offset < self.pending.len() {
+                let write_result = {
+                    let mut pipe = self.output.borrow_mut();
+                    pipe.write(&self.pending[self.pending_offset..])
+                };
+                match write_result {
+                    WriteResult::Written(written) => {
+                        let end = self.pending_offset + written;
+                        let chunk = self.pending[self.pending_offset..end].to_vec();
+                        self.write_targets(&chunk);
+                        self.pending_offset += written;
+                        if self.pending_offset == self.pending.len() {
+                            self.pending.clear();
+                            self.pending_offset = 0;
+                        }
+                        return PipeProcessPoll::Ready;
+                    }
+                    WriteResult::WouldBlock(0) => return PipeProcessPoll::PendingWrite,
+                    WriteResult::WouldBlock(written) => {
+                        let end = self.pending_offset + written;
+                        let chunk = self.pending[self.pending_offset..end].to_vec();
+                        self.write_targets(&chunk);
+                        self.pending_offset += written;
+                        return PipeProcessPoll::Ready;
+                    }
+                    WriteResult::BrokenPipe => {
+                        return self.finish();
+                    }
+                }
+            }
+
+            if self.pipe_stderr {
+                let len = self.stderr.borrow().len();
+                if self.stderr_offset < len {
+                    let chunk = {
+                        let stderr = self.stderr.borrow();
+                        stderr[self.stderr_offset..].to_vec()
+                    };
+                    let write_result = {
+                        let mut output = self.output.borrow_mut();
+                        output.write(&chunk)
+                    };
+                    match write_result {
+                        WriteResult::Written(written) => {
+                            self.stderr_offset += written;
+                            return PipeProcessPoll::Ready;
+                        }
+                        WriteResult::WouldBlock(0) => return PipeProcessPoll::PendingWrite,
+                        WriteResult::WouldBlock(written) => {
+                            self.stderr_offset += written;
+                            return PipeProcessPoll::Ready;
+                        }
+                        WriteResult::BrokenPipe => return self.finish(),
+                    }
+                }
+            }
+
+            if self.reader_done {
+                return self.finish();
+            }
+
+            let mut buffer = [0u8; 4096];
+            let reader = self
+                .reader
+                .as_mut()
+                .expect("tee pipe process polled after reader finished");
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    self.reader_done = true;
+                }
+                Ok(read) => self.pending.extend_from_slice(&buffer[..read]),
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    return PipeProcessPoll::PendingRead;
+                }
+                Err(err) => {
+                    *self.status.borrow_mut() = 1;
+                    self.stderr.borrow_mut().extend_from_slice(
+                        format!("wasmsh: tee: streaming pipeline read error: {err}\n").as_bytes(),
+                    );
+                    self.reader_done = true;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum StreamingHeadMode {
+    Lines(usize),
+    Bytes(usize),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum StreamingTailMode {
+    Lines(usize),
+    Bytes(usize),
+}
+
+struct YesStreamReader {
+    line: Vec<u8>,
+    offset: usize,
+    remaining_lines: usize,
+}
+
+impl YesStreamReader {
+    fn new(line: Vec<u8>, remaining_lines: usize) -> Self {
+        Self {
+            line,
+            offset: 0,
+            remaining_lines,
+        }
+    }
+}
+
+impl Read for YesStreamReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() || self.line.is_empty() || self.remaining_lines == 0 {
+            return Ok(0);
+        }
+        let mut written = 0usize;
+        while written < buf.len() && self.remaining_lines > 0 {
+            let remaining_line = &self.line[self.offset..];
+            let to_copy = remaining_line.len().min(buf.len() - written);
+            buf[written..written + to_copy].copy_from_slice(&remaining_line[..to_copy]);
+            written += to_copy;
+            self.offset += to_copy;
+            if self.offset == self.line.len() {
+                self.offset = 0;
+                self.remaining_lines = self.remaining_lines.saturating_sub(1);
+            }
+        }
+        Ok(written)
+    }
+}
+
+struct HeadStreamReader<R> {
+    inner: R,
+    mode: StreamingHeadMode,
+    finished: bool,
+    pending: Vec<u8>,
+    pending_offset: usize,
+    lines_seen: usize,
+}
+
+struct TailStreamReader<R> {
+    inner: R,
+    mode: StreamingTailMode,
+    output_pending: Vec<u8>,
+    output_offset: usize,
+    finalized: bool,
+    byte_ring: VecDeque<u8>,
+    line_ring: VecDeque<Vec<u8>>,
+    current_line: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StreamingBatStage {
+    show_numbers: bool,
+    show_header: bool,
+    line_range: Option<(Option<usize>, Option<usize>)>,
+    show_all: bool,
+}
+
+struct BatStreamReader<R> {
+    inner: R,
+    stage: StreamingBatStage,
+    input_pending: Vec<u8>,
+    output_pending: Vec<u8>,
+    output_offset: usize,
+    finished: bool,
+    header_emitted: bool,
+    footer_emitted: bool,
+    line_num: usize,
+}
+
+#[derive(Clone, Debug)]
+struct StreamingSedSubstitute {
+    pattern: String,
+    replacement: String,
+    global: bool,
+}
+
+#[derive(Clone, Debug)]
+enum StreamingSedAddr {
+    None,
+    Line(usize),
+    Last,
+    Regex(String),
+    Range(Box<StreamingSedAddr>, Box<StreamingSedAddr>),
+}
+
+#[derive(Clone, Debug)]
+enum StreamingSedCmd {
+    Substitute(StreamingSedSubstitute),
+    Delete,
+    Print,
+    Transliterate(Vec<char>, Vec<char>),
+    AppendText(String),
+    InsertText(String),
+    ChangeText(String),
+    Quit,
+}
+
+#[derive(Clone, Debug)]
+struct StreamingSedInstruction {
+    addr: StreamingSedAddr,
+    cmd: StreamingSedCmd,
+}
+
+#[derive(Clone, Debug)]
+struct StreamingSedStage {
+    suppress_print: bool,
+    instructions: Vec<StreamingSedInstruction>,
+}
+
+struct SedStreamReader<R> {
+    inner: R,
+    stage: StreamingSedStage,
+    input_pending: Vec<u8>,
+    output_pending: Vec<u8>,
+    output_offset: usize,
+    initialized: bool,
+    finished: bool,
+    current: Option<(String, bool)>,
+    next: Option<(String, bool)>,
+    line_num: usize,
+    range_states: Vec<bool>,
+    input_eof: bool,
+}
+
+#[derive(Clone, Debug)]
+struct StreamingPasteStage {
+    delimiter: String,
+    serial: bool,
+}
+
+struct PasteStreamReader<R> {
+    inner: R,
+    stage: StreamingPasteStage,
+    input_pending: Vec<u8>,
+    output_pending: Vec<u8>,
+    output_offset: usize,
+    finalized: bool,
+    ended_with_newline: bool,
+    serial_first: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StreamingColumnStage;
+
+struct ColumnStreamReader<R> {
+    inner: R,
+    output_pending: Vec<u8>,
+    output_offset: usize,
+    finalized: bool,
+    ended_with_newline: bool,
+}
+
+#[derive(Clone, Debug)]
+struct StreamingTeeStage {
+    append: bool,
+    paths: Vec<String>,
+}
+
+struct TeeTarget {
+    display_path: String,
+    sink: Box<dyn VfsWriteSink>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StreamingWcFlags {
+    lines: bool,
+    words: bool,
+    bytes: bool,
+    max_line_length: bool,
+}
+
+struct WcStreamReader<R> {
+    inner: R,
+    flags: StreamingWcFlags,
+    summary: Vec<u8>,
+    summary_offset: usize,
+    finalized: bool,
+    lines: usize,
+    words: usize,
+    bytes: usize,
+    max_line_length: usize,
+    current_line_length: usize,
+    in_word: bool,
+    saw_input: bool,
+    ended_with_newline: bool,
+}
+
+#[derive(Clone, Debug)]
+struct StreamingGrepFlags {
+    ignore_case: bool,
+    invert: bool,
+    count_only: bool,
+    show_line_numbers: bool,
+    files_only: bool,
+    word_match: bool,
+    only_matching: bool,
+    quiet: bool,
+    extended: bool,
+    fixed: bool,
+    after_context: usize,
+    before_context: usize,
+    max_count: Option<usize>,
+    show_filename: Option<bool>,
+}
+
+#[derive(Clone, Debug)]
+struct StreamingGrepStage {
+    flags: StreamingGrepFlags,
+    patterns: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct StreamingUniqFlags {
+    count: bool,
+    duplicates_only: bool,
+    unique_only: bool,
+    ignore_case: bool,
+    skip_fields: usize,
+    skip_chars: usize,
+    compare_chars: Option<usize>,
+}
+
+impl<R> WcStreamReader<R> {
+    fn new(inner: R, flags: StreamingWcFlags) -> Self {
+        Self {
+            inner,
+            flags,
+            summary: Vec::new(),
+            summary_offset: 0,
+            finalized: false,
+            lines: 0,
+            words: 0,
+            bytes: 0,
+            max_line_length: 0,
+            current_line_length: 0,
+            in_word: false,
+            saw_input: false,
+            ended_with_newline: false,
+        }
+    }
+
+    fn take_summary(&mut self, buf: &mut [u8]) -> usize {
+        if self.summary_offset >= self.summary.len() {
+            return 0;
+        }
+        let remaining = &self.summary[self.summary_offset..];
+        let to_copy = remaining.len().min(buf.len());
+        buf[..to_copy].copy_from_slice(&remaining[..to_copy]);
+        self.summary_offset += to_copy;
+        to_copy
+    }
+
+    fn process_chunk(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+        self.saw_input = true;
+        self.bytes += chunk.len();
+        for &byte in chunk {
+            let is_whitespace = byte.is_ascii_whitespace();
+            if is_whitespace {
+                self.in_word = false;
+            } else if !self.in_word {
+                self.words += 1;
+                self.in_word = true;
+            }
+
+            if byte == b'\n' {
+                self.lines += 1;
+                self.max_line_length = self.max_line_length.max(self.current_line_length);
+                self.current_line_length = 0;
+                self.ended_with_newline = true;
+            } else {
+                self.current_line_length += 1;
+                self.ended_with_newline = false;
+            }
+        }
+    }
+
+    fn finalize_summary(&mut self) {
+        if self.finalized {
+            return;
+        }
+        self.finalized = true;
+        if self.saw_input && !self.ended_with_newline {
+            self.lines += 1;
+            self.max_line_length = self.max_line_length.max(self.current_line_length);
+        }
+
+        let mut parts = Vec::new();
+        if self.flags.lines {
+            parts.push(format!("{:>7}", self.lines));
+        }
+        if self.flags.words {
+            parts.push(format!("{:>7}", self.words));
+        }
+        if self.flags.bytes {
+            parts.push(format!("{:>7}", self.bytes));
+        }
+        if self.flags.max_line_length {
+            parts.push(format!("{:>7}", self.max_line_length));
+        }
+        let mut output = parts.join("");
+        output.push('\n');
+        self.summary = output.into_bytes();
+    }
+}
+
+impl<R: Read> Read for WcStreamReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let copied = self.take_summary(buf);
+        if copied > 0 {
+            return Ok(copied);
+        }
+        if self.finalized {
+            return Ok(0);
+        }
+
+        let mut scratch = [0u8; 4096];
+        loop {
+            let read = self.inner.read(&mut scratch)?;
+            if read == 0 {
+                self.finalize_summary();
+                return Ok(self.take_summary(buf));
+            }
+            self.process_chunk(&scratch[..read]);
+        }
+    }
+}
+
+impl<R> HeadStreamReader<R> {
+    fn new(inner: R, mode: StreamingHeadMode) -> Self {
+        Self {
+            inner,
+            mode,
+            finished: false,
+            pending: Vec::new(),
+            pending_offset: 0,
+            lines_seen: 0,
+        }
+    }
+
+    fn take_from_pending(&mut self, buf: &mut [u8]) -> usize {
+        if self.pending_offset >= self.pending.len() {
+            self.pending.clear();
+            self.pending_offset = 0;
+            return 0;
+        }
+        let remaining = &self.pending[self.pending_offset..];
+        let to_copy = remaining.len().min(buf.len());
+        buf[..to_copy].copy_from_slice(&remaining[..to_copy]);
+        self.pending_offset += to_copy;
+        if self.pending_offset == self.pending.len() {
+            self.pending.clear();
+            self.pending_offset = 0;
+        }
+        to_copy
+    }
+}
+
+impl<R: Read> Read for HeadStreamReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let copied = self.take_from_pending(buf);
+        if copied > 0 {
+            return Ok(copied);
+        }
+        if self.finished {
+            return Ok(0);
+        }
+
+        match self.mode {
+            StreamingHeadMode::Bytes(ref mut remaining) => {
+                if *remaining == 0 {
+                    self.finished = true;
+                    return Ok(0);
+                }
+                let to_read = (*remaining).min(buf.len());
+                let read = self.inner.read(&mut buf[..to_read])?;
+                *remaining = remaining.saturating_sub(read);
+                if read == 0 || *remaining == 0 {
+                    self.finished = read == 0 || *remaining == 0;
+                }
+                Ok(read)
+            }
+            StreamingHeadMode::Lines(limit) => {
+                if self.lines_seen >= limit {
+                    self.finished = true;
+                    return Ok(0);
+                }
+                let mut produced = 0usize;
+                let mut one = [0u8; 1];
+                while produced < buf.len() && self.lines_seen < limit {
+                    let read = match self.inner.read(&mut one) {
+                        Ok(read) => read,
+                        Err(err) if err.kind() == ErrorKind::WouldBlock && produced > 0 => {
+                            return Ok(produced);
+                        }
+                        Err(err) => return Err(err),
+                    };
+                    if read == 0 {
+                        self.finished = true;
+                        break;
+                    }
+                    let byte = one[0];
+                    buf[produced] = byte;
+                    produced += 1;
+                    if byte == b'\n' {
+                        self.lines_seen += 1;
+                    }
+                }
+                if self.lines_seen >= limit {
+                    self.finished = true;
+                }
+                Ok(produced)
+            }
+        }
+    }
+}
+
+impl<R> TailStreamReader<R> {
+    fn new(inner: R, mode: StreamingTailMode) -> Self {
+        Self {
+            inner,
+            mode,
+            output_pending: Vec::new(),
+            output_offset: 0,
+            finalized: false,
+            byte_ring: VecDeque::new(),
+            line_ring: VecDeque::new(),
+            current_line: Vec::new(),
+        }
+    }
+
+    fn push_tail_byte(&mut self, byte: u8) {
+        let StreamingTailMode::Bytes(limit) = self.mode else {
+            return;
+        };
+        if limit == 0 {
+            return;
+        }
+        if self.byte_ring.len() == limit {
+            self.byte_ring.pop_front();
+        }
+        self.byte_ring.push_back(byte);
+    }
+
+    fn push_tail_line(&mut self, line: Vec<u8>) {
+        let StreamingTailMode::Lines(limit) = self.mode else {
+            return;
+        };
+        if limit == 0 {
+            return;
+        }
+        if self.line_ring.len() == limit {
+            self.line_ring.pop_front();
+        }
+        self.line_ring.push_back(line);
+    }
+
+    fn process_chunk(&mut self, chunk: &[u8]) {
+        match self.mode {
+            StreamingTailMode::Bytes(_) => {
+                for &byte in chunk {
+                    self.push_tail_byte(byte);
+                }
+            }
+            StreamingTailMode::Lines(_) => {
+                for &byte in chunk {
+                    if byte == b'\n' {
+                        let line = std::mem::take(&mut self.current_line);
+                        self.push_tail_line(line);
+                    } else {
+                        self.current_line.push(byte);
+                    }
+                }
+            }
+        }
+    }
+
+    fn finalize_output(&mut self) {
+        if self.finalized {
+            return;
+        }
+        match self.mode {
+            StreamingTailMode::Bytes(_) => {
+                self.output_pending.extend(self.byte_ring.drain(..));
+            }
+            StreamingTailMode::Lines(_) => {
+                if !self.current_line.is_empty() {
+                    let line = std::mem::take(&mut self.current_line);
+                    self.push_tail_line(line);
+                }
+                for line in self.line_ring.drain(..) {
+                    self.output_pending.extend_from_slice(&line);
+                    self.output_pending.push(b'\n');
+                }
+            }
+        }
+        self.finalized = true;
+    }
+}
+
+impl<R: Read> Read for TailStreamReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let copied = take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
+        if copied > 0 {
+            return Ok(copied);
+        }
+        if self.finalized {
+            return Ok(0);
+        }
+        loop {
+            let mut scratch = [0u8; 4096];
+            match self.inner.read(&mut scratch) {
+                Ok(0) => {
+                    self.finalize_output();
+                    return Ok(take_pending_output(
+                        &mut self.output_pending,
+                        &mut self.output_offset,
+                        buf,
+                    ));
+                }
+                Ok(read) => self.process_chunk(&scratch[..read]),
+                Err(err) => return Err(err),
+            }
+        }
+    }
+}
+
+fn streaming_bat_in_range(line_num: usize, range: Option<(Option<usize>, Option<usize>)>) -> bool {
+    let Some((start, end)) = range else {
+        return true;
+    };
+    if start.is_some_and(|s| line_num < s) {
+        return false;
+    }
+    end.is_none_or(|e| line_num <= e)
+}
+
+fn streaming_make_visible(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if ch == '\t' {
+            out.push_str("\\t");
+        } else if ch == '\r' {
+            out.push_str("\\r");
+        } else if ch.is_control() {
+            let _ = std::fmt::Write::write_fmt(&mut out, format_args!("\\x{:02x}", ch as u32));
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+impl<R> BatStreamReader<R> {
+    fn new(inner: R, stage: StreamingBatStage) -> Self {
+        Self {
+            inner,
+            stage,
+            input_pending: Vec::new(),
+            output_pending: Vec::new(),
+            output_offset: 0,
+            finished: false,
+            header_emitted: false,
+            footer_emitted: false,
+            line_num: 0,
+        }
+    }
+
+    fn emit_header(&mut self) {
+        if !self.stage.show_header || self.header_emitted {
+            return;
+        }
+        self.header_emitted = true;
+        let separator = "\u{2500}";
+        let rule_left: String = separator.repeat(7);
+        let rule_right: String = separator.repeat(20);
+        let top_corner = "\u{252C}";
+        let mid_corner = "\u{253C}";
+        self.output_pending
+            .extend_from_slice(format!("{rule_left}{top_corner}{rule_right}\n").as_bytes());
+        self.output_pending
+            .extend_from_slice(format!("{rule_left}{mid_corner}{rule_right}\n").as_bytes());
+    }
+
+    fn emit_footer(&mut self) {
+        if !self.stage.show_header || self.footer_emitted {
+            return;
+        }
+        self.footer_emitted = true;
+        let separator = "\u{2500}";
+        let rule_left: String = separator.repeat(7);
+        let rule_right: String = separator.repeat(20);
+        let bot_corner = "\u{2534}";
+        self.output_pending
+            .extend_from_slice(format!("{rule_left}{bot_corner}{rule_right}\n").as_bytes());
+    }
+}
+
+impl<R: Read> Read for BatStreamReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let copied =
+                take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
+            if copied > 0 {
+                return Ok(copied);
+            }
+            if self.finished {
+                return Ok(0);
+            }
+
+            self.emit_header();
+            let copied =
+                take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
+            if copied > 0 {
+                return Ok(copied);
+            }
+
+            match streaming_read_next_line(&mut self.inner, &mut self.input_pending)? {
+                Some((line, _had_newline)) => {
+                    self.line_num += 1;
+                    if !streaming_bat_in_range(self.line_num, self.stage.line_range) {
+                        continue;
+                    }
+                    let display_line = if self.stage.show_all {
+                        streaming_make_visible(&line)
+                    } else {
+                        line
+                    };
+                    if self.stage.show_numbers {
+                        self.output_pending.extend_from_slice(
+                            format!("{:>5}   \u{2502} {display_line}\n", self.line_num).as_bytes(),
+                        );
+                    } else {
+                        self.output_pending
+                            .extend_from_slice(format!("{display_line}\n").as_bytes());
+                    }
+                }
+                None => {
+                    self.emit_footer();
+                    self.finished = true;
+                }
+            }
+        }
+    }
+}
+
+fn streaming_simple_grep_match(line: &str, pattern: &str) -> bool {
+    if let Some(rest) = pattern.strip_prefix('^') {
+        if let Some(mid) = rest.strip_suffix('$') {
+            line == mid
+        } else {
+            line.starts_with(rest)
+        }
+    } else if let Some(rest) = pattern.strip_suffix('$') {
+        line.ends_with(rest)
+    } else {
+        line.contains(pattern)
+    }
+}
+
+fn parse_streaming_sed_substitute(expr: &str) -> Option<StreamingSedSubstitute> {
+    if !expr.starts_with('s') || expr.len() < 4 {
+        return None;
+    }
+    let delim = expr.as_bytes()[1] as char;
+    let rest = &expr[2..];
+    let parts: Vec<&str> = rest.split(delim).collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    Some(StreamingSedSubstitute {
+        pattern: parts[0].to_string(),
+        replacement: parts[1].to_string(),
+        global: parts.get(2).is_some_and(|flags| flags.contains('g')),
+    })
+}
+
+fn parse_streaming_sed_addr(s: &str) -> (StreamingSedAddr, &str) {
+    if let Some(stripped) = s.strip_prefix('/') {
+        if let Some(end) = stripped.find('/') {
+            let pat = &stripped[..end];
+            let rest = &stripped[end + 1..];
+            if let Some(after_comma) = rest.strip_prefix(',') {
+                let (addr2, rest2) = parse_streaming_sed_addr(after_comma);
+                return (
+                    StreamingSedAddr::Range(
+                        Box::new(StreamingSedAddr::Regex(pat.to_string())),
+                        Box::new(addr2),
+                    ),
+                    rest2,
+                );
+            }
+            return (StreamingSedAddr::Regex(pat.to_string()), rest);
+        }
+    }
+    if let Some(rest) = s.strip_prefix('$') {
+        if let Some(after_comma) = rest.strip_prefix(',') {
+            let (addr2, rest2) = parse_streaming_sed_addr(after_comma);
+            return (
+                StreamingSedAddr::Range(Box::new(StreamingSedAddr::Last), Box::new(addr2)),
+                rest2,
+            );
+        }
+        return (StreamingSedAddr::Last, rest);
+    }
+    let num_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    if num_end > 0 {
+        if let Ok(n) = s[..num_end].parse::<usize>() {
+            let rest = &s[num_end..];
+            if let Some(after_comma) = rest.strip_prefix(',') {
+                let (addr2, rest2) = parse_streaming_sed_addr(after_comma);
+                return (
+                    StreamingSedAddr::Range(Box::new(StreamingSedAddr::Line(n)), Box::new(addr2)),
+                    rest2,
+                );
+            }
+            return (StreamingSedAddr::Line(n), rest);
+        }
+    }
+    (StreamingSedAddr::None, s)
+}
+
+fn parse_streaming_sed_script(script: &str) -> Vec<StreamingSedInstruction> {
+    let mut instructions = Vec::new();
+    for part in script.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (addr, rest) = parse_streaming_sed_addr(part);
+        let rest = rest.trim();
+        let cmd = if rest.starts_with('s') {
+            if let Some(sub) = parse_streaming_sed_substitute(rest) {
+                StreamingSedCmd::Substitute(sub)
+            } else {
+                continue;
+            }
+        } else if rest == "d" {
+            StreamingSedCmd::Delete
+        } else if rest == "p" {
+            StreamingSedCmd::Print
+        } else if rest == "q" {
+            StreamingSedCmd::Quit
+        } else if rest.starts_with("y/") || rest.starts_with("y|") {
+            let delim = rest.as_bytes()[1] as char;
+            let inner = &rest[2..];
+            let parts: Vec<&str> = inner.split(delim).collect();
+            if parts.len() >= 2 {
+                StreamingSedCmd::Transliterate(
+                    parts[0].chars().collect(),
+                    parts[1].chars().collect(),
+                )
+            } else {
+                continue;
+            }
+        } else if let Some(text) = rest.strip_prefix("a\\") {
+            StreamingSedCmd::AppendText(text.trim_start().to_string())
+        } else if let Some(text) = rest.strip_prefix("i\\") {
+            StreamingSedCmd::InsertText(text.trim_start().to_string())
+        } else if let Some(text) = rest.strip_prefix("c\\") {
+            StreamingSedCmd::ChangeText(text.trim_start().to_string())
+        } else {
+            continue;
+        };
+        instructions.push(StreamingSedInstruction { addr, cmd });
+    }
+    instructions
+}
+
+fn streaming_sed_addr_matches(
+    addr: &StreamingSedAddr,
+    line_num: usize,
+    is_last: bool,
+    line: &str,
+    in_range: &mut bool,
+) -> bool {
+    match addr {
+        StreamingSedAddr::None => true,
+        StreamingSedAddr::Line(n) => line_num == *n,
+        StreamingSedAddr::Last => is_last,
+        StreamingSedAddr::Regex(pat) => streaming_simple_grep_match(line, pat),
+        StreamingSedAddr::Range(start, end) => {
+            if *in_range {
+                if streaming_sed_addr_matches(end, line_num, is_last, line, &mut false) {
+                    *in_range = false;
+                }
+                true
+            } else if streaming_sed_addr_matches(start, line_num, is_last, line, &mut false) {
+                *in_range = true;
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+fn streaming_sed_emit_line(output: &mut Vec<u8>, line: &str) {
+    output.extend_from_slice(line.as_bytes());
+    output.push(b'\n');
+}
+
+impl<R> SedStreamReader<R> {
+    fn new(inner: R, stage: StreamingSedStage) -> Self {
+        let range_states = vec![false; stage.instructions.len()];
+        Self {
+            inner,
+            stage,
+            input_pending: Vec::new(),
+            output_pending: Vec::new(),
+            output_offset: 0,
+            initialized: false,
+            finished: false,
+            current: None,
+            next: None,
+            line_num: 1,
+            range_states,
+            input_eof: false,
+        }
+    }
+
+    fn fill_lookahead(&mut self) -> std::io::Result<()>
+    where
+        R: Read,
+    {
+        if self.current.is_none() {
+            self.current = streaming_read_next_line(&mut self.inner, &mut self.input_pending)?;
+        }
+        if self.current.is_some() && self.next.is_none() && !self.input_eof {
+            match streaming_read_next_line(&mut self.inner, &mut self.input_pending)? {
+                Some(line) => self.next = Some(line),
+                None => self.input_eof = true,
+            }
+        }
+        Ok(())
+    }
+
+    fn initialize(&mut self) -> std::io::Result<()>
+    where
+        R: Read,
+    {
+        if self.initialized {
+            return Ok(());
+        }
+        self.fill_lookahead()?;
+        self.initialized = true;
+        Ok(())
+    }
+}
+
+impl<R: Read> Read for SedStreamReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let copied =
+                take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
+            if copied > 0 {
+                return Ok(copied);
+            }
+            if self.finished {
+                return Ok(0);
+            }
+
+            self.initialize()?;
+            self.fill_lookahead()?;
+            let Some((line, _had_newline)) = self.current.take() else {
+                self.finished = true;
+                continue;
+            };
+
+            let is_last = self.input_eof && self.next.is_none();
+            let mut current_text = line;
+            let mut deleted = false;
+            let mut printed = false;
+            let mut quit = false;
+
+            for (idx, instr) in self.stage.instructions.iter().enumerate() {
+                if !streaming_sed_addr_matches(
+                    &instr.addr,
+                    self.line_num,
+                    is_last,
+                    &current_text,
+                    &mut self.range_states[idx],
+                ) {
+                    continue;
+                }
+                match &instr.cmd {
+                    StreamingSedCmd::Substitute(sub) => {
+                        current_text = if sub.global {
+                            current_text.replace(&sub.pattern, &sub.replacement)
+                        } else {
+                            current_text.replacen(&sub.pattern, &sub.replacement, 1)
+                        };
+                    }
+                    StreamingSedCmd::Delete => {
+                        deleted = true;
+                        break;
+                    }
+                    StreamingSedCmd::Print => {
+                        streaming_sed_emit_line(&mut self.output_pending, &current_text);
+                        printed = true;
+                    }
+                    StreamingSedCmd::Transliterate(from, to) => {
+                        current_text = current_text
+                            .chars()
+                            .map(|c| {
+                                if let Some(pos) = from.iter().position(|&fc| fc == c) {
+                                    to.get(pos).or(to.last()).copied().unwrap_or(c)
+                                } else {
+                                    c
+                                }
+                            })
+                            .collect();
+                    }
+                    StreamingSedCmd::AppendText(text) => {
+                        if !self.stage.suppress_print && !printed {
+                            streaming_sed_emit_line(&mut self.output_pending, &current_text);
+                            printed = true;
+                        }
+                        streaming_sed_emit_line(&mut self.output_pending, text);
+                    }
+                    StreamingSedCmd::InsertText(text) => {
+                        streaming_sed_emit_line(&mut self.output_pending, text);
+                    }
+                    StreamingSedCmd::ChangeText(text) => {
+                        streaming_sed_emit_line(&mut self.output_pending, text);
+                        deleted = true;
+                        printed = true;
+                        break;
+                    }
+                    StreamingSedCmd::Quit => {
+                        quit = true;
+                        break;
+                    }
+                }
+            }
+
+            if !deleted && !self.stage.suppress_print && !printed {
+                streaming_sed_emit_line(&mut self.output_pending, &current_text);
+            }
+
+            if quit {
+                self.finished = true;
+            } else {
+                self.current = self.next.take();
+                if self.current.is_some() {
+                    self.line_num += 1;
+                    self.fill_lookahead()?;
+                } else {
+                    self.finished = true;
+                }
+            }
+        }
+    }
+}
+
+impl<R> PasteStreamReader<R> {
+    fn new(inner: R, stage: StreamingPasteStage) -> Self {
+        Self {
+            inner,
+            stage,
+            input_pending: Vec::new(),
+            output_pending: Vec::new(),
+            output_offset: 0,
+            finalized: false,
+            ended_with_newline: true,
+            serial_first: true,
+        }
+    }
+
+    fn finalize_serial(&mut self) -> std::io::Result<()>
+    where
+        R: Read,
+    {
+        while let Some((line, _had_newline)) =
+            streaming_read_next_line(&mut self.inner, &mut self.input_pending)?
+        {
+            if !self.serial_first {
+                self.output_pending
+                    .extend_from_slice(self.stage.delimiter.as_bytes());
+            }
+            self.output_pending.extend_from_slice(line.as_bytes());
+            self.serial_first = false;
+        }
+        self.output_pending.push(b'\n');
+        Ok(())
+    }
+}
+
+impl<R: Read> Read for PasteStreamReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let copied =
+                take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
+            if copied > 0 {
+                return Ok(copied);
+            }
+            if self.finalized {
+                return Ok(0);
+            }
+
+            if self.stage.serial {
+                self.finalize_serial()?;
+                self.finalized = true;
+                continue;
+            }
+
+            let mut scratch = [0u8; 4096];
+            let read = self.inner.read(&mut scratch)?;
+            if read == 0 {
+                if !self.ended_with_newline {
+                    self.output_pending.push(b'\n');
+                }
+                self.finalized = true;
+                continue;
+            }
+            self.ended_with_newline = scratch[read - 1] == b'\n';
+            self.output_pending.extend_from_slice(&scratch[..read]);
+        }
+    }
+}
+
+impl<R> ColumnStreamReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            output_pending: Vec::new(),
+            output_offset: 0,
+            finalized: false,
+            ended_with_newline: true,
+        }
+    }
+}
+
+impl<R: Read> Read for ColumnStreamReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let copied =
+                take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
+            if copied > 0 {
+                return Ok(copied);
+            }
+            if self.finalized {
+                return Ok(0);
+            }
+
+            let mut scratch = [0u8; 4096];
+            let read = self.inner.read(&mut scratch)?;
+            if read == 0 {
+                if !self.ended_with_newline {
+                    self.output_pending.push(b'\n');
+                }
+                self.finalized = true;
+                continue;
+            }
+            self.ended_with_newline = scratch[read - 1] == b'\n';
+            self.output_pending.extend_from_slice(&scratch[..read]);
+        }
+    }
+}
+
+fn take_pending_output(pending: &mut Vec<u8>, pending_offset: &mut usize, buf: &mut [u8]) -> usize {
+    if *pending_offset >= pending.len() {
+        pending.clear();
+        *pending_offset = 0;
+        return 0;
+    }
+    let remaining = &pending[*pending_offset..];
+    let to_copy = remaining.len().min(buf.len());
+    buf[..to_copy].copy_from_slice(&remaining[..to_copy]);
+    *pending_offset += to_copy;
+    if *pending_offset == pending.len() {
+        pending.clear();
+        *pending_offset = 0;
+    }
+    to_copy
+}
+
+fn streaming_read_next_line(
+    reader: &mut dyn Read,
+    pending: &mut Vec<u8>,
+) -> std::io::Result<Option<(String, bool)>> {
+    loop {
+        if let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+            let mut line = pending.drain(..=pos).collect::<Vec<u8>>();
+            let _ = line.pop();
+            return Ok(Some((String::from_utf8_lossy(&line).to_string(), true)));
+        }
+
+        let mut buffer = [0u8; 4096];
+        match reader.read(&mut buffer) {
+            Ok(0) => {
+                if pending.is_empty() {
+                    return Ok(None);
+                }
+                let line = std::mem::take(pending);
+                return Ok(Some((String::from_utf8_lossy(&line).to_string(), false)));
+            }
+            Ok(read) => pending.extend_from_slice(&buffer[..read]),
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+struct RevStreamReader<R> {
+    inner: R,
+    input_pending: Vec<u8>,
+    output_pending: Vec<u8>,
+    output_offset: usize,
+    finished: bool,
+}
+
+impl<R> RevStreamReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            input_pending: Vec::new(),
+            output_pending: Vec::new(),
+            output_offset: 0,
+            finished: false,
+        }
+    }
+}
+
+impl<R: Read> Read for RevStreamReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let copied = take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
+        if copied > 0 {
+            return Ok(copied);
+        }
+        if self.finished {
+            return Ok(0);
+        }
+
+        match streaming_read_next_line(&mut self.inner, &mut self.input_pending)? {
+            Some((line, _had_newline)) => {
+                let reversed: String = line.chars().rev().collect();
+                self.output_pending.extend_from_slice(reversed.as_bytes());
+                self.output_pending.push(b'\n');
+                Ok(take_pending_output(
+                    &mut self.output_pending,
+                    &mut self.output_offset,
+                    buf,
+                ))
+            }
+            None => {
+                self.finished = true;
+                Ok(0)
+            }
+        }
+    }
+}
+
+fn streaming_cut_range_includes(ranges: &[StreamingCutRange], idx: usize) -> bool {
+    ranges.iter().any(|range| {
+        let start = range.start.unwrap_or(1);
+        let end = range.end.unwrap_or(usize::MAX);
+        idx >= start && idx <= end
+    })
+}
+
+fn apply_streaming_cut(line: &str, stage: &StreamingCutStage) -> Option<Vec<u8>> {
+    match &stage.mode {
+        StreamingCutMode::Fields(ranges) => {
+            if stage.only_delimited && !line.contains(stage.delim) {
+                return None;
+            }
+            let parts: Vec<&str> = line.split(stage.delim).collect();
+            let selected: Vec<&str> = parts
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| {
+                    let included = streaming_cut_range_includes(ranges, idx + 1);
+                    if stage.complement {
+                        !included
+                    } else {
+                        included
+                    }
+                })
+                .map(|(_, part)| *part)
+                .collect();
+            Some(selected.join(&stage.output_delim).into_bytes())
+        }
+        StreamingCutMode::Chars(ranges) | StreamingCutMode::Bytes(ranges) => {
+            let chars: Vec<char> = line.chars().collect();
+            let selected: String = chars
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| {
+                    let included = streaming_cut_range_includes(ranges, idx + 1);
+                    if stage.complement {
+                        !included
+                    } else {
+                        included
+                    }
+                })
+                .map(|(_, ch)| *ch)
+                .collect();
+            Some(selected.into_bytes())
+        }
+    }
+}
+
+struct CutStreamReader<R> {
+    inner: R,
+    stage: StreamingCutStage,
+    input_pending: Vec<u8>,
+    output_pending: Vec<u8>,
+    output_offset: usize,
+    finished: bool,
+}
+
+impl<R> CutStreamReader<R> {
+    fn new(inner: R, stage: StreamingCutStage) -> Self {
+        Self {
+            inner,
+            stage,
+            input_pending: Vec::new(),
+            output_pending: Vec::new(),
+            output_offset: 0,
+            finished: false,
+        }
+    }
+}
+
+impl<R: Read> Read for CutStreamReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let copied =
+                take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
+            if copied > 0 {
+                return Ok(copied);
+            }
+            if self.finished {
+                return Ok(0);
+            }
+
+            match streaming_read_next_line(&mut self.inner, &mut self.input_pending)? {
+                Some((line, _had_newline)) => {
+                    if let Some(mut out) = apply_streaming_cut(&line, &self.stage) {
+                        out.push(b'\n');
+                        self.output_pending.extend_from_slice(&out);
+                    }
+                }
+                None => {
+                    self.finished = true;
+                }
+            }
+        }
+    }
+}
+
+fn streaming_grep_match_single(line: &str, pattern: &str, flags: &StreamingGrepFlags) -> bool {
+    if flags.word_match {
+        for word in line.split(|c: char| !c.is_alphanumeric() && c != '_') {
+            if word == pattern {
+                return true;
+            }
+        }
+        return false;
+    }
+    if flags.fixed {
+        line.contains(pattern)
+    } else {
+        line.contains(pattern)
+    }
+}
+
+fn streaming_grep_match_pattern(line: &str, pattern: &str, flags: &StreamingGrepFlags) -> bool {
+    let (line_cmp, pattern_cmp) = if flags.ignore_case {
+        (line.to_lowercase(), pattern.to_lowercase())
+    } else {
+        (line.to_string(), pattern.to_string())
+    };
+    if flags.extended && pattern_cmp.contains('|') {
+        return pattern_cmp
+            .split('|')
+            .any(|alt| streaming_grep_match_single(&line_cmp, alt.trim(), flags));
+    }
+    streaming_grep_match_single(&line_cmp, &pattern_cmp, flags)
+}
+
+fn streaming_grep_find_match<'a>(
+    line: &'a str,
+    pattern: &str,
+    flags: &StreamingGrepFlags,
+) -> Option<&'a str> {
+    let (line_cmp, pattern_cmp) = if flags.ignore_case {
+        (line.to_lowercase(), pattern.to_lowercase())
+    } else {
+        (line.to_string(), pattern.to_string())
+    };
+    if flags.word_match {
+        let start = line_cmp.find(&pattern_cmp)?;
+        if start > 0 && line_cmp.as_bytes()[start - 1].is_ascii_alphanumeric() {
+            return None;
+        }
+        let end = start + pattern_cmp.len();
+        if end < line_cmp.len() && line_cmp.as_bytes()[end].is_ascii_alphanumeric() {
+            return None;
+        }
+        Some(&line[start..start + pattern_cmp.len()])
+    } else {
+        let idx = line_cmp.find(&pattern_cmp)?;
+        Some(&line[idx..idx + pattern_cmp.len()])
+    }
+}
+
+fn streaming_grep_line_matches(
+    line: &str,
+    flags: &StreamingGrepFlags,
+    patterns: &[String],
+) -> bool {
+    let matched = patterns
+        .iter()
+        .any(|pattern| streaming_grep_match_pattern(line, pattern, flags));
+    matched != flags.invert
+}
+
+fn emit_streaming_grep_one(
+    output: &mut Vec<u8>,
+    line: &str,
+    line_num: usize,
+    flags: &StreamingGrepFlags,
+    patterns: &[String],
+) {
+    let mut prefix = String::new();
+    if flags.show_filename == Some(true) {
+        prefix.push_str("(standard input):");
+    }
+    if flags.show_line_numbers {
+        prefix.push_str(&format!("{line_num}:"));
+    }
+    if flags.only_matching {
+        for pattern in patterns {
+            if let Some(matched) = streaming_grep_find_match(line, pattern, flags) {
+                output.extend_from_slice(prefix.as_bytes());
+                output.extend_from_slice(matched.as_bytes());
+                output.push(b'\n');
+            }
+        }
+    } else {
+        output.extend_from_slice(prefix.as_bytes());
+        output.extend_from_slice(line.as_bytes());
+        output.push(b'\n');
+    }
+}
+
+struct GrepStreamReader<R> {
+    inner: R,
+    stage: StreamingGrepStage,
+    status: Rc<RefCell<i32>>,
+    input_pending: Vec<u8>,
+    output_pending: Vec<u8>,
+    output_offset: usize,
+    finished: bool,
+    match_count: u64,
+    found: bool,
+    remaining_after: usize,
+    printed_separator: bool,
+    before_buf: VecDeque<(usize, String)>,
+    line_num: usize,
+    emitted_count_summary: bool,
+}
+
+impl<R> GrepStreamReader<R> {
+    fn new(inner: R, stage: StreamingGrepStage, status: Rc<RefCell<i32>>) -> Self {
+        Self {
+            inner,
+            stage,
+            status,
+            input_pending: Vec::new(),
+            output_pending: Vec::new(),
+            output_offset: 0,
+            finished: false,
+            match_count: 0,
+            found: false,
+            remaining_after: 0,
+            printed_separator: false,
+            before_buf: VecDeque::new(),
+            line_num: 0,
+            emitted_count_summary: false,
+        }
+    }
+
+    fn emit_count_summary(&mut self) {
+        if self.stage.flags.count_only && !self.stage.flags.quiet && !self.emitted_count_summary {
+            if self.stage.flags.show_filename == Some(true) {
+                self.output_pending.extend_from_slice(
+                    format!("(standard input):{}\n", self.match_count).as_bytes(),
+                );
+            } else {
+                self.output_pending
+                    .extend_from_slice(format!("{}\n", self.match_count).as_bytes());
+            }
+            self.emitted_count_summary = true;
+        }
+    }
+}
+
+impl<R: Read> Read for GrepStreamReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let copied =
+                take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
+            if copied > 0 {
+                return Ok(copied);
+            }
+            if self.finished {
+                return Ok(0);
+            }
+
+            match streaming_read_next_line(&mut self.inner, &mut self.input_pending)? {
+                Some((line, _had_newline)) => {
+                    self.line_num += 1;
+                    if streaming_grep_line_matches(&line, &self.stage.flags, &self.stage.patterns) {
+                        self.found = true;
+                        *self.status.borrow_mut() = 0;
+                        self.match_count += 1;
+
+                        if self.stage.flags.quiet || self.stage.flags.files_only {
+                            if let Some(max) = self.stage.flags.max_count {
+                                if self.match_count >= max as u64 {
+                                    self.finished = true;
+                                }
+                            }
+                            continue;
+                        }
+
+                        if !self.stage.flags.count_only {
+                            if self.stage.flags.before_context > 0 && !self.before_buf.is_empty() {
+                                if self.printed_separator && self.stage.flags.before_context > 0 {
+                                    self.output_pending.extend_from_slice(b"--\n");
+                                }
+                                for (before_line_num, before_line) in &self.before_buf {
+                                    emit_streaming_grep_one(
+                                        &mut self.output_pending,
+                                        before_line,
+                                        *before_line_num,
+                                        &self.stage.flags,
+                                        &self.stage.patterns,
+                                    );
+                                }
+                            }
+                            self.before_buf.clear();
+                            emit_streaming_grep_one(
+                                &mut self.output_pending,
+                                &line,
+                                self.line_num,
+                                &self.stage.flags,
+                                &self.stage.patterns,
+                            );
+                            self.remaining_after = self.stage.flags.after_context;
+                            self.printed_separator = true;
+                        }
+
+                        if let Some(max) = self.stage.flags.max_count {
+                            if self.match_count >= max as u64 {
+                                self.emit_count_summary();
+                                self.finished = true;
+                            }
+                        }
+                    } else if self.remaining_after > 0 && !self.stage.flags.count_only {
+                        emit_streaming_grep_one(
+                            &mut self.output_pending,
+                            &line,
+                            self.line_num,
+                            &self.stage.flags,
+                            &self.stage.patterns,
+                        );
+                        self.remaining_after -= 1;
+                    } else if self.stage.flags.before_context > 0 {
+                        self.before_buf.push_back((self.line_num, line));
+                        if self.before_buf.len() > self.stage.flags.before_context {
+                            self.before_buf.pop_front();
+                        }
+                    }
+                }
+                None => {
+                    self.emit_count_summary();
+                    if !self.found {
+                        *self.status.borrow_mut() = 1;
+                    }
+                    self.finished = true;
+                }
+            }
+        }
+    }
+}
+
+fn streaming_uniq_compare_key(line: &str, flags: &StreamingUniqFlags) -> String {
+    let mut slice = line;
+    for _ in 0..flags.skip_fields {
+        slice = slice.trim_start();
+        if let Some(pos) = slice.find(char::is_whitespace) {
+            slice = &slice[pos..];
+        } else {
+            slice = "";
+            break;
+        }
+    }
+    if flags.skip_chars > 0 {
+        let chars: Vec<char> = slice.chars().collect();
+        slice = if flags.skip_chars < chars.len() {
+            &slice[chars[..flags.skip_chars]
+                .iter()
+                .map(|ch| ch.len_utf8())
+                .sum::<usize>()..]
+        } else {
+            ""
+        };
+    }
+    let mut key = slice.to_string();
+    if let Some(limit) = flags.compare_chars {
+        key = key.chars().take(limit).collect();
+    }
+    if flags.ignore_case {
+        key = key.to_lowercase();
+    }
+    key
+}
+
+fn emit_streaming_uniq_line(
+    output: &mut Vec<u8>,
+    line: &str,
+    count: usize,
+    flags: &StreamingUniqFlags,
+) {
+    if flags.duplicates_only && count < 2 {
+        return;
+    }
+    if flags.unique_only && count > 1 {
+        return;
+    }
+    if flags.count {
+        output.extend_from_slice(format!("{count:>7} {line}\n").as_bytes());
+    } else {
+        output.extend_from_slice(line.as_bytes());
+        output.push(b'\n');
+    }
+}
+
+struct UniqStreamReader<R> {
+    inner: R,
+    flags: StreamingUniqFlags,
+    input_pending: Vec<u8>,
+    output_pending: Vec<u8>,
+    output_offset: usize,
+    finished: bool,
+    prev: Option<(String, String)>,
+    count: usize,
+}
+
+impl<R> UniqStreamReader<R> {
+    fn new(inner: R, flags: StreamingUniqFlags) -> Self {
+        Self {
+            inner,
+            flags,
+            input_pending: Vec::new(),
+            output_pending: Vec::new(),
+            output_offset: 0,
+            finished: false,
+            prev: None,
+            count: 0,
+        }
+    }
+}
+
+impl<R: Read> Read for UniqStreamReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let copied =
+                take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
+            if copied > 0 {
+                return Ok(copied);
+            }
+            if self.finished {
+                return Ok(0);
+            }
+
+            match streaming_read_next_line(&mut self.inner, &mut self.input_pending)? {
+                Some((line, _had_newline)) => {
+                    let key = streaming_uniq_compare_key(&line, &self.flags);
+                    if self
+                        .prev
+                        .as_ref()
+                        .is_some_and(|(_, prev_key)| *prev_key == key)
+                    {
+                        self.count += 1;
+                    } else {
+                        if let Some((prev_line, _)) = self.prev.take() {
+                            emit_streaming_uniq_line(
+                                &mut self.output_pending,
+                                &prev_line,
+                                self.count,
+                                &self.flags,
+                            );
+                        }
+                        self.prev = Some((line, key));
+                        self.count = 1;
+                    }
+                }
+                None => {
+                    if let Some((prev_line, _)) = self.prev.take() {
+                        emit_streaming_uniq_line(
+                            &mut self.output_pending,
+                            &prev_line,
+                            self.count,
+                            &self.flags,
+                        );
+                    }
+                    self.finished = true;
+                }
+            }
+        }
+    }
+}
+
+fn streaming_tr_expand_set(s: &str) -> Vec<char> {
+    let mut chars = Vec::new();
+    let mut iter = s.chars().peekable();
+    while let Some(ch) = iter.next() {
+        if ch == '[' && iter.peek() == Some(&':') {
+            iter.next();
+            let class_name: String = iter.by_ref().take_while(|&c| c != ':').collect();
+            let _ = iter.next();
+            match class_name.as_str() {
+                "upper" => chars.extend('A'..='Z'),
+                "lower" => chars.extend('a'..='z'),
+                "digit" => chars.extend('0'..='9'),
+                "alpha" => {
+                    chars.extend('A'..='Z');
+                    chars.extend('a'..='z');
+                }
+                "alnum" => {
+                    chars.extend('0'..='9');
+                    chars.extend('A'..='Z');
+                    chars.extend('a'..='z');
+                }
+                "space" => chars.extend([' ', '\t', '\n', '\r', '\x0b', '\x0c']),
+                "blank" => chars.extend([' ', '\t']),
+                "punct" => chars.extend("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~".chars()),
+                _ => {}
+            }
+        } else if iter.peek() == Some(&'-') {
+            let saved = iter.clone();
+            iter.next();
+            if let Some(&end_ch) = iter.peek() {
+                if end_ch > ch {
+                    chars.extend(ch..=end_ch);
+                    iter.next();
+                } else {
+                    chars.push(ch);
+                    iter = saved;
+                    iter.next();
+                    chars.push('-');
+                }
+            } else {
+                chars.push(ch);
+                chars.push('-');
+            }
+        } else if ch == '\\' {
+            match iter.next() {
+                Some('n') => chars.push('\n'),
+                Some('t') => chars.push('\t'),
+                Some('r') => chars.push('\r'),
+                Some('\\') | None => chars.push('\\'),
+                Some(other) => chars.push(other),
+            }
+        } else {
+            chars.push(ch);
+        }
+    }
+    chars
+}
+
+fn streaming_tr_process_utf8_chunk(pending: &mut Vec<u8>, chunk: &[u8], mut f: impl FnMut(char)) {
+    pending.extend_from_slice(chunk);
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(text) => {
+                for ch in text.chars() {
+                    f(ch);
+                }
+                pending.clear();
+                return;
+            }
+            Err(err) => {
+                let valid = err.valid_up_to();
+                if valid > 0 {
+                    let text = String::from_utf8_lossy(&pending[..valid]).to_string();
+                    for ch in text.chars() {
+                        f(ch);
+                    }
+                    pending.drain(..valid);
+                    continue;
+                }
+                if err.error_len().is_some() {
+                    let text = String::from_utf8_lossy(&pending[..1]).to_string();
+                    for ch in text.chars() {
+                        f(ch);
+                    }
+                    pending.drain(..1);
+                    continue;
+                }
+                return;
+            }
+        }
+    }
+}
+
+fn streaming_tr_flush_pending_lossy(pending: &mut Vec<u8>, mut f: impl FnMut(char)) {
+    if pending.is_empty() {
+        return;
+    }
+    let text = String::from_utf8_lossy(pending).to_string();
+    pending.clear();
+    for ch in text.chars() {
+        f(ch);
+    }
+}
+
+struct TrStreamReader<R> {
+    inner: R,
+    stage: StreamingTrStage,
+    input_pending: Vec<u8>,
+    output_pending: Vec<u8>,
+    output_offset: usize,
+    finished: bool,
+    prev: Option<char>,
+}
+
+impl<R> TrStreamReader<R> {
+    fn new(inner: R, stage: StreamingTrStage) -> Self {
+        Self {
+            inner,
+            stage,
+            input_pending: Vec::new(),
+            output_pending: Vec::new(),
+            output_offset: 0,
+            finished: false,
+            prev: None,
+        }
+    }
+
+    fn emit_char(&mut self, ch: char) {
+        let mut buffer = [0u8; 4];
+        self.output_pending
+            .extend_from_slice(ch.encode_utf8(&mut buffer).as_bytes());
+        self.prev = Some(ch);
+    }
+
+    fn process_char(&mut self, ch: char) {
+        if self.stage.delete && self.stage.squeeze && !self.stage.to_chars.is_empty() {
+            let in_set = self.stage.from_chars.contains(&ch);
+            let keep = if self.stage.complement {
+                in_set
+            } else {
+                !in_set
+            };
+            if !keep {
+                return;
+            }
+            if self.stage.to_chars.contains(&ch) && self.prev == Some(ch) {
+                return;
+            }
+            self.emit_char(ch);
+            return;
+        }
+
+        if self.stage.delete {
+            let in_set = self.stage.from_chars.contains(&ch);
+            let keep = if self.stage.complement {
+                in_set
+            } else {
+                !in_set
+            };
+            if keep {
+                self.emit_char(ch);
+            }
+            return;
+        }
+
+        if self.stage.squeeze && self.stage.to_chars.is_empty() {
+            if self.stage.from_chars.contains(&ch) && self.prev == Some(ch) {
+                return;
+            }
+            self.emit_char(ch);
+            return;
+        }
+
+        let from_set = if self.stage.complement {
+            (0u8..=127)
+                .map(|b| b as char)
+                .filter(|candidate| !self.stage.from_chars.contains(candidate))
+                .collect::<Vec<_>>()
+        } else {
+            self.stage.from_chars.clone()
+        };
+        let translated = if let Some(pos) = from_set.iter().position(|&source| source == ch) {
+            self.stage
+                .to_chars
+                .get(pos)
+                .or(self.stage.to_chars.last())
+                .copied()
+                .unwrap_or(ch)
+        } else {
+            ch
+        };
+        if self.stage.squeeze
+            && self.stage.to_chars.contains(&translated)
+            && self.prev == Some(translated)
+        {
+            return;
+        }
+        self.emit_char(translated);
+    }
+}
+
+impl<R: Read> Read for TrStreamReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let copied =
+                take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
+            if copied > 0 {
+                return Ok(copied);
+            }
+            if self.finished {
+                return Ok(0);
+            }
+
+            let mut scratch = [0u8; 4096];
+            let read = self.inner.read(&mut scratch)?;
+            if read == 0 {
+                let mut pending = std::mem::take(&mut self.input_pending);
+                let mut chars = Vec::new();
+                streaming_tr_flush_pending_lossy(&mut pending, |ch| chars.push(ch));
+                self.input_pending = pending;
+                for ch in chars {
+                    self.process_char(ch);
+                }
+                self.finished = true;
+                continue;
+            }
+            let mut pending = std::mem::take(&mut self.input_pending);
+            let mut chars = Vec::new();
+            streaming_tr_process_utf8_chunk(&mut pending, &scratch[..read], |ch| chars.push(ch));
+            self.input_pending = pending;
+            for ch in chars {
+                self.process_char(ch);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum PendingInput {
+    Bytes(Vec<u8>),
+    File {
+        path: String,
+        remove_after_read: bool,
+    },
 }
 
 /// Result from an external command handler.
@@ -104,12 +3400,53 @@ pub struct ExternalCommandResult {
     pub status: i32,
 }
 
+pub struct ExternalCommandStdin<'a> {
+    reader: Box<dyn Read + 'a>,
+}
+
+impl std::fmt::Debug for ExternalCommandStdin<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalCommandStdin")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> ExternalCommandStdin<'a> {
+    #[must_use]
+    pub fn from_bytes(data: &'a [u8]) -> Self {
+        Self {
+            reader: Box::new(Cursor::new(data)),
+        }
+    }
+
+    #[must_use]
+    pub fn from_reader<R>(reader: R) -> Self
+    where
+        R: Read + 'a,
+    {
+        Self {
+            reader: Box::new(reader),
+        }
+    }
+
+    pub fn read_chunk(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.reader.read(buf)
+    }
+}
+
+impl Read for ExternalCommandStdin<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.read_chunk(buf)
+    }
+}
+
 /// Callback type for external (host-provided) commands.
 ///
 /// Called with `(command_name, argv, stdin)`. Returns `Some(result)` if
 /// the command was handled, `None` to fall through to "command not found".
-pub type ExternalCommandHandler =
-    Box<dyn FnMut(&str, &[String], Option<&[u8]>) -> Option<ExternalCommandResult>>;
+pub type ExternalCommandHandler = Box<
+    dyn FnMut(&str, &[String], Option<ExternalCommandStdin<'_>>) -> Option<ExternalCommandResult>,
+>;
 
 /// The worker-side runtime that processes host commands.
 #[allow(missing_debug_implementations)]
@@ -120,8 +3457,13 @@ pub struct WorkerRuntime {
     utils: UtilRegistry,
     builtins: wasmsh_builtins::BuiltinRegistry,
     initialized: bool,
-    /// Pending stdin data for the next command (from here-doc or pipe).
-    pending_stdin: Option<Vec<u8>>,
+    /// Pending stdin source for the next command (from here-doc, redirect, or pipe).
+    pending_stdin: Option<PendingInput>,
+    live_redirections: Vec<LiveRedirectionScope>,
+    /// Deferred `>(...)` sinks scoped to the currently executing command.
+    proc_subst_out_scopes: Vec<Vec<PendingProcessSubstOut>>,
+    /// Deferred `<(...)` cleanup and stderr flush scoped to the current command.
+    proc_subst_in_scopes: Vec<Vec<PendingProcessSubstIn>>,
     /// Registered shell functions (name → HIR body).
     functions: IndexMap<String, HirCommand>,
     /// Transient execution state (loop control, exit, locals).
@@ -139,6 +3481,58 @@ enum ArrayCharAction {
     Append(char),
     Skip,
     SplitField,
+}
+
+enum StreamingPipelineStage {
+    Literal(Vec<u8>),
+    File(String),
+    Yes { line: Vec<u8> },
+    BufferedCommand(BufferedPipelineCommand),
+    Cat,
+    Head(StreamingHeadMode),
+    Tail(StreamingTailMode),
+    Bat(StreamingBatStage),
+    Sed(StreamingSedStage),
+    Tee(StreamingTeeStage),
+    Paste(StreamingPasteStage),
+    Column(StreamingColumnStage),
+    Grep(StreamingGrepStage),
+    Uniq(StreamingUniqFlags),
+    Rev,
+    Cut(StreamingCutStage),
+    Tr(StreamingTrStage),
+    Wc(StreamingWcFlags),
+}
+
+#[derive(Clone, Debug)]
+enum StreamingCutMode {
+    Fields(Vec<StreamingCutRange>),
+    Chars(Vec<StreamingCutRange>),
+    Bytes(Vec<StreamingCutRange>),
+}
+
+#[derive(Clone, Debug)]
+struct StreamingCutStage {
+    mode: StreamingCutMode,
+    delim: char,
+    complement: bool,
+    only_delimited: bool,
+    output_delim: String,
+}
+
+#[derive(Clone, Debug)]
+struct StreamingCutRange {
+    start: Option<usize>,
+    end: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct StreamingTrStage {
+    delete: bool,
+    squeeze: bool,
+    complement: bool,
+    from_chars: Vec<char>,
+    to_chars: Vec<char>,
 }
 
 /// Quoting state for parsing array elements.
@@ -237,6 +3631,9 @@ impl WorkerRuntime {
             builtins: wasmsh_builtins::BuiltinRegistry::new(),
             initialized: false,
             pending_stdin: None,
+            live_redirections: Vec::new(),
+            proc_subst_out_scopes: Vec::new(),
+            proc_subst_in_scopes: Vec::new(),
             functions: IndexMap::new(),
             exec: ExecState::new(),
             aliases: IndexMap::new(),
@@ -270,12 +3667,18 @@ impl WorkerRuntime {
                 self.vm = Vm::new(ShellState::new(), step_budget);
                 self.fs = BackendFs::new();
                 self.pending_stdin = None;
+                self.live_redirections.clear();
+                self.proc_subst_out_scopes.clear();
+                self.proc_subst_in_scopes.clear();
                 self.functions = IndexMap::new();
                 self.exec.reset();
                 self.aliases = IndexMap::new();
                 self.initialized = true;
                 // Set default shopt options (bash defaults)
                 self.vm.state.set_var("SHOPT_extglob".into(), "1".into());
+                self.vm
+                    .state
+                    .set_var("SHOPT_expand_aliases".into(), "1".into());
                 vec![WorkerEvent::Version(PROTOCOL_VERSION.to_string())]
             }
             HostCommand::Run { input } => {
@@ -322,9 +3725,7 @@ impl WorkerRuntime {
                 match self.fs.open(&path, OpenOptions::write()) {
                     Ok(h) => {
                         if let Err(e) = self.fs.write_file(h, &data) {
-                            self.vm.stderr.extend_from_slice(
-                                format!("wasmsh: write error: {e}\n").as_bytes(),
-                            );
+                            self.write_stderr(format!("wasmsh: write error: {e}\n").as_bytes());
                         }
                         self.fs.close(h);
                         vec![WorkerEvent::FsChanged(path)]
@@ -431,7 +3832,6 @@ impl WorkerRuntime {
         self.run_exit_trap_if_needed(&mut events);
         self.drain_io_events(&mut events);
         self.drain_diagnostic_events(&mut events);
-        self.push_output_limit_warning(&mut events);
 
         let exit_status = if self.exec.resource_exhausted {
             // Resource exhaustion (step budget, output limit, cancellation)
@@ -494,6 +3894,182 @@ impl WorkerRuntime {
         });
     }
 
+    fn push_output_capture(&mut self, capture_stdout: bool, capture_stderr: bool) {
+        self.exec.output_captures.push(OutputCapture {
+            capture_stdout,
+            capture_stderr,
+            ..OutputCapture::default()
+        });
+    }
+
+    fn pop_output_capture(&mut self) -> CapturedOutput {
+        let capture = self
+            .exec
+            .output_captures
+            .pop()
+            .expect("output capture stack underflow");
+        CapturedOutput {
+            stdout: capture.stdout,
+            stderr: capture.stderr,
+        }
+    }
+
+    fn with_output_capture<T>(
+        &mut self,
+        capture_stdout: bool,
+        capture_stderr: bool,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> (T, CapturedOutput) {
+        self.push_output_capture(capture_stdout, capture_stderr);
+        let result = f(self);
+        let captured = self.pop_output_capture();
+        (result, captured)
+    }
+
+    fn with_live_redirection_scope<T>(
+        &mut self,
+        scope: Option<LiveRedirectionScope>,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        if let Some(scope) = scope {
+            self.live_redirections.push(scope);
+            let result = f(self);
+            self.live_redirections.pop();
+            result
+        } else {
+            f(self)
+        }
+    }
+
+    fn append_visible_output_direct(&mut self, data: &[u8], stdout: bool) {
+        if stdout {
+            self.vm.stdout.extend_from_slice(data);
+        } else {
+            self.vm.stderr.extend_from_slice(data);
+        }
+    }
+
+    fn write_output_destination_direct(
+        &mut self,
+        destination: &OutputDestination,
+        data: &[u8],
+    ) -> bool {
+        match destination {
+            OutputDestination::VisibleStdout => {
+                self.append_visible_output_direct(data, true);
+                true
+            }
+            OutputDestination::VisibleStderr => {
+                self.append_visible_output_direct(data, false);
+                true
+            }
+            OutputDestination::File { path, sink } => {
+                if let Err(err) = sink.borrow_mut().write(data) {
+                    let msg = format!("wasmsh: write error: {err}\n");
+                    self.emit_visible_stderr_direct(msg.as_bytes());
+                    self.vm.diagnostics.push(wasmsh_vm::DiagnosticEvent {
+                        level: wasmsh_vm::DiagLevel::Error,
+                        category: wasmsh_vm::DiagCategory::Filesystem,
+                        message: format!("write failed for {path}: {err}"),
+                    });
+                }
+                false
+            }
+            OutputDestination::ProcessSubst { path } => {
+                if let Some(sink) = self.process_subst_out_sink_mut(path) {
+                    sink.write(data);
+                } else {
+                    let msg = format!("wasmsh: {path}: process substitution sink not found\n");
+                    self.emit_visible_stderr_direct(msg.as_bytes());
+                }
+                false
+            }
+        }
+    }
+
+    fn emit_visible_stderr_direct(&mut self, data: &[u8]) {
+        self.append_visible_output_direct(data, false);
+        self.account_output(data.len());
+    }
+
+    fn route_output(&mut self, data: &[u8], stdout: bool) -> bool {
+        let mut routed_stdout = stdout;
+        if let Some(scope) = self.live_redirections.last().cloned() {
+            let destination = if stdout { scope.stdout } else { scope.stderr };
+            match destination {
+                OutputDestination::VisibleStdout => {
+                    routed_stdout = true;
+                }
+                OutputDestination::VisibleStderr => {
+                    routed_stdout = false;
+                }
+                OutputDestination::File { .. } | OutputDestination::ProcessSubst { .. } => {
+                    return self.write_output_destination_direct(&destination, data);
+                }
+            }
+        }
+
+        for capture in self.exec.output_captures.iter_mut().rev() {
+            let should_capture = if routed_stdout {
+                capture.capture_stdout
+            } else {
+                capture.capture_stderr
+            };
+            if !should_capture {
+                continue;
+            }
+            if routed_stdout {
+                capture.stdout.extend_from_slice(data);
+            } else {
+                capture.stderr.extend_from_slice(data);
+            }
+            return false;
+        }
+
+        if routed_stdout {
+            self.vm.stdout.extend_from_slice(data);
+        } else {
+            self.vm.stderr.extend_from_slice(data);
+        }
+        true
+    }
+
+    fn account_output(&mut self, bytes: usize) {
+        self.vm.track_output(bytes as u64);
+        self.flag_output_limit_if_needed();
+    }
+
+    fn write_stdout(&mut self, data: &[u8]) {
+        if self.route_output(data, true) {
+            self.account_output(data.len());
+        }
+    }
+
+    fn write_stderr(&mut self, data: &[u8]) {
+        if self.route_output(data, false) {
+            self.account_output(data.len());
+        }
+    }
+
+    fn write_streams(&mut self, stdout: &[u8], stderr: &[u8]) {
+        let visible_stdout = self.route_output(stdout, true);
+        let visible_stderr = self.route_output(stderr, false);
+        let visible_bytes =
+            usize::from(visible_stdout) * stdout.len() + usize::from(visible_stderr) * stderr.len();
+        if visible_bytes > 0 {
+            self.account_output(visible_bytes);
+        }
+    }
+
+    fn flag_output_limit_if_needed(&mut self) {
+        if self.exec.resource_exhausted {
+            return;
+        }
+        if self.vm.check_output_limit().is_err() {
+            self.exec.resource_exhausted = true;
+        }
+    }
+
     fn drain_diagnostic_events(&mut self, events: &mut Vec<WorkerEvent>) {
         for diag in self.vm.diagnostics.drain(..) {
             events.push(WorkerEvent::Diagnostic(
@@ -510,22 +4086,6 @@ impl WorkerRuntime {
             wasmsh_vm::DiagLevel::Warning => DiagnosticLevel::Warning,
             wasmsh_vm::DiagLevel::Error => DiagnosticLevel::Error,
         }
-    }
-
-    fn push_output_limit_warning(&self, events: &mut Vec<WorkerEvent>) {
-        if self.vm.limits.output_byte_limit == 0
-            || self.vm.output_bytes <= self.vm.limits.output_byte_limit
-        {
-            return;
-        }
-
-        events.push(WorkerEvent::Diagnostic(
-            DiagnosticLevel::Error,
-            format!(
-                "output limit exceeded: {} bytes (limit: {}); execution aborted",
-                self.vm.output_bytes, self.vm.limits.output_byte_limit
-            ),
-        ));
     }
 
     fn execute_pipeline_chain(&mut self, and_or: &HirAndOr) {
@@ -548,69 +4108,1345 @@ impl WorkerRuntime {
 
     fn execute_pipeline(&mut self, pipeline: &HirPipeline) {
         let cmds = &pipeline.commands;
-        if cmds.len() == 1 {
-            self.execute_single_pipeline(&cmds[0]);
-        } else {
-            self.execute_multi_pipeline(cmds, pipeline);
-        }
+        self.execute_scheduled_pipeline(cmds, pipeline);
         if pipeline.negated {
             self.vm.state.last_status = i32::from(self.vm.state.last_status == 0);
         }
     }
 
-    fn execute_single_pipeline(&mut self, cmd: &HirCommand) {
-        self.execute_command(cmd);
-        self.set_pipestatus(&[self.vm.state.last_status]);
+    fn execute_scheduled_pipeline(&mut self, cmds: &[HirCommand], pipeline: &HirPipeline) {
+        self.execute_scheduled_pipeline_with_source_reader(cmds, pipeline, None);
     }
 
-    fn execute_multi_pipeline(&mut self, cmds: &[HirCommand], pipeline: &HirPipeline) {
+    fn execute_scheduled_pipeline_with_source_reader(
+        &mut self,
+        cmds: &[HirCommand],
+        pipeline: &HirPipeline,
+        source_reader: Option<Box<dyn Read>>,
+    ) {
         let pipefail = self.vm.state.get_var("SHOPT_o_pipefail").as_deref() == Some("1");
-        let mut rightmost_failure: i32 = 0;
-        let mut statuses: Vec<i32> = Vec::new();
-
-        for (i, cmd) in cmds.iter().enumerate() {
-            let is_last = i == cmds.len() - 1;
-            let stdout_before = self.vm.stdout.len();
-            let stderr_before = self.vm.stderr.len();
-
-            self.execute_command(cmd);
-            statuses.push(self.vm.state.last_status);
-
-            if pipefail && self.vm.state.last_status != 0 {
-                rightmost_failure = self.vm.state.last_status;
+        let stages: Vec<StreamingPipelineStage> = cmds
+            .iter()
+            .enumerate()
+            .map(|(idx, cmd)| self.compile_pipeline_stage(cmd, idx == 0 && source_reader.is_none()))
+            .collect();
+        if source_reader.is_none() && stages.len() == 1 {
+            if !matches!(stages[0], StreamingPipelineStage::BufferedCommand(_))
+                && !Self::command_requires_runtime_expansion(&cmds[0])
+            {
+                if let Some(argv) = self.resolve_streaming_pipeline_argv(&cmds[0]) {
+                    self.trace_command(&argv);
+                }
             }
-
-            if !is_last {
-                self.pipe_stage_output(
-                    stdout_before,
-                    stderr_before,
-                    pipeline.pipe_stderr.get(i).copied().unwrap_or(false),
-                );
+            let status = self.execute_scheduled_single_stage(&stages[0]);
+            self.set_pipestatus(&[status]);
+            if !self.exec.resource_exhausted {
+                self.vm.state.last_status = status;
             }
+            return;
         }
+        let stage_statuses: Vec<Rc<RefCell<i32>>> = stages
+            .iter()
+            .map(|stage| {
+                Rc::new(RefCell::new(
+                    if matches!(stage, StreamingPipelineStage::Grep(_)) {
+                        1
+                    } else {
+                        0
+                    },
+                ))
+            })
+            .collect();
+        let stage_stderr: Vec<Rc<RefCell<Vec<u8>>>> = stages
+            .iter()
+            .map(|_| Rc::new(RefCell::new(Vec::new())))
+            .collect();
+        let stage_pipe_stderr: Vec<bool> = (0..stages.len())
+            .map(|idx| pipeline.pipe_stderr.get(idx).copied().unwrap_or(false))
+            .collect();
 
+        self.execute_pipebuffer_streaming_pipeline(
+            source_reader,
+            &stages,
+            &stage_pipe_stderr,
+            &stage_statuses,
+            &stage_stderr,
+        );
+
+        let statuses: Vec<i32> = stage_statuses
+            .iter()
+            .map(|status| *status.borrow())
+            .collect();
         self.set_pipestatus(&statuses);
-        if pipefail && rightmost_failure != 0 {
-            self.vm.state.last_status = rightmost_failure;
+        if !self.exec.resource_exhausted {
+            if pipefail {
+                self.vm.state.last_status = statuses
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|status| *status != 0)
+                    .unwrap_or(0);
+            } else {
+                self.vm.state.last_status = statuses.last().copied().unwrap_or(0);
+            }
         }
     }
 
-    fn pipe_stage_output(&mut self, stdout_before: usize, stderr_before: usize, pipe_stderr: bool) {
-        use wasmsh_vm::pipe::PipeBuffer;
+    fn execute_scheduled_single_stage(&mut self, stage: &StreamingPipelineStage) -> i32 {
+        match stage {
+            StreamingPipelineStage::Literal(data) => {
+                self.write_stdout(data);
+                0
+            }
+            StreamingPipelineStage::File(path) => {
+                let resolved = self.resolve_cwd_path(path);
+                let Ok(mut reader) = self.open_streaming_file_reader(&resolved, "cat") else {
+                    return self.vm.state.last_status;
+                };
+                let mut buffer = [0u8; 4096];
+                loop {
+                    match reader.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            self.write_stdout(&buffer[..read]);
+                            if self.exec.resource_exhausted {
+                                return 1;
+                            }
+                        }
+                        Err(err) => {
+                            self.write_stderr(
+                                format!("wasmsh: cat: stdin read error: {err}\n").as_bytes(),
+                            );
+                            return 1;
+                        }
+                    }
+                }
+                0
+            }
+            StreamingPipelineStage::Yes { line } => {
+                for _ in 0..STREAMING_YES_MAX_LINES {
+                    self.write_stdout(line);
+                    if self.exec.resource_exhausted {
+                        return 1;
+                    }
+                }
+                0
+            }
+            StreamingPipelineStage::BufferedCommand(BufferedPipelineCommand::Argv(argv)) => {
+                let cmd_name = argv.first().map(String::as_str).unwrap_or("command");
+                self.trace_command(argv);
+                if self.try_runtime_command(cmd_name, argv) {
+                    return self.vm.state.last_status;
+                }
+                self.dispatch_command(cmd_name, argv);
+                self.vm.state.last_status
+            }
+            StreamingPipelineStage::BufferedCommand(BufferedPipelineCommand::Hir(cmd)) => {
+                self.execute_command(cmd);
+                self.vm.state.last_status
+            }
+            _ => {
+                self.vm.state.last_status = 1;
+                self.write_stderr(b"wasmsh: unsupported single-stage scheduler node\n");
+                1
+            }
+        }
+    }
 
-        let mut stage_output = self.vm.stdout[stdout_before..].to_vec();
-        self.vm.stdout.truncate(stdout_before);
+    fn compile_pipeline_stage(
+        &mut self,
+        cmd: &HirCommand,
+        is_first: bool,
+    ) -> StreamingPipelineStage {
+        if let Some(argv) = self.resolve_streaming_pipeline_argv(cmd) {
+            if self.get_shopt_value("expand_aliases")
+                && argv
+                    .first()
+                    .is_some_and(|name| self.aliases.contains_key(name))
+            {
+                return StreamingPipelineStage::BufferedCommand(BufferedPipelineCommand::Hir(
+                    cmd.clone(),
+                ));
+            }
+            if argv
+                .first()
+                .is_some_and(|name| self.functions.contains_key(name))
+            {
+                return StreamingPipelineStage::BufferedCommand(BufferedPipelineCommand::Argv(
+                    argv,
+                ));
+            }
+            if let Some(stage) = self.parse_streaming_stage(&argv, is_first) {
+                if Self::uses_native_pipe_scheduler(&stage) {
+                    return stage;
+                }
+                return StreamingPipelineStage::BufferedCommand(BufferedPipelineCommand::Argv(
+                    argv,
+                ));
+            }
+            return StreamingPipelineStage::BufferedCommand(BufferedPipelineCommand::Hir(
+                cmd.clone(),
+            ));
+        }
+        StreamingPipelineStage::BufferedCommand(BufferedPipelineCommand::Hir(cmd.clone()))
+    }
 
-        if pipe_stderr {
-            let stage_stderr = self.vm.stderr[stderr_before..].to_vec();
-            self.vm.stderr.truncate(stderr_before);
-            stage_output.extend_from_slice(&stage_stderr);
+    fn uses_native_pipe_scheduler(stage: &StreamingPipelineStage) -> bool {
+        !matches!(stage, StreamingPipelineStage::BufferedCommand(_))
+    }
+
+    fn execute_pipebuffer_streaming_pipeline(
+        &mut self,
+        source_reader: Option<Box<dyn Read>>,
+        stages: &[StreamingPipelineStage],
+        stage_pipe_stderr: &[bool],
+        stage_statuses: &[Rc<RefCell<i32>>],
+        stage_stderr: &[Rc<RefCell<Vec<u8>>>],
+    ) -> bool {
+        let mut processes = Vec::new();
+        let output_pipes: Vec<Rc<RefCell<PipeBuffer>>> = (0..stages.len())
+            .map(|_| Rc::new(RefCell::new(PipeBuffer::new(PIPEBUFFER_STREAMING_CAPACITY))))
+            .collect();
+        if let Some(source_reader) = source_reader {
+            let source_pipe = Rc::new(RefCell::new(PipeBuffer::new(PIPEBUFFER_STREAMING_CAPACITY)));
+            let source_stderr = Rc::new(RefCell::new(Vec::new()));
+            let source_status = Rc::new(RefCell::new(0));
+            processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                source_reader,
+                source_pipe.clone(),
+                source_stderr,
+                source_status,
+                "source",
+                false,
+            )));
+            match &stages[0] {
+                StreamingPipelineStage::Tee(stage) => {
+                    let reader = Box::new(PipeReader::new(source_pipe)) as Box<dyn Read>;
+                    processes.push(StreamingPipeProcess::Tee(TeePipeProcess::new(
+                        reader,
+                        output_pipes[0].clone(),
+                        &mut self.fs,
+                        self.vm.state.cwd.as_str(),
+                        stage,
+                        stage_stderr[0].clone(),
+                        stage_statuses[0].clone(),
+                        stage_pipe_stderr[0],
+                    )));
+                }
+                StreamingPipelineStage::BufferedCommand(argv) => {
+                    processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
+                        Some(source_pipe),
+                        output_pipes[0].clone(),
+                        argv.clone(),
+                        stage_pipe_stderr[0],
+                        stage_stderr[0].clone(),
+                        stage_statuses[0].clone(),
+                    )));
+                }
+                _ => {
+                    let reader = Box::new(PipeReader::new(source_pipe)) as Box<dyn Read>;
+                    let Some(stage_reader) =
+                        Self::wrap_non_tee_streaming_stage(reader, &stages[0], 0, stage_statuses)
+                    else {
+                        return false;
+                    };
+                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                        stage_reader,
+                        output_pipes[0].clone(),
+                        stage_stderr[0].clone(),
+                        stage_statuses[0].clone(),
+                        "stage",
+                        stage_pipe_stderr[0],
+                    )));
+                }
+            }
+        } else {
+            match &stages[0] {
+                StreamingPipelineStage::Literal(data) => {
+                    let first_reader: Box<dyn Read + '_> = Box::new(Cursor::new(data.clone()));
+                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                        first_reader,
+                        output_pipes[0].clone(),
+                        stage_stderr[0].clone(),
+                        stage_statuses[0].clone(),
+                        "source",
+                        stage_pipe_stderr[0],
+                    )));
+                }
+                StreamingPipelineStage::File(path) => {
+                    let resolved = self.resolve_cwd_path(path);
+                    let first_reader = match self.open_streaming_file_reader(&resolved, "cat") {
+                        Ok(reader) => reader,
+                        Err(_) => {
+                            *stage_statuses[0].borrow_mut() = self.vm.state.last_status;
+                            return true;
+                        }
+                    };
+                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                        first_reader,
+                        output_pipes[0].clone(),
+                        stage_stderr[0].clone(),
+                        stage_statuses[0].clone(),
+                        "source",
+                        stage_pipe_stderr[0],
+                    )));
+                }
+                StreamingPipelineStage::Yes { line } => {
+                    let first_reader: Box<dyn Read + '_> =
+                        Box::new(YesStreamReader::new(line.clone(), STREAMING_YES_MAX_LINES));
+                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                        first_reader,
+                        output_pipes[0].clone(),
+                        stage_stderr[0].clone(),
+                        stage_statuses[0].clone(),
+                        "source",
+                        stage_pipe_stderr[0],
+                    )));
+                }
+                StreamingPipelineStage::BufferedCommand(argv) => {
+                    processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
+                        None,
+                        output_pipes[0].clone(),
+                        argv.clone(),
+                        stage_pipe_stderr[0],
+                        stage_stderr[0].clone(),
+                        stage_statuses[0].clone(),
+                    )));
+                }
+                _ => unreachable!("unexpected first pipeline stage"),
+            }
         }
 
-        let mut pipe = PipeBuffer::default_size();
-        pipe.write_all(&stage_output);
-        pipe.close_write();
-        self.pending_stdin = Some(pipe.drain());
+        for idx in 1..stages.len() {
+            match &stages[idx] {
+                StreamingPipelineStage::Head(mode) => {
+                    processes.push(StreamingPipeProcess::Head(HeadPipeProcess::new(
+                        output_pipes[idx - 1].clone(),
+                        output_pipes[idx].clone(),
+                        *mode,
+                    )));
+                }
+                StreamingPipelineStage::Tee(stage) => {
+                    let reader =
+                        Box::new(PipeReader::new(output_pipes[idx - 1].clone())) as Box<dyn Read>;
+                    processes.push(StreamingPipeProcess::Tee(TeePipeProcess::new(
+                        reader,
+                        output_pipes[idx].clone(),
+                        &mut self.fs,
+                        self.vm.state.cwd.as_str(),
+                        stage,
+                        stage_stderr[idx].clone(),
+                        stage_statuses[idx].clone(),
+                        stage_pipe_stderr[idx],
+                    )));
+                }
+                StreamingPipelineStage::BufferedCommand(argv) => {
+                    processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
+                        Some(output_pipes[idx - 1].clone()),
+                        output_pipes[idx].clone(),
+                        argv.clone(),
+                        stage_pipe_stderr[idx],
+                        stage_stderr[idx].clone(),
+                        stage_statuses[idx].clone(),
+                    )));
+                }
+                _ => {
+                    let reader =
+                        Box::new(PipeReader::new(output_pipes[idx - 1].clone())) as Box<dyn Read>;
+                    let Some(stage_reader) = Self::wrap_non_tee_streaming_stage(
+                        reader,
+                        &stages[idx],
+                        idx,
+                        stage_statuses,
+                    ) else {
+                        return false;
+                    };
+                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                        stage_reader,
+                        output_pipes[idx].clone(),
+                        stage_stderr[idx].clone(),
+                        stage_statuses[idx].clone(),
+                        "stage",
+                        stage_pipe_stderr[idx],
+                    )));
+                }
+            }
+        }
+        let final_pipe = output_pipes
+            .last()
+            .cloned()
+            .expect("final pipe missing for streaming pipeline");
+
+        let mut finished = vec![false; processes.len()];
+        loop {
+            if self.check_resource_limits() {
+                final_pipe.borrow_mut().close_read();
+                break;
+            }
+
+            let mut progressed = false;
+            for idx in (0..processes.len()).rev() {
+                if finished[idx] {
+                    continue;
+                }
+                match processes[idx].poll(self) {
+                    PipeProcessPoll::Ready => progressed = true,
+                    PipeProcessPoll::PendingRead | PipeProcessPoll::PendingWrite => {}
+                    PipeProcessPoll::Exited => {
+                        finished[idx] = true;
+                        progressed = true;
+                    }
+                }
+            }
+
+            loop {
+                let mut buffer = [0u8; 4096];
+                let read_result = {
+                    let mut pipe = final_pipe.borrow_mut();
+                    pipe.read(&mut buffer)
+                };
+                match read_result {
+                    ReadResult::Read(read) => {
+                        self.write_stdout(&buffer[..read]);
+                        progressed = true;
+                        if self.exec.resource_exhausted {
+                            final_pipe.borrow_mut().close_read();
+                            break;
+                        }
+                    }
+                    ReadResult::WouldBlock | ReadResult::Eof => break,
+                }
+            }
+
+            if self.exec.resource_exhausted {
+                break;
+            }
+
+            if finished.iter().all(|done| *done) {
+                break;
+            }
+            if !progressed {
+                break;
+            }
+        }
+
+        for process in &mut processes {
+            process.close(self);
+        }
+
+        for (idx, stderr) in stage_stderr.iter().enumerate() {
+            if stage_pipe_stderr[idx] {
+                continue;
+            }
+            let data = stderr.borrow();
+            if !data.is_empty() {
+                self.write_stderr(&data);
+            }
+        }
+        true
+    }
+
+    fn wrap_non_tee_streaming_stage<'a>(
+        reader: Box<dyn Read + 'a>,
+        stage: &StreamingPipelineStage,
+        idx: usize,
+        stage_statuses: &[Rc<RefCell<i32>>],
+    ) -> Option<Box<dyn Read + 'a>> {
+        match stage {
+            StreamingPipelineStage::Cat => Some(reader),
+            StreamingPipelineStage::Head(mode) => Some(match mode {
+                StreamingHeadMode::Lines(limit) => Box::new(HeadStreamReader::new(
+                    reader,
+                    StreamingHeadMode::Lines(*limit),
+                )),
+                StreamingHeadMode::Bytes(limit) => Box::new(HeadStreamReader::new(
+                    reader,
+                    StreamingHeadMode::Bytes(*limit),
+                )),
+            }),
+            StreamingPipelineStage::Tail(mode) => Some(match mode {
+                StreamingTailMode::Lines(limit) => Box::new(TailStreamReader::new(
+                    reader,
+                    StreamingTailMode::Lines(*limit),
+                )),
+                StreamingTailMode::Bytes(limit) => Box::new(TailStreamReader::new(
+                    reader,
+                    StreamingTailMode::Bytes(*limit),
+                )),
+            }),
+            StreamingPipelineStage::Bat(stage) => {
+                Some(Box::new(BatStreamReader::new(reader, *stage)))
+            }
+            StreamingPipelineStage::Sed(stage) => {
+                Some(Box::new(SedStreamReader::new(reader, stage.clone())))
+            }
+            StreamingPipelineStage::Paste(stage) => {
+                Some(Box::new(PasteStreamReader::new(reader, stage.clone())))
+            }
+            StreamingPipelineStage::Column(_) => Some(Box::new(ColumnStreamReader::new(reader))),
+            StreamingPipelineStage::Grep(stage) => Some(Box::new(GrepStreamReader::new(
+                reader,
+                stage.clone(),
+                stage_statuses[idx].clone(),
+            ))),
+            StreamingPipelineStage::Uniq(flags) => {
+                Some(Box::new(UniqStreamReader::new(reader, flags.clone())))
+            }
+            StreamingPipelineStage::Rev => Some(Box::new(RevStreamReader::new(reader))),
+            StreamingPipelineStage::Cut(stage) => {
+                Some(Box::new(CutStreamReader::new(reader, stage.clone())))
+            }
+            StreamingPipelineStage::Tr(stage) => {
+                Some(Box::new(TrStreamReader::new(reader, stage.clone())))
+            }
+            StreamingPipelineStage::Wc(flags) => {
+                Some(Box::new(WcStreamReader::new(reader, *flags)))
+            }
+            StreamingPipelineStage::Tee(_)
+            | StreamingPipelineStage::Literal(_)
+            | StreamingPipelineStage::File(_)
+            | StreamingPipelineStage::Yes { .. }
+            | StreamingPipelineStage::BufferedCommand(_) => None,
+        }
+    }
+
+    fn resolve_streaming_pipeline_argv(&mut self, cmd: &HirCommand) -> Option<Vec<String>> {
+        let HirCommand::Exec(exec) = cmd else {
+            return None;
+        };
+        if !exec.env.is_empty() || !exec.redirections.is_empty() {
+            return None;
+        }
+        let resolved = self.resolve_command_subst(&exec.argv);
+        if self.exec.expansion_failed {
+            return None;
+        }
+        let expanded = expand_words_argv(&resolved, &mut self.vm.state);
+        if self.check_nounset_error() || expanded.is_empty() {
+            return None;
+        }
+        let tagged: Vec<(String, bool)> = expanded
+            .into_iter()
+            .flat_map(|ew| {
+                if ew.was_quoted {
+                    vec![(ew.text, true)]
+                } else {
+                    wasmsh_expand::expand_braces(&ew.text)
+                        .into_iter()
+                        .map(|s| (s, false))
+                        .collect()
+                }
+            })
+            .collect();
+        Some(self.expand_globs_tagged(tagged))
+    }
+
+    fn parse_streaming_stage(
+        &self,
+        argv: &[String],
+        is_first: bool,
+    ) -> Option<StreamingPipelineStage> {
+        let cmd_name = argv.first()?.as_str();
+        match cmd_name {
+            "echo" if is_first => Some(StreamingPipelineStage::Literal(
+                Self::streaming_echo_bytes(&argv[1..]),
+            )),
+            "yes" if is_first => {
+                let text = if argv.len() > 1 {
+                    argv[1..].join(" ")
+                } else {
+                    "y".to_string()
+                };
+                Some(StreamingPipelineStage::Yes {
+                    line: format!("{text}\n").into_bytes(),
+                })
+            }
+            "cat" => Self::parse_streaming_cat_stage(&argv[1..], is_first),
+            "head" if !is_first => Self::parse_streaming_head_stage(&argv[1..]),
+            "tail" if !is_first => Self::parse_streaming_tail_stage(&argv[1..]),
+            "bat" if !is_first => Self::parse_streaming_bat_stage(&argv[1..]),
+            "sed" if !is_first => Self::parse_streaming_sed_stage(&argv[1..]),
+            "tee" if !is_first => Self::parse_streaming_tee_stage(&argv[1..]),
+            "paste" if !is_first => Self::parse_streaming_paste_stage(&argv[1..]),
+            "column" if !is_first => Self::parse_streaming_column_stage(&argv[1..]),
+            "grep" if !is_first => Self::parse_streaming_grep_stage(&argv[1..]),
+            "uniq" if !is_first => Self::parse_streaming_uniq_stage(&argv[1..]),
+            "rev" if !is_first => Self::parse_streaming_rev_stage(&argv[1..]),
+            "cut" if !is_first => Self::parse_streaming_cut_stage(&argv[1..]),
+            "tr" if !is_first => Self::parse_streaming_tr_stage(&argv[1..]),
+            "wc" if !is_first => Self::parse_streaming_wc_stage(&argv[1..]),
+            _ if cmd_name == "bash"
+                || cmd_name == "sh"
+                || cmd_name == "builtin"
+                || self.functions.contains_key(cmd_name)
+                || self.builtins.is_builtin(cmd_name)
+                || self.utils.is_utility(cmd_name)
+                || self.external_handler.is_some() =>
+            {
+                Some(StreamingPipelineStage::BufferedCommand(
+                    BufferedPipelineCommand::Argv(argv.to_vec()),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn streaming_echo_bytes(args: &[String]) -> Vec<u8> {
+        let mut suppress_newline = false;
+        let mut interpret_escapes = false;
+        let mut start = 0usize;
+
+        for (i, arg) in args.iter().enumerate() {
+            let bytes = arg.as_bytes();
+            if bytes.first() != Some(&b'-') || bytes.len() < 2 {
+                break;
+            }
+            if !bytes[1..].iter().all(|b| matches!(b, b'n' | b'e')) {
+                break;
+            }
+            for &byte in &bytes[1..] {
+                match byte {
+                    b'n' => suppress_newline = true,
+                    b'e' => interpret_escapes = true,
+                    _ => {}
+                }
+            }
+            start = i + 1;
+        }
+
+        let text = args[start..].join(" ");
+        let rendered = if interpret_escapes {
+            Self::process_streaming_echo_escapes(&text)
+        } else {
+            text
+        };
+        let mut output = rendered.into_bytes();
+        if !suppress_newline {
+            output.push(b'\n');
+        }
+        output
+    }
+
+    fn process_streaming_echo_escapes(text: &str) -> String {
+        let bytes = text.as_bytes();
+        let mut output = String::new();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                match bytes[i + 1] {
+                    b'n' => output.push('\n'),
+                    b't' => output.push('\t'),
+                    b'r' => output.push('\r'),
+                    b'\\' => output.push('\\'),
+                    other => {
+                        output.push('\\');
+                        output.push(other as char);
+                    }
+                }
+                i += 2;
+            } else {
+                output.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        output
+    }
+
+    fn parse_streaming_cat_stage(
+        args: &[String],
+        is_first: bool,
+    ) -> Option<StreamingPipelineStage> {
+        let non_separator: Vec<&String> = args.iter().filter(|arg| arg.as_str() != "--").collect();
+        if non_separator.iter().any(|arg| arg.starts_with('-')) {
+            return None;
+        }
+        if is_first {
+            if non_separator.len() == 1 {
+                return Some(StreamingPipelineStage::File(non_separator[0].clone()));
+            }
+            return None;
+        }
+        Some(StreamingPipelineStage::Cat)
+    }
+
+    fn parse_streaming_head_stage(args: &[String]) -> Option<StreamingPipelineStage> {
+        let mut mode = StreamingHeadMode::Lines(10);
+        let mut files = Vec::new();
+        let mut i = 0usize;
+        while i < args.len() {
+            let arg = args[i].as_str();
+            if arg == "-c" && i + 1 < args.len() {
+                mode = StreamingHeadMode::Bytes(args[i + 1].parse().ok()?);
+                i += 2;
+            } else if arg == "-n" && i + 1 < args.len() {
+                mode = StreamingHeadMode::Lines(args[i + 1].parse().ok()?);
+                i += 2;
+            } else if arg.starts_with('-') && arg.len() > 1 && arg != "--" {
+                if let Ok(lines) = arg[1..].parse::<usize>() {
+                    mode = StreamingHeadMode::Lines(lines);
+                } else {
+                    return None;
+                }
+                i += 1;
+            } else if arg == "--" {
+                i += 1;
+            } else {
+                files.push(arg);
+                i += 1;
+            }
+        }
+        if files.is_empty() {
+            Some(StreamingPipelineStage::Head(mode))
+        } else {
+            None
+        }
+    }
+
+    fn parse_streaming_tail_stage(args: &[String]) -> Option<StreamingPipelineStage> {
+        let mut mode = StreamingTailMode::Lines(10);
+        let mut files = Vec::new();
+        let mut i = 0usize;
+        while i < args.len() {
+            let arg = args[i].as_str();
+            if arg == "-c" && i + 1 < args.len() {
+                mode = StreamingTailMode::Bytes(args[i + 1].parse().ok()?);
+                i += 2;
+            } else if arg == "-n" && i + 1 < args.len() {
+                let value = args[i + 1].as_str();
+                if value.starts_with('+') {
+                    return None;
+                }
+                mode = StreamingTailMode::Lines(value.parse().ok()?);
+                i += 2;
+            } else if arg == "-f" {
+                return None;
+            } else if arg.starts_with('-') && arg.len() > 1 && arg != "--" {
+                if let Ok(lines) = arg[1..].parse::<usize>() {
+                    mode = StreamingTailMode::Lines(lines);
+                } else {
+                    return None;
+                }
+                i += 1;
+            } else if arg == "--" {
+                i += 1;
+            } else {
+                files.push(arg);
+                i += 1;
+            }
+        }
+        if files.is_empty() {
+            Some(StreamingPipelineStage::Tail(mode))
+        } else {
+            None
+        }
+    }
+
+    fn parse_streaming_bat_stage(args: &[String]) -> Option<StreamingPipelineStage> {
+        let mut stage = StreamingBatStage {
+            show_numbers: true,
+            show_header: true,
+            line_range: None,
+            show_all: false,
+        };
+        let mut i = 0usize;
+        while i < args.len() {
+            let arg = args[i].as_str();
+            match arg {
+                "-n" | "--number" => {
+                    stage.show_numbers = true;
+                    i += 1;
+                }
+                "-p" | "--plain" => {
+                    stage.show_numbers = false;
+                    stage.show_header = false;
+                    i += 1;
+                }
+                "-A" | "--show-all" => {
+                    stage.show_all = true;
+                    i += 1;
+                }
+                "-r" | "--line-range" if i + 1 < args.len() => {
+                    stage.line_range = Self::parse_streaming_bat_range(&args[i + 1]);
+                    i += 2;
+                }
+                "-l" | "--language" | "--paging" if i + 1 < args.len() => {
+                    i += 2;
+                }
+                "--style=numbers" => {
+                    stage.show_numbers = true;
+                    stage.show_header = false;
+                    i += 1;
+                }
+                "--style=header" => {
+                    stage.show_numbers = false;
+                    stage.show_header = true;
+                    i += 1;
+                }
+                "--style=plain" => {
+                    stage.show_numbers = false;
+                    stage.show_header = false;
+                    i += 1;
+                }
+                value if value.starts_with("--style=") => {
+                    stage.show_numbers = true;
+                    stage.show_header = true;
+                    i += 1;
+                }
+                value if value.starts_with("--line-range=") => {
+                    stage.line_range =
+                        Self::parse_streaming_bat_range(&value["--line-range=".len()..]);
+                    i += 1;
+                }
+                value if value.starts_with("--paging=") || value.starts_with("--language=") => {
+                    i += 1;
+                }
+                value if value.starts_with('-') && value.len() > 1 && !value.starts_with("--") => {
+                    for ch in value[1..].chars() {
+                        match ch {
+                            'n' => stage.show_numbers = true,
+                            'p' => {
+                                stage.show_numbers = false;
+                                stage.show_header = false;
+                            }
+                            'A' => stage.show_all = true,
+                            _ => return None,
+                        }
+                    }
+                    i += 1;
+                }
+                "--" => {
+                    if i + 1 != args.len() {
+                        return None;
+                    }
+                    i += 1;
+                }
+                _ => return None,
+            }
+        }
+        Some(StreamingPipelineStage::Bat(stage))
+    }
+
+    fn parse_streaming_bat_range(s: &str) -> Option<(Option<usize>, Option<usize>)> {
+        if let Some((start, end)) = s.split_once(':') {
+            let start = if start.is_empty() {
+                None
+            } else {
+                start.parse().ok()
+            };
+            let end = if end.is_empty() {
+                None
+            } else {
+                end.parse().ok()
+            };
+            Some((start, end))
+        } else {
+            let n = s.parse().ok()?;
+            Some((Some(n), Some(n)))
+        }
+    }
+
+    fn parse_streaming_sed_stage(args: &[String]) -> Option<StreamingPipelineStage> {
+        let mut suppress_print = false;
+        let mut expressions = Vec::new();
+        let mut i = 0usize;
+        while i < args.len() {
+            let arg = args[i].as_str();
+            if arg == "-n" {
+                suppress_print = true;
+                i += 1;
+            } else if arg == "-e" && i + 1 < args.len() {
+                expressions.push(args[i + 1].clone());
+                i += 2;
+            } else if arg == "-E" || arg == "-r" {
+                i += 1;
+            } else if arg == "-f" || arg == "-i" || arg.starts_with("-i") {
+                return None;
+            } else if arg.starts_with('-') && arg.len() > 1 && arg != "--" {
+                return None;
+            } else if arg == "--" {
+                if i + 1 >= args.len() {
+                    break;
+                }
+                if expressions.is_empty() {
+                    expressions.push(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    return None;
+                }
+            } else if expressions.is_empty() {
+                expressions.push(args[i].clone());
+                i += 1;
+            } else {
+                return None;
+            }
+        }
+        if expressions.is_empty() {
+            return None;
+        }
+        let script = expressions.join(";");
+        let instructions = parse_streaming_sed_script(&script);
+        if instructions.is_empty() {
+            return None;
+        }
+        Some(StreamingPipelineStage::Sed(StreamingSedStage {
+            suppress_print,
+            instructions,
+        }))
+    }
+
+    fn parse_streaming_paste_stage(args: &[String]) -> Option<StreamingPipelineStage> {
+        let mut delimiter = "\t".to_string();
+        let mut serial = false;
+        let mut i = 0usize;
+        while i < args.len() {
+            let arg = args[i].as_str();
+            if arg == "-d" && i + 1 < args.len() {
+                delimiter = args[i + 1].clone();
+                i += 2;
+            } else if arg == "-s" {
+                serial = true;
+                i += 1;
+            } else if arg.starts_with('-') && arg.len() > 1 {
+                for ch in arg[1..].chars() {
+                    match ch {
+                        's' => serial = true,
+                        'd' => {
+                            if i + 1 < args.len() {
+                                delimiter = args[i + 1].clone();
+                                i += 1;
+                            } else {
+                                return None;
+                            }
+                        }
+                        _ => return None,
+                    }
+                }
+                i += 1;
+            } else if arg == "--" {
+                if i + 1 != args.len() {
+                    return None;
+                }
+                i += 1;
+            } else {
+                return None;
+            }
+        }
+        Some(StreamingPipelineStage::Paste(StreamingPasteStage {
+            delimiter,
+            serial,
+        }))
+    }
+
+    fn parse_streaming_tee_stage(args: &[String]) -> Option<StreamingPipelineStage> {
+        let mut append = false;
+        let mut paths = Vec::new();
+        let mut i = 0usize;
+        while i < args.len() {
+            let arg = args[i].as_str();
+            if arg == "-a" {
+                append = true;
+                i += 1;
+            } else if arg == "-i" {
+                i += 1;
+            } else if arg == "--" {
+                paths.extend(args[i + 1..].iter().cloned());
+                break;
+            } else if arg.starts_with('-') && arg.len() > 1 {
+                for ch in arg[1..].chars() {
+                    match ch {
+                        'a' => append = true,
+                        'i' => {}
+                        _ => return None,
+                    }
+                }
+                i += 1;
+            } else {
+                paths.push(args[i].clone());
+                i += 1;
+            }
+        }
+        Some(StreamingPipelineStage::Tee(StreamingTeeStage {
+            append,
+            paths,
+        }))
+    }
+
+    fn parse_streaming_column_stage(args: &[String]) -> Option<StreamingPipelineStage> {
+        let mut i = 0usize;
+        while i < args.len() {
+            let arg = args[i].as_str();
+            if arg == "-t" {
+                return None;
+            }
+            if arg == "-s" && i + 1 < args.len() {
+                return None;
+            }
+            if arg.starts_with('-') && arg.len() > 1 {
+                i += 1;
+            } else if arg == "--" {
+                if i + 1 != args.len() {
+                    return None;
+                }
+                i += 1;
+            } else {
+                return None;
+            }
+        }
+        Some(StreamingPipelineStage::Column(StreamingColumnStage))
+    }
+
+    fn parse_streaming_rev_stage(args: &[String]) -> Option<StreamingPipelineStage> {
+        if args.iter().all(|arg| arg == "--") {
+            Some(StreamingPipelineStage::Rev)
+        } else {
+            None
+        }
+    }
+
+    fn parse_streaming_grep_stage(args: &[String]) -> Option<StreamingPipelineStage> {
+        let mut flags = StreamingGrepFlags {
+            ignore_case: false,
+            invert: false,
+            count_only: false,
+            show_line_numbers: false,
+            files_only: false,
+            word_match: false,
+            only_matching: false,
+            quiet: false,
+            extended: false,
+            fixed: false,
+            after_context: 0,
+            before_context: 0,
+            max_count: None,
+            show_filename: None,
+        };
+        let mut patterns = Vec::new();
+        let mut rest = Vec::new();
+        let mut i = 0usize;
+        while i < args.len() {
+            let arg = args[i].as_str();
+            if arg == "--" {
+                rest.extend(args[i + 1..].iter().cloned());
+                break;
+            }
+            if arg.starts_with("--include=")
+                || arg.starts_with("--exclude=")
+                || arg == "--color"
+                || arg.starts_with("--color=")
+                || arg == "-r"
+                || arg == "-R"
+                || arg == "--recursive"
+            {
+                return None;
+            }
+            if arg == "-e" && i + 1 < args.len() {
+                patterns.push(args[i + 1].clone());
+                i += 2;
+                continue;
+            }
+            if arg == "-f" && i + 1 < args.len() {
+                return None;
+            }
+            if arg == "-A" && i + 1 < args.len() {
+                flags.after_context = args[i + 1].parse().ok()?;
+                i += 2;
+                continue;
+            }
+            if arg == "-B" && i + 1 < args.len() {
+                flags.before_context = args[i + 1].parse().ok()?;
+                i += 2;
+                continue;
+            }
+            if arg == "-C" && i + 1 < args.len() {
+                let n = args[i + 1].parse().ok()?;
+                flags.before_context = n;
+                flags.after_context = n;
+                i += 2;
+                continue;
+            }
+            if arg == "-m" && i + 1 < args.len() {
+                flags.max_count = args[i + 1].parse().ok();
+                i += 2;
+                continue;
+            }
+            if arg.starts_with('-') && arg.len() > 1 {
+                for ch in arg[1..].chars() {
+                    match ch {
+                        'i' => flags.ignore_case = true,
+                        'v' => flags.invert = true,
+                        'c' => flags.count_only = true,
+                        'n' => flags.show_line_numbers = true,
+                        'l' => flags.files_only = true,
+                        'E' | 'P' => flags.extended = true,
+                        'F' => flags.fixed = true,
+                        'w' => flags.word_match = true,
+                        'o' => flags.only_matching = true,
+                        'q' => flags.quiet = true,
+                        'h' => flags.show_filename = Some(false),
+                        'H' => flags.show_filename = Some(true),
+                        'z' => {}
+                        _ => return None,
+                    }
+                }
+                i += 1;
+            } else {
+                rest.push(args[i].clone());
+                i += 1;
+            }
+        }
+
+        let (patterns, file_args) = if patterns.is_empty() {
+            let first = rest.first()?.clone();
+            (vec![first], rest[1..].to_vec())
+        } else {
+            (patterns, rest)
+        };
+        if !file_args.is_empty() {
+            return None;
+        }
+        Some(StreamingPipelineStage::Grep(StreamingGrepStage {
+            flags,
+            patterns,
+        }))
+    }
+
+    fn parse_streaming_uniq_stage(args: &[String]) -> Option<StreamingPipelineStage> {
+        let mut flags = StreamingUniqFlags {
+            count: false,
+            duplicates_only: false,
+            unique_only: false,
+            ignore_case: false,
+            skip_fields: 0,
+            skip_chars: 0,
+            compare_chars: None,
+        };
+        let mut i = 0usize;
+        while i < args.len() {
+            let arg = args[i].as_str();
+            if arg == "-f" && i + 1 < args.len() {
+                flags.skip_fields = args[i + 1].parse().ok()?;
+                i += 2;
+            } else if arg == "-s" && i + 1 < args.len() {
+                flags.skip_chars = args[i + 1].parse().ok()?;
+                i += 2;
+            } else if arg == "-w" && i + 1 < args.len() {
+                flags.compare_chars = args[i + 1].parse().ok();
+                i += 2;
+            } else if arg.starts_with('-') && arg.len() > 1 && arg != "--" {
+                for ch in arg[1..].chars() {
+                    match ch {
+                        'c' => flags.count = true,
+                        'd' => flags.duplicates_only = true,
+                        'u' => flags.unique_only = true,
+                        'i' => flags.ignore_case = true,
+                        'z' => {}
+                        _ => return None,
+                    }
+                }
+                i += 1;
+            } else if arg == "--" {
+                i += 1;
+            } else {
+                return None;
+            }
+        }
+        Some(StreamingPipelineStage::Uniq(flags))
+    }
+
+    fn parse_streaming_cut_ranges(spec: &str) -> Vec<StreamingCutRange> {
+        spec.split(',')
+            .filter_map(|part| {
+                if let Some((start, end)) = part.split_once('-') {
+                    Some(StreamingCutRange {
+                        start: if start.is_empty() {
+                            None
+                        } else {
+                            start.parse().ok()
+                        },
+                        end: if end.is_empty() {
+                            None
+                        } else {
+                            end.parse().ok()
+                        },
+                    })
+                } else {
+                    let n: usize = part.parse().ok()?;
+                    Some(StreamingCutRange {
+                        start: Some(n),
+                        end: Some(n),
+                    })
+                }
+            })
+            .collect()
+    }
+
+    fn parse_streaming_cut_stage(args: &[String]) -> Option<StreamingPipelineStage> {
+        let mut delim = '\t';
+        let mut mode = None;
+        let mut complement = false;
+        let mut only_delimited = false;
+        let mut output_delim = None;
+        let mut i = 0usize;
+
+        while i < args.len() {
+            let arg = args[i].as_str();
+            if arg == "-d" && i + 1 < args.len() {
+                delim = args[i + 1].chars().next().unwrap_or('\t');
+                i += 2;
+            } else if arg.starts_with("-d") && arg.len() > 2 {
+                delim = arg[2..].chars().next().unwrap_or('\t');
+                i += 1;
+            } else if arg == "-f" && i + 1 < args.len() {
+                mode = Some(StreamingCutMode::Fields(Self::parse_streaming_cut_ranges(
+                    &args[i + 1],
+                )));
+                i += 2;
+            } else if let Some(spec) = arg.strip_prefix("-f") {
+                mode = Some(StreamingCutMode::Fields(Self::parse_streaming_cut_ranges(
+                    spec,
+                )));
+                i += 1;
+            } else if arg == "-c" && i + 1 < args.len() {
+                mode = Some(StreamingCutMode::Chars(Self::parse_streaming_cut_ranges(
+                    &args[i + 1],
+                )));
+                i += 2;
+            } else if let Some(spec) = arg.strip_prefix("-c") {
+                mode = Some(StreamingCutMode::Chars(Self::parse_streaming_cut_ranges(
+                    spec,
+                )));
+                i += 1;
+            } else if arg == "-b" && i + 1 < args.len() {
+                mode = Some(StreamingCutMode::Bytes(Self::parse_streaming_cut_ranges(
+                    &args[i + 1],
+                )));
+                i += 2;
+            } else if let Some(spec) = arg.strip_prefix("-b") {
+                mode = Some(StreamingCutMode::Bytes(Self::parse_streaming_cut_ranges(
+                    spec,
+                )));
+                i += 1;
+            } else if arg == "--complement" {
+                complement = true;
+                i += 1;
+            } else if arg == "-s" {
+                only_delimited = true;
+                i += 1;
+            } else if let Some(out) = arg.strip_prefix("--output-delimiter=") {
+                output_delim = Some(out.to_string());
+                i += 1;
+            } else if arg == "-z" || arg == "--" {
+                i += 1;
+            } else {
+                return None;
+            }
+        }
+
+        Some(StreamingPipelineStage::Cut(StreamingCutStage {
+            mode: mode?,
+            delim,
+            complement,
+            only_delimited,
+            output_delim: output_delim.unwrap_or_else(|| delim.to_string()),
+        }))
+    }
+
+    fn parse_streaming_tr_stage(args: &[String]) -> Option<StreamingPipelineStage> {
+        let mut delete = false;
+        let mut squeeze = false;
+        let mut complement = false;
+        let mut set_args = Vec::new();
+
+        for arg in args {
+            if arg.starts_with('-') && arg.len() > 1 {
+                for ch in arg[1..].chars() {
+                    match ch {
+                        'd' => delete = true,
+                        's' => squeeze = true,
+                        'c' | 'C' => complement = true,
+                        't' => {}
+                        _ => return None,
+                    }
+                }
+            } else {
+                set_args.push(arg.as_str());
+            }
+        }
+
+        if set_args.is_empty() {
+            return None;
+        }
+        let from_chars = streaming_tr_expand_set(set_args[0]);
+        if delete {
+            let to_chars = if squeeze && set_args.len() >= 2 {
+                streaming_tr_expand_set(set_args[1])
+            } else {
+                Vec::new()
+            };
+            return Some(StreamingPipelineStage::Tr(StreamingTrStage {
+                delete,
+                squeeze,
+                complement,
+                from_chars,
+                to_chars,
+            }));
+        }
+        if squeeze && set_args.len() < 2 {
+            return Some(StreamingPipelineStage::Tr(StreamingTrStage {
+                delete,
+                squeeze,
+                complement,
+                from_chars,
+                to_chars: Vec::new(),
+            }));
+        }
+        if set_args.len() < 2 {
+            return None;
+        }
+        Some(StreamingPipelineStage::Tr(StreamingTrStage {
+            delete,
+            squeeze,
+            complement,
+            from_chars,
+            to_chars: streaming_tr_expand_set(set_args[1]),
+        }))
+    }
+
+    fn parse_streaming_wc_stage(args: &[String]) -> Option<StreamingPipelineStage> {
+        let mut flags = StreamingWcFlags {
+            lines: false,
+            words: false,
+            bytes: false,
+            max_line_length: false,
+        };
+        let mut parsing_flags = true;
+
+        for arg in args {
+            if parsing_flags && arg == "--" {
+                parsing_flags = false;
+                continue;
+            }
+            if parsing_flags && arg.starts_with('-') && arg.len() > 1 {
+                for ch in arg[1..].chars() {
+                    match ch {
+                        'l' => flags.lines = true,
+                        'w' => flags.words = true,
+                        'c' | 'm' => flags.bytes = true,
+                        'L' => flags.max_line_length = true,
+                        _ => return None,
+                    }
+                }
+                continue;
+            }
+            return None;
+        }
+
+        if !flags.lines && !flags.words && !flags.bytes && !flags.max_line_length {
+            flags.lines = true;
+            flags.words = true;
+            flags.bytes = true;
+        }
+        Some(StreamingPipelineStage::Wc(flags))
     }
 
     fn set_pipestatus(&mut self, statuses: &[i32]) {
@@ -625,22 +5461,273 @@ impl WorkerRuntime {
         }
     }
 
-    /// Execute a command substitution and return the trimmed output.
-    fn execute_subst(&mut self, inner: &str) -> smol_str::SmolStr {
-        let saved_stdout = std::mem::take(&mut self.vm.stdout);
-        let events = self.execute_input_inner(inner);
-        let mut result = String::new();
-        for e in &events {
-            if let WorkerEvent::Stdout(d) = e {
-                result.push_str(&String::from_utf8_lossy(d));
+    fn open_streaming_file_reader(
+        &mut self,
+        path: &str,
+        cmd_name: &str,
+    ) -> Result<Box<dyn Read>, ()> {
+        let resolved = self.resolve_cwd_path(path);
+        match Self::open_streaming_file_reader_in_fs(&mut self.fs, &resolved) {
+            Ok(reader) => Ok(reader),
+            Err(err) => {
+                let msg =
+                    format!("wasmsh: {cmd_name}: failed to open stdin source {resolved}: {err}\n");
+                self.write_stderr(msg.as_bytes());
+                self.vm.state.last_status = 1;
+                Err(())
             }
         }
-        if !self.vm.stdout.is_empty() {
-            result.push_str(&String::from_utf8_lossy(&self.vm.stdout));
-            self.vm.stdout.clear();
+    }
+
+    fn open_streaming_file_reader_in_fs(
+        fs: &mut BackendFs,
+        resolved: &str,
+    ) -> Result<Box<dyn Read>, String> {
+        let handle = fs
+            .open(resolved, OpenOptions::read())
+            .map_err(|err| err.to_string())?;
+        let reader_result = fs.stream_file(handle).map_err(|err| err.to_string());
+        fs.close(handle);
+        reader_result
+    }
+
+    fn execute_inner_capture_stdout(&mut self, input: &str) -> Vec<u8> {
+        let events = self.execute_isolated_input_events(input, None);
+        let mut stdout = Vec::new();
+        for event in events {
+            match event {
+                WorkerEvent::Stdout(data) => stdout.extend_from_slice(&data),
+                WorkerEvent::Stderr(data) => self.write_stderr(&data),
+                WorkerEvent::Diagnostic(level, msg) => self.vm.emit_diagnostic(
+                    convert_diag_level(level),
+                    wasmsh_vm::DiagCategory::Runtime,
+                    msg,
+                ),
+                WorkerEvent::Exit(_) | WorkerEvent::Version(_) | WorkerEvent::FsChanged(_) => {}
+                _ => {}
+            }
         }
+        stdout
+    }
+
+    fn execute_isolated_input_events(
+        &mut self,
+        input: &str,
+        pending_input: Option<PendingInput>,
+    ) -> Vec<WorkerEvent> {
+        let saved_state = self.vm.state.clone();
+        let saved_functions = self.functions.clone();
+        let saved_aliases = self.aliases.clone();
+        let saved_exec = self.exec.clone();
+        let saved_pending = self.pending_stdin.take();
+        let saved_stdout = std::mem::take(&mut self.vm.stdout);
+        let saved_stderr = std::mem::take(&mut self.vm.stderr);
+        let saved_diagnostics = std::mem::take(&mut self.vm.diagnostics);
+        let saved_output_bytes = self.vm.output_bytes;
+        let saved_proc_subst_out_scopes = std::mem::take(&mut self.proc_subst_out_scopes);
+        let saved_proc_subst_in_scopes = std::mem::take(&mut self.proc_subst_in_scopes);
+
+        self.pending_stdin = pending_input;
+        let (mut inner_events, captured) =
+            self.with_output_capture(true, true, |runtime| runtime.execute_input_inner(input));
+        let inner_resource_exhausted = self.exec.resource_exhausted;
+        let inner_diagnostics = self
+            .vm
+            .diagnostics
+            .drain(..)
+            .map(|diag| {
+                WorkerEvent::Diagnostic(Self::to_protocol_diag_level(diag.level), diag.message)
+            })
+            .collect::<Vec<_>>();
+        self.clear_pending_input();
+        for scope in self.proc_subst_out_scopes.drain(..) {
+            for sink in scope {
+                let _ = self.fs.remove_file(&sink.path);
+            }
+        }
+        for scope in self.proc_subst_in_scopes.drain(..) {
+            for sink in scope {
+                let _ = self.fs.remove_file(&sink.path);
+            }
+        }
+
+        self.vm.state = saved_state;
+        self.functions = saved_functions;
+        self.aliases = saved_aliases;
+        self.exec = saved_exec;
+        self.exec.resource_exhausted |= inner_resource_exhausted;
+        self.pending_stdin = saved_pending;
         self.vm.stdout = saved_stdout;
+        self.vm.stderr = saved_stderr;
+        self.vm.diagnostics = saved_diagnostics;
+        self.vm.output_bytes = saved_output_bytes;
+        self.proc_subst_out_scopes = saved_proc_subst_out_scopes;
+        self.proc_subst_in_scopes = saved_proc_subst_in_scopes;
+
+        let mut events = Vec::new();
+        if !captured.stdout.is_empty() {
+            events.push(WorkerEvent::Stdout(captured.stdout));
+        }
+        if !captured.stderr.is_empty() {
+            events.push(WorkerEvent::Stderr(captured.stderr));
+        }
+        for event in inner_events.drain(..) {
+            match &event {
+                WorkerEvent::Stdout(_)
+                    if !events.iter().any(|e| matches!(e, WorkerEvent::Stdout(_))) =>
+                {
+                    events.push(event);
+                }
+                WorkerEvent::Stderr(_)
+                    if !events.iter().any(|e| matches!(e, WorkerEvent::Stderr(_))) =>
+                {
+                    events.push(event);
+                }
+                WorkerEvent::Stdout(_) | WorkerEvent::Stderr(_) => {}
+                _ => events.push(event),
+            }
+        }
+        events.extend(inner_diagnostics);
+        events
+    }
+
+    fn execute_isolated_scheduled_pipeline_events_from_reader(
+        &mut self,
+        pipeline: &HirPipeline,
+        reader: Box<dyn Read>,
+    ) -> Vec<WorkerEvent> {
+        let saved_state = self.vm.state.clone();
+        let saved_functions = self.functions.clone();
+        let saved_aliases = self.aliases.clone();
+        let saved_exec = self.exec.clone();
+        let saved_pending = self.pending_stdin.take();
+        let saved_stdout = std::mem::take(&mut self.vm.stdout);
+        let saved_stderr = std::mem::take(&mut self.vm.stderr);
+        let saved_diagnostics = std::mem::take(&mut self.vm.diagnostics);
+        let saved_output_bytes = self.vm.output_bytes;
+        let saved_proc_subst_out_scopes = std::mem::take(&mut self.proc_subst_out_scopes);
+        let saved_proc_subst_in_scopes = std::mem::take(&mut self.proc_subst_in_scopes);
+
+        self.pending_stdin = None;
+        self.proc_subst_out_scopes.clear();
+        self.proc_subst_in_scopes.clear();
+        self.exec.recursion_depth += 1;
+        if self.exec.recursion_depth > MAX_RECURSION_DEPTH {
+            self.exec.recursion_depth -= 1;
+            self.vm.state = saved_state;
+            self.functions = saved_functions;
+            self.aliases = saved_aliases;
+            self.exec = saved_exec;
+            self.pending_stdin = saved_pending;
+            self.vm.stdout = saved_stdout;
+            self.vm.stderr = saved_stderr;
+            self.vm.diagnostics = saved_diagnostics;
+            self.vm.output_bytes = saved_output_bytes;
+            self.proc_subst_out_scopes = saved_proc_subst_out_scopes;
+            self.proc_subst_in_scopes = saved_proc_subst_in_scopes;
+            return vec![WorkerEvent::Stderr(
+                b"wasmsh: maximum recursion depth exceeded\n".to_vec(),
+            )];
+        }
+
+        let (_, captured) = self.with_output_capture(true, true, |runtime| {
+            runtime.execute_scheduled_pipeline_with_source_reader(
+                &pipeline.commands,
+                pipeline,
+                Some(reader),
+            );
+        });
+        self.exec.recursion_depth -= 1;
+        let inner_resource_exhausted = self.exec.resource_exhausted;
+        let inner_diagnostics = self
+            .vm
+            .diagnostics
+            .drain(..)
+            .map(|diag| {
+                WorkerEvent::Diagnostic(Self::to_protocol_diag_level(diag.level), diag.message)
+            })
+            .collect::<Vec<_>>();
+        self.clear_pending_input();
+        let pending_scopes: Vec<Vec<PendingProcessSubstOut>> =
+            self.proc_subst_out_scopes.drain(..).collect();
+        for scope in pending_scopes {
+            for sink in scope {
+                self.flush_process_subst_out(sink);
+            }
+        }
+        let pending_in_scopes: Vec<Vec<PendingProcessSubstIn>> =
+            self.proc_subst_in_scopes.drain(..).collect();
+        for scope in pending_in_scopes {
+            self.flush_process_subst_in_scope(scope);
+        }
+
+        self.vm.state = saved_state;
+        self.functions = saved_functions;
+        self.aliases = saved_aliases;
+        self.exec = saved_exec;
+        self.exec.resource_exhausted |= inner_resource_exhausted;
+        self.pending_stdin = saved_pending;
+        self.vm.stdout = saved_stdout;
+        self.vm.stderr = saved_stderr;
+        self.vm.diagnostics = saved_diagnostics;
+        self.vm.output_bytes = saved_output_bytes;
+        self.proc_subst_out_scopes = saved_proc_subst_out_scopes;
+        self.proc_subst_in_scopes = saved_proc_subst_in_scopes;
+
+        let mut events = Vec::new();
+        if !captured.stdout.is_empty() {
+            events.push(WorkerEvent::Stdout(captured.stdout));
+        }
+        if !captured.stderr.is_empty() {
+            events.push(WorkerEvent::Stderr(captured.stderr));
+        }
+        events.extend(inner_diagnostics);
+        events
+    }
+
+    /// Execute a command substitution and return the trimmed output.
+    fn execute_subst(&mut self, inner: &str) -> smol_str::SmolStr {
+        let stdout = self.execute_inner_capture_stdout(inner);
+        let result = String::from_utf8_lossy(&stdout).to_string();
         smol_str::SmolStr::from(result.trim_end_matches('\n'))
+    }
+
+    fn word_parts_require_runtime_expansion(parts: &[wasmsh_ast::WordPart]) -> bool {
+        parts.iter().any(|part| match part {
+            wasmsh_ast::WordPart::Literal(_) | wasmsh_ast::WordPart::SingleQuoted(_) => false,
+            wasmsh_ast::WordPart::DoubleQuoted(inner) => {
+                Self::word_parts_require_runtime_expansion(inner)
+            }
+            wasmsh_ast::WordPart::Parameter(_)
+            | wasmsh_ast::WordPart::Arithmetic(_)
+            | wasmsh_ast::WordPart::CommandSubstitution(_)
+            | wasmsh_ast::WordPart::ProcessSubstIn(_)
+            | wasmsh_ast::WordPart::ProcessSubstOut(_)
+            | _ => true,
+        })
+    }
+
+    fn command_requires_runtime_expansion(cmd: &HirCommand) -> bool {
+        let HirCommand::Exec(exec) = cmd else {
+            return false;
+        };
+        exec.argv
+            .iter()
+            .any(|word| Self::word_parts_require_runtime_expansion(&word.parts))
+    }
+
+    fn parse_single_pipeline_input(input: &str) -> Option<HirPipeline> {
+        let ast = wasmsh_parse::parse(input).ok()?;
+        let hir = wasmsh_hir::lower(&ast);
+        let cc = hir.items.first()?;
+        if hir.items.len() != 1 || cc.list.len() != 1 {
+            return None;
+        }
+        let and_or = cc.list.first()?;
+        if !and_or.rest.is_empty() {
+            return None;
+        }
+        Some(and_or.first.clone())
     }
 
     /// Counter for generating unique temp file paths for process substitution.
@@ -649,45 +5736,516 @@ impl WorkerRuntime {
         COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Execute `<(cmd)` — run the command, write stdout to a temp file,
-    /// return the temp file path as the expansion result.
-    fn execute_process_subst_in(&mut self, inner: &str) -> smol_str::SmolStr {
-        let output = self.execute_subst_raw(inner);
-        let path = format!("/tmp/_proc_subst_{}", Self::next_proc_subst_id());
-        let h = self.fs.open(&path, OpenOptions::write()).unwrap();
-        let _ = self.fs.write_file(h, output.as_bytes());
-        self.fs.close(h);
-        smol_str::SmolStr::from(path)
+    fn next_pending_input_id() -> u64 {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Execute `>(cmd)` — create a temp file, return its path.
-    /// After the outer command writes to it, read and feed to the inner command.
-    /// (Simplified: just returns a writable temp path; full pipe semantics deferred.)
-    fn execute_process_subst_out(&mut self, _inner: &str) -> smol_str::SmolStr {
-        let path = format!("/tmp/_proc_subst_{}", Self::next_proc_subst_id());
-        // Create empty file
-        let h = self.fs.open(&path, OpenOptions::write()).unwrap();
-        let _ = self.fs.write_file(h, b"");
-        self.fs.close(h);
-        smol_str::SmolStr::from(path)
+    fn set_pending_input_bytes(&mut self, data: Vec<u8>) {
+        self.pending_stdin = Some(PendingInput::Bytes(data));
     }
 
-    /// Execute a command and return its raw stdout (without trimming).
-    fn execute_subst_raw(&mut self, inner: &str) -> String {
-        let saved_stdout = std::mem::take(&mut self.vm.stdout);
-        let events = self.execute_input_inner(inner);
-        let mut result = String::new();
-        for e in &events {
-            if let WorkerEvent::Stdout(d) = e {
-                result.push_str(&String::from_utf8_lossy(d));
+    fn set_pending_input_file(&mut self, path: String, remove_after_read: bool) {
+        self.pending_stdin = Some(PendingInput::File {
+            path,
+            remove_after_read,
+        });
+    }
+
+    fn clear_pending_input(&mut self) {
+        let Some(input) = self.pending_stdin.take() else {
+            return;
+        };
+        if let PendingInput::File {
+            path,
+            remove_after_read: true,
+        } = input
+        {
+            let _ = self.fs.remove_file(&path);
+        }
+    }
+
+    fn take_pending_input_reader(&mut self, cmd_name: &str) -> Result<Option<Box<dyn Read>>, ()> {
+        let Some(input) = self.pending_stdin.take() else {
+            return Ok(None);
+        };
+        match input {
+            PendingInput::Bytes(data) => Ok(Some(Box::new(Cursor::new(data)))),
+            PendingInput::File {
+                path,
+                remove_after_read,
+            } => {
+                let reader_result = self.open_streaming_file_reader(&path, cmd_name);
+                if remove_after_read {
+                    let _ = self.fs.remove_file(&path);
+                }
+                reader_result.map(Some)
             }
         }
-        if !self.vm.stdout.is_empty() {
-            result.push_str(&String::from_utf8_lossy(&self.vm.stdout));
-            self.vm.stdout.clear();
+    }
+
+    fn take_builtin_stdin(
+        &mut self,
+        cmd_name: &str,
+    ) -> Result<Option<wasmsh_builtins::BuiltinStdin<'static>>, ()> {
+        let reader = self.take_pending_input_reader(cmd_name)?;
+        Ok(reader.map(wasmsh_builtins::BuiltinStdin::from_reader))
+    }
+
+    fn take_util_stdin(
+        &mut self,
+        cmd_name: &str,
+    ) -> Result<Option<wasmsh_utils::UtilStdin<'static>>, ()> {
+        let reader = self.take_pending_input_reader(cmd_name)?;
+        Ok(reader.map(wasmsh_utils::UtilStdin::from_reader))
+    }
+
+    fn take_external_stdin(
+        &mut self,
+        cmd_name: &str,
+    ) -> Result<Option<ExternalCommandStdin<'static>>, ()> {
+        let reader = self.take_pending_input_reader(cmd_name)?;
+        Ok(reader.map(ExternalCommandStdin::from_reader))
+    }
+
+    fn can_use_isolated_process_subst_runtime(&self) -> bool {
+        self.external_handler.is_none() && self.network.is_none()
+    }
+
+    fn clone_for_isolated_process_subst(&self) -> Option<Self> {
+        if !self.can_use_isolated_process_subst_runtime() {
+            return None;
         }
-        self.vm.stdout = saved_stdout;
-        result
+        let mut exec = ExecState::new();
+        exec.recursion_depth = self.exec.recursion_depth;
+        Some(Self {
+            config: self.config.clone(),
+            vm: Vm::with_limits(self.vm.state.clone(), self.vm.limits.clone()),
+            fs: self.fs.clone(),
+            utils: UtilRegistry::new(),
+            builtins: wasmsh_builtins::BuiltinRegistry::new(),
+            initialized: self.initialized,
+            pending_stdin: None,
+            live_redirections: Vec::new(),
+            proc_subst_out_scopes: Vec::new(),
+            proc_subst_in_scopes: Vec::new(),
+            functions: self.functions.clone(),
+            exec,
+            aliases: self.aliases.clone(),
+            external_handler: None,
+            network: None,
+        })
+    }
+
+    fn build_live_process_subst_pipeline(
+        &mut self,
+        pipeline: &HirPipeline,
+        source_pipe: Option<Rc<RefCell<PipeBuffer>>>,
+    ) -> Option<(
+        Vec<StreamingPipeProcess<'static>>,
+        Vec<Rc<RefCell<Vec<u8>>>>,
+        Vec<bool>,
+        Rc<RefCell<PipeBuffer>>,
+        Vec<Rc<RefCell<i32>>>,
+    )> {
+        let stages: Vec<StreamingPipelineStage> = pipeline
+            .commands
+            .iter()
+            .enumerate()
+            .map(|(idx, cmd)| self.compile_pipeline_stage(cmd, idx == 0 && source_pipe.is_none()))
+            .collect();
+        let stage_statuses: Vec<Rc<RefCell<i32>>> = stages
+            .iter()
+            .map(|stage| {
+                Rc::new(RefCell::new(
+                    if matches!(stage, StreamingPipelineStage::Grep(_)) {
+                        1
+                    } else {
+                        0
+                    },
+                ))
+            })
+            .collect();
+        let stage_stderr: Vec<Rc<RefCell<Vec<u8>>>> = stages
+            .iter()
+            .map(|_| Rc::new(RefCell::new(Vec::new())))
+            .collect();
+        let stage_pipe_stderr = vec![false; stages.len()];
+        let output_pipes: Vec<Rc<RefCell<PipeBuffer>>> = (0..stages.len())
+            .map(|_| Rc::new(RefCell::new(PipeBuffer::new(PIPEBUFFER_STREAMING_CAPACITY))))
+            .collect();
+        let mut processes = Vec::new();
+
+        if let Some(source_pipe) = source_pipe {
+            match &stages[0] {
+                StreamingPipelineStage::Tee(stage) => {
+                    let reader = Box::new(PipeReader::new(source_pipe)) as Box<dyn Read>;
+                    processes.push(StreamingPipeProcess::Tee(TeePipeProcess::new(
+                        reader,
+                        output_pipes[0].clone(),
+                        &mut self.fs,
+                        self.vm.state.cwd.as_str(),
+                        stage,
+                        stage_stderr[0].clone(),
+                        stage_statuses[0].clone(),
+                        false,
+                    )));
+                }
+                StreamingPipelineStage::BufferedCommand(argv) => {
+                    processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
+                        Some(source_pipe),
+                        output_pipes[0].clone(),
+                        argv.clone(),
+                        false,
+                        stage_stderr[0].clone(),
+                        stage_statuses[0].clone(),
+                    )));
+                }
+                _ => {
+                    let reader = Box::new(PipeReader::new(source_pipe)) as Box<dyn Read>;
+                    let stage_reader =
+                        Self::wrap_non_tee_streaming_stage(reader, &stages[0], 0, &stage_statuses)?;
+                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                        stage_reader,
+                        output_pipes[0].clone(),
+                        stage_stderr[0].clone(),
+                        stage_statuses[0].clone(),
+                        "process-subst",
+                        false,
+                    )));
+                }
+            }
+        } else {
+            match &stages[0] {
+                StreamingPipelineStage::Literal(data) => {
+                    let reader: Box<dyn Read> = Box::new(Cursor::new(data.clone()));
+                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                        reader,
+                        output_pipes[0].clone(),
+                        stage_stderr[0].clone(),
+                        stage_statuses[0].clone(),
+                        "process-subst",
+                        false,
+                    )));
+                }
+                StreamingPipelineStage::File(path) => {
+                    let resolved = self.resolve_cwd_path(path);
+                    let reader = self.open_streaming_file_reader(&resolved, "cat").ok()?;
+                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                        reader,
+                        output_pipes[0].clone(),
+                        stage_stderr[0].clone(),
+                        stage_statuses[0].clone(),
+                        "process-subst",
+                        false,
+                    )));
+                }
+                StreamingPipelineStage::Yes { line } => {
+                    let reader: Box<dyn Read> =
+                        Box::new(YesStreamReader::new(line.clone(), STREAMING_YES_MAX_LINES));
+                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                        reader,
+                        output_pipes[0].clone(),
+                        stage_stderr[0].clone(),
+                        stage_statuses[0].clone(),
+                        "process-subst",
+                        false,
+                    )));
+                }
+                StreamingPipelineStage::BufferedCommand(argv) => {
+                    processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
+                        None,
+                        output_pipes[0].clone(),
+                        argv.clone(),
+                        false,
+                        stage_stderr[0].clone(),
+                        stage_statuses[0].clone(),
+                    )));
+                }
+                _ => return None,
+            }
+        }
+
+        for idx in 1..stages.len() {
+            match &stages[idx] {
+                StreamingPipelineStage::Head(mode) => {
+                    processes.push(StreamingPipeProcess::Head(HeadPipeProcess::new(
+                        output_pipes[idx - 1].clone(),
+                        output_pipes[idx].clone(),
+                        *mode,
+                    )));
+                }
+                StreamingPipelineStage::Tee(stage) => {
+                    let reader =
+                        Box::new(PipeReader::new(output_pipes[idx - 1].clone())) as Box<dyn Read>;
+                    processes.push(StreamingPipeProcess::Tee(TeePipeProcess::new(
+                        reader,
+                        output_pipes[idx].clone(),
+                        &mut self.fs,
+                        self.vm.state.cwd.as_str(),
+                        stage,
+                        stage_stderr[idx].clone(),
+                        stage_statuses[idx].clone(),
+                        false,
+                    )));
+                }
+                StreamingPipelineStage::BufferedCommand(argv) => {
+                    processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
+                        Some(output_pipes[idx - 1].clone()),
+                        output_pipes[idx].clone(),
+                        argv.clone(),
+                        false,
+                        stage_stderr[idx].clone(),
+                        stage_statuses[idx].clone(),
+                    )));
+                }
+                _ => {
+                    let reader =
+                        Box::new(PipeReader::new(output_pipes[idx - 1].clone())) as Box<dyn Read>;
+                    let stage_reader = Self::wrap_non_tee_streaming_stage(
+                        reader,
+                        &stages[idx],
+                        idx,
+                        &stage_statuses,
+                    )?;
+                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                        stage_reader,
+                        output_pipes[idx].clone(),
+                        stage_stderr[idx].clone(),
+                        stage_statuses[idx].clone(),
+                        "process-subst",
+                        false,
+                    )));
+                }
+            }
+        }
+
+        Some((
+            processes,
+            stage_stderr,
+            stage_pipe_stderr,
+            output_pipes.last().cloned()?,
+            stage_statuses,
+        ))
+    }
+
+    fn try_build_live_process_subst_in_reader(
+        &mut self,
+        inner: &str,
+    ) -> Option<(
+        Box<dyn Read>,
+        Rc<RefCell<Vec<u8>>>,
+        Rc<RefCell<Vec<wasmsh_vm::DiagnosticEvent>>>,
+    )> {
+        let pipeline = Self::parse_single_pipeline_input(inner)?;
+        let requires_runtime = pipeline.commands.iter().enumerate().any(|(idx, cmd)| {
+            matches!(
+                self.compile_pipeline_stage(cmd, idx == 0),
+                StreamingPipelineStage::BufferedCommand(_)
+            )
+        });
+        let mut isolated_runtime = if requires_runtime {
+            self.clone_for_isolated_process_subst().map(Box::new)
+        } else {
+            None
+        };
+        let (processes, stage_stderr, stage_pipe_stderr, final_pipe, _) =
+            if let Some(runtime) = isolated_runtime.as_mut() {
+                runtime.build_live_process_subst_pipeline(&pipeline, None)?
+            } else {
+                if requires_runtime {
+                    return None;
+                }
+                self.build_live_process_subst_pipeline(&pipeline, None)?
+            };
+
+        let flushed_stderr = Rc::new(RefCell::new(Vec::new()));
+        let flushed_diagnostics = Rc::new(RefCell::new(Vec::new()));
+        let reader = LiveProcessSubstInReader {
+            isolated_runtime,
+            processes,
+            finished: vec![false; stage_stderr.len()],
+            final_pipe,
+            stage_stderr,
+            stage_pipe_stderr,
+            flushed_stderr: flushed_stderr.clone(),
+            flushed_diagnostics: flushed_diagnostics.clone(),
+            done: false,
+        };
+        Some((Box::new(reader), flushed_stderr, flushed_diagnostics))
+    }
+
+    /// Execute `<(cmd)` by registering a command-scoped readable path.
+    fn execute_process_subst_in(&mut self, inner: &str) -> smol_str::SmolStr {
+        let path = format!("/tmp/_proc_subst_{}", Self::next_proc_subst_id());
+        if self.proc_subst_in_scopes.is_empty() {
+            self.proc_subst_in_scopes.push(Vec::new());
+        }
+
+        if let Some((reader, stderr, diagnostics)) =
+            self.try_build_live_process_subst_in_reader(inner)
+        {
+            if self.fs.install_stream_reader(&path, reader).is_ok() {
+                self.proc_subst_in_scopes
+                    .last_mut()
+                    .expect("process substitution input scope stack is empty")
+                    .push(PendingProcessSubstIn {
+                        path: path.clone(),
+                        stderr: Some(stderr),
+                        diagnostics: Some(diagnostics),
+                    });
+                return smol_str::SmolStr::from(path);
+            }
+        }
+
+        let output = self.execute_inner_capture_stdout(inner);
+        if let Ok(h) = self.fs.open(&path, OpenOptions::write()) {
+            let _ = self.fs.write_file(h, &output);
+            self.fs.close(h);
+        }
+        self.proc_subst_in_scopes
+            .last_mut()
+            .expect("process substitution input scope stack is empty")
+            .push(PendingProcessSubstIn {
+                path: path.clone(),
+                stderr: None,
+                diagnostics: None,
+            });
+        smol_str::SmolStr::from(path)
+    }
+
+    fn try_build_live_process_subst_runner(
+        &mut self,
+        inner: &str,
+    ) -> Option<LiveProcessSubstRunner> {
+        let pipeline = Self::parse_single_pipeline_input(inner)?;
+        let source_pipe = Rc::new(RefCell::new(PipeBuffer::new(PIPEBUFFER_STREAMING_CAPACITY)));
+        let mut isolated_runtime = self.clone_for_isolated_process_subst();
+        let (processes, stage_stderr, stage_pipe_stderr, final_pipe, _) =
+            if let Some(runtime) = isolated_runtime.as_mut() {
+                runtime.build_live_process_subst_pipeline(&pipeline, Some(source_pipe.clone()))?
+            } else {
+                self.build_live_process_subst_pipeline(&pipeline, Some(source_pipe.clone()))?
+            };
+
+        Some(LiveProcessSubstRunner {
+            isolated_runtime: isolated_runtime.map(Box::new),
+            source_pipe,
+            processes,
+            finished: vec![false; stage_stderr.len()],
+            final_pipe,
+            stage_stderr,
+            stage_pipe_stderr,
+            captured_stdout: Vec::new(),
+            captured_stderr: Vec::new(),
+            captured_diagnostics: Vec::new(),
+            done: false,
+            synced_steps: self.vm.steps,
+        })
+    }
+
+    fn register_process_subst_out(&mut self, inner: &str) -> Option<String> {
+        if self.proc_subst_out_scopes.is_empty() {
+            self.proc_subst_out_scopes.push(Vec::new());
+        }
+        let path = format!("/tmp/_proc_subst_{}", Self::next_proc_subst_id());
+        let mode = if let Some(runner) = self.try_build_live_process_subst_runner(inner) {
+            PendingProcessSubstOutMode::Live { runner }
+        } else {
+            PendingProcessSubstOutMode::Buffered { data: Vec::new() }
+        };
+        self.proc_subst_out_scopes
+            .last_mut()
+            .expect("process substitution scope stack is empty")
+            .push(PendingProcessSubstOut {
+                path: path.clone(),
+                inner: inner.to_string(),
+                mode,
+            });
+        Some(path)
+    }
+
+    fn flush_process_subst_out_scope(&mut self, scope: Vec<PendingProcessSubstOut>) {
+        for sink in scope {
+            self.flush_process_subst_out(sink);
+        }
+    }
+
+    fn flush_process_subst_in_scope(&mut self, scope: Vec<PendingProcessSubstIn>) {
+        for sink in scope {
+            if let Some(stderr) = sink.stderr {
+                let data = stderr.borrow();
+                if !data.is_empty() {
+                    self.write_stderr(&data);
+                }
+            }
+            if let Some(diagnostics) = sink.diagnostics {
+                let mut diagnostics = diagnostics.borrow_mut();
+                for event in diagnostics.drain(..) {
+                    self.vm
+                        .emit_diagnostic(event.level, event.category, event.message);
+                }
+            }
+            let _ = self.fs.remove_file(&sink.path);
+        }
+    }
+
+    fn flush_process_subst_out(&mut self, sink: PendingProcessSubstOut) {
+        let saved_status = self.vm.state.last_status;
+        match sink.mode {
+            PendingProcessSubstOutMode::Buffered { data } => {
+                let events = if let Some(pipeline) = Self::parse_single_pipeline_input(&sink.inner)
+                {
+                    self.execute_isolated_scheduled_pipeline_events_from_reader(
+                        &pipeline,
+                        Box::new(Cursor::new(data.clone())),
+                    )
+                } else {
+                    self.execute_isolated_input_events(&sink.inner, Some(PendingInput::Bytes(data)))
+                };
+                for event in events {
+                    match event {
+                        WorkerEvent::Stdout(data) => self.write_stdout(&data),
+                        WorkerEvent::Stderr(data) => self.write_stderr(&data),
+                        WorkerEvent::Diagnostic(level, msg) => self.vm.emit_diagnostic(
+                            convert_diag_level(level),
+                            wasmsh_vm::DiagCategory::Runtime,
+                            msg,
+                        ),
+                        WorkerEvent::Exit(_)
+                        | WorkerEvent::Version(_)
+                        | WorkerEvent::FsChanged(_) => {}
+                        _ => {}
+                    }
+                }
+            }
+            PendingProcessSubstOutMode::Live { mut runner } => {
+                if runner.isolated_runtime.is_some() {
+                    runner.finish_with_parent(self);
+                } else {
+                    runner.finish();
+                }
+                if !runner.captured_stdout.is_empty() {
+                    self.write_stdout(&runner.captured_stdout);
+                }
+                if !runner.captured_stderr.is_empty() {
+                    self.write_stderr(&runner.captured_stderr);
+                }
+                for diag in runner.captured_diagnostics {
+                    self.vm
+                        .emit_diagnostic(diag.level, diag.category, diag.message);
+                }
+            }
+        }
+        self.vm.state.last_status = saved_status;
+    }
+
+    /// Execute `>(cmd)` by creating a writable temp path and scheduling the
+    /// consumer command to run once the enclosing command finishes writing to it.
+    fn execute_process_subst_out(&mut self, inner: &str) -> smol_str::SmolStr {
+        self.register_process_subst_out(inner)
+            .map(smol_str::SmolStr::from)
+            .unwrap_or_default()
     }
 
     /// Resolve command substitutions in a list of words by executing them.
@@ -742,13 +6300,29 @@ impl WorkerRuntime {
     }
 
     fn execute_command(&mut self, cmd: &HirCommand) {
+        self.proc_subst_out_scopes.push(Vec::new());
+        self.proc_subst_in_scopes.push(Vec::new());
+        self.execute_command_body(cmd);
+        let in_scope = self
+            .proc_subst_in_scopes
+            .pop()
+            .expect("process substitution input scope stack underflow");
+        let scope = self
+            .proc_subst_out_scopes
+            .pop()
+            .expect("process substitution scope stack underflow");
+        self.flush_process_subst_out_scope(scope);
+        self.flush_process_subst_in_scope(in_scope);
+    }
+
+    fn execute_command_body(&mut self, cmd: &HirCommand) {
         match cmd {
             HirCommand::Exec(exec) => self.execute_exec(exec),
             HirCommand::Assign(assign) => {
                 for a in &assign.assignments {
                     self.execute_assignment(&a.name, a.value.as_ref());
                 }
-                let stdout_before = self.vm.stdout.len();
+                let stdout_before = self.current_stdout_len();
                 self.apply_redirections(&assign.redirections, stdout_before);
                 self.vm.state.last_status = 0;
             }
@@ -769,7 +6343,7 @@ impl WorkerRuntime {
                 self.vm.state.last_status = 0;
             }
             HirCommand::RedirectOnly(ro) => {
-                let stdout_before = self.vm.stdout.len();
+                let stdout_before = self.current_stdout_len();
                 self.apply_redirections(&ro.redirections, stdout_before);
                 self.vm.state.last_status = 0;
             }
@@ -790,6 +6364,9 @@ impl WorkerRuntime {
     /// Execute a simple command (`HirCommand::Exec`).
     fn execute_exec(&mut self, exec: &wasmsh_hir::HirExec) {
         let resolved = self.resolve_command_subst(&exec.argv);
+        if self.exec.expansion_failed {
+            return;
+        }
         let expanded = expand_words_argv(&resolved, &mut self.vm.state);
 
         if self.check_nounset_error() {
@@ -827,16 +6404,20 @@ impl WorkerRuntime {
             return;
         }
 
-        let stdout_before = self.vm.stdout.len();
+        let live_redirections = match self.prepare_live_redirections(&exec.redirections) {
+            Ok(scope) => scope,
+            Err(()) => return,
+        };
         let cmd_name = &argv[0];
-        self.trace_command(&argv);
+        self.with_live_redirection_scope(live_redirections, |runtime| {
+            runtime.trace_command(&argv);
 
-        if self.try_runtime_command(cmd_name, &argv) {
-            return;
-        }
+            if runtime.try_runtime_command(cmd_name, &argv) {
+                return;
+            }
 
-        self.dispatch_command(cmd_name, &argv);
-        self.apply_redirections(&exec.redirections, stdout_before);
+            runtime.dispatch_command(cmd_name, &argv);
+        });
     }
 
     /// Check for nounset errors from expansion. Returns true if an error was found.
@@ -844,7 +6425,7 @@ impl WorkerRuntime {
         if let Some(var_name) = self.vm.state.get_var("_NOUNSET_ERROR") {
             if !var_name.is_empty() {
                 let msg = format!("wasmsh: {var_name}: unbound variable\n");
-                self.vm.stderr.extend_from_slice(msg.as_bytes());
+                self.write_stderr(msg.as_bytes());
                 self.vm.state.set_var(
                     smol_str::SmolStr::from("_NOUNSET_ERROR"),
                     smol_str::SmolStr::default(),
@@ -865,7 +6446,7 @@ impl WorkerRuntime {
                     if let Some(body) = &redir.here_doc_body {
                         let expanded =
                             wasmsh_expand::expand_string(&body.content, &mut self.vm.state);
-                        self.pending_stdin = Some(expanded.into_bytes());
+                        self.set_pending_input_bytes(expanded.into_bytes());
                     }
                 }
                 RedirectionOp::HereString => {
@@ -874,32 +6455,29 @@ impl WorkerRuntime {
                     let content = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
                     let mut data = content.into_bytes();
                     data.push(b'\n');
-                    self.pending_stdin = Some(data);
+                    self.set_pending_input_bytes(data);
                 }
                 RedirectionOp::Input => {
                     let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
                     let resolved_target = resolved.first().unwrap_or(&redir.target);
                     let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
                     let path = self.resolve_cwd_path(&target);
-                    if let Ok(h) = self.fs.open(&path, OpenOptions::read()) {
-                        match self.fs.read_file(h) {
-                            Ok(data) => {
-                                self.pending_stdin = Some(data);
-                            }
-                            Err(e) => {
-                                let msg = format!("wasmsh: {target}: read error: {e}\n");
-                                self.vm.stderr.extend_from_slice(msg.as_bytes());
-                                self.vm.state.last_status = 1;
-                                self.fs.close(h);
-                                return true;
-                            }
+                    match self.fs.stat(&path) {
+                        Ok(metadata) if !metadata.is_dir => {
+                            self.set_pending_input_file(path, false);
                         }
-                        self.fs.close(h);
-                    } else {
-                        let msg = format!("wasmsh: {target}: No such file or directory\n");
-                        self.vm.stderr.extend_from_slice(msg.as_bytes());
-                        self.vm.state.last_status = 1;
-                        return true;
+                        Ok(_) => {
+                            let msg = format!("wasmsh: {target}: Is a directory\n");
+                            self.write_stderr(msg.as_bytes());
+                            self.vm.state.last_status = 1;
+                            return true;
+                        }
+                        Err(_) => {
+                            let msg = format!("wasmsh: {target}: No such file or directory\n");
+                            self.write_stderr(msg.as_bytes());
+                            self.vm.state.last_status = 1;
+                            return true;
+                        }
                     }
                 }
                 _ => {}
@@ -908,8 +6486,33 @@ impl WorkerRuntime {
         false
     }
 
+    fn pending_input_first_line(&mut self, cmd_name: &str) -> Result<String, ()> {
+        let data = self.read_pending_input_bytes(cmd_name)?.unwrap_or_default();
+        let input = String::from_utf8_lossy(&data);
+        Ok(input.lines().next().unwrap_or("").to_string())
+    }
+
+    fn read_pending_input_bytes(&mut self, cmd_name: &str) -> Result<Option<Vec<u8>>, ()> {
+        let Some(mut reader) = self.take_pending_input_reader(cmd_name)? else {
+            return Ok(None);
+        };
+        let mut data = Vec::new();
+        match reader.read_to_end(&mut data) {
+            Ok(_) => Ok(Some(data)),
+            Err(err) => {
+                let msg = format!("wasmsh: {cmd_name}: stdin read error: {err}\n");
+                self.write_stderr(msg.as_bytes());
+                self.vm.state.last_status = 1;
+                Err(())
+            }
+        }
+    }
+
     /// Try alias expansion for the command. Returns true if an alias was expanded.
     fn try_alias_expansion(&mut self, argv: &[String]) -> bool {
+        if !self.get_shopt_value("expand_aliases") {
+            return false;
+        }
         if let Some(alias_val) = self.aliases.get(&argv[0]).cloned() {
             let rest = if argv.len() > 1 {
                 format!(" {}", argv[1..].join(" "))
@@ -933,7 +6536,7 @@ impl WorkerRuntime {
                 .get_var("PS4")
                 .unwrap_or_else(|| smol_str::SmolStr::from("+ "));
             let trace_line = format!("{}{}\n", ps4, argv.join(" "));
-            self.vm.stderr.extend_from_slice(trace_line.as_bytes());
+            self.write_stderr(trace_line.as_bytes());
         }
     }
 
@@ -1043,13 +6646,13 @@ impl WorkerRuntime {
         };
         let Some(full) = resolved else {
             let msg = format!("source: {path}: not found\n");
-            self.vm.stderr.extend_from_slice(msg.as_bytes());
+            self.write_stderr(msg.as_bytes());
             self.vm.state.last_status = 1;
             return;
         };
         let Ok(h) = self.fs.open(&full, OpenOptions::read()) else {
             let msg = format!("source: {path}: not found\n");
-            self.vm.stderr.extend_from_slice(msg.as_bytes());
+            self.write_stderr(msg.as_bytes());
             self.vm.state.last_status = 1;
             return;
         };
@@ -1068,7 +6671,7 @@ impl WorkerRuntime {
             Err(e) => {
                 self.fs.close(h);
                 let msg = format!("source: {path}: read error: {e}\n");
-                self.vm.stderr.extend_from_slice(msg.as_bytes());
+                self.write_stderr(msg.as_bytes());
                 self.vm.state.last_status = 1;
             }
         }
@@ -1078,8 +6681,8 @@ impl WorkerRuntime {
     fn merge_sub_events(&mut self, events: Vec<WorkerEvent>) {
         for e in events {
             match e {
-                WorkerEvent::Stdout(d) => self.vm.stdout.extend_from_slice(&d),
-                WorkerEvent::Stderr(d) => self.vm.stderr.extend_from_slice(&d),
+                WorkerEvent::Stdout(d) => self.write_stdout(&d),
+                WorkerEvent::Stderr(d) => self.write_stderr(&d),
                 _ => {}
             }
         }
@@ -1089,15 +6692,13 @@ impl WorkerRuntime {
     fn merge_sub_events_with_diagnostics(&mut self, events: Vec<WorkerEvent>) {
         for e in events {
             match e {
-                WorkerEvent::Stdout(d) => self.vm.stdout.extend_from_slice(&d),
-                WorkerEvent::Stderr(d) => self.vm.stderr.extend_from_slice(&d),
-                WorkerEvent::Diagnostic(level, msg) => {
-                    self.vm.diagnostics.push(wasmsh_vm::DiagnosticEvent {
-                        level: convert_diag_level(level),
-                        category: wasmsh_vm::DiagCategory::Runtime,
-                        message: msg,
-                    });
-                }
+                WorkerEvent::Stdout(d) => self.write_stdout(&d),
+                WorkerEvent::Stderr(d) => self.write_stderr(&d),
+                WorkerEvent::Diagnostic(level, msg) => self.vm.emit_diagnostic(
+                    convert_diag_level(level),
+                    wasmsh_vm::DiagCategory::Runtime,
+                    msg,
+                ),
                 _ => {}
             }
         }
@@ -1127,7 +6728,7 @@ impl WorkerRuntime {
         };
         let Ok(h) = self.fs.open(&path, OpenOptions::read()) else {
             let msg = format!("{}: {}: No such file or directory\n", argv[0], argv[1]);
-            self.vm.stderr.extend_from_slice(msg.as_bytes());
+            self.write_stderr(msg.as_bytes());
             self.vm.state.last_status = 127;
             return;
         };
@@ -1169,22 +6770,24 @@ impl WorkerRuntime {
             } else {
                 self.call_utility(cmd_name, argv);
             }
-        } else if let Some(ref mut handler) = self.external_handler {
-            let stdin_data = self.pending_stdin.take();
-            if let Some(result) = handler(cmd_name, argv, stdin_data.as_deref()) {
-                self.vm.stdout.extend_from_slice(&result.stdout);
-                self.vm.stderr.extend_from_slice(&result.stderr);
-                self.vm.output_bytes += (result.stdout.len() + result.stderr.len()) as u64;
-                self.vm.state.last_status = result.status;
+        } else {
+            let Ok(stdin) = self.take_external_stdin(cmd_name) else {
+                return;
+            };
+            if let Some(ref mut handler) = self.external_handler {
+                if let Some(result) = handler(cmd_name, argv, stdin) {
+                    self.write_streams(&result.stdout, &result.stderr);
+                    self.vm.state.last_status = result.status;
+                } else {
+                    let msg = format!("wasmsh: {cmd_name}: command not found\n");
+                    self.write_stderr(msg.as_bytes());
+                    self.vm.state.last_status = 127;
+                }
             } else {
                 let msg = format!("wasmsh: {cmd_name}: command not found\n");
-                self.vm.stderr.extend_from_slice(msg.as_bytes());
+                self.write_stderr(msg.as_bytes());
                 self.vm.state.last_status = 127;
             }
-        } else {
-            let msg = format!("wasmsh: {cmd_name}: command not found\n");
-            self.vm.stderr.extend_from_slice(msg.as_bytes());
-            self.vm.state.last_status = 127;
         }
     }
 
@@ -1216,21 +6819,47 @@ impl WorkerRuntime {
     /// Invoke a builtin command.
     fn call_builtin(&mut self, cmd_name: &str, argv: &[String]) {
         let builtin_fn = self.builtins.get(cmd_name).unwrap();
-        let stdin_data = self.pending_stdin.take();
-        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-        let mut sink = wasmsh_builtins::VecSink::default();
-        let status = {
-            let mut ctx = wasmsh_builtins::BuiltinContext {
-                state: &mut self.vm.state,
-                output: &mut sink,
-                fs: Some(&self.fs),
-                stdin: stdin_data.as_deref(),
-            };
-            builtin_fn(&mut ctx, &argv_refs)
+        let Ok(stdin) = self.take_builtin_stdin(cmd_name) else {
+            return;
         };
-        self.vm.stdout.extend_from_slice(&sink.stdout);
-        self.vm.stderr.extend_from_slice(&sink.stderr);
-        self.vm.output_bytes += (sink.stdout.len() + sink.stderr.len()) as u64;
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let status = if self.can_use_runtime_output_sink() {
+            let mut router = RuntimeOutputRouter {
+                exec: &mut self.exec,
+                live_redirections: &mut self.live_redirections,
+                proc_subst_out_scopes: &mut self.proc_subst_out_scopes,
+                vm_stdout: &mut self.vm.stdout,
+                vm_stderr: &mut self.vm.stderr,
+                vm_output_bytes: &mut self.vm.output_bytes,
+                vm_output_limit: self.vm.limits.output_byte_limit,
+                vm_diagnostics: &mut self.vm.diagnostics,
+            };
+            let mut sink = RuntimeBuiltinSink {
+                router: &mut router,
+            };
+            {
+                let mut ctx = wasmsh_builtins::BuiltinContext {
+                    state: &mut self.vm.state,
+                    output: &mut sink,
+                    fs: Some(&self.fs),
+                    stdin,
+                };
+                builtin_fn(&mut ctx, &argv_refs)
+            }
+        } else {
+            let mut sink = wasmsh_builtins::VecSink::default();
+            let status = {
+                let mut ctx = wasmsh_builtins::BuiltinContext {
+                    state: &mut self.vm.state,
+                    output: &mut sink,
+                    fs: Some(&self.fs),
+                    stdin,
+                };
+                builtin_fn(&mut ctx, &argv_refs)
+            };
+            self.write_streams(&sink.stdout, &sink.stderr);
+            status
+        };
         self.vm.state.last_status = status;
         self.pending_stdin = None;
     }
@@ -1274,10 +6903,10 @@ impl WorkerRuntime {
         };
 
         // Phase 1: run find with cleaned argv, capturing stdout
-        let saved_stdout = std::mem::take(&mut self.vm.stdout);
-        self.call_utility("find", &cleaned_argv);
-        let find_output = std::mem::take(&mut self.vm.stdout);
-        self.vm.stdout = saved_stdout;
+        let (_, captured) = self.with_output_capture(true, false, |runtime| {
+            runtime.call_utility("find", &cleaned_argv);
+        });
+        let find_output = captured.stdout;
 
         // Phase 2: parse matched paths
         let paths_str = String::from_utf8_lossy(&find_output);
@@ -1335,10 +6964,10 @@ impl WorkerRuntime {
         }
 
         // Run xargs utility — it outputs formatted command lines for non-echo
-        let saved_stdout = std::mem::take(&mut self.vm.stdout);
-        self.call_utility("xargs", argv);
-        let xargs_output = std::mem::take(&mut self.vm.stdout);
-        self.vm.stdout = saved_stdout;
+        let (_, captured) = self.with_output_capture(true, false, |runtime| {
+            runtime.call_utility("xargs", argv);
+        });
+        let xargs_output = captured.stdout;
 
         // Execute each output line as a command
         let output_str = String::from_utf8_lossy(&xargs_output);
@@ -1355,25 +6984,54 @@ impl WorkerRuntime {
 
     /// Invoke a utility command.
     fn call_utility(&mut self, cmd_name: &str, argv: &[String]) {
-        let stdin_data = self.pending_stdin.take();
-        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-        let mut output = UtilOutput::default();
-        let cwd = self.vm.state.cwd.clone();
-        let status = {
-            let util_fn = self.utils.get(cmd_name).unwrap();
-            let mut ctx = UtilContext {
-                fs: &mut self.fs,
-                output: &mut output,
-                cwd: &cwd,
-                stdin: stdin_data.as_deref(),
-                state: Some(&self.vm.state),
-                network: self.network.as_deref(),
-            };
-            util_fn(&mut ctx, &argv_refs)
+        let Ok(stdin) = self.take_util_stdin(cmd_name) else {
+            return;
         };
-        self.vm.stdout.extend_from_slice(&output.stdout);
-        self.vm.stderr.extend_from_slice(&output.stderr);
-        self.vm.output_bytes += (output.stdout.len() + output.stderr.len()) as u64;
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let cwd = self.vm.state.cwd.clone();
+        let status = if self.can_use_runtime_output_sink() {
+            let mut router = RuntimeOutputRouter {
+                exec: &mut self.exec,
+                live_redirections: &mut self.live_redirections,
+                proc_subst_out_scopes: &mut self.proc_subst_out_scopes,
+                vm_stdout: &mut self.vm.stdout,
+                vm_stderr: &mut self.vm.stderr,
+                vm_output_bytes: &mut self.vm.output_bytes,
+                vm_output_limit: self.vm.limits.output_byte_limit,
+                vm_diagnostics: &mut self.vm.diagnostics,
+            };
+            let mut output = RuntimeUtilSink {
+                router: &mut router,
+            };
+            {
+                let util_fn = self.utils.get(cmd_name).unwrap();
+                let mut ctx = UtilContext {
+                    fs: &mut self.fs,
+                    output: &mut output,
+                    cwd: &cwd,
+                    stdin,
+                    state: Some(&self.vm.state),
+                    network: self.network.as_deref(),
+                };
+                util_fn(&mut ctx, &argv_refs)
+            }
+        } else {
+            let mut output = UtilOutput::default();
+            let status = {
+                let util_fn = self.utils.get(cmd_name).unwrap();
+                let mut ctx = UtilContext {
+                    fs: &mut self.fs,
+                    output: &mut output,
+                    cwd: &cwd,
+                    stdin,
+                    state: Some(&self.vm.state),
+                    network: self.network.as_deref(),
+                };
+                util_fn(&mut ctx, &argv_refs)
+            };
+            self.write_streams(&output.stdout, &output.stderr);
+            status
+        };
         self.vm.state.last_status = status;
     }
 
@@ -1595,12 +7253,12 @@ impl WorkerRuntime {
         }
         for (idx, w) in words.iter().enumerate() {
             let line = format!("{}) {}\n", idx + 1, w);
-            self.vm.stderr.extend_from_slice(line.as_bytes());
+            self.write_stderr(line.as_bytes());
         }
 
-        let stdin_data = self.pending_stdin.take().unwrap_or_default();
-        let input = String::from_utf8_lossy(&stdin_data);
-        let first_line = input.lines().next().unwrap_or("");
+        let Ok(first_line) = self.pending_input_first_line("select") else {
+            return;
+        };
 
         self.vm.state.set_var(
             smol_str::SmolStr::from("REPLY"),
@@ -1657,9 +7315,13 @@ impl WorkerRuntime {
         let args = &argv[1..];
         if args.is_empty() {
             // List all aliases
-            for (name, value) in &self.aliases {
-                let line = format!("alias {name}='{value}'\n");
-                self.vm.stdout.extend_from_slice(line.as_bytes());
+            let alias_lines: Vec<String> = self
+                .aliases
+                .iter()
+                .map(|(name, value)| format!("alias {name}='{value}'\n"))
+                .collect();
+            for line in alias_lines {
+                self.write_stdout(line.as_bytes());
             }
             self.vm.state.last_status = 0;
             return;
@@ -1673,10 +7335,10 @@ impl WorkerRuntime {
                 // Show specific alias
                 if let Some(value) = self.aliases.get(arg.as_str()) {
                     let line = format!("alias {arg}='{value}'\n");
-                    self.vm.stdout.extend_from_slice(line.as_bytes());
+                    self.write_stdout(line.as_bytes());
                 } else {
                     let msg = format!("alias: {arg}: not found\n");
-                    self.vm.stderr.extend_from_slice(msg.as_bytes());
+                    self.write_stderr(msg.as_bytes());
                     self.vm.state.last_status = 1;
                     return;
                 }
@@ -1689,9 +7351,7 @@ impl WorkerRuntime {
     fn execute_unalias(&mut self, argv: &[String]) {
         let args = &argv[1..];
         if args.is_empty() {
-            self.vm
-                .stderr
-                .extend_from_slice(b"unalias: usage: unalias [-a] name ...\n");
+            self.write_stderr(b"unalias: usage: unalias [-a] name ...\n");
             self.vm.state.last_status = 1;
             return;
         }
@@ -1700,7 +7360,7 @@ impl WorkerRuntime {
                 self.aliases.clear();
             } else if self.aliases.shift_remove(arg.as_str()).is_none() {
                 let msg = format!("unalias: {arg}: not found\n");
-                self.vm.stderr.extend_from_slice(msg.as_bytes());
+                self.write_stderr(msg.as_bytes());
                 self.vm.state.last_status = 1;
                 return;
             }
@@ -1716,19 +7376,19 @@ impl WorkerRuntime {
             if self.aliases.contains_key(name.as_str()) {
                 let val = self.aliases.get(name.as_str()).unwrap();
                 let msg = format!("{name} is aliased to `{val}'\n");
-                self.vm.stdout.extend_from_slice(msg.as_bytes());
+                self.write_stdout(msg.as_bytes());
             } else if self.functions.contains_key(name.as_str()) {
                 let msg = format!("{name} is a function\n");
-                self.vm.stdout.extend_from_slice(msg.as_bytes());
+                self.write_stdout(msg.as_bytes());
             } else if self.builtins.is_builtin(name) {
                 let msg = format!("{name} is a shell builtin\n");
-                self.vm.stdout.extend_from_slice(msg.as_bytes());
+                self.write_stdout(msg.as_bytes());
             } else if self.utils.is_utility(name) {
                 let msg = format!("{name} is a shell utility\n");
-                self.vm.stdout.extend_from_slice(msg.as_bytes());
+                self.write_stdout(msg.as_bytes());
             } else {
                 let msg = format!("wasmsh: type: {name}: not found\n");
-                self.vm.stderr.extend_from_slice(msg.as_bytes());
+                self.write_stderr(msg.as_bytes());
                 status = 1;
             }
         }
@@ -1745,25 +7405,51 @@ impl WorkerRuntime {
         let cmd_name = &argv[1];
         let builtin_argv: Vec<String> = argv[1..].to_vec();
         if let Some(builtin_fn) = self.builtins.get(cmd_name) {
-            let stdin_data = self.pending_stdin.take();
-            let argv_refs: Vec<&str> = builtin_argv.iter().map(String::as_str).collect();
-            let mut sink = wasmsh_builtins::VecSink::default();
-            let status = {
-                let mut ctx = wasmsh_builtins::BuiltinContext {
-                    state: &mut self.vm.state,
-                    output: &mut sink,
-                    fs: Some(&self.fs),
-                    stdin: stdin_data.as_deref(),
-                };
-                builtin_fn(&mut ctx, &argv_refs)
+            let Ok(stdin) = self.take_builtin_stdin(cmd_name) else {
+                return;
             };
-            self.vm.stdout.extend_from_slice(&sink.stdout);
-            self.vm.stderr.extend_from_slice(&sink.stderr);
-            self.vm.output_bytes += (sink.stdout.len() + sink.stderr.len()) as u64;
+            let argv_refs: Vec<&str> = builtin_argv.iter().map(String::as_str).collect();
+            let status = if self.can_use_runtime_output_sink() {
+                let mut router = RuntimeOutputRouter {
+                    exec: &mut self.exec,
+                    live_redirections: &mut self.live_redirections,
+                    proc_subst_out_scopes: &mut self.proc_subst_out_scopes,
+                    vm_stdout: &mut self.vm.stdout,
+                    vm_stderr: &mut self.vm.stderr,
+                    vm_output_bytes: &mut self.vm.output_bytes,
+                    vm_output_limit: self.vm.limits.output_byte_limit,
+                    vm_diagnostics: &mut self.vm.diagnostics,
+                };
+                let mut sink = RuntimeBuiltinSink {
+                    router: &mut router,
+                };
+                {
+                    let mut ctx = wasmsh_builtins::BuiltinContext {
+                        state: &mut self.vm.state,
+                        output: &mut sink,
+                        fs: Some(&self.fs),
+                        stdin,
+                    };
+                    builtin_fn(&mut ctx, &argv_refs)
+                }
+            } else {
+                let mut sink = wasmsh_builtins::VecSink::default();
+                let status = {
+                    let mut ctx = wasmsh_builtins::BuiltinContext {
+                        state: &mut self.vm.state,
+                        output: &mut sink,
+                        fs: Some(&self.fs),
+                        stdin,
+                    };
+                    builtin_fn(&mut ctx, &argv_refs)
+                };
+                self.write_streams(&sink.stdout, &sink.stderr);
+                status
+            };
             self.vm.state.last_status = status;
         } else {
             let msg = format!("builtin: {cmd_name}: not a shell builtin\n");
-            self.vm.stderr.extend_from_slice(msg.as_bytes());
+            self.write_stderr(msg.as_bytes());
             self.vm.state.last_status = 1;
         }
     }
@@ -1772,12 +7458,21 @@ impl WorkerRuntime {
     /// Supports `-t` (strip trailing newline). Default array: MAPFILE.
     fn execute_mapfile(&mut self, argv: &[String]) {
         let (strip_newline, array_name) = Self::parse_mapfile_args(&argv[1..]);
-        let data = self.pending_stdin.take().unwrap_or_default();
-        let text = String::from_utf8_lossy(&data);
-
         let name_key = smol_str::SmolStr::from(array_name.as_str());
         self.vm.state.init_indexed_array(name_key.clone());
-        self.populate_mapfile_array(&name_key, &text, strip_newline);
+        let Ok(reader) = self.take_pending_input_reader("mapfile") else {
+            return;
+        };
+        if let Some(mut reader) = reader {
+            if self
+                .populate_mapfile_array_from_reader(&name_key, &mut reader, strip_newline)
+                .is_err()
+            {
+                return;
+            }
+        } else {
+            self.populate_mapfile_array(&name_key, "", strip_newline);
+        }
         self.vm.state.last_status = 0;
     }
 
@@ -1819,6 +7514,71 @@ impl WorkerRuntime {
             );
             idx += 1;
         }
+    }
+
+    fn populate_mapfile_array_from_reader(
+        &mut self,
+        name_key: &smol_str::SmolStr,
+        reader: &mut dyn Read,
+        strip_newline: bool,
+    ) -> Result<(), ()> {
+        let mut buffer = [0u8; 4096];
+        let mut current = Vec::new();
+        let mut idx = 0usize;
+        let mut saw_any = false;
+
+        loop {
+            let read = match reader.read(&mut buffer) {
+                Ok(read) => read,
+                Err(err) => {
+                    let msg = format!("wasmsh: mapfile: stdin read error: {err}\n");
+                    self.write_stderr(msg.as_bytes());
+                    self.vm.state.last_status = 1;
+                    return Err(());
+                }
+            };
+            if read == 0 {
+                break;
+            }
+            saw_any = true;
+            for &byte in &buffer[..read] {
+                if byte == b'\n' {
+                    let value = if strip_newline {
+                        String::from_utf8_lossy(&current).to_string()
+                    } else {
+                        let mut line = current.clone();
+                        line.push(b'\n');
+                        String::from_utf8_lossy(&line).to_string()
+                    };
+                    self.vm.state.set_array_element(
+                        name_key.clone(),
+                        &idx.to_string(),
+                        smol_str::SmolStr::from(value.as_str()),
+                    );
+                    idx += 1;
+                    current.clear();
+                } else {
+                    current.push(byte);
+                }
+            }
+        }
+
+        if !current.is_empty() || !saw_any {
+            let value = if strip_newline {
+                String::from_utf8_lossy(&current).to_string()
+            } else {
+                let mut line = current;
+                line.push(b'\n');
+                String::from_utf8_lossy(&line).to_string()
+            };
+            self.vm.state.set_array_element(
+                name_key.clone(),
+                &idx.to_string(),
+                smol_str::SmolStr::from(value.as_str()),
+            );
+        }
+
+        Ok(())
     }
 
     /// Search `$PATH` directories in the VFS for a file. Returns the first match.
@@ -1934,7 +7694,7 @@ impl WorkerRuntime {
             let enabled = self.get_shopt_value(name);
             let status_str = if enabled { "on" } else { "off" };
             let line = format!("{name}\t{status_str}\n");
-            self.vm.stdout.extend_from_slice(line.as_bytes());
+            self.write_stdout(line.as_bytes());
         }
         self.vm.state.last_status = 0;
     }
@@ -1945,7 +7705,7 @@ impl WorkerRuntime {
         }
 
         let msg = format!("shopt: {name}: invalid shell option name\n");
-        self.vm.stderr.extend_from_slice(msg.as_bytes());
+        self.write_stderr(msg.as_bytes());
         self.vm.state.last_status = 1;
         true
     }
@@ -2000,7 +7760,7 @@ impl WorkerRuntime {
                 .collect();
             for (name, val) in &vars {
                 let line = format!("declare -- {name}=\"{val}\"\n");
-                self.vm.stdout.extend_from_slice(line.as_bytes());
+                self.write_stdout(line.as_bytes());
             }
         } else {
             for &idx in names {
@@ -2011,7 +7771,7 @@ impl WorkerRuntime {
                 if let Some(var) = self.vm.state.env.get(name) {
                     let val = var.value.as_scalar();
                     let line = format!("declare -- {name}=\"{val}\"\n");
-                    self.vm.stdout.extend_from_slice(line.as_bytes());
+                    self.write_stdout(line.as_bytes());
                 }
             }
         }
@@ -2157,43 +7917,8 @@ impl WorkerRuntime {
         if self.exec.resource_exhausted {
             return true;
         }
-        // Step budget
-        self.vm.steps += 1;
-        if self.vm.limits.step_limit > 0 && self.vm.steps >= self.vm.limits.step_limit {
+        if self.vm.begin_step().is_err() {
             self.exec.resource_exhausted = true;
-            self.vm.diagnostics.push(wasmsh_vm::DiagnosticEvent {
-                level: wasmsh_vm::DiagLevel::Error,
-                category: wasmsh_vm::DiagCategory::Budget,
-                message: format!(
-                    "step budget exhausted: {} steps (limit: {})",
-                    self.vm.steps, self.vm.limits.step_limit
-                ),
-            });
-            return true;
-        }
-        // Cancellation
-        if self.vm.cancellation_token().is_cancelled() {
-            self.exec.resource_exhausted = true;
-            self.vm.diagnostics.push(wasmsh_vm::DiagnosticEvent {
-                level: wasmsh_vm::DiagLevel::Error,
-                category: wasmsh_vm::DiagCategory::Budget,
-                message: "execution cancelled".to_string(),
-            });
-            return true;
-        }
-        // Output limit
-        if self.vm.limits.output_byte_limit > 0
-            && self.vm.output_bytes > self.vm.limits.output_byte_limit
-        {
-            self.exec.resource_exhausted = true;
-            self.vm.diagnostics.push(wasmsh_vm::DiagnosticEvent {
-                level: wasmsh_vm::DiagLevel::Error,
-                category: wasmsh_vm::DiagCategory::Budget,
-                message: format!(
-                    "output limit exceeded: {} bytes (limit: {})",
-                    self.vm.output_bytes, self.vm.limits.output_byte_limit
-                ),
-            });
             return true;
         }
         false
@@ -2814,25 +8539,158 @@ impl WorkerRuntime {
         match self.fs.open(path, opts) {
             Ok(h) => {
                 if let Err(e) = self.fs.write_file(h, data) {
-                    self.vm
-                        .stderr
-                        .extend_from_slice(format!("wasmsh: write error: {e}\n").as_bytes());
+                    self.write_stderr(format!("wasmsh: write error: {e}\n").as_bytes());
                 }
                 self.fs.close(h);
             }
             Err(e) => {
-                self.vm
-                    .stderr
-                    .extend_from_slice(format!("wasmsh: {target}: {e}\n").as_bytes());
+                self.write_stderr(format!("wasmsh: {target}: {e}\n").as_bytes());
             }
         }
     }
 
-    /// Capture stdout data from the given position, truncating the stdout buffer.
+    fn can_use_runtime_output_sink(&self) -> bool {
+        true
+    }
+
+    fn current_stdout_len(&self) -> usize {
+        for capture in self.exec.output_captures.iter().rev() {
+            if capture.capture_stdout {
+                return capture.stdout.len();
+            }
+        }
+        self.vm.stdout.len()
+    }
+
+    /// Capture stdout data from the given position, truncating the active stdout buffer.
     fn capture_stdout(&mut self, from: usize) -> Vec<u8> {
+        for capture in self.exec.output_captures.iter_mut().rev() {
+            if capture.capture_stdout {
+                let data = capture.stdout[from..].to_vec();
+                capture.stdout.truncate(from);
+                return data;
+            }
+        }
+
         let data = self.vm.stdout[from..].to_vec();
         self.vm.stdout.truncate(from);
         data
+    }
+
+    /// Drain the active stderr buffer.
+    fn take_stderr(&mut self) -> Vec<u8> {
+        for capture in self.exec.output_captures.iter_mut().rev() {
+            if capture.capture_stderr {
+                return std::mem::take(&mut capture.stderr);
+            }
+        }
+        std::mem::take(&mut self.vm.stderr)
+    }
+
+    fn process_subst_out_sink_mut(&mut self, path: &str) -> Option<&mut PendingProcessSubstOut> {
+        for scope in self.proc_subst_out_scopes.iter_mut().rev() {
+            if let Some(index) = scope.iter().position(|sink| sink.path == path) {
+                return scope.get_mut(index);
+            }
+        }
+        None
+    }
+
+    fn write_process_subst_out_with_parent(
+        &mut self,
+        path: &str,
+        data: &[u8],
+        clear: bool,
+    ) -> bool {
+        for scope_index in (0..self.proc_subst_out_scopes.len()).rev() {
+            let maybe_index = self.proc_subst_out_scopes[scope_index]
+                .iter()
+                .position(|sink| sink.path == path);
+            if let Some(index) = maybe_index {
+                let mut sink = self.proc_subst_out_scopes[scope_index].remove(index);
+                if clear {
+                    sink.clear();
+                }
+                sink.write_with_parent(self, data);
+                self.proc_subst_out_scopes[scope_index].insert(index, sink);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn prepare_live_redirections(
+        &mut self,
+        redirections: &[HirRedirection],
+    ) -> Result<Option<LiveRedirectionScope>, ()> {
+        let mut scope = LiveRedirectionScope {
+            stdout: OutputDestination::VisibleStdout,
+            stderr: OutputDestination::VisibleStderr,
+        };
+        let mut handled_any = false;
+
+        for redir in redirections {
+            match redir.op {
+                RedirectionOp::Output | RedirectionOp::Append => {
+                    handled_any = true;
+                    let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
+                    let resolved_target = resolved.first().unwrap_or(&redir.target);
+                    let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
+                    let path = self.resolve_cwd_path(&target);
+                    let destination = if self.process_subst_out_sink_mut(&path).is_some() {
+                        if matches!(redir.op, RedirectionOp::Output) {
+                            if let Some(sink) = self.process_subst_out_sink_mut(&path) {
+                                sink.clear();
+                            }
+                        }
+                        OutputDestination::ProcessSubst { path }
+                    } else {
+                        match self
+                            .fs
+                            .open_write_sink(&path, matches!(redir.op, RedirectionOp::Append))
+                        {
+                            Ok(sink) => OutputDestination::File {
+                                path,
+                                sink: Rc::new(RefCell::new(sink)),
+                            },
+                            Err(err) => {
+                                let msg = format!("wasmsh: {target}: {err}\n");
+                                self.write_stderr(msg.as_bytes());
+                                self.vm.state.last_status = 1;
+                                return Err(());
+                            }
+                        }
+                    };
+                    match redir.fd.unwrap_or(1) {
+                        FD_BOTH => {
+                            scope.stdout = destination.clone();
+                            scope.stderr = destination;
+                        }
+                        2 => scope.stderr = destination,
+                        _ => scope.stdout = destination,
+                    }
+                }
+                RedirectionOp::DupOutput => {
+                    handled_any = true;
+                    let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
+                    let resolved_target = resolved.first().unwrap_or(&redir.target);
+                    let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
+                    let target_fd = target.parse().unwrap_or(1);
+                    let source_fd = redir.fd.unwrap_or(1);
+                    let destination = match target_fd {
+                        2 => scope.stderr.clone(),
+                        _ => scope.stdout.clone(),
+                    };
+                    match source_fd {
+                        2 => scope.stderr = destination,
+                        _ => scope.stdout = destination,
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(handled_any.then_some(scope))
     }
 
     /// Apply redirections: for `>` and `>>`, write captured stdout/stderr to file.
@@ -2858,11 +8716,11 @@ impl WorkerRuntime {
                     let target_fd: u32 = target.parse().unwrap_or(1);
                     let source_fd = redir.fd.unwrap_or(1);
                     if source_fd == 2 && target_fd == 1 {
-                        let stderr_data = std::mem::take(&mut self.vm.stderr);
-                        self.vm.stdout.extend_from_slice(&stderr_data);
+                        let stderr_data = self.take_stderr();
+                        self.write_stdout(&stderr_data);
                     } else if source_fd == 1 && target_fd == 2 {
                         let stdout_data = self.capture_stdout(stdout_before);
-                        self.vm.stderr.extend_from_slice(&stdout_data);
+                        self.write_stderr(&stdout_data);
                     }
                 }
                 #[allow(unreachable_patterns)]
@@ -2875,23 +8733,29 @@ impl WorkerRuntime {
     fn apply_output_redir(&mut self, path: &str, target: &str, fd: u32, stdout_before: usize) {
         let data = if fd == FD_BOTH {
             let mut combined = self.capture_stdout(stdout_before);
-            combined.extend_from_slice(&std::mem::take(&mut self.vm.stderr));
+            combined.extend_from_slice(&self.take_stderr());
             combined
         } else if fd == 2 {
-            std::mem::take(&mut self.vm.stderr)
+            self.take_stderr()
         } else {
             self.capture_stdout(stdout_before)
         };
+        if self.write_process_subst_out_with_parent(path, &data, true) {
+            return;
+        }
         self.write_to_file(path, target, &data, OpenOptions::write());
     }
 
     /// Apply `>>` append redirection for a specific fd.
     fn apply_append_redir(&mut self, path: &str, target: &str, fd: u32, stdout_before: usize) {
         let data = if fd == 2 {
-            std::mem::take(&mut self.vm.stderr)
+            self.take_stderr()
         } else {
             self.capture_stdout(stdout_before)
         };
+        if self.write_process_subst_out_with_parent(path, &data, false) {
+            return;
+        }
         self.write_to_file(path, target, &data, OpenOptions::append());
     }
 }
@@ -4302,5 +10166,839 @@ fn split_alternatives(pat: &[u8]) -> Vec<Vec<u8>> {
 impl Default for WorkerRuntime {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn get_stdout(events: &[WorkerEvent]) -> String {
+        let mut out = Vec::new();
+        for event in events {
+            if let WorkerEvent::Stdout(data) = event {
+                out.extend_from_slice(data);
+            }
+        }
+        String::from_utf8(out).unwrap_or_default()
+    }
+
+    fn get_stderr(events: &[WorkerEvent]) -> String {
+        let mut out = Vec::new();
+        for event in events {
+            if let WorkerEvent::Stderr(data) = event {
+                out.extend_from_slice(data);
+            }
+        }
+        String::from_utf8(out).unwrap_or_default()
+    }
+
+    fn has_output_limit_diagnostic(events: &[WorkerEvent]) -> bool {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                WorkerEvent::Diagnostic(_, message) if message.contains("output limit exceeded")
+            )
+        })
+    }
+
+    #[test]
+    fn streaming_yes_head_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.vm.limits.output_byte_limit = 10;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "yes | head -n 5".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "y\ny\ny\ny\ny\n");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn streaming_yes_cat_head_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.vm.limits.output_byte_limit = 10;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "yes | cat | head -n 5".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "y\ny\ny\ny\ny\n");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn streaming_yes_head_wc_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.vm.limits.output_byte_limit = 8;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "yes | head -n 5 | wc -l".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "      5\n");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn streaming_cat_file_head_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.handle_command(HostCommand::WriteFile {
+            path: "/big.txt".into(),
+            data: b"abcdefghijklmnopqrstuvwxyz".to_vec(),
+        });
+        runtime.vm.limits.output_byte_limit = 10;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "cat /big.txt | head -c 10".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "abcdefghij");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn streaming_yes_tr_head_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.vm.limits.output_byte_limit = 10;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "yes | tr y z | head -n 5".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "z\nz\nz\nz\nz\n");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn streaming_yes_grep_head_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.vm.limits.output_byte_limit = 10;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "yes | grep y | head -n 5".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "y\ny\ny\ny\ny\n");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn streaming_yes_tee_head_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.vm.limits.output_byte_limit = 10;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "yes | tee /tee.txt | head -n 5".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "y\ny\ny\ny\ny\n");
+        assert!(!has_output_limit_diagnostic(&events));
+
+        let file_events = runtime.handle_command(HostCommand::ReadFile {
+            path: "/tee.txt".into(),
+        });
+        assert_eq!(get_stdout(&file_events), "y\ny\ny\ny\ny\n");
+    }
+
+    #[test]
+    fn streaming_buffered_sort_tee_cat_preserves_sorted_output() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "printf 'b\\na\\n' | sort | tee /sorted.txt | cat".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "a\nb\n");
+        let file_events = runtime.handle_command(HostCommand::ReadFile {
+            path: "/sorted.txt".into(),
+        });
+        assert_eq!(get_stdout(&file_events), "a\nb\n");
+    }
+
+    #[test]
+    fn streaming_yes_rev_head_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.vm.limits.output_byte_limit = 10;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "yes | rev | head -n 5".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "y\ny\ny\ny\ny\n");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn streaming_echo_cut_head_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.vm.limits.output_byte_limit = 6;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "echo abc:def | cut -d: -f2 | head -c 4".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "def\n");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn streaming_echo_tail_head_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.vm.limits.output_byte_limit = 3;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "echo -e 'a\\nb\\nc' | tail -n 2 | head -n 1".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "b\n");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn streaming_yes_bat_head_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        let expected = "    1   │ y\n    2   │ y\n";
+        runtime.vm.limits.output_byte_limit = expected.len() as u64;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "yes | bat --style=numbers | head -n 2".into(),
+        });
+
+        assert_eq!(get_stdout(&events), expected);
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn streaming_yes_sed_head_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.vm.limits.output_byte_limit = 10;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "yes | sed 's/y/z/' | head -n 5".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "z\nz\nz\nz\nz\n");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn streaming_echo_paste_serial_head_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.vm.limits.output_byte_limit = 6;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "echo -e 'a\\nb\\nc' | paste -s -d , | head -c 6".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "a,b,c\n");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn streaming_echo_column_head_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.vm.limits.output_byte_limit = 4;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "echo abc | column | head -c 4".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "abc\n");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn streaming_echo_uniq_head_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.vm.limits.output_byte_limit = 6;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "echo -e 'a\\na\\nb' | uniq | head -n 2".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "a\nb\n");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn streaming_buffered_printf_sort_head_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.vm.limits.output_byte_limit = 2;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "printf 'b\\na\\n' | sort | head -n 1".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "a\n");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn streaming_buffered_function_stage_preserves_output() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "f(){ cat; }\nprintf hi | f | head -c 2".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "hi");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn streaming_buffered_function_pipe_stderr_respects_visible_output_limit() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.vm.limits.output_byte_limit = 8;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "f(){ echo out; echo err >&2; }\nf |& head -n 2".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "out\nerr\n");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn scheduled_group_stage_pipe_stderr_preserves_output() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "printf x | { cat; echo err >&2; } |& cat".into(),
+        });
+
+        let stdout = get_stdout(&events);
+        assert!(stdout.contains("x"));
+        assert!(stdout.contains("err"));
+    }
+
+    #[test]
+    fn streaming_tee_pipe_stderr_preserves_output_and_stage_status() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "printf x | tee / |& cat\necho ${PIPESTATUS[*]}".into(),
+        });
+
+        let stdout = get_stdout(&events);
+        assert!(stdout.contains("x"));
+        assert!(stdout.contains("tee: /: is a directory: /"));
+        assert!(stdout.contains("0 1 0"));
+        assert_eq!(get_stderr(&events), "");
+    }
+
+    #[test]
+    fn streaming_tee_pipe_stderr_respects_pipefail() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "set -o pipefail\nprintf x | tee / |& cat".into(),
+        });
+
+        assert_eq!(runtime.vm.state.last_status, 1);
+        let stdout = get_stdout(&events);
+        assert!(stdout.contains("x"));
+        assert!(stdout.contains("tee: /: is a directory: /"));
+    }
+
+    #[test]
+    fn generic_pipeline_capture_does_not_count_hidden_stage_output() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.vm.limits.output_byte_limit = 2;
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "echo -e 'a\\nb' | grep b".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "b\n");
+        assert!(!has_output_limit_diagnostic(&events));
+    }
+
+    #[test]
+    fn generic_pipeline_file_capture_preserves_redirection_behavior() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "echo -e 'a\\nb' | grep b >/filtered.txt | wc -l".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "      0\n");
+
+        let file_events = runtime.handle_command(HostCommand::ReadFile {
+            path: "/filtered.txt".into(),
+        });
+        assert_eq!(get_stdout(&file_events), "b\n");
+    }
+
+    #[test]
+    fn scheduler_single_redirect_only_command_creates_target_file() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "> /created.txt".into(),
+        });
+
+        assert_eq!(runtime.vm.state.last_status, 0);
+        assert_eq!(get_stdout(&events), "");
+        assert_eq!(get_stderr(&events), "");
+
+        let file_events = runtime.handle_command(HostCommand::ReadFile {
+            path: "/created.txt".into(),
+        });
+        assert_eq!(get_stdout(&file_events), "");
+    }
+
+    #[test]
+    fn command_substitution_keeps_inner_stderr_visible() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "echo $(printf 'hello'; echo err >&2)".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "hello\n");
+        assert_eq!(get_stderr(&events), "err\n");
+    }
+
+    #[test]
+    fn command_substitution_isolates_shell_state() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "foo=before; echo $(foo=after; printf hi); echo $foo".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "hi\nbefore\n");
+    }
+
+    #[test]
+    fn process_substitution_out_feeds_inner_command() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "printf hi > >(cat)".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "hi");
+        assert_eq!(get_stderr(&events), "");
+        assert_eq!(runtime.vm.state.last_status, 0);
+    }
+
+    #[test]
+    fn process_substitution_out_runs_schedulable_inner_pipeline() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "printf 'a\\nb\\n' > >(head -n 1 | cat)".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "a\n");
+        assert_eq!(get_stderr(&events), "");
+        assert_eq!(runtime.vm.state.last_status, 0);
+    }
+
+    #[test]
+    fn process_substitution_out_runs_live_tail_pipeline() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        runtime.proc_subst_out_scopes.push(Vec::new());
+        let path = runtime
+            .register_process_subst_out("tail -n 1 | cat")
+            .expect("process substitution path");
+
+        {
+            let sink = runtime
+                .process_subst_out_sink_mut(&path)
+                .expect("registered process substitution sink");
+            match &sink.mode {
+                PendingProcessSubstOutMode::Live { .. } => {}
+                PendingProcessSubstOutMode::Buffered { .. } => {
+                    panic!("expected live process substitution runner")
+                }
+            }
+            sink.write(b"a\nb\n");
+        }
+
+        let scope = runtime.proc_subst_out_scopes.pop().unwrap_or_default();
+        runtime.flush_process_subst_out_scope(scope);
+        assert_eq!(runtime.vm.stdout, b"b\n");
+    }
+
+    #[test]
+    fn process_substitution_out_runs_live_buffered_pipeline() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        runtime.proc_subst_out_scopes.push(Vec::new());
+        let path = runtime
+            .register_process_subst_out("sort | cat")
+            .expect("process substitution path");
+
+        {
+            let sink = runtime
+                .process_subst_out_sink_mut(&path)
+                .expect("registered process substitution sink");
+            match &sink.mode {
+                PendingProcessSubstOutMode::Live { runner } => {
+                    assert!(runner.isolated_runtime.is_some());
+                }
+                PendingProcessSubstOutMode::Buffered { .. } => {
+                    panic!("expected live buffered process substitution runner")
+                }
+            }
+            sink.write(b"b\na\n");
+        }
+
+        let scope = runtime.proc_subst_out_scopes.pop().unwrap_or_default();
+        runtime.flush_process_subst_out_scope(scope);
+        assert_eq!(runtime.vm.stdout, b"a\nb\n");
+    }
+
+    #[test]
+    fn process_substitution_in_registers_live_reader_and_cleans_up() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        runtime.proc_subst_in_scopes.push(Vec::new());
+        let path = runtime
+            .execute_process_subst_in("yes | head -n 2")
+            .to_string();
+        assert!(runtime.fs.stat(&path).is_ok());
+
+        let file = runtime.handle_command(HostCommand::ReadFile { path: path.clone() });
+        assert_eq!(get_stdout(&file), "y\ny\n");
+        assert!(runtime.fs.stat(&path).is_err());
+
+        let scope = runtime.proc_subst_in_scopes.pop().unwrap_or_default();
+        runtime.flush_process_subst_in_scope(scope);
+        assert!(runtime.fs.stat(&path).is_err());
+    }
+
+    #[test]
+    fn process_substitution_in_registers_live_sed_reader_and_cleans_up() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        runtime.proc_subst_in_scopes.push(Vec::new());
+        let path = runtime
+            .execute_process_subst_in("yes | sed 's/y/z/' | head -n 2")
+            .to_string();
+        assert!(runtime.fs.stat(&path).is_ok());
+
+        let file = runtime.handle_command(HostCommand::ReadFile { path: path.clone() });
+        assert_eq!(get_stdout(&file), "z\nz\n");
+        assert!(runtime.fs.stat(&path).is_err());
+
+        let scope = runtime.proc_subst_in_scopes.pop().unwrap_or_default();
+        runtime.flush_process_subst_in_scope(scope);
+        assert!(runtime.fs.stat(&path).is_err());
+    }
+
+    #[test]
+    fn process_substitution_in_runs_live_buffered_reader_and_cleans_up() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        runtime.proc_subst_in_scopes.push(Vec::new());
+        let path = runtime
+            .execute_process_subst_in("printf 'b\\na\\n' | sort")
+            .to_string();
+
+        assert!(runtime.fs.stat(&path).is_ok());
+        let file = runtime.handle_command(HostCommand::ReadFile { path: path.clone() });
+        assert_eq!(get_stdout(&file), "a\nb\n");
+        assert!(runtime.fs.stat(&path).is_err());
+
+        let scope = runtime.proc_subst_in_scopes.pop().unwrap_or_default();
+        runtime.flush_process_subst_in_scope(scope);
+        assert!(runtime.fs.stat(&path).is_err());
+    }
+
+    #[test]
+    fn live_process_substitution_runner_consumes_before_flush() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        runtime.proc_subst_out_scopes.push(Vec::new());
+        let path = runtime
+            .register_process_subst_out("head -n 1 | cat")
+            .expect("process substitution path");
+
+        {
+            let sink = runtime
+                .process_subst_out_sink_mut(&path)
+                .expect("registered process substitution sink");
+            sink.write(b"a\nb\n");
+            match &sink.mode {
+                PendingProcessSubstOutMode::Live { runner } => {
+                    assert_eq!(runner.captured_stdout, b"a\n");
+                }
+                PendingProcessSubstOutMode::Buffered { .. } => {
+                    panic!("expected live process substitution runner")
+                }
+            }
+        }
+
+        let scope = runtime.proc_subst_out_scopes.pop().unwrap_or_default();
+        runtime.flush_process_subst_out_scope(scope);
+        assert_eq!(runtime.vm.stdout, b"a\n");
+    }
+
+    #[test]
+    fn live_process_substitution_runner_tee_writes_before_flush() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        runtime.proc_subst_out_scopes.push(Vec::new());
+        let path = runtime
+            .register_process_subst_out("tee /tee.txt | cat")
+            .expect("process substitution path");
+
+        {
+            let sink = runtime
+                .process_subst_out_sink_mut(&path)
+                .expect("registered process substitution sink");
+            sink.write(b"a\nb\n");
+            match &sink.mode {
+                PendingProcessSubstOutMode::Live { runner } => {
+                    assert!(runner.captured_stdout.starts_with(b"a\nb"));
+                }
+                PendingProcessSubstOutMode::Buffered { .. } => {
+                    panic!("expected live process substitution runner")
+                }
+            }
+        }
+
+        let file = runtime.handle_command(HostCommand::ReadFile {
+            path: "/tee.txt".into(),
+        });
+        assert!(get_stdout(&file).starts_with("a\nb"));
+
+        let scope = runtime.proc_subst_out_scopes.pop().unwrap_or_default();
+        runtime.flush_process_subst_out_scope(scope);
+        assert_eq!(runtime.vm.stdout, b"a\nb\n");
+
+        let file = runtime.handle_command(HostCommand::ReadFile {
+            path: "/tee.txt".into(),
+        });
+        assert_eq!(get_stdout(&file), "a\nb\n");
+    }
+
+    #[test]
+    fn exec_live_redirections_preserve_left_to_right_dup_order() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "printf hi > /first.txt 1>&2\nprintf hi 1>&2 > /second.txt".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "");
+        assert_eq!(get_stderr(&events), "hi");
+
+        let first = runtime.handle_command(HostCommand::ReadFile {
+            path: "/first.txt".into(),
+        });
+        assert_eq!(get_stdout(&first), "");
+
+        let second = runtime.handle_command(HostCommand::ReadFile {
+            path: "/second.txt".into(),
+        });
+        assert_eq!(get_stdout(&second), "hi");
+    }
+
+    #[test]
+    fn exec_process_subst_redirections_preserve_left_to_right_dup_order() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "printf hi > >(cat) 1>&2\nprintf hi 1>&2 > >(cat)".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "hi");
+        assert_eq!(get_stderr(&events), "hi");
+    }
+
+    #[test]
+    fn builtin_and_utility_redirections_write_files_during_execution() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "type printf > /builtin.txt\nprintf hi > /utility.txt".into(),
+        });
+
+        let status = events
+            .iter()
+            .find_map(|event| {
+                if let WorkerEvent::Exit(code) = event {
+                    Some(*code)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(-1);
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "");
+        assert_eq!(get_stderr(&events), "");
+
+        let builtin = runtime.handle_command(HostCommand::ReadFile {
+            path: "/builtin.txt".into(),
+        });
+        assert!(get_stdout(&builtin).contains("printf"));
+
+        let utility = runtime.handle_command(HostCommand::ReadFile {
+            path: "/utility.txt".into(),
+        });
+        assert_eq!(get_stdout(&utility), "hi");
     }
 }

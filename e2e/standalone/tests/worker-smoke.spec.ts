@@ -12,31 +12,16 @@ test("worker returns Version, stdout, and Exit(0) for echo hello", async ({
   // Ask the page to spin up a worker, send Init, then Run "echo hello",
   // and collect all events from both responses.
   const result = await page.evaluate(async () => {
-    const worker = (window as any).createShellWorker();
-
-    function sendAndReceive(msg: any): Promise<any> {
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("worker timeout")), 10_000);
-        worker.onmessage = (e: MessageEvent) => {
-          clearTimeout(timeout);
-          resolve(e.data);
-        };
-        worker.onerror = (e: ErrorEvent) => {
-          clearTimeout(timeout);
-          reject(new Error(e.message));
-        };
-        worker.postMessage(msg);
-      });
-    }
+    const client = (window as any).createShellWorkerClient(10_000);
 
     // 1. Init
-    const initReply = await sendAndReceive({
+    const initReply = await client.send({
       type: "Init",
       step_budget: 100000,
     });
 
     // 2. Run
-    const runReply = await sendAndReceive({
+    const runReply = await client.send({
       type: "Run",
       input: "echo hello",
     });

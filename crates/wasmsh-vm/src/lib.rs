@@ -168,10 +168,67 @@ impl Vm {
         });
     }
 
+    fn budget_stop(&mut self, result: StepResult, message: String) -> StepResult {
+        self.emit_diagnostic(DiagLevel::Error, DiagCategory::Budget, message);
+        result
+    }
+
     /// Track output bytes and check the limit. Returns true if within limits.
     pub fn track_output(&mut self, bytes: u64) -> bool {
         self.output_bytes += bytes;
         self.limits.output_byte_limit == 0 || self.output_bytes <= self.limits.output_byte_limit
+    }
+
+    /// Append stdout bytes and update output accounting.
+    pub fn write_stdout(&mut self, data: &[u8]) {
+        self.stdout.extend_from_slice(data);
+        self.track_output(data.len() as u64);
+    }
+
+    /// Append stderr bytes and update output accounting.
+    pub fn write_stderr(&mut self, data: &[u8]) {
+        self.stderr.extend_from_slice(data);
+        self.track_output(data.len() as u64);
+    }
+
+    /// Append both stdout and stderr bytes and update output accounting once.
+    pub fn write_streams(&mut self, stdout: &[u8], stderr: &[u8]) {
+        self.stdout.extend_from_slice(stdout);
+        self.stderr.extend_from_slice(stderr);
+        self.track_output((stdout.len() + stderr.len()) as u64);
+    }
+
+    /// Check whether the accumulated output has exceeded the configured limit.
+    pub fn check_output_limit(&mut self) -> Result<(), StepResult> {
+        if self.limits.output_byte_limit > 0 && self.output_bytes > self.limits.output_byte_limit {
+            return Err(self.budget_stop(
+                StepResult::OutputLimitExceeded,
+                format!(
+                    "output limit exceeded: {} bytes (limit: {})",
+                    self.output_bytes, self.limits.output_byte_limit
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Consume one execution step using the VM's shared budget/cancel semantics.
+    pub fn begin_step(&mut self) -> Result<(), StepResult> {
+        if self.cancel.is_cancelled() {
+            return Err(self.budget_stop(StepResult::Cancelled, "execution cancelled".to_string()));
+        }
+        self.check_output_limit()?;
+        if self.limits.step_limit > 0 && self.steps >= self.limits.step_limit {
+            return Err(self.budget_stop(
+                StepResult::Yield,
+                format!(
+                    "step budget exhausted: {} steps (limit: {})",
+                    self.steps, self.limits.step_limit
+                ),
+            ));
+        }
+        self.steps += 1;
+        Ok(())
     }
 
     /// Get the cancellation token (can be cloned and shared).
@@ -187,17 +244,9 @@ impl Vm {
         let instructions = &program.instructions;
 
         while pc < instructions.len() {
-            // Check cancellation
-            if self.cancel.is_cancelled() {
-                return StepResult::Cancelled;
+            if let Err(stop) = self.begin_step() {
+                return stop;
             }
-
-            // Check step budget
-            if self.limits.step_limit > 0 && self.steps >= self.limits.step_limit {
-                return StepResult::Yield;
-            }
-
-            self.steps += 1;
 
             match &instructions[pc] {
                 Ir::SetVar { name, value } => {
@@ -219,9 +268,7 @@ impl Vm {
                             };
                             builtin_fn(&mut ctx, &argv_refs)
                         };
-                        self.stdout.extend_from_slice(&sink.stdout);
-                        self.stderr.extend_from_slice(&sink.stderr);
-                        self.output_bytes += (sink.stdout.len() + sink.stderr.len()) as u64;
+                        self.write_streams(&sink.stdout, &sink.stderr);
                         self.state.last_status = status;
                     } else {
                         self.emit_diagnostic(
@@ -361,6 +408,10 @@ mod tests {
         token.cancel();
         let prog = IrProgram::new(vec![Ir::Nop]);
         assert_eq!(vm.run(&prog), StepResult::Cancelled);
+        assert!(vm
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("execution cancelled")));
     }
 
     #[test]
@@ -387,5 +438,34 @@ mod tests {
         assert_eq!(vm.state.last_status, 7);
         assert_eq!(vm.state.get_var("?").unwrap(), "7");
         assert_eq!(vm.state.get_var("X").unwrap(), "1");
+    }
+
+    #[test]
+    fn begin_step_matches_vm_budget_semantics() {
+        let mut vm = Vm::new(ShellState::new(), 1);
+        assert_eq!(vm.begin_step(), Ok(()));
+        assert_eq!(vm.steps, 1);
+        assert_eq!(vm.begin_step(), Err(StepResult::Yield));
+        assert!(vm
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("step budget exhausted")));
+    }
+
+    #[test]
+    fn output_limit_is_reported_through_begin_step() {
+        let mut vm = Vm::with_limits(
+            ShellState::new(),
+            ExecutionLimits {
+                step_limit: 0,
+                output_byte_limit: 3,
+            },
+        );
+        vm.write_stdout(b"four");
+        assert_eq!(vm.begin_step(), Err(StepResult::OutputLimitExceeded));
+        assert!(vm
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("output limit exceeded")));
     }
 }

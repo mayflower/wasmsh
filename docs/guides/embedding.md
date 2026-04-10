@@ -128,7 +128,7 @@ shell — for example, a database query, an API call, or in the Pyodide
 case, the in-process Python interpreter.
 
 ```rust
-use wasmsh_runtime::{WorkerRuntime, ExternalCommandResult};
+use wasmsh_runtime::{ExternalCommandResult, WorkerRuntime};
 
 let mut rt = WorkerRuntime::new();
 rt.handle_command(HostCommand::Init {
@@ -139,7 +139,7 @@ rt.handle_command(HostCommand::Init {
 rt.set_external_handler(Box::new(|name, argv, stdin| {
     match name {
         "say-hello" => Some(ExternalCommandResult {
-            exit_code: 0,
+            status: 0,
             stdout: format!("hello, {}\n", argv.first().map(|s| s.as_str()).unwrap_or("world")).into_bytes(),
             stderr: vec![],
         }),
@@ -157,12 +157,13 @@ The handler signature is:
 
 ```rust
 type ExternalCommandHandler =
-    Box<dyn FnMut(&str, &[String], Option<&[u8]>) -> Option<ExternalCommandResult>>;
+    Box<dyn FnMut(&str, &[String], Option<ExternalCommandStdin<'_>>) -> Option<ExternalCommandResult>>;
 ```
 
 - `name`: the command name as the script wrote it.
 - `argv`: the expanded argument vector (excluding `name`).
-- `stdin`: the piped or here-doc input bytes, if any.
+- `stdin`: the piped or here-doc input stream, if any. Consume it with
+  `stdin.read_all()?` or by wrapping your own reader with `ExternalCommandStdin::from_reader(...)`.
 - Return `Some(result)` to handle the command, or `None` to fall through.
 
 The Pyodide adapter installs an `ExternalCommandHandler` that dispatches

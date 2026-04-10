@@ -16,9 +16,11 @@ let installHelpers = null;
 let runtimeBridge = null;
 let assetBaseUrl = null;
 let sessionAllowedHosts = [];
-/** Set of package names whose wheel files are actually served locally.
- *  Built at boot by batch HEAD-checking all lockfile entries in parallel. */
-let bundledPackageNames = new Set();
+/** Map of package name -> wheel file from pyodide-lock.json. */
+let bundledPackageFiles = new Map();
+/** Cache of package name -> locally served status. */
+let bundledPackageAvailability = new Map();
+let bundledPackageIndexPromise = null;
 
 function resolveHelperUrl(relativePath) {
   return new URL(relativePath, self.location.href).href;
@@ -40,6 +42,61 @@ async function ensureHelperModules() {
     });
   }
   await helperModulesPromise;
+}
+
+async function ensureBundledPackageIndex() {
+  if (bundledPackageIndexPromise) {
+    await bundledPackageIndexPromise;
+    return;
+  }
+  bundledPackageIndexPromise = (async () => {
+    const lockUrl = `${assetBaseUrl}/pyodide-lock.json`;
+    const resp = await fetch(lockUrl);
+    if (!resp.ok) {
+      throw new Error(`Could not fetch bundled package index: HTTP ${resp.status}`);
+    }
+    const lock = await resp.json();
+    bundledPackageFiles = new Map();
+    for (const [name, entry] of Object.entries(lock.packages || {})) {
+      if (entry && entry.file_name) {
+        bundledPackageFiles.set(name, entry.file_name);
+      }
+    }
+  })().catch((error) => {
+    bundledPackageIndexPromise = null;
+    throw error;
+  });
+  await bundledPackageIndexPromise;
+}
+
+async function isBundledPackage(name) {
+  if (bundledPackageAvailability.has(name)) {
+    return bundledPackageAvailability.get(name);
+  }
+
+  try {
+    await ensureBundledPackageIndex();
+  } catch (error) {
+    console.warn(`[wasmsh] Failed to load bundled package index: ${error.message}`);
+    bundledPackageAvailability.set(name, false);
+    return false;
+  }
+
+  const fileName = bundledPackageFiles.get(name);
+  if (!fileName) {
+    bundledPackageAvailability.set(name, false);
+    return false;
+  }
+
+  try {
+    const response = await fetch(`${assetBaseUrl}/${fileName}`, { method: "HEAD" });
+    const available = response.ok;
+    bundledPackageAvailability.set(name, available);
+    return available;
+  } catch {
+    bundledPackageAvailability.set(name, false);
+    return false;
+  }
 }
 
 function protocol() {
@@ -187,36 +244,6 @@ async function boot(baseUrl) {
     // micropip not available — not fatal
   }
 
-  // Build the set of bundled packages whose wheel files are actually served
-  // locally.  We read the lockfile (the browser HTTP cache likely already has
-  // it from loadPyodide) and then batch-HEAD all wheel file_names in parallel.
-  // Only packages with a locally available wheel are considered "bundled".
-  try {
-    const lockUrl = `${assetBaseUrl}/pyodide-lock.json`;
-    const resp = await fetch(lockUrl);
-    if (resp.ok) {
-      const lock = await resp.json();
-      const entries = Object.entries(lock.packages || {});
-      const checks = entries.map(async ([name, entry]) => {
-        if (!entry.file_name) return null;
-        try {
-          const r = await fetch(`${assetBaseUrl}/${entry.file_name}`, { method: "HEAD" });
-          return r.ok ? name : null;
-        } catch {
-          return null;
-        }
-      });
-      const results = await Promise.all(checks);
-      bundledPackageNames = new Set(results.filter(Boolean));
-    } else {
-      console.warn(`[wasmsh] Could not fetch bundled package index: HTTP ${resp.status}`);
-      bundledPackageNames = new Set();
-    }
-  } catch (err) {
-    console.warn(`[wasmsh] Failed to load bundled package index: ${err.message}`);
-    bundledPackageNames = new Set();
-  }
-
   module._pyodide = pyodide;
   runtimeBridge = runtimeBridgeModule().createRuntimeBridge(module);
 }
@@ -303,7 +330,7 @@ const methods = {
     }
 
     return installHelpers.installPackages(reqs, pyodideRef, {
-      isBundled: (name) => bundledPackageNames.has(name),
+      isBundled: isBundledPackage,
       allowedHosts: sessionAllowedHosts,
       deps: options.deps,
     });
@@ -317,7 +344,9 @@ const methods = {
     moduleRef = null;
     pyodideRef = null;
     bootPromise = null;
-    bundledPackageNames = new Set();
+    bundledPackageFiles = new Map();
+    bundledPackageAvailability = new Map();
+    bundledPackageIndexPromise = null;
     return { closed: true };
   },
 };

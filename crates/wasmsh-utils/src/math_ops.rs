@@ -1,6 +1,6 @@
 //! Math utility: bc.
 
-use crate::helpers::get_input_text;
+use crate::helpers::collect_input_text;
 use crate::UtilContext;
 
 // ---------------------------------------------------------------------------
@@ -26,7 +26,10 @@ pub(crate) fn util_bc(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     }
 
-    let input = get_input_text(ctx, args);
+    let input = match collect_input_text(ctx, args, "bc") {
+        Ok(input) => input,
+        Err(status) => return status,
+    };
 
     let mut env = BcEnv::new();
     if load_math_lib {
@@ -974,7 +977,7 @@ mod tests {
                 fs: &mut fs,
                 output: &mut output,
                 cwd: "/",
-                stdin: Some(input_bytes),
+                stdin: Some(crate::UtilStdin::from_bytes(input_bytes)),
                 state: None,
                 network: None,
             };

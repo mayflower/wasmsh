@@ -4,7 +4,7 @@ use std::fmt::Write;
 
 use wasmsh_fs::{OpenOptions, Vfs};
 
-use crate::helpers::{child_path, emit_error, read_text, resolve_path};
+use crate::helpers::{child_path, collect_input_text, collect_path_text, emit_error, resolve_path};
 use crate::UtilContext;
 
 // ---------------------------------------------------------------------------
@@ -674,10 +674,7 @@ fn diff_read_file(
             ctx.output.stderr(msg.as_bytes());
             Err(2)
         }
-        Ok(_) => read_text(ctx.fs, path).map_err(|e| {
-            emit_error(ctx.output, "diff", display, &e);
-            2
-        }),
+        Ok(_) => collect_path_text(ctx, path, display, "diff").map_err(|_| 2),
         Err(_) => {
             if new_file_flag {
                 Ok(String::new())
@@ -701,7 +698,14 @@ pub(crate) fn util_diff(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     }
 
     // Handle "-" as stdin for either operand
-    let stdin_text = ctx.stdin.map(|d| String::from_utf8_lossy(d).to_string());
+    let stdin_text = if positional[0] == "-" || positional[1] == "-" {
+        match collect_input_text(ctx, &[], "diff") {
+            Ok(text) => Some(text),
+            Err(status) => return status,
+        }
+    } else {
+        None
+    };
     let (old_text, old_label) = if positional[0] == "-" {
         (
             stdin_text.clone().unwrap_or_default(),
@@ -794,10 +798,7 @@ fn read_text_or_empty(
     if !exists {
         return Ok(String::new());
     }
-    read_text(ctx.fs, path).map_err(|e| {
-        emit_error(ctx.output, "diff", display, &e);
-        2
-    })
+    collect_path_text(ctx, path, display, "diff").map_err(|_| 2)
 }
 
 /// Recursively diff two directory trees.
@@ -1225,7 +1226,7 @@ fn apply_patch_to_file(
     let stripped = strip_path_components(&pf.path, strip_count);
     let target_path = resolve_path(ctx.cwd, stripped);
 
-    let mut lines: Vec<String> = match read_text(ctx.fs, &target_path) {
+    let mut lines: Vec<String> = match collect_path_text(ctx, &target_path, stripped, "patch") {
         Ok(text) => text.lines().map(String::from).collect(),
         Err(_) => Vec::new(),
     };
@@ -1286,18 +1287,19 @@ pub(crate) fn util_patch(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     // Read the patch text.
     let patch_text = if let Some(pf) = flags.patch_file {
         let full = resolve_path(ctx.cwd, pf);
-        match read_text(ctx.fs, &full) {
+        match collect_path_text(ctx, &full, pf, "patch") {
             Ok(t) => t,
-            Err(e) => {
-                emit_error(ctx.output, "patch", pf, &e);
+            Err(status) => return status.max(2),
+        }
+    } else {
+        match collect_input_text(ctx, &[], "patch") {
+            Ok(data) if !data.is_empty() => data,
+            Ok(_) => {
+                ctx.output.stderr(b"patch: no input\n");
                 return 2;
             }
+            Err(status) => return status,
         }
-    } else if let Some(data) = ctx.stdin {
-        String::from_utf8_lossy(data).to_string()
-    } else {
-        ctx.output.stderr(b"patch: no input\n");
-        return 2;
     };
 
     let mut patch_files = parse_unified_diff(&patch_text);
@@ -1324,6 +1326,7 @@ pub(crate) fn util_patch(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::helpers::read_text;
     use crate::{UtilContext, VecOutput};
     use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
 
@@ -1364,7 +1367,7 @@ mod tests {
                 fs,
                 output: &mut output,
                 cwd: "/",
-                stdin,
+                stdin: stdin.map(crate::UtilStdin::from_bytes),
                 state: None,
                 network: None,
             };

@@ -78,13 +78,15 @@ pub(crate) fn util_printenv(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     if !names.is_empty() {
         if let Some(state) = ctx.state {
             let vars = state.env.exported_vars();
+            let mut found_any = false;
             for name in &names {
                 if let Some(value) = vars.get(*name) {
                     ctx.output.stdout(value.as_bytes());
                     ctx.output.stdout(if null_sep { b"\0" } else { b"\n" });
-                    return 0;
+                    found_any = true;
                 }
             }
+            return i32::from(!found_any);
         }
         return 1;
     }
@@ -380,4 +382,57 @@ pub(crate) fn util_date(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasmsh_fs::BackendFs;
+    use wasmsh_state::{ShellState, ShellVar};
+
+    fn run_printenv(argv: &[&str], exports: &[(&str, &str)]) -> (i32, String, String) {
+        let mut fs = BackendFs::new();
+        let mut output = crate::VecOutput::default();
+        let mut state = ShellState::new();
+        for (name, value) in exports {
+            let mut var = ShellVar::scalar((*value).into());
+            var.exported = true;
+            state.env.set((*name).into(), var);
+        }
+        let status = util_printenv(
+            &mut UtilContext {
+                fs: &mut fs,
+                output: &mut output,
+                cwd: "/",
+                stdin: None,
+                state: Some(&state),
+                network: None,
+            },
+            argv,
+        );
+        (
+            status,
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    }
+
+    #[test]
+    fn printenv_prints_all_requested_names() {
+        let (status, stdout, stderr) = run_printenv(
+            &["printenv", "FOO", "BAR"],
+            &[("FOO", "one"), ("BAR", "two")],
+        );
+        assert_eq!(status, 0);
+        assert_eq!(stdout, "one\ntwo\n");
+        assert_eq!(stderr, "");
+    }
+
+    #[test]
+    fn printenv_returns_failure_when_all_requested_names_are_missing() {
+        let (status, stdout, stderr) = run_printenv(&["printenv", "MISSING"], &[("FOO", "one")]);
+        assert_eq!(status, 1);
+        assert_eq!(stdout, "");
+        assert_eq!(stderr, "");
+    }
 }

@@ -284,7 +284,7 @@ mod tests {
                 fs,
                 output: &mut output,
                 cwd: "/",
-                stdin,
+                stdin: stdin.map(crate::UtilStdin::from_bytes),
                 state: None,
                 network: None,
             };

@@ -6,6 +6,8 @@
 
 #![warn(missing_docs)]
 
+use std::io::Read;
+
 #[cfg(feature = "emscripten")]
 #[allow(unsafe_code, clippy::borrow_as_ptr)]
 mod emscripten_fs;
@@ -129,13 +131,32 @@ impl OpenOptions {
 }
 
 /// Virtual filesystem trait.
+pub trait VfsWriteSink {
+    /// Write a chunk to the sink.
+    fn write(&mut self, data: &[u8]) -> Result<(), FsError>;
+}
+
+/// Virtual filesystem trait.
 pub trait Vfs {
     /// Open a file at `path` with the given options, returning a handle.
     fn open(&mut self, path: &str, opts: OpenOptions) -> Result<FileHandle, FsError>;
     /// Read the entire contents of an open file.
     fn read_file(&self, handle: FileHandle) -> Result<Vec<u8>, FsError>;
+    /// Create an owned streaming reader for an open file handle.
+    fn stream_file(&self, handle: FileHandle) -> Result<Box<dyn Read>, FsError>;
     /// Write `data` to an open file, replacing its contents.
     fn write_file(&mut self, handle: FileHandle, data: &[u8]) -> Result<(), FsError>;
+    /// Open an owned write sink for incremental writes to `path`.
+    fn open_write_sink(
+        &mut self,
+        path: &str,
+        append: bool,
+    ) -> Result<Box<dyn VfsWriteSink>, FsError>;
+    /// Install a single-consumer streaming reader at `path`.
+    ///
+    /// The next read-only open of this path may consume the installed reader
+    /// instead of opening a normal file.
+    fn install_stream_reader(&mut self, path: &str, reader: Box<dyn Read>) -> Result<(), FsError>;
     /// Close an open file handle.
     fn close(&mut self, handle: FileHandle);
     /// Return metadata for the entry at `path`.

@@ -6,10 +6,11 @@ use std::fmt::Write;
 use wasmsh_fs::{BackendFs, OpenOptions, Vfs};
 
 use crate::helpers::{
-    child_path, copy_file_contents, emit_error, require_args, resolve_path, simple_glob_match,
-    XorShift64,
+    child_path, copy_file_contents, emit_error, open_reader_for_path, require_args, resolve_path,
+    simple_glob_match, XorShift64,
 };
 use crate::{UtilContext, UtilOutput};
+use std::io::Read;
 
 #[allow(clippy::struct_excessive_bools)]
 struct CatFlags {
@@ -59,46 +60,98 @@ fn cat_has_flags(f: &CatFlags) -> bool {
     f.number_all || f.number_nonblank || f.squeeze_blank || f.show_ends || f.show_tabs
 }
 
-fn cat_emit_lines(output: &mut dyn UtilOutput, text: &str, flags: &CatFlags, line_num: &mut usize) {
-    let mut prev_blank = false;
-    for line in text.split('\n') {
-        let is_blank = line.is_empty();
-        if flags.squeeze_blank && is_blank && prev_blank {
-            continue;
-        }
-        prev_blank = is_blank;
-
-        if (flags.number_nonblank && !is_blank) || flags.number_all {
-            *line_num += 1;
-            let prefix = format!("{:>6}\t", *line_num);
-            output.stdout(prefix.as_bytes());
-        }
-
-        if flags.show_tabs {
-            output.stdout(line.replace('\t', "^I").as_bytes());
-        } else {
-            output.stdout(line.as_bytes());
-        }
-
-        if flags.show_ends {
-            output.stdout(b"$");
-        }
-        output.stdout(b"\n");
+fn cat_emit_line(
+    output: &mut dyn UtilOutput,
+    line: &str,
+    flags: &CatFlags,
+    line_num: &mut usize,
+    prev_blank: &mut bool,
+) {
+    let is_blank = line.is_empty();
+    if flags.squeeze_blank && is_blank && *prev_blank {
+        return;
     }
+    *prev_blank = is_blank;
+
+    if (flags.number_nonblank && !is_blank) || flags.number_all {
+        *line_num += 1;
+        let prefix = format!("{:>6}\t", *line_num);
+        output.stdout(prefix.as_bytes());
+    }
+
+    if flags.show_tabs {
+        output.stdout(line.replace('\t', "^I").as_bytes());
+    } else {
+        output.stdout(line.as_bytes());
+    }
+
+    if flags.show_ends {
+        output.stdout(b"$");
+    }
+    output.stdout(b"\n");
+}
+
+fn cat_emit_reader_with_flags(
+    output: &mut dyn UtilOutput,
+    reader: &mut dyn Read,
+    flags: &CatFlags,
+    line_num: &mut usize,
+    cmd: &str,
+) -> Result<(), String> {
+    let mut prev_blank = false;
+    let mut pending = Vec::new();
+    let mut buffer = [0u8; 4096];
+
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|err| format!("{cmd}: stdin read error: {err}\n"))?;
+        if read == 0 {
+            break;
+        }
+        pending.extend_from_slice(&buffer[..read]);
+        while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+            let mut line = pending.drain(..=pos).collect::<Vec<u8>>();
+            let _ = line.pop();
+            let text = String::from_utf8_lossy(&line);
+            cat_emit_line(output, &text, flags, line_num, &mut prev_blank);
+        }
+    }
+
+    if !pending.is_empty() {
+        let text = String::from_utf8_lossy(&pending);
+        cat_emit_line(output, &text, flags, line_num, &mut prev_blank);
+    }
+
+    Ok(())
 }
 
 pub(crate) fn util_cat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let (flags, files) = parse_cat_flags(argv);
 
     if files.is_empty() {
-        if let Some(data) = ctx.stdin {
+        if let Some(mut stdin) = ctx.stdin.take() {
             if !cat_has_flags(&flags) {
-                ctx.output.stdout(data);
+                let mut buffer = [0u8; 4096];
+                loop {
+                    match stdin.read_chunk(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(read) => ctx.output.stdout(&buffer[..read]),
+                        Err(err) => {
+                            let msg = format!("cat: stdin read error: {err}\n");
+                            ctx.output.stderr(msg.as_bytes());
+                            return 1;
+                        }
+                    }
+                }
             } else {
-                let text = String::from_utf8_lossy(data);
-                let trimmed = text.strip_suffix('\n').unwrap_or(&text);
                 let mut line_num = 0usize;
-                cat_emit_lines(ctx.output, trimmed, &flags, &mut line_num);
+                if let Err(msg) =
+                    cat_emit_reader_with_flags(ctx.output, &mut stdin, &flags, &mut line_num, "cat")
+                {
+                    ctx.output.stderr(msg.as_bytes());
+                    return 1;
+                }
             }
             return 0;
         }
@@ -110,28 +163,42 @@ pub(crate) fn util_cat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut line_num = 0usize;
     for path in &files {
         let full = resolve_path(ctx.cwd, path);
-        match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => {
-                match ctx.fs.read_file(h) {
-                    Ok(data) => {
-                        if !cat_has_flags(&flags) {
-                            ctx.output.stdout(&data);
-                        } else {
-                            let text = String::from_utf8_lossy(&data);
-                            let trimmed = text.strip_suffix('\n').unwrap_or(&text);
-                            cat_emit_lines(ctx.output, trimmed, &flags, &mut line_num);
+        if !cat_has_flags(&flags) {
+            match open_reader_for_path(ctx, &full, path, "cat") {
+                Ok(mut reader) => {
+                    let mut buffer = [0u8; 4096];
+                    loop {
+                        match reader.read(&mut buffer) {
+                            Ok(0) => break,
+                            Ok(read) => ctx.output.stdout(&buffer[..read]),
+                            Err(err) => {
+                                let msg = format!("cat: stdin read error: {err}\n");
+                                ctx.output.stderr(msg.as_bytes());
+                                status = 1;
+                                break;
+                            }
                         }
                     }
-                    Err(e) => {
-                        emit_error(ctx.output, "cat", path, &e);
+                }
+                Err(_) => status = 1,
+            }
+        } else {
+            match open_reader_for_path(ctx, &full, path, "cat") {
+                Ok(mut reader) => {
+                    if let Err(msg) = cat_emit_reader_with_flags(
+                        ctx.output,
+                        reader.as_mut(),
+                        &flags,
+                        &mut line_num,
+                        "cat",
+                    ) {
+                        ctx.output.stderr(msg.as_bytes());
                         status = 1;
                     }
                 }
-                ctx.fs.close(h);
-            }
-            Err(e) => {
-                emit_error(ctx.output, "cat", path, &e);
-                status = 1;
+                Err(_) => {
+                    status = 1;
+                }
             }
         }
     }
@@ -1328,4 +1395,66 @@ pub(crate) fn util_mktemp(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     ctx.output.stderr(b"mktemp: failed to create unique name\n");
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{UtilContext, UtilStdin, VecOutput};
+    use wasmsh_fs::MemoryFs;
+
+    fn run_cat(argv: &[&str], stdin: Option<&[u8]>, fs: &mut MemoryFs) -> (i32, String, String) {
+        let mut output = VecOutput::default();
+        let status = {
+            let mut ctx = UtilContext {
+                fs,
+                output: &mut output,
+                cwd: "/",
+                stdin: stdin.map(UtilStdin::from_bytes),
+                state: None,
+                network: None,
+            };
+            util_cat(&mut ctx, argv)
+        };
+        (
+            status,
+            String::from_utf8_lossy(&output.stdout).to_string(),
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        )
+    }
+
+    #[test]
+    fn cat_number_nonblank_streams_stdin() {
+        let mut fs = MemoryFs::new();
+        let (status, stdout, stderr) = run_cat(&["cat", "-b"], Some(b"a\n\nb\n"), &mut fs);
+        assert_eq!(status, 0);
+        assert!(stderr.is_empty());
+        assert_eq!(stdout, "     1\ta\n\n     2\tb\n");
+    }
+
+    #[test]
+    fn cat_show_tabs_and_ends_streams_file() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/tabbed.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"a\tb\n").unwrap();
+        fs.close(h);
+
+        let (status, stdout, stderr) = run_cat(&["cat", "-TE", "/tabbed.txt"], None, &mut fs);
+        assert_eq!(status, 0);
+        assert!(stderr.is_empty());
+        assert_eq!(stdout, "a^Ib$\n");
+    }
+
+    #[test]
+    fn cat_plain_file_streams_without_flags() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/plain.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"hello\nworld\n").unwrap();
+        fs.close(h);
+
+        let (status, stdout, stderr) = run_cat(&["cat", "/plain.txt"], None, &mut fs);
+        assert_eq!(status, 0);
+        assert!(stderr.is_empty());
+        assert_eq!(stdout, "hello\nworld\n");
+    }
 }

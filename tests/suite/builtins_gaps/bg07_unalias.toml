@@ -13,4 +13,4 @@ type greet 2>&1
 
 [expect]
 status = 1
-stderr_contains = ["not found"]
+stdout_contains = ["not found"]

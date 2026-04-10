@@ -6,7 +6,7 @@
 
 use std::ffi::CString;
 use std::sync::atomic::{AtomicU64, Ordering};
-use wasmsh_runtime::ExternalCommandResult;
+use wasmsh_runtime::{ExternalCommandResult, ExternalCommandStdin};
 
 extern "C" {
     fn PyRun_SimpleString(command: *const std::os::raw::c_char) -> std::os::raw::c_int;
@@ -31,7 +31,7 @@ impl Drop for FileGuard {
 pub fn handle_python_command(
     cmd_name: &str,
     argv: &[String],
-    stdin: Option<&[u8]>,
+    stdin: Option<ExternalCommandStdin<'_>>,
 ) -> Option<ExternalCommandResult> {
     if cmd_name != "python" && cmd_name != "python3" {
         return None;
@@ -114,7 +114,7 @@ pub fn handle_python_command(
 }
 
 /// Extract code to run from argv (`-c CODE`, script file, or stdin).
-fn extract_code(argv: &[String], stdin: Option<&[u8]>) -> Option<String> {
+fn extract_code(argv: &[String], stdin: Option<ExternalCommandStdin<'_>>) -> Option<String> {
     let mut i = 1;
     while i < argv.len() {
         if argv[i] == "-c" {
@@ -133,9 +133,21 @@ fn extract_code(argv: &[String], stdin: Option<&[u8]>) -> Option<String> {
         return Some(read_script_file(&argv[i]));
     }
 
-    if let Some(data) = stdin {
+    if let Some(stdin) = stdin {
+        let mut stdin = stdin;
+        let mut data = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            let Ok(read) = stdin.read_chunk(&mut buffer) else {
+                return Some(String::new());
+            };
+            if read == 0 {
+                break;
+            }
+            data.extend_from_slice(&buffer[..read]);
+        }
         if !data.is_empty() {
-            return Some(String::from_utf8_lossy(data).into_owned());
+            return Some(String::from_utf8_lossy(&data).into_owned());
         }
     }
 
@@ -212,4 +224,26 @@ fn base64_encode(data: &[u8]) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_code;
+    use wasmsh_runtime::ExternalCommandStdin;
+
+    #[test]
+    fn extract_code_prefers_c_flag() {
+        let argv = vec!["python3".to_string(), "-c".to_string(), "print(1)".to_string()];
+        assert_eq!(extract_code(&argv, None), Some("print(1)".to_string()));
+    }
+
+    #[test]
+    fn extract_code_reads_stdin_when_no_script_or_c_flag() {
+        let argv = vec!["python3".to_string()];
+        let stdin = ExternalCommandStdin::from_bytes(b"print('stdin')\n");
+        assert_eq!(
+            extract_code(&argv, Some(stdin)),
+            Some("print('stdin')\n".to_string())
+        );
+    }
 }

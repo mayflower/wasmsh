@@ -137,14 +137,14 @@ package), you can register an `ExternalCommandHandler` to add commands
 that the host wants to expose:
 
 ```rust
-use wasmsh_runtime::{WorkerRuntime, ExternalCommandResult};
+use wasmsh_runtime::{ExternalCommandResult, WorkerRuntime};
 
 let mut rt = WorkerRuntime::new();
 
 rt.set_external_handler(Box::new(|name, argv, stdin| {
     match name {
         "query-db" => Some(ExternalCommandResult {
-            exit_code: 0,
+            status: 0,
             stdout: format!("rows: {}\n", argv.len()).into_bytes(),
             stderr: vec![],
         }),

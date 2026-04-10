@@ -4,8 +4,71 @@
 <body>
   <p id="status">loading</p>
   <script>
-    window.createShellWorker = function () {
-      return new Worker("./worker.js", { type: "module" });
+    window.createShellWorkerClient = function (defaultTimeoutMs = 15_000) {
+      const worker = new Worker("./worker.js", { type: "module" });
+      const pending = [];
+
+      worker.addEventListener("message", function (e) {
+        const entry = pending.shift();
+        if (!entry) return;
+        clearTimeout(entry.timeout);
+        if (e.data && e.data.error) {
+          entry.reject(new Error(e.data.error));
+        } else {
+          entry.resolve(e.data);
+        }
+      });
+
+      worker.addEventListener("error", function (e) {
+        const error = new Error(e.message || "worker error");
+        while (pending.length > 0) {
+          const entry = pending.shift();
+          clearTimeout(entry.timeout);
+          entry.reject(error);
+        }
+      });
+
+      return {
+        worker,
+        send(msg, timeoutMs = defaultTimeoutMs) {
+          return new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+              const idx = pending.findIndex((entry) => entry.timeout === timeout);
+              if (idx >= 0) pending.splice(idx, 1);
+              reject(new Error("worker timeout"));
+            }, timeoutMs);
+            pending.push({ resolve, reject, timeout });
+            worker.postMessage(msg);
+          });
+        },
+        close() {
+          worker.terminate();
+        },
+      };
+    };
+    window.createShellWorker = function (defaultTimeoutMs = 15_000) {
+      const client = window.createShellWorkerClient(defaultTimeoutMs);
+      return {
+        onmessage: null,
+        onerror: null,
+        postMessage(msg) {
+          client.send(msg).then(
+            (data) => {
+              if (typeof this.onmessage === "function") {
+                this.onmessage({ data });
+              }
+            },
+            (error) => {
+              if (typeof this.onerror === "function") {
+                this.onerror({ message: error.message });
+              }
+            },
+          );
+        },
+        terminate() {
+          client.close();
+        },
+      };
     };
     document.getElementById("status").textContent = "ready";
   </script>

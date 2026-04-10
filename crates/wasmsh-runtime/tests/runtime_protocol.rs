@@ -6,7 +6,7 @@
 //! work end-to-end.
 
 use wasmsh_protocol::{DiagnosticLevel, HostCommand, WorkerEvent, PROTOCOL_VERSION};
-use wasmsh_runtime::WorkerRuntime;
+use wasmsh_runtime::{ExternalCommandResult, WorkerRuntime};
 
 fn get_stdout(events: &[WorkerEvent]) -> String {
     let mut out = Vec::new();
@@ -50,6 +50,20 @@ fn run_echo_hello() {
     let mut rt = WorkerRuntime::new();
     rt.handle_command(HostCommand::Init {
         step_budget: 0,
+        allowed_hosts: vec![],
+    });
+    let events = rt.handle_command(HostCommand::Run {
+        input: "echo hello".into(),
+    });
+    assert_eq!(get_stdout(&events), "hello\n");
+    assert_eq!(get_exit(&events), 0);
+}
+
+#[test]
+fn simple_command_runs_with_single_step_budget() {
+    let mut rt = WorkerRuntime::new();
+    rt.handle_command(HostCommand::Init {
+        step_budget: 1,
         allowed_hosts: vec![],
     });
     let events = rt.handle_command(HostCommand::Run {
@@ -147,6 +161,24 @@ fn cat_reads_vfs_file() {
 }
 
 #[test]
+fn input_redirection_reads_vfs_file_lazily() {
+    let mut rt = WorkerRuntime::new();
+    rt.handle_command(HostCommand::Init {
+        step_budget: 0,
+        allowed_hosts: vec![],
+    });
+    rt.handle_command(HostCommand::WriteFile {
+        path: "/input.txt".into(),
+        data: b"redirected".to_vec(),
+    });
+    let events = rt.handle_command(HostCommand::Run {
+        input: "cat < /input.txt".into(),
+    });
+    assert_eq!(get_stdout(&events), "redirected");
+    assert_eq!(get_exit(&events), 0);
+}
+
+#[test]
 fn run_recovers_after_exit_builtin() {
     let mut rt = WorkerRuntime::new();
     rt.handle_command(HostCommand::Init {
@@ -185,5 +217,44 @@ fn single_quoted_glob_not_expanded() {
         input: "echo '[a-z]*'".into(),
     });
     assert_eq!(get_stdout(&events), "[a-z]*\n");
+    assert_eq!(get_exit(&events), 0);
+}
+
+#[test]
+fn external_handler_receives_pipeline_stdin() {
+    let mut rt = WorkerRuntime::new();
+    rt.set_external_handler(Box::new(|name, _argv, stdin| {
+        if name != "hostcat" {
+            return None;
+        }
+        let stdout = stdin
+            .map(|mut stdin| {
+                let mut out = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    match stdin.read_chunk(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(read) => out.extend_from_slice(&buffer[..read]),
+                        Err(_) => return Vec::new(),
+                    }
+                }
+                out
+            })
+            .unwrap_or_default();
+        Some(ExternalCommandResult {
+            stdout,
+            stderr: Vec::new(),
+            status: 0,
+        })
+    }));
+    rt.handle_command(HostCommand::Init {
+        step_budget: 0,
+        allowed_hosts: vec![],
+    });
+
+    let events = rt.handle_command(HostCommand::Run {
+        input: "printf hi | hostcat".into(),
+    });
+    assert_eq!(get_stdout(&events), "hi");
     assert_eq!(get_exit(&events), 0);
 }

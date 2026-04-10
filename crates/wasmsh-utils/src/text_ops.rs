@@ -1,10 +1,16 @@
 //! Text utilities: head, tail, wc, grep, sed, sort, uniq, cut, tr, tee, paste, rev, column.
 
+use std::collections::VecDeque;
 use std::fmt::Write;
+use std::io::Read;
 
 use wasmsh_fs::{OpenOptions, Vfs};
 
-use crate::helpers::{emit_error, get_input_text, grep_matches, read_text, resolve_path};
+use crate::helpers::{
+    collect_input_lines, collect_input_text, collect_path_text, emit_error, grep_matches,
+    open_reader_for_path, read_next_line_from_reader, resolve_path, stream_input_chunks,
+    stream_input_lines,
+};
 use crate::{UtilContext, UtilOutput};
 
 enum HeadMode {
@@ -48,18 +54,61 @@ fn parse_head_args<'a>(argv: &'a [&'a str]) -> (HeadMode, bool, bool, Vec<&'a st
     (mode, quiet, verbose, files)
 }
 
-fn head_emit(output: &mut dyn UtilOutput, data: &[u8], mode: &HeadMode) {
+fn head_emit_reader(
+    output: &mut dyn UtilOutput,
+    reader: &mut dyn Read,
+    mode: &HeadMode,
+    cmd: &str,
+) -> i32 {
     match mode {
-        HeadMode::Bytes(n) => {
-            let end = (*n).min(data.len());
-            output.stdout(&data[..end]);
-        }
-        HeadMode::Lines(n) => {
-            let text = String::from_utf8_lossy(data);
-            for line in text.lines().take(*n) {
-                output.stdout(line.as_bytes());
-                output.stdout(b"\n");
+        HeadMode::Bytes(limit) => {
+            let mut remaining = *limit;
+            let mut buffer = [0u8; 4096];
+            while remaining > 0 {
+                let to_read = remaining.min(buffer.len());
+                match reader.read(&mut buffer[..to_read]) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        output.stdout(&buffer[..read]);
+                        remaining -= read;
+                    }
+                    Err(err) => {
+                        let msg = format!("{cmd}: stdin read error: {err}\n");
+                        output.stderr(msg.as_bytes());
+                        return 1;
+                    }
+                }
             }
+            0
+        }
+        HeadMode::Lines(limit) => {
+            let mut lines_seen = 0usize;
+            let mut buffer = [0u8; 4096];
+            while lines_seen < *limit {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        let mut consumed = 0usize;
+                        while consumed < read && lines_seen < *limit {
+                            let byte = buffer[consumed];
+                            output.stdout(&buffer[consumed..consumed + 1]);
+                            consumed += 1;
+                            if byte == b'\n' {
+                                lines_seen += 1;
+                            }
+                        }
+                        if lines_seen >= *limit {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        let msg = format!("{cmd}: stdin read error: {err}\n");
+                        output.stderr(msg.as_bytes());
+                        return 1;
+                    }
+                }
+            }
+            0
         }
     }
 }
@@ -67,9 +116,8 @@ fn head_emit(output: &mut dyn UtilOutput, data: &[u8], mode: &HeadMode) {
 pub(crate) fn util_head(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let (mode, quiet, verbose, files) = parse_head_args(argv);
     if files.is_empty() {
-        if let Some(data) = ctx.stdin {
-            head_emit(ctx.output, data, &mode);
-            return 0;
+        if let Some(mut stdin) = ctx.stdin.take() {
+            return head_emit_reader(ctx.output, &mut stdin, &mode, "head");
         }
         ctx.output.stderr(b"head: missing operand\n");
         return 1;
@@ -85,28 +133,14 @@ pub(crate) fn util_head(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             ctx.output.stdout(hdr.as_bytes());
         }
         let full = resolve_path(ctx.cwd, path);
-        match read_text(ctx.fs, &full) {
-            Ok(text) => head_emit(ctx.output, text.as_bytes(), &mode),
-            Err(e) => {
-                emit_error(ctx.output, "head", path, &e);
-                status = 1;
+        match open_reader_for_path(ctx, &full, path, "head") {
+            Ok(mut reader) => {
+                status |= head_emit_reader(ctx.output, reader.as_mut(), &mode, "head");
             }
+            Err(_) => status = 1,
         }
     }
     status
-}
-
-pub(crate) fn tail_output(text: &str, n: usize, from_start: bool, output: &mut dyn UtilOutput) {
-    let lines: Vec<&str> = text.lines().collect();
-    let start = if from_start {
-        (n.saturating_sub(1)).min(lines.len())
-    } else {
-        lines.len().saturating_sub(n)
-    };
-    for line in &lines[start..] {
-        output.stdout(line.as_bytes());
-        output.stdout(b"\n");
-    }
 }
 
 enum TailMode {
@@ -169,15 +203,116 @@ fn parse_tail_args<'a>(argv: &'a [&'a str]) -> (TailMode, bool, bool, Vec<&'a st
     )
 }
 
-fn tail_emit(output: &mut dyn UtilOutput, data: &[u8], mode: &TailMode) {
+fn tail_emit_reader(
+    output: &mut dyn UtilOutput,
+    reader: &mut dyn Read,
+    mode: &TailMode,
+    cmd: &str,
+) -> i32 {
     match mode {
-        TailMode::Bytes(n) => {
-            let start = data.len().saturating_sub(*n);
-            output.stdout(&data[start..]);
+        TailMode::Bytes(limit) => {
+            let mut ring = VecDeque::with_capacity(*limit);
+            let mut buffer = [0u8; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        for &byte in &buffer[..read] {
+                            if ring.len() == *limit && *limit > 0 {
+                                ring.pop_front();
+                            }
+                            if *limit > 0 {
+                                ring.push_back(byte);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let msg = format!("{cmd}: stdin read error: {err}\n");
+                        output.stderr(msg.as_bytes());
+                        return 1;
+                    }
+                }
+            }
+            let bytes: Vec<u8> = ring.into_iter().collect();
+            output.stdout(&bytes);
+            0
         }
-        TailMode::Lines(n, from_start) => {
-            let text = String::from_utf8_lossy(data);
-            tail_output(&text, *n, *from_start, output);
+        TailMode::Lines(limit, from_start) => {
+            let mut buffer = [0u8; 4096];
+            let mut current = Vec::new();
+            if *from_start {
+                let mut lines_seen = 0usize;
+                loop {
+                    match reader.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            for &byte in &buffer[..read] {
+                                if byte == b'\n' {
+                                    if lines_seen + 1 >= *limit {
+                                        output.stdout(&current);
+                                        output.stdout(b"\n");
+                                    }
+                                    current.clear();
+                                    lines_seen += 1;
+                                } else {
+                                    current.push(byte);
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            let msg = format!("{cmd}: stdin read error: {err}\n");
+                            output.stderr(msg.as_bytes());
+                            return 1;
+                        }
+                    }
+                }
+                if !current.is_empty() && lines_seen + 1 >= *limit {
+                    output.stdout(&current);
+                    output.stdout(b"\n");
+                }
+                return 0;
+            }
+
+            let mut ring: VecDeque<Vec<u8>> = VecDeque::with_capacity(*limit);
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        for &byte in &buffer[..read] {
+                            if byte == b'\n' {
+                                if ring.len() == *limit && *limit > 0 {
+                                    ring.pop_front();
+                                }
+                                if *limit > 0 {
+                                    ring.push_back(std::mem::take(&mut current));
+                                } else {
+                                    current.clear();
+                                }
+                            } else {
+                                current.push(byte);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let msg = format!("{cmd}: stdin read error: {err}\n");
+                        output.stderr(msg.as_bytes());
+                        return 1;
+                    }
+                }
+            }
+            if !current.is_empty() {
+                if ring.len() == *limit && *limit > 0 {
+                    ring.pop_front();
+                }
+                if *limit > 0 {
+                    ring.push_back(current);
+                }
+            }
+            for line in ring {
+                output.stdout(&line);
+                output.stdout(b"\n");
+            }
+            0
         }
     }
 }
@@ -185,9 +320,8 @@ fn tail_emit(output: &mut dyn UtilOutput, data: &[u8], mode: &TailMode) {
 pub(crate) fn util_tail(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let (mode, quiet, verbose, files) = parse_tail_args(argv);
     if files.is_empty() {
-        if let Some(data) = ctx.stdin {
-            tail_emit(ctx.output, data, &mode);
-            return 0;
+        if let Some(mut stdin) = ctx.stdin.take() {
+            return tail_emit_reader(ctx.output, &mut stdin, &mode, "tail");
         }
         ctx.output.stderr(b"tail: missing operand\n");
         return 1;
@@ -203,12 +337,11 @@ pub(crate) fn util_tail(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             ctx.output.stdout(hdr.as_bytes());
         }
         let full = resolve_path(ctx.cwd, path);
-        match read_text(ctx.fs, &full) {
-            Ok(text) => tail_emit(ctx.output, text.as_bytes(), &mode),
-            Err(e) => {
-                emit_error(ctx.output, "tail", path, &e);
-                status = 1;
+        match open_reader_for_path(ctx, &full, path, "tail") {
+            Ok(mut reader) => {
+                status |= tail_emit_reader(ctx.output, reader.as_mut(), &mode, "tail");
             }
+            Err(_) => status = 1,
         }
     }
     status
@@ -218,10 +351,11 @@ pub(crate) fn util_wc(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let (flags, file_args) = parse_wc_flags(&argv[1..]);
 
     if file_args.is_empty() {
-        if let Some(data) = ctx.stdin {
-            let text = String::from_utf8_lossy(data);
-            wc_emit(ctx, &text, data.len(), None, &flags);
-            return 0;
+        if let Some(mut stdin) = ctx.stdin.take() {
+            return match wc_emit_reader(ctx.output, &mut stdin, None, &flags, "wc") {
+                Ok(_) => 0,
+                Err(code) => code,
+            };
         }
         ctx.output.stderr(b"wc: missing operand\n");
         return 1;
@@ -232,18 +366,18 @@ pub(crate) fn util_wc(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut total_bytes: usize = 0;
     for path in &file_args {
         let full = resolve_path(ctx.cwd, path);
-        match read_text(ctx.fs, &full) {
-            Ok(text) => {
-                let bytes = text.len();
-                total_lines += text.lines().count();
-                total_words += text.split_whitespace().count();
-                total_bytes += bytes;
-                wc_emit(ctx, &text, bytes, Some(path), &flags);
+        match open_reader_for_path(ctx, &full, path, "wc") {
+            Ok(mut reader) => {
+                match wc_emit_reader(ctx.output, reader.as_mut(), Some(path), &flags, "wc") {
+                    Ok((lines, words, bytes, _max_line_length)) => {
+                        total_lines += lines;
+                        total_words += words;
+                        total_bytes += bytes;
+                    }
+                    Err(_) => status = 1,
+                }
             }
-            Err(e) => {
-                emit_error(ctx.output, "wc", path, &e);
-                status = 1;
-            }
+            Err(_) => status = 1,
         }
     }
     if file_args.len() > 1 {
@@ -306,34 +440,83 @@ fn parse_wc_flags<'a>(args: &[&'a str]) -> (WcFlags, Vec<&'a str>) {
     )
 }
 
-fn wc_emit(
-    ctx: &mut UtilContext<'_>,
-    text: &str,
-    bytes: usize,
+fn wc_emit_reader(
+    output: &mut dyn UtilOutput,
+    reader: &mut dyn Read,
     path: Option<&str>,
     flags: &WcFlags,
-) {
+    cmd: &str,
+) -> Result<(usize, usize, usize, usize), i32> {
+    let mut buffer = [0u8; 4096];
+    let mut lines = 0usize;
+    let mut words = 0usize;
+    let mut bytes = 0usize;
+    let mut max_line_length = 0usize;
+    let mut current_line_length = 0usize;
+    let mut in_word = false;
+    let mut saw_input = false;
+    let mut ended_with_newline = false;
+
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                saw_input = true;
+                bytes += read;
+                for &byte in &buffer[..read] {
+                    let is_whitespace = byte.is_ascii_whitespace();
+                    if is_whitespace {
+                        in_word = false;
+                    } else if !in_word {
+                        words += 1;
+                        in_word = true;
+                    }
+
+                    if byte == b'\n' {
+                        lines += 1;
+                        max_line_length = max_line_length.max(current_line_length);
+                        current_line_length = 0;
+                        ended_with_newline = true;
+                    } else {
+                        current_line_length += 1;
+                        ended_with_newline = false;
+                    }
+                }
+            }
+            Err(err) => {
+                let msg = format!("{cmd}: stdin read error: {err}\n");
+                output.stderr(msg.as_bytes());
+                return Err(1);
+            }
+        }
+    }
+
+    if saw_input && !ended_with_newline {
+        lines += 1;
+        max_line_length = max_line_length.max(current_line_length);
+    }
+
     let mut parts = Vec::new();
     if flags.lines {
-        parts.push(format!("{:>7}", text.lines().count()));
+        parts.push(format!("{lines:>7}"));
     }
     if flags.words {
-        parts.push(format!("{:>7}", text.split_whitespace().count()));
+        parts.push(format!("{words:>7}"));
     }
     if flags.bytes {
         parts.push(format!("{bytes:>7}"));
     }
     if flags.max_line_length {
-        let max_len = text.lines().map(str::len).max().unwrap_or(0);
-        parts.push(format!("{max_len:>7}"));
+        parts.push(format!("{max_line_length:>7}"));
     }
     let mut out = parts.join("");
-    if let Some(p) = path {
+    if let Some(path) = path {
         out.push(' ');
-        out.push_str(p);
+        out.push_str(path);
     }
     out.push('\n');
-    ctx.output.stdout(out.as_bytes());
+    output.stdout(out.as_bytes());
+    Ok((lines, words, bytes, max_line_length))
 }
 
 fn wc_emit_totals(
@@ -542,29 +725,31 @@ fn grep_line_matches(line: &str, flags: &GrepFlags, patterns: &[&str]) -> bool {
     matched != flags.invert
 }
 
-fn grep_process_file(
+fn grep_process_reader(
     output: &mut dyn UtilOutput,
-    text: &str,
+    reader: &mut dyn Read,
     filename: Option<&str>,
     flags: &GrepFlags,
     patterns: &[&str],
-) -> (bool, u64) {
-    let lines: Vec<&str> = text.lines().collect();
+    cmd: &str,
+) -> Result<(bool, u64), i32> {
     let mut match_count = 0u64;
     let mut found = false;
     let mut remaining_after = 0usize;
     let mut printed_separator = false;
+    let mut before_buf: VecDeque<(usize, String)> = VecDeque::new();
+    let mut pending = Vec::new();
+    let mut line_num = 0usize;
 
-    // For -B context, track which lines to print before a match
-    let mut before_buf: Vec<(usize, &str)> = Vec::new();
-
-    for (i, &line) in lines.iter().enumerate() {
-        if grep_line_matches(line, flags, patterns) {
+    while let Some((line, _had_newline)) =
+        read_next_line_from_reader(reader, &mut pending, output, cmd)?
+    {
+        line_num += 1;
+        if grep_line_matches(&line, flags, patterns) {
             found = true;
             match_count += 1;
 
             if flags.quiet || flags.files_only {
-                // Don't emit lines
                 if let Some(max) = flags.max_count {
                     if match_count >= max as u64 {
                         break;
@@ -573,17 +758,23 @@ fn grep_process_file(
                 continue;
             }
             if !flags.count_only {
-                // Print before-context lines
                 if flags.before_context > 0 && !before_buf.is_empty() {
                     if printed_separator && flags.before_context > 0 {
                         output.stdout(b"--\n");
                     }
-                    for (bi, bline) in &before_buf {
-                        grep_emit_one(output, bline, *bi + 1, filename, flags, patterns);
+                    for (before_line_num, before_line) in &before_buf {
+                        grep_emit_one(
+                            output,
+                            before_line,
+                            *before_line_num,
+                            filename,
+                            flags,
+                            patterns,
+                        );
                     }
                 }
                 before_buf.clear();
-                grep_emit_one(output, line, i + 1, filename, flags, patterns);
+                grep_emit_one(output, &line, line_num, filename, flags, patterns);
                 remaining_after = flags.after_context;
                 printed_separator = true;
             }
@@ -593,12 +784,12 @@ fn grep_process_file(
                 }
             }
         } else if remaining_after > 0 && !flags.count_only {
-            grep_emit_one(output, line, i + 1, filename, flags, patterns);
+            grep_emit_one(output, &line, line_num, filename, flags, patterns);
             remaining_after -= 1;
         } else if flags.before_context > 0 {
-            before_buf.push((i, line));
+            before_buf.push_back((line_num, line));
             if before_buf.len() > flags.before_context {
-                before_buf.remove(0);
+                before_buf.pop_front();
             }
         }
     }
@@ -617,7 +808,18 @@ fn grep_process_file(
             output.stdout(s.as_bytes());
         }
     }
-    (found, match_count)
+    Ok((found, match_count))
+}
+
+fn grep_process_stdin(
+    ctx: &mut UtilContext<'_>,
+    flags: &GrepFlags,
+    patterns: &[&str],
+) -> Result<(bool, u64), i32> {
+    let Some(mut stdin) = ctx.stdin.take() else {
+        return Ok((false, 0));
+    };
+    grep_process_reader(ctx.output, &mut stdin, None, flags, patterns, "grep")
 }
 
 fn grep_emit_one(
@@ -678,9 +880,17 @@ fn grep_walk_recursive(
                     continue;
                 }
             }
-            if let Ok(text) = read_text(ctx.fs, &child) {
-                let (found, _) =
-                    grep_process_file(ctx.output, &text, Some(&child), flags, patterns);
+            if let Ok(mut reader) = open_reader_for_path(ctx, &child, &child, "grep") {
+                let Ok((found, _)) = grep_process_reader(
+                    ctx.output,
+                    reader.as_mut(),
+                    Some(&child),
+                    flags,
+                    patterns,
+                    "grep",
+                ) else {
+                    continue;
+                };
                 if found {
                     *found_any = true;
                     if flags.files_only {
@@ -720,14 +930,13 @@ pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     }
 
     if file_args.is_empty() {
-        let Some(text) = ctx
-            .stdin
-            .map(|data| String::from_utf8_lossy(data).to_string())
-        else {
+        if !ctx.has_stdin() {
             ctx.output.stderr(b"grep: missing file operand\n");
             return 2;
+        }
+        let Ok((found, _)) = grep_process_stdin(ctx, &flags, &patterns) else {
+            return 2;
         };
-        let (found, _) = grep_process_file(ctx.output, &text, None, &flags, &patterns);
         return i32::from(!found);
     }
 
@@ -741,10 +950,19 @@ pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut found_any = false;
     for path in &file_args {
         let full = resolve_path(ctx.cwd, path);
-        match read_text(ctx.fs, &full) {
-            Ok(text) => {
+        match open_reader_for_path(ctx, &full, path, "grep") {
+            Ok(mut reader) => {
                 let fname = if show_fn { Some(*path) } else { None };
-                let (found, _) = grep_process_file(ctx.output, &text, fname, &adj_flags, &patterns);
+                let Ok((found, _)) = grep_process_reader(
+                    ctx.output,
+                    reader.as_mut(),
+                    fname,
+                    &adj_flags,
+                    &patterns,
+                    "grep",
+                ) else {
+                    continue;
+                };
                 if found {
                     found_any = true;
                     if adj_flags.files_only {
@@ -753,9 +971,7 @@ pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     }
                 }
             }
-            Err(e) => {
-                emit_error(ctx.output, "grep", path, &e);
-            }
+            Err(_) => {}
         }
     }
     i32::from(!found_any)
@@ -898,22 +1114,22 @@ fn parse_sed_script(script: &str) -> Vec<SedInstruction> {
 fn sed_addr_matches(
     addr: &SedAddr,
     line_num: usize,
-    total_lines: usize,
+    is_last: bool,
     line: &str,
     in_range: &mut bool,
 ) -> bool {
     match addr {
         SedAddr::None => true,
         SedAddr::Line(n) => line_num == *n,
-        SedAddr::Last => line_num == total_lines,
+        SedAddr::Last => is_last,
         SedAddr::Regex(pat) => grep_matches(line, pat, false),
         SedAddr::Range(start, end) => {
             if *in_range {
-                if sed_addr_matches(end, line_num, total_lines, line, &mut false) {
+                if sed_addr_matches(end, line_num, is_last, line, &mut false) {
                     *in_range = false;
                 }
                 true
-            } else if sed_addr_matches(start, line_num, total_lines, line, &mut false) {
+            } else if sed_addr_matches(start, line_num, is_last, line, &mut false) {
                 *in_range = true;
                 true
             } else {
@@ -921,6 +1137,118 @@ fn sed_addr_matches(
             }
         }
     }
+}
+
+fn sed_emit_line(output: &mut dyn UtilOutput, capture: &mut Option<String>, line: &str) {
+    output.stdout(line.as_bytes());
+    output.stdout(b"\n");
+    if let Some(capture) = capture.as_mut() {
+        capture.push_str(line);
+        capture.push('\n');
+    }
+}
+
+fn sed_process_reader(
+    output: &mut dyn UtilOutput,
+    reader: &mut dyn Read,
+    instructions: &[SedInstruction],
+    suppress_print: bool,
+    capture: &mut Option<String>,
+    cmd: &str,
+) -> Result<(), i32> {
+    let mut range_states: Vec<bool> = vec![false; instructions.len()];
+    let mut pending = Vec::new();
+    let mut line_num = 1usize;
+    let mut current = read_next_line_from_reader(reader, &mut pending, output, cmd)?;
+    let mut next = if current.is_some() {
+        read_next_line_from_reader(reader, &mut pending, output, cmd)?
+    } else {
+        None
+    };
+
+    while let Some((line, _had_newline)) = current.take() {
+        let is_last = next.is_none();
+        let mut current_text = line;
+        let mut deleted = false;
+        let mut printed = false;
+        let mut quit = false;
+
+        for (ci, instr) in instructions.iter().enumerate() {
+            if !sed_addr_matches(
+                &instr.addr,
+                line_num,
+                is_last,
+                &current_text,
+                &mut range_states[ci],
+            ) {
+                continue;
+            }
+            match &instr.cmd {
+                SedCmd::Substitute(sub) => {
+                    current_text = if sub.global {
+                        current_text.replace(&sub.pattern, &sub.replacement)
+                    } else {
+                        current_text.replacen(&sub.pattern, &sub.replacement, 1)
+                    };
+                }
+                SedCmd::Delete => {
+                    deleted = true;
+                    break;
+                }
+                SedCmd::Print => {
+                    sed_emit_line(output, capture, &current_text);
+                    printed = true;
+                }
+                SedCmd::Transliterate(from, to) => {
+                    current_text = current_text
+                        .chars()
+                        .map(|c| {
+                            if let Some(pos) = from.iter().position(|&fc| fc == c) {
+                                to.get(pos).or(to.last()).copied().unwrap_or(c)
+                            } else {
+                                c
+                            }
+                        })
+                        .collect();
+                }
+                SedCmd::AppendText(text) => {
+                    if !suppress_print && !printed {
+                        sed_emit_line(output, capture, &current_text);
+                        printed = true;
+                    }
+                    sed_emit_line(output, capture, text);
+                }
+                SedCmd::InsertText(text) => {
+                    sed_emit_line(output, capture, text);
+                }
+                SedCmd::ChangeText(text) => {
+                    sed_emit_line(output, capture, text);
+                    deleted = true;
+                    printed = true;
+                    break;
+                }
+                SedCmd::Quit => {
+                    quit = true;
+                    break;
+                }
+            }
+        }
+
+        if !deleted && !suppress_print && !printed {
+            sed_emit_line(output, capture, &current_text);
+        }
+        if quit {
+            break;
+        }
+
+        current = next.take();
+        if current.is_some() {
+            next = read_next_line_from_reader(reader, &mut pending, output, cmd)?;
+        }
+        line_num += 1;
+    }
+
+    Ok(())
 }
 
 pub(crate) fn util_sed(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
@@ -950,7 +1278,7 @@ pub(crate) fn util_sed(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         } else if arg == "-f" && i + 1 < argv.len() {
             // script file - read it
             let full = resolve_path(ctx.cwd, argv[i + 1]);
-            if let Ok(script) = read_text(ctx.fs, &full) {
+            if let Ok(script) = collect_path_text(ctx, &full, argv[i + 1], "sed") {
                 expressions.push(script);
             }
             i += 2;
@@ -979,132 +1307,74 @@ pub(crate) fn util_sed(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let script = expressions.join(";");
     let instructions = parse_sed_script(&script);
 
-    let process = |text: &str, output: &mut dyn UtilOutput| -> String {
-        let lines: Vec<&str> = text.lines().collect();
-        let total = lines.len();
-        let mut result = String::new();
-        let mut range_states: Vec<bool> = vec![false; instructions.len()];
-
-        for (idx, &line) in lines.iter().enumerate() {
-            let line_num = idx + 1;
-            let mut current = line.to_string();
-            let mut deleted = false;
-            let mut printed = false;
-            let mut quit = false;
-
-            for (ci, instr) in instructions.iter().enumerate() {
-                if !sed_addr_matches(
-                    &instr.addr,
-                    line_num,
-                    total,
-                    &current,
-                    &mut range_states[ci],
-                ) {
-                    continue;
-                }
-                match &instr.cmd {
-                    SedCmd::Substitute(sub) => {
-                        current = if sub.global {
-                            current.replace(&sub.pattern, &sub.replacement)
-                        } else {
-                            current.replacen(&sub.pattern, &sub.replacement, 1)
-                        };
-                    }
-                    SedCmd::Delete => {
-                        deleted = true;
-                        break;
-                    }
-                    SedCmd::Print => {
-                        output.stdout(current.as_bytes());
-                        output.stdout(b"\n");
-                        printed = true;
-                    }
-                    SedCmd::Transliterate(from, to) => {
-                        current = current
-                            .chars()
-                            .map(|c| {
-                                if let Some(pos) = from.iter().position(|&fc| fc == c) {
-                                    to.get(pos).or(to.last()).copied().unwrap_or(c)
-                                } else {
-                                    c
-                                }
-                            })
-                            .collect();
-                    }
-                    SedCmd::AppendText(text) => {
-                        if !suppress_print {
-                            output.stdout(current.as_bytes());
-                            output.stdout(b"\n");
-                        }
-                        output.stdout(text.as_bytes());
-                        output.stdout(b"\n");
-                        printed = true;
-                    }
-                    SedCmd::InsertText(text) => {
-                        output.stdout(text.as_bytes());
-                        output.stdout(b"\n");
-                    }
-                    SedCmd::ChangeText(text) => {
-                        output.stdout(text.as_bytes());
-                        output.stdout(b"\n");
-                        deleted = true;
-                        break;
-                    }
-                    SedCmd::Quit => {
-                        if !suppress_print && !printed {
-                            output.stdout(current.as_bytes());
-                            output.stdout(b"\n");
-                        }
-                        result.push_str(&current);
-                        result.push('\n');
-                        quit = true;
-                        break;
-                    }
-                }
-            }
-            if quit {
-                break;
-            }
-            if !deleted {
-                if !suppress_print && !printed {
-                    output.stdout(current.as_bytes());
-                    output.stdout(b"\n");
-                }
-                result.push_str(&current);
-                result.push('\n');
-            }
-        }
-        result
-    };
-
     if in_place && !file_args.is_empty() {
         for path in &file_args {
             let full = resolve_path(ctx.cwd, path);
-            let text = match read_text(ctx.fs, &full) {
-                Ok(t) => t,
-                Err(e) => {
-                    emit_error(ctx.output, "sed", path, &e);
-                    return 1;
-                }
-            };
             if let Some(ref suffix) = in_place_suffix {
                 let backup = format!("{full}{suffix}");
                 let _ = crate::helpers::copy_file_contents(ctx.fs, &full, &backup);
             }
-            // process without output (in-place)
+            let mut reader = match open_reader_for_path(ctx, &full, path, "sed") {
+                Ok(reader) => reader,
+                Err(status) => return status,
+            };
             let mut dummy = SedDummyOutput;
-            let result = process(&text, &mut dummy);
-            // Write back
+            let mut result = Some(String::new());
+            if let Err(status) = sed_process_reader(
+                &mut dummy,
+                reader.as_mut(),
+                &instructions,
+                suppress_print,
+                &mut result,
+                "sed",
+            ) {
+                return status;
+            }
             if let Ok(h) = ctx.fs.open(&full, OpenOptions::write()) {
-                let _ = ctx.fs.write_file(h, result.as_bytes());
+                let _ = ctx.fs.write_file(h, result.unwrap_or_default().as_bytes());
                 ctx.fs.close(h);
             }
         }
         return 0;
     }
 
-    let text = get_input_text(ctx, &file_args);
-    process(&text, ctx.output);
+    if file_args.is_empty() {
+        let Some(mut stdin) = ctx.stdin.take() else {
+            ctx.output.stderr(b"sed: missing operand\n");
+            return 1;
+        };
+        let mut capture = None;
+        return match sed_process_reader(
+            ctx.output,
+            &mut stdin,
+            &instructions,
+            suppress_print,
+            &mut capture,
+            "sed",
+        ) {
+            Ok(()) => 0,
+            Err(status) => status,
+        };
+    }
+
+    for path in &file_args {
+        let full = resolve_path(ctx.cwd, path);
+        let mut reader = match open_reader_for_path(ctx, &full, path, "sed") {
+            Ok(reader) => reader,
+            Err(status) => return status,
+        };
+        let mut capture = None;
+        if let Err(status) = sed_process_reader(
+            ctx.output,
+            reader.as_mut(),
+            &instructions,
+            suppress_print,
+            &mut capture,
+            "sed",
+        ) {
+            return status;
+        }
+    }
     0
 }
 
@@ -1290,12 +1560,14 @@ fn version_compare(a: &str, b: &str) -> std::cmp::Ordering {
 
 pub(crate) fn util_sort(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let (flags, file_args) = parse_sort_flags(argv);
-    let text = get_input_text(ctx, &file_args);
-    let mut lines: Vec<&str> = text.lines().collect();
+    let mut lines = match collect_input_lines(ctx, &file_args, "sort") {
+        Ok(lines) => lines,
+        Err(status) => return status,
+    };
 
     if flags.check {
         for w in lines.windows(2) {
-            let ord = sort_compare(w[0], w[1], &flags);
+            let ord = sort_compare(&w[0], &w[1], &flags);
             if (flags.reverse && ord == std::cmp::Ordering::Less)
                 || (!flags.reverse && ord == std::cmp::Ordering::Greater)
             {
@@ -1437,7 +1709,9 @@ fn uniq_compare_key<'a>(line: &'a str, flags: &UniqFlags) -> String {
 
 pub(crate) fn util_uniq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let (flags, file_args) = parse_uniq_flags(argv);
-    let text = get_input_text(ctx, &file_args);
+    if file_args.is_empty() && !ctx.has_stdin() {
+        return 0;
+    }
 
     let mut prev: Option<(String, String)> = None; // (original_line, compare_key)
     let mut cnt: usize = 0;
@@ -1458,7 +1732,7 @@ pub(crate) fn util_uniq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     };
 
-    for line in text.lines() {
+    if stream_input_lines(ctx, &file_args, "uniq", |line, _had_newline, ctx| {
         let key = uniq_compare_key(line, &flags);
         if prev.as_ref().is_some_and(|(_, k)| *k == key) {
             cnt += 1;
@@ -1469,6 +1743,11 @@ pub(crate) fn util_uniq(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             prev = Some((line.to_string(), key));
             cnt = 1;
         }
+        Ok(())
+    })
+    .is_err()
+    {
+        return 1;
     }
     if let Some((ref p, _)) = prev {
         emit(ctx.output, p, cnt, &flags);
@@ -1572,13 +1851,11 @@ pub(crate) fn util_cut(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         return 1;
     };
     let out_sep = output_delim.unwrap_or_else(|| delim.to_string());
-    let text = get_input_text(ctx, &file_args);
-
-    for line in text.lines() {
+    if stream_input_lines(ctx, &file_args, "cut", |line, _had_newline, ctx| {
         match &mode {
             CutMode::Fields(ranges) => {
                 if only_delimited && !line.contains(delim) {
-                    continue;
+                    return Ok(());
                 }
                 let parts: Vec<&str> = line.split(delim).collect();
                 let selected: Vec<&str> = parts
@@ -1616,6 +1893,11 @@ pub(crate) fn util_cut(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                 ctx.output.stdout(b"\n");
             }
         }
+        Ok(())
+    })
+    .is_err()
+    {
+        return 1;
     }
     0
 }
@@ -1683,6 +1965,52 @@ fn tr_expand_set(s: &str) -> Vec<char> {
     chars
 }
 
+fn tr_process_utf8_chunk(pending: &mut Vec<u8>, chunk: &[u8], mut f: impl FnMut(char)) {
+    pending.extend_from_slice(chunk);
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(text) => {
+                for ch in text.chars() {
+                    f(ch);
+                }
+                pending.clear();
+                return;
+            }
+            Err(err) => {
+                let valid = err.valid_up_to();
+                if valid > 0 {
+                    let text = String::from_utf8_lossy(&pending[..valid]).to_string();
+                    for ch in text.chars() {
+                        f(ch);
+                    }
+                    pending.drain(..valid);
+                    continue;
+                }
+                if err.error_len().is_some() {
+                    let text = String::from_utf8_lossy(&pending[..1]).to_string();
+                    for ch in text.chars() {
+                        f(ch);
+                    }
+                    pending.drain(..1);
+                    continue;
+                }
+                return;
+            }
+        }
+    }
+}
+
+fn tr_flush_pending_lossy(pending: &mut Vec<u8>, mut f: impl FnMut(char)) {
+    if pending.is_empty() {
+        return;
+    }
+    let text = String::from_utf8_lossy(pending).to_string();
+    pending.clear();
+    for ch in text.chars() {
+        f(ch);
+    }
+}
+
 pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut delete = false;
     let mut squeeze = false;
@@ -1705,12 +2033,10 @@ pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     }
 
-    let text = if let Some(data) = ctx.stdin {
-        String::from_utf8_lossy(data).to_string()
-    } else {
+    if !ctx.has_stdin() {
         ctx.output.stderr(b"tr: missing operand\n");
         return 1;
-    };
+    }
 
     if set_args.is_empty() {
         ctx.output.stderr(b"tr: missing operand\n");
@@ -1720,60 +2046,105 @@ pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let from_chars = tr_expand_set(set_args[0]);
 
     if delete && squeeze && set_args.len() >= 2 {
-        // -ds: delete chars in SET1, then squeeze chars in SET2
         let squeeze_chars = tr_expand_set(set_args[1]);
-        let after_delete: String = text
-            .chars()
-            .filter(|c| {
-                let in_set = from_chars.contains(c);
-                if complement {
-                    in_set
-                } else {
-                    !in_set
-                }
-            })
-            .collect();
-        let mut result = String::new();
         let mut prev: Option<char> = None;
-        for c in after_delete.chars() {
-            if squeeze_chars.contains(&c) && prev == Some(c) {
-                continue;
-            }
-            result.push(c);
-            prev = Some(c);
+        let mut pending = Vec::new();
+        if stream_input_chunks(ctx, &[], "tr", |chunk, ctx| {
+            tr_process_utf8_chunk(&mut pending, chunk, |c| {
+                let in_set = from_chars.contains(&c);
+                let keep = if complement { in_set } else { !in_set };
+                if !keep {
+                    return;
+                }
+                if squeeze_chars.contains(&c) && prev == Some(c) {
+                    return;
+                }
+                let mut buf = [0u8; 4];
+                ctx.output.stdout(c.encode_utf8(&mut buf).as_bytes());
+                prev = Some(c);
+            });
+            Ok(())
+        })
+        .is_err()
+        {
+            return 1;
         }
-        ctx.output.stdout(result.as_bytes());
+        if !pending.is_empty() {
+            tr_flush_pending_lossy(&mut pending, |c| {
+                let in_set = from_chars.contains(&c);
+                let keep = if complement { in_set } else { !in_set };
+                if !keep {
+                    return;
+                }
+                if squeeze_chars.contains(&c) && prev == Some(c) {
+                    return;
+                }
+                let mut buf = [0u8; 4];
+                ctx.output.stdout(c.encode_utf8(&mut buf).as_bytes());
+                prev = Some(c);
+            });
+        }
         return 0;
     }
 
     if delete {
-        let result: String = text
-            .chars()
-            .filter(|c| {
-                let in_set = from_chars.contains(c);
-                if complement {
-                    in_set
-                } else {
-                    !in_set
+        let mut pending = Vec::new();
+        if stream_input_chunks(ctx, &[], "tr", |chunk, ctx| {
+            tr_process_utf8_chunk(&mut pending, chunk, |c| {
+                let in_set = from_chars.contains(&c);
+                let keep = if complement { in_set } else { !in_set };
+                if keep {
+                    let mut buf = [0u8; 4];
+                    ctx.output.stdout(c.encode_utf8(&mut buf).as_bytes());
                 }
-            })
-            .collect();
-        ctx.output.stdout(result.as_bytes());
+            });
+            Ok(())
+        })
+        .is_err()
+        {
+            return 1;
+        }
+        if !pending.is_empty() {
+            tr_flush_pending_lossy(&mut pending, |c| {
+                let in_set = from_chars.contains(&c);
+                let keep = if complement { in_set } else { !in_set };
+                if keep {
+                    let mut buf = [0u8; 4];
+                    ctx.output.stdout(c.encode_utf8(&mut buf).as_bytes());
+                }
+            });
+        }
         return 0;
     }
 
     if squeeze && set_args.len() < 2 {
-        // Squeeze only — squeeze repeated chars from SET1
-        let mut result = String::new();
         let mut prev: Option<char> = None;
-        for c in text.chars() {
-            if from_chars.contains(&c) && prev == Some(c) {
-                continue;
-            }
-            result.push(c);
-            prev = Some(c);
+        let mut pending = Vec::new();
+        if stream_input_chunks(ctx, &[], "tr", |chunk, ctx| {
+            tr_process_utf8_chunk(&mut pending, chunk, |c| {
+                if from_chars.contains(&c) && prev == Some(c) {
+                    return;
+                }
+                let mut buf = [0u8; 4];
+                ctx.output.stdout(c.encode_utf8(&mut buf).as_bytes());
+                prev = Some(c);
+            });
+            Ok(())
+        })
+        .is_err()
+        {
+            return 1;
         }
-        ctx.output.stdout(result.as_bytes());
+        if !pending.is_empty() {
+            tr_flush_pending_lossy(&mut pending, |c| {
+                if from_chars.contains(&c) && prev == Some(c) {
+                    return;
+                }
+                let mut buf = [0u8; 4];
+                ctx.output.stdout(c.encode_utf8(&mut buf).as_bytes());
+                prev = Some(c);
+            });
+        }
         return 0;
     }
 
@@ -1793,21 +2164,45 @@ pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         from_chars.clone()
     };
 
-    let mut result = String::new();
     let mut prev: Option<char> = None;
-    for c in text.chars() {
-        let translated = if let Some(pos) = from_set.iter().position(|&fc| fc == c) {
-            to_chars.get(pos).or(to_chars.last()).copied().unwrap_or(c)
-        } else {
-            c
-        };
-        if squeeze && to_chars.contains(&translated) && prev == Some(translated) {
-            continue;
-        }
-        result.push(translated);
-        prev = Some(translated);
+    let mut pending = Vec::new();
+    if stream_input_chunks(ctx, &[], "tr", |chunk, ctx| {
+        tr_process_utf8_chunk(&mut pending, chunk, |c| {
+            let translated = if let Some(pos) = from_set.iter().position(|&fc| fc == c) {
+                to_chars.get(pos).or(to_chars.last()).copied().unwrap_or(c)
+            } else {
+                c
+            };
+            if squeeze && to_chars.contains(&translated) && prev == Some(translated) {
+                return;
+            }
+            let mut buf = [0u8; 4];
+            ctx.output
+                .stdout(translated.encode_utf8(&mut buf).as_bytes());
+            prev = Some(translated);
+        });
+        Ok(())
+    })
+    .is_err()
+    {
+        return 1;
     }
-    ctx.output.stdout(result.as_bytes());
+    if !pending.is_empty() {
+        tr_flush_pending_lossy(&mut pending, |c| {
+            let translated = if let Some(pos) = from_set.iter().position(|&fc| fc == c) {
+                to_chars.get(pos).or(to_chars.last()).copied().unwrap_or(c)
+            } else {
+                c
+            };
+            if squeeze && to_chars.contains(&translated) && prev == Some(translated) {
+                return;
+            }
+            let mut buf = [0u8; 4];
+            ctx.output
+                .stdout(translated.encode_utf8(&mut buf).as_bytes());
+            prev = Some(translated);
+        });
+    }
     0
 }
 
@@ -1818,33 +2213,55 @@ pub(crate) fn util_tee(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         append = true;
         args = &args[1..];
     }
-    let data = if let Some(d) = ctx.stdin {
-        d.to_vec()
-    } else {
-        Vec::new()
-    };
-    ctx.output.stdout(&data);
     let mut status = 0;
-    for path in args {
+    let mut handles = Vec::new();
+    for path in args.iter().copied() {
         let full = resolve_path(ctx.cwd, path);
-        let opts = if append {
-            OpenOptions::append()
-        } else {
-            OpenOptions::write()
-        };
-        match ctx.fs.open(&full, opts) {
-            Ok(h) => {
-                if let Err(e) = ctx.fs.write_file(h, &data) {
+        if !append {
+            match ctx.fs.open(&full, OpenOptions::write()) {
+                Ok(h) => ctx.fs.close(h),
+                Err(e) => {
                     emit_error(ctx.output, "tee", path, &e);
                     status = 1;
+                    continue;
                 }
-                ctx.fs.close(h);
             }
+        }
+        match ctx.fs.open(&full, OpenOptions::append()) {
+            Ok(h) => handles.push((path, h)),
             Err(e) => {
                 emit_error(ctx.output, "tee", path, &e);
                 status = 1;
             }
         }
+    }
+
+    if let Some(mut stdin) = ctx.stdin.take() {
+        let mut buffer = [0u8; 4096];
+        loop {
+            match stdin.read_chunk(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    let chunk = &buffer[..read];
+                    ctx.output.stdout(chunk);
+                    for (path, handle) in &handles {
+                        if let Err(e) = ctx.fs.write_file(*handle, chunk) {
+                            emit_error(ctx.output, "tee", path, &e);
+                            status = 1;
+                        }
+                    }
+                }
+                Err(err) => {
+                    let msg = format!("tee: stdin read error: {err}\n");
+                    ctx.output.stderr(msg.as_bytes());
+                    status = 1;
+                    break;
+                }
+            }
+        }
+    }
+    for (_, handle) in handles {
+        ctx.fs.close(handle);
     }
     status
 }
@@ -1896,50 +2313,103 @@ fn parse_paste_bundled<'a>(arg: &str, args: &[&'a str], flags: &mut PasteFlags) 
     true
 }
 
-fn paste_read_files(ctx: &mut UtilContext<'_>, args: &[&str]) -> Result<Vec<Vec<String>>, i32> {
-    let mut file_lines: Vec<Vec<String>> = Vec::new();
-    for path in args {
-        let lines = if *path == "-" {
-            let text = ctx
-                .stdin
-                .map(|d| String::from_utf8_lossy(d).to_string())
-                .unwrap_or_default();
-            text.lines().map(String::from).collect()
-        } else {
-            let full = resolve_path(ctx.cwd, path);
-            match read_text(ctx.fs, &full) {
-                Ok(text) => text.lines().map(String::from).collect(),
-                Err(e) => {
-                    emit_error(ctx.output, "paste", path, &e);
-                    return Err(1);
-                }
-            }
-        };
-        file_lines.push(lines);
-    }
-    Ok(file_lines)
+struct PasteSource<'a> {
+    reader: Box<dyn Read + 'a>,
+    pending: Vec<u8>,
+    finished: bool,
 }
 
-fn paste_serial(ctx: &mut UtilContext<'_>, file_lines: &[Vec<String>], delimiter: &str) {
-    for lines in file_lines {
-        let joined = lines.join(delimiter);
-        ctx.output.stdout(joined.as_bytes());
-        ctx.output.stdout(b"\n");
+impl<'a> PasteSource<'a> {
+    fn new(reader: Box<dyn Read + 'a>) -> Self {
+        Self {
+            reader,
+            pending: Vec::new(),
+            finished: false,
+        }
     }
-}
 
-fn paste_merge(ctx: &mut UtilContext<'_>, file_lines: &[Vec<String>], delimiter: &str) {
-    let max_lines = file_lines.iter().map(Vec::len).max().unwrap_or(0);
-    for i in 0..max_lines {
-        for (fi, lines) in file_lines.iter().enumerate() {
-            if fi > 0 {
-                ctx.output.stdout(delimiter.as_bytes());
-            }
-            if let Some(line) = lines.get(i) {
-                ctx.output.stdout(line.as_bytes());
+    fn next_line(&mut self, output: &mut dyn UtilOutput) -> Result<Option<String>, i32> {
+        if self.finished {
+            return Ok(None);
+        }
+        match read_next_line_from_reader(self.reader.as_mut(), &mut self.pending, output, "paste")?
+        {
+            Some((line, _had_newline)) => Ok(Some(line)),
+            None => {
+                self.finished = true;
+                Ok(None)
             }
         }
-        ctx.output.stdout(b"\n");
+    }
+}
+
+fn paste_open_sources<'a>(
+    ctx: &mut UtilContext<'a>,
+    args: &[&str],
+) -> Result<Vec<PasteSource<'a>>, i32> {
+    let mut sources = Vec::new();
+    for path in args {
+        let source = if *path == "-" {
+            if let Some(stdin) = ctx.stdin.take() {
+                PasteSource::new(Box::new(stdin))
+            } else {
+                PasteSource::new(Box::new(std::io::Cursor::new(Vec::new())))
+            }
+        } else {
+            let full = resolve_path(ctx.cwd, path);
+            PasteSource::new(open_reader_for_path(ctx, &full, path, "paste")?)
+        };
+        sources.push(source);
+    }
+    Ok(sources)
+}
+
+fn paste_serial(
+    output: &mut dyn UtilOutput,
+    sources: &mut [PasteSource<'_>],
+    delimiter: &str,
+) -> Result<(), i32> {
+    for source in sources.iter_mut() {
+        let mut first = true;
+        while let Some(line) = source.next_line(output)? {
+            if !first {
+                output.stdout(delimiter.as_bytes());
+            }
+            output.stdout(line.as_bytes());
+            first = false;
+        }
+        output.stdout(b"\n");
+    }
+    Ok(())
+}
+
+fn paste_merge(
+    output: &mut dyn UtilOutput,
+    sources: &mut [PasteSource<'_>],
+    delimiter: &str,
+) -> Result<(), i32> {
+    loop {
+        let mut row = Vec::with_capacity(sources.len());
+        let mut saw_any = false;
+        for source in sources.iter_mut() {
+            let line = source.next_line(output)?;
+            if line.is_some() {
+                saw_any = true;
+            }
+            row.push(line);
+        }
+        if !saw_any {
+            return Ok(());
+        }
+        for (idx, line) in row.into_iter().enumerate() {
+            if idx > 0 {
+                output.stdout(delimiter.as_bytes());
+            }
+            if let Some(line) = line {
+                output.stdout(line.as_bytes());
+            }
+        }
+        output.stdout(b"\n");
     }
 }
 
@@ -1947,42 +2417,58 @@ pub(crate) fn util_paste(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let (flags, args) = parse_paste_flags(argv);
 
     if args.is_empty() {
-        let Some(data) = ctx.stdin else {
+        if !ctx.has_stdin() {
             ctx.output.stderr(b"paste: missing operand\n");
             return 1;
-        };
-        let text = String::from_utf8_lossy(data);
-        ctx.output.stdout(text.as_bytes());
-        if !text.ends_with('\n') {
+        }
+        let mut ended_with_newline = true;
+        if stream_input_chunks(ctx, &[], "paste", |chunk, ctx| {
+            ended_with_newline = chunk.last().copied() == Some(b'\n');
+            ctx.output.stdout(chunk);
+            Ok(())
+        })
+        .is_err()
+        {
+            return 1;
+        }
+        if !ended_with_newline {
             ctx.output.stdout(b"\n");
         }
         return 0;
     }
 
-    let file_lines = match paste_read_files(ctx, args) {
-        Ok(fl) => fl,
+    let mut sources = match paste_open_sources(ctx, args) {
+        Ok(sources) => sources,
         Err(status) => return status,
     };
 
     if flags.serial {
-        paste_serial(ctx, &file_lines, &flags.delimiter);
-    } else {
-        paste_merge(ctx, &file_lines, &flags.delimiter);
+        return match paste_serial(ctx.output, &mut sources, &flags.delimiter) {
+            Ok(()) => 0,
+            Err(status) => status,
+        };
     }
-    0
+    match paste_merge(ctx.output, &mut sources, &flags.delimiter) {
+        Ok(()) => 0,
+        Err(status) => status,
+    }
 }
 
 pub(crate) fn util_rev(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let file_args = &argv[1..];
-    let text = get_input_text(ctx, file_args);
-    if text.is_empty() && file_args.is_empty() && ctx.stdin.is_none() {
+    if file_args.is_empty() && !ctx.has_stdin() {
         ctx.output.stderr(b"rev: missing operand\n");
         return 1;
     }
-    for line in text.lines() {
+    if stream_input_lines(ctx, file_args, "rev", |line, _had_newline, ctx| {
         let reversed: String = line.chars().rev().collect();
         ctx.output.stdout(reversed.as_bytes());
         ctx.output.stdout(b"\n");
+        Ok(())
+    })
+    .is_err()
+    {
+        return 1;
     }
     0
 }
@@ -2090,17 +2576,42 @@ pub(crate) fn util_bat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let file_args: Vec<&str> = argv[consumed..].to_vec();
 
     if file_args.is_empty() {
-        if let Some(data) = ctx.stdin {
-            let text = String::from_utf8_lossy(data).to_string();
-            bat_output(
-                ctx,
-                None,
-                &text,
-                flags.show_numbers,
-                flags.show_header,
-                flags.line_range,
-                flags.show_all,
-            );
+        if ctx.has_stdin() {
+            let separator = "\u{2500}";
+            let rule_left: String = separator.repeat(7);
+            let rule_right: String = separator.repeat(20);
+            let vert = "\u{2502}";
+            if flags.show_header {
+                bat_emit_chrome(ctx.output, None, &rule_left, &rule_right);
+            }
+            let mut line_num = 0usize;
+            if stream_input_lines(ctx, &[], "bat", |line, _had_newline, ctx| {
+                line_num += 1;
+                if !bat_in_range(line_num, flags.line_range) {
+                    return Ok(());
+                }
+                let display_line = if flags.show_all {
+                    make_visible(line)
+                } else {
+                    line.to_string()
+                };
+                let out = if flags.show_numbers {
+                    format!("{line_num:>5}   {vert} {display_line}\n")
+                } else {
+                    format!("{display_line}\n")
+                };
+                ctx.output.stdout(out.as_bytes());
+                Ok(())
+            })
+            .is_err()
+            {
+                return 1;
+            }
+            if flags.show_header {
+                let bot_corner = "\u{2534}";
+                let footer = format!("{rule_left}{bot_corner}{rule_right}\n");
+                ctx.output.stdout(footer.as_bytes());
+            }
             return 0;
         }
         ctx.output.stderr(b"bat: missing operand\n");
@@ -2110,22 +2621,23 @@ pub(crate) fn util_bat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut status = 0;
     for path in &file_args {
         let full = resolve_path(ctx.cwd, path);
-        match read_text(ctx.fs, &full) {
-            Ok(text) => {
-                bat_output(
-                    ctx,
+        match open_reader_for_path(ctx, &full, path, "bat") {
+            Ok(mut reader) => {
+                if bat_output(
+                    ctx.output,
                     Some(path),
-                    &text,
+                    reader.as_mut(),
                     flags.show_numbers,
                     flags.show_header,
                     flags.line_range,
                     flags.show_all,
-                );
+                )
+                .is_err()
+                {
+                    status = 1;
+                }
             }
-            Err(e) => {
-                emit_error(ctx.output, "bat", path, &e);
-                status = 1;
-            }
+            Err(_) => status = 1,
         }
     }
 
@@ -2163,7 +2675,7 @@ fn bat_in_range(line_num: usize, range: Option<(Option<usize>, Option<usize>)>) 
 }
 
 fn bat_emit_chrome(
-    ctx: &mut UtilContext<'_>,
+    output: &mut dyn UtilOutput,
     filename: Option<&str>,
     rule_left: &str,
     rule_right: &str,
@@ -2173,58 +2685,59 @@ fn bat_emit_chrome(
     let vert = "\u{2502}";
 
     let header_line = format!("{rule_left}{top_corner}{rule_right}\n");
-    ctx.output.stdout(header_line.as_bytes());
+    output.stdout(header_line.as_bytes());
     if let Some(name) = filename {
         let file_line = format!("       {vert} File: {name}\n");
-        ctx.output.stdout(file_line.as_bytes());
+        output.stdout(file_line.as_bytes());
     }
     let sep_line = format!("{rule_left}{mid_corner}{rule_right}\n");
-    ctx.output.stdout(sep_line.as_bytes());
+    output.stdout(sep_line.as_bytes());
 }
 
 fn bat_output(
-    ctx: &mut UtilContext<'_>,
+    output: &mut dyn UtilOutput,
     filename: Option<&str>,
-    text: &str,
+    reader: &mut dyn Read,
     show_numbers: bool,
     show_header: bool,
     line_range: Option<(Option<usize>, Option<usize>)>,
     show_all: bool,
-) {
+) -> Result<(), i32> {
     let separator = "\u{2500}";
     let vert = "\u{2502}";
     let rule_left: String = separator.repeat(7);
     let rule_right: String = separator.repeat(20);
 
     if show_header {
-        bat_emit_chrome(ctx, filename, &rule_left, &rule_right);
+        bat_emit_chrome(output, filename, &rule_left, &rule_right);
     }
 
-    for (i, line) in text.lines().enumerate() {
-        let line_num = i + 1;
+    let mut line_num = 0usize;
+    let mut pending = Vec::new();
+    while let Some((line, _had_newline)) =
+        read_next_line_from_reader(reader, &mut pending, output, "bat")?
+    {
+        line_num += 1;
         if !bat_in_range(line_num, line_range) {
             continue;
         }
 
-        let display_line = if show_all {
-            make_visible(line)
-        } else {
-            line.to_string()
-        };
+        let display_line = if show_all { make_visible(&line) } else { line };
 
         let out = if show_numbers {
             format!("{line_num:>5}   {vert} {display_line}\n")
         } else {
             format!("{display_line}\n")
         };
-        ctx.output.stdout(out.as_bytes());
+        output.stdout(out.as_bytes());
     }
 
     if show_header {
         let bot_corner = "\u{2534}";
         let footer = format!("{rule_left}{bot_corner}{rule_right}\n");
-        ctx.output.stdout(footer.as_bytes());
+        output.stdout(footer.as_bytes());
     }
+    Ok(())
 }
 
 /// Replace non-printable characters with visible representations.
@@ -2326,14 +2839,23 @@ fn column_format_row(row: &[&str], col_widths: &[usize]) -> String {
 
 pub(crate) fn util_column(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let (flags, args) = parse_column_flags(argv);
-    let text = get_input_text(ctx, args);
-    if text.is_empty() {
-        return 0;
-    }
-
     if flags.table_mode {
+        let text = match collect_input_text(ctx, args, "column") {
+            Ok(text) => text,
+            Err(status) => return status,
+        };
+        if text.is_empty() {
+            return 0;
+        }
         column_table_output(ctx, &text, flags.input_delim.as_ref());
     } else {
+        let text = match collect_input_text(ctx, args, "column") {
+            Ok(text) => text,
+            Err(status) => return status,
+        };
+        if text.is_empty() {
+            return 0;
+        }
         ctx.output.stdout(text.as_bytes());
         if !text.ends_with('\n') {
             ctx.output.stdout(b"\n");
@@ -2346,6 +2868,7 @@ pub(crate) fn util_column(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 mod tests {
     use super::*;
     use crate::{UtilContext, VecOutput};
+    use std::io::Read;
     use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
 
     fn make_fs() -> MemoryFs {
@@ -2396,7 +2919,7 @@ mod tests {
                 fs,
                 output: &mut output,
                 cwd: "/",
-                stdin: Some(stdin),
+                stdin: Some(crate::UtilStdin::from_bytes(stdin)),
                 state: None,
                 network: None,
             };
@@ -2407,6 +2930,46 @@ mod tests {
             String::from_utf8_lossy(&output.stdout).to_string(),
             String::from_utf8_lossy(&output.stderr).to_string(),
         )
+    }
+
+    fn run_stdin_reader(
+        f: fn(&mut UtilContext<'_>, &[&str]) -> i32,
+        argv: &[&str],
+        stdin: impl Read + 'static,
+        fs: &mut MemoryFs,
+    ) -> (i32, String, String) {
+        let mut output = VecOutput::default();
+        let status = {
+            let mut ctx = UtilContext {
+                fs,
+                output: &mut output,
+                cwd: "/",
+                stdin: Some(crate::UtilStdin::from_reader(stdin)),
+                state: None,
+                network: None,
+            };
+            f(&mut ctx, argv)
+        };
+        (
+            status,
+            String::from_utf8_lossy(&output.stdout).to_string(),
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        )
+    }
+
+    struct InfiniteLinesReader;
+
+    impl Read for InfiniteLinesReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            let pattern = b"x\n";
+            for (idx, slot) in buf.iter_mut().enumerate() {
+                *slot = pattern[idx % pattern.len()];
+            }
+            Ok(buf.len())
+        }
     }
 
     #[test]
@@ -2746,5 +3309,81 @@ mod tests {
         let col2_pos_0 = lines[0].find("bb").unwrap();
         let col2_pos_1 = lines[1].find("eee").unwrap();
         assert_eq!(col2_pos_0, col2_pos_1, "columns not aligned: {lines:?}");
+    }
+
+    #[test]
+    fn head_reads_file_input_via_reader_path() {
+        let mut fs = make_fs_with_file("/head.txt", b"one\ntwo\nthree\nfour\n");
+        let (status, out, err) = run(util_head, &["head", "-n", "2", "/head.txt"], &mut fs);
+        assert_eq!(status, 0, "{err}");
+        assert_eq!(out, "one\ntwo\n");
+    }
+
+    #[test]
+    fn head_stops_on_streaming_stdin_without_draining() {
+        let mut fs = make_fs();
+        let (status, out, err) = run_stdin_reader(
+            util_head,
+            &["head", "-n", "3"],
+            InfiniteLinesReader,
+            &mut fs,
+        );
+        assert_eq!(status, 0, "{err}");
+        assert_eq!(out, "x\nx\nx\n");
+    }
+
+    #[test]
+    fn wc_counts_file_input_chunks() {
+        let mut fs = make_fs_with_file("/wc.txt", b"aa\nbb\ncc\n");
+        let (status, out, err) = run(util_wc, &["wc", "-l", "/wc.txt"], &mut fs);
+        assert_eq!(status, 0, "{err}");
+        assert_eq!(out, "      3 /wc.txt\n");
+    }
+
+    #[test]
+    fn wc_counts_streaming_stdin_chunks() {
+        let mut fs = make_fs();
+        let (status, out, err) = run_stdin_reader(
+            util_wc,
+            &["wc", "-l"],
+            std::io::Cursor::new(b"aa\nbb\ncc\n".to_vec()),
+            &mut fs,
+        );
+        assert_eq!(status, 0, "{err}");
+        assert_eq!(out, "      3\n");
+    }
+
+    #[test]
+    fn paste_merges_file_inputs_incrementally() {
+        let mut fs = make_fs_with_file("/a.txt", b"a1\na2\n");
+        let h = fs.open("/b.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"b1\nb2\nb3\n").unwrap();
+        fs.close(h);
+        let (status, out, err) = run(util_paste, &["paste", "/a.txt", "/b.txt"], &mut fs);
+        assert_eq!(status, 0, "{err}");
+        assert_eq!(out, "a1\tb1\na2\tb2\n\tb3\n");
+    }
+
+    #[test]
+    fn paste_serial_reads_each_file_as_stream() {
+        let mut fs = make_fs_with_file("/a.txt", b"a1\na2\n");
+        let h = fs.open("/b.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"b1\nb2\n").unwrap();
+        fs.close(h);
+        let (status, out, err) = run(
+            util_paste,
+            &["paste", "-s", "-d", ",", "/a.txt", "/b.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0, "{err}");
+        assert_eq!(out, "a1,a2\nb1,b2\n");
+    }
+
+    #[test]
+    fn sed_last_address_works_on_file_stream() {
+        let mut fs = make_fs_with_file("/sed.txt", b"first\nmiddle\nlast\n");
+        let (status, out, err) = run(util_sed, &["sed", "-n", "$p", "/sed.txt"], &mut fs);
+        assert_eq!(status, 0, "{err}");
+        assert_eq!(out, "last\n");
     }
 }

@@ -1,5 +1,7 @@
 //! Shared helper functions used across utility modules.
 
+use std::io::Read;
+
 use wasmsh_fs::{BackendFs, FsError, OpenOptions, Vfs};
 
 use crate::{UtilContext, UtilOutput};
@@ -72,23 +74,222 @@ pub(crate) fn read_text(fs: &mut BackendFs, path: &str) -> Result<String, FsErro
     String::from_utf8(data).map_err(|_| FsError::Io("invalid utf-8".into()))
 }
 
-/// Get input text from file args or stdin.
-pub(crate) fn get_input_text(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> String {
-    if file_args.is_empty() {
-        if let Some(data) = ctx.stdin {
-            return String::from_utf8_lossy(data).to_string();
-        }
-        String::new()
-    } else {
+/// Open an input reader from either the first file argument or the current stdin source.
+pub(crate) fn open_input_reader<'a>(
+    ctx: &mut UtilContext<'a>,
+    file_args: &[&str],
+    cmd: &str,
+) -> Result<Option<Box<dyn Read + 'a>>, i32> {
+    if !file_args.is_empty() {
         let full = resolve_path(ctx.cwd, file_args[0]);
-        match read_text(ctx.fs, &full) {
-            Ok(text) => text,
-            Err(e) => {
-                emit_error(ctx.output, "read", file_args[0], &e);
-                String::new()
+        return open_reader_for_path(ctx, &full, file_args[0], cmd).map(Some);
+    }
+    Ok(ctx
+        .stdin
+        .take()
+        .map(|stdin| Box::new(stdin) as Box<dyn Read + 'a>))
+}
+
+/// Open a streaming reader for a resolved path.
+pub(crate) fn open_reader_for_path<'a>(
+    ctx: &mut UtilContext<'a>,
+    full_path: &str,
+    display_name: &str,
+    cmd: &str,
+) -> Result<Box<dyn Read + 'a>, i32> {
+    match ctx.fs.open(full_path, OpenOptions::read()) {
+        Ok(handle) => {
+            let reader = match ctx.fs.stream_file(handle) {
+                Ok(reader) => reader,
+                Err(err) => {
+                    ctx.fs.close(handle);
+                    emit_error(ctx.output, cmd, display_name, &err);
+                    return Err(1);
+                }
+            };
+            ctx.fs.close(handle);
+            Ok(reader)
+        }
+        Err(err) => {
+            emit_error(ctx.output, cmd, display_name, &err);
+            Err(1)
+        }
+    }
+}
+
+fn read_reader_to_bytes(
+    mut reader: Box<dyn Read + '_>,
+    output: &mut dyn UtilOutput,
+    cmd: &str,
+) -> Result<Vec<u8>, i32> {
+    let mut data = Vec::new();
+    match reader.read_to_end(&mut data) {
+        Ok(_) => Ok(data),
+        Err(err) => {
+            let msg = format!("{cmd}: stdin read error: {err}\n");
+            output.stderr(msg.as_bytes());
+            Err(1)
+        }
+    }
+}
+
+fn read_reader_to_string(
+    reader: Box<dyn Read + '_>,
+    output: &mut dyn UtilOutput,
+    cmd: &str,
+) -> Result<String, i32> {
+    read_reader_to_bytes(reader, output, cmd).map(|data| String::from_utf8_lossy(&data).to_string())
+}
+
+pub(crate) fn read_next_line_from_reader(
+    reader: &mut dyn Read,
+    pending: &mut Vec<u8>,
+    output: &mut dyn UtilOutput,
+    cmd: &str,
+) -> Result<Option<(String, bool)>, i32> {
+    loop {
+        if let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+            let mut line = pending.drain(..=pos).collect::<Vec<u8>>();
+            let _ = line.pop();
+            return Ok(Some((String::from_utf8_lossy(&line).to_string(), true)));
+        }
+
+        let mut buffer = [0u8; 4096];
+        match reader.read(&mut buffer) {
+            Ok(0) => {
+                if pending.is_empty() {
+                    return Ok(None);
+                }
+                let line = std::mem::take(pending);
+                return Ok(Some((String::from_utf8_lossy(&line).to_string(), false)));
+            }
+            Ok(read) => pending.extend_from_slice(&buffer[..read]),
+            Err(err) => {
+                let msg = format!("{cmd}: stdin read error: {err}\n");
+                output.stderr(msg.as_bytes());
+                return Err(1);
             }
         }
     }
+}
+
+pub(crate) fn collect_input_bytes(
+    ctx: &mut UtilContext<'_>,
+    file_args: &[&str],
+    cmd: &str,
+) -> Result<Vec<u8>, i32> {
+    let Some(reader) = open_input_reader(ctx, file_args, cmd)? else {
+        return Ok(Vec::new());
+    };
+    read_reader_to_bytes(reader, ctx.output, cmd)
+}
+
+pub(crate) fn collect_input_text(
+    ctx: &mut UtilContext<'_>,
+    file_args: &[&str],
+    cmd: &str,
+) -> Result<String, i32> {
+    let Some(reader) = open_input_reader(ctx, file_args, cmd)? else {
+        return Ok(String::new());
+    };
+    read_reader_to_string(reader, ctx.output, cmd)
+}
+
+pub(crate) fn collect_input_lines(
+    ctx: &mut UtilContext<'_>,
+    file_args: &[&str],
+    cmd: &str,
+) -> Result<Vec<String>, i32> {
+    let mut lines = Vec::new();
+    stream_input_lines(ctx, file_args, cmd, |line, _had_newline, _ctx| {
+        lines.push(line.to_string());
+        Ok(())
+    })?;
+    Ok(lines)
+}
+
+pub(crate) fn collect_path_text(
+    ctx: &mut UtilContext<'_>,
+    full_path: &str,
+    display_name: &str,
+    cmd: &str,
+) -> Result<String, i32> {
+    let reader = open_reader_for_path(ctx, full_path, display_name, cmd)?;
+    read_reader_to_string(reader, ctx.output, cmd)
+}
+
+pub(crate) fn stream_input_chunks(
+    ctx: &mut UtilContext<'_>,
+    file_args: &[&str],
+    cmd: &str,
+    mut f: impl FnMut(&[u8], &mut UtilContext<'_>) -> Result<(), i32>,
+) -> Result<(), i32> {
+    let Some(mut reader) = open_input_reader(ctx, file_args, cmd)? else {
+        return Ok(());
+    };
+    let mut buffer = [0u8; 4096];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(read) => f(&buffer[..read], ctx)?,
+            Err(err) => {
+                let msg = format!("{cmd}: stdin read error: {err}\n");
+                ctx.output.stderr(msg.as_bytes());
+                return Err(1);
+            }
+        }
+    }
+}
+
+pub(crate) fn stream_input_lines(
+    ctx: &mut UtilContext<'_>,
+    file_args: &[&str],
+    cmd: &str,
+    mut f: impl FnMut(&str, bool, &mut UtilContext<'_>) -> Result<(), i32>,
+) -> Result<(), i32> {
+    let Some(mut reader) = open_input_reader(ctx, file_args, cmd)? else {
+        return Ok(());
+    };
+    let mut pending = Vec::new();
+    while let Some((line, had_newline)) =
+        read_next_line_from_reader(reader.as_mut(), &mut pending, ctx.output, cmd)?
+    {
+        f(&line, had_newline, ctx)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn stream_input_whitespace_tokens(
+    ctx: &mut UtilContext<'_>,
+    file_args: &[&str],
+    cmd: &str,
+    mut f: impl FnMut(&str, &mut UtilContext<'_>) -> Result<(), i32>,
+) -> Result<(), i32> {
+    let mut pending = String::new();
+    stream_input_chunks(ctx, file_args, cmd, |chunk, ctx| {
+        pending.push_str(&String::from_utf8_lossy(chunk));
+        let mut split_at = 0usize;
+        for (idx, ch) in pending.char_indices() {
+            if ch.is_whitespace() {
+                split_at = idx + ch.len_utf8();
+            }
+        }
+        if split_at == 0 {
+            return Ok(());
+        }
+        let completed = pending[..split_at].to_string();
+        pending.drain(..split_at);
+        for token in completed.split_whitespace() {
+            f(token, ctx)?;
+        }
+        Ok(())
+    })?;
+    if !pending.trim().is_empty() {
+        for token in pending.split_whitespace() {
+            f(token, ctx)?;
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +326,14 @@ pub(crate) fn crc32(data: &[u8]) -> u32 {
         crc = (crc >> 8) ^ CRC32_TABLE[index];
     }
     !crc
+}
+
+pub(crate) fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
+    for &byte in data {
+        let index = ((crc ^ u32::from(byte)) & 0xFF) as usize;
+        crc = (crc >> 8) ^ CRC32_TABLE[index];
+    }
+    crc
 }
 
 /// Basic grep pattern matching with `^` and `$` anchor support.
@@ -212,7 +421,7 @@ pub(crate) fn hashsum_util(
         return hashsum_check(ctx, &file_args, cmd_name, hash_fn);
     }
     if file_args.is_empty() {
-        let data = ctx.stdin.map(<[u8]>::to_vec).unwrap_or_default();
+        let data = collect_input_bytes(ctx, &[], cmd_name).unwrap_or_default();
         let hash = hash_fn(&data);
         let line = format!("{hash}  -\n");
         ctx.output.stdout(line.as_bytes());
@@ -239,12 +448,11 @@ fn hashsum_check(
     hash_fn: fn(&[u8]) -> String,
 ) -> i32 {
     let text = if file_args.is_empty() {
-        ctx.stdin
-            .map(|d| String::from_utf8_lossy(d).to_string())
-            .unwrap_or_default()
+        collect_input_text(ctx, &[], cmd_name).unwrap_or_default()
     } else {
-        match read_file_bytes(ctx, file_args[0], cmd_name) {
-            Ok(data) => String::from_utf8_lossy(&data).to_string(),
+        let full = resolve_path(ctx.cwd, file_args[0]);
+        match collect_path_text(ctx, &full, file_args[0], cmd_name) {
+            Ok(text) => text,
             Err(s) => return s,
         }
     };
@@ -372,13 +580,7 @@ pub(crate) fn read_input_bytes(
     file_args: &[&str],
     cmd: &str,
 ) -> Result<Vec<u8>, i32> {
-    if !file_args.is_empty() {
-        read_file_bytes(ctx, file_args[0], cmd)
-    } else if let Some(d) = ctx.stdin {
-        Ok(d.to_vec())
-    } else {
-        Ok(Vec::new())
-    }
+    collect_input_bytes(ctx, file_args, cmd)
 }
 
 /// Simple glob matching: `*` matches any sequence, `?` matches one char.

@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use crate::helpers::{emit_error, read_text, resolve_path};
+use crate::helpers::{collect_input_text, collect_path_text, resolve_path};
 use crate::UtilContext;
 
 // ---------------------------------------------------------------------------
@@ -1147,26 +1147,23 @@ fn parse_combined_flags(flags: &str, opts: &mut YqOptions) -> bool {
 /// Read yq input text from stdin or file arguments.
 fn read_yq_input(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> Result<String, i32> {
     if file_args.is_empty() {
-        if let Some(data) = ctx.stdin {
-            return Ok(String::from_utf8_lossy(data).to_string());
+        if ctx.stdin.is_none() {
+            ctx.output.stderr(b"yq: missing input\n");
+            return Err(1);
         }
-        ctx.output.stderr(b"yq: missing input\n");
-        return Err(1);
+        return collect_input_text(ctx, &[], "yq");
     }
     let mut combined = String::new();
     for path in file_args {
         let full = resolve_path(ctx.cwd, path);
-        match read_text(ctx.fs, &full) {
+        match collect_path_text(ctx, &full, path, "yq") {
             Ok(t) => {
                 if !combined.is_empty() {
                     combined.push('\n');
                 }
                 combined.push_str(&t);
             }
-            Err(e) => {
-                emit_error(ctx.output, "yq", path, &e);
-                return Err(1);
-            }
+            Err(status) => return Err(status),
         }
     }
     Ok(combined)
@@ -1255,7 +1252,7 @@ mod tests {
                 fs,
                 output: &mut output,
                 cwd: "/",
-                stdin,
+                stdin: stdin.map(crate::UtilStdin::from_bytes),
                 state: None,
                 network: None,
             };

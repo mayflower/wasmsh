@@ -12,6 +12,7 @@ pub struct PipeBuffer {
     data: VecDeque<u8>,
     capacity: usize,
     write_closed: bool,
+    read_closed: bool,
 }
 
 /// Result of a write attempt.
@@ -44,6 +45,7 @@ impl PipeBuffer {
             data: VecDeque::with_capacity(capacity),
             capacity,
             write_closed: false,
+            read_closed: false,
         }
     }
 
@@ -55,6 +57,9 @@ impl PipeBuffer {
 
     /// Write data into the pipe. Returns how many bytes were accepted.
     pub fn write(&mut self, buf: &[u8]) -> WriteResult {
+        if self.read_closed {
+            return WriteResult::BrokenPipe;
+        }
         if buf.is_empty() {
             return WriteResult::Written(0);
         }
@@ -97,6 +102,27 @@ impl PipeBuffer {
         ReadResult::Read(self.data.len())
     }
 
+    /// Read up to `buf.len()` bytes from the pipe into `buf`.
+    pub fn read(&mut self, buf: &mut [u8]) -> ReadResult {
+        if buf.is_empty() {
+            return ReadResult::Read(0);
+        }
+        if self.data.is_empty() {
+            if self.write_closed {
+                return ReadResult::Eof;
+            }
+            return ReadResult::WouldBlock;
+        }
+        let to_read = buf.len().min(self.data.len());
+        for slot in &mut buf[..to_read] {
+            *slot = self
+                .data
+                .pop_front()
+                .expect("pipe read length exceeded available data");
+        }
+        ReadResult::Read(to_read)
+    }
+
     /// Drain all available data from the pipe.
     pub fn drain(&mut self) -> Vec<u8> {
         self.data.drain(..).collect()
@@ -107,10 +133,21 @@ impl PipeBuffer {
         self.write_closed = true;
     }
 
+    /// Close the read end of the pipe so future writes observe broken pipe.
+    pub fn close_read(&mut self) {
+        self.read_closed = true;
+    }
+
     /// Check if the write end is closed.
     #[must_use]
     pub fn is_write_closed(&self) -> bool {
         self.write_closed
+    }
+
+    /// Check if the read end is closed.
+    #[must_use]
+    pub fn is_read_closed(&self) -> bool {
+        self.read_closed
     }
 
     /// Check if there's data available to read.
@@ -187,5 +224,22 @@ mod tests {
         let mut pipe = PipeBuffer::new(4);
         pipe.write_all(b"hello world"); // exceeds capacity
         assert_eq!(pipe.len(), 11);
+    }
+
+    #[test]
+    fn incremental_read_drains_prefix_only() {
+        let mut pipe = PipeBuffer::new(1024);
+        pipe.write_all(b"hello");
+        let mut buf = [0u8; 2];
+        assert!(matches!(pipe.read(&mut buf), ReadResult::Read(2)));
+        assert_eq!(&buf, b"he");
+        assert_eq!(pipe.drain(), b"llo");
+    }
+
+    #[test]
+    fn close_read_makes_future_writes_broken_pipe() {
+        let mut pipe = PipeBuffer::new(1024);
+        pipe.close_read();
+        assert!(matches!(pipe.write(b"hello"), WriteResult::BrokenPipe));
     }
 }

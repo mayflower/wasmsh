@@ -7,11 +7,55 @@
     const worker = new Worker("./pyodide-worker.js");
     window._pyWorker = worker;
     window._pyWorkerReady = false;
-    worker.onmessage = function (e) {
-      if (e.data && e.data.type === "ready") {
+    const pending = [];
+    let readyResolve;
+    let readyReject;
+    window._pyWorkerReadyPromise = new Promise((resolve, reject) => {
+      readyResolve = resolve;
+      readyReject = reject;
+    });
+
+    worker.addEventListener("message", function (e) {
+      const data = e.data;
+      if (data && data.type === "ready") {
         window._pyWorkerReady = true;
         document.getElementById("status").textContent = "ready";
+        readyResolve();
+        return;
       }
+
+      const entry = pending.shift();
+      if (!entry) return;
+      clearTimeout(entry.timeout);
+      if (data && data.error) {
+        entry.reject(new Error(data.error));
+      } else {
+        entry.resolve(data.events);
+      }
+    });
+
+    worker.addEventListener("error", function (e) {
+      const error = new Error(e.message || "worker error");
+      if (!window._pyWorkerReady) {
+        readyReject(error);
+      }
+      while (pending.length > 0) {
+        const entry = pending.shift();
+        clearTimeout(entry.timeout);
+        entry.reject(error);
+      }
+    });
+
+    window._pySend = function (msg, timeoutMs = 60_000) {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          const idx = pending.findIndex((entry) => entry.timeout === timeout);
+          if (idx >= 0) pending.splice(idx, 1);
+          reject(new Error("worker timeout"));
+        }, timeoutMs);
+        pending.push({ resolve, reject, timeout });
+        worker.postMessage(msg);
+      });
     };
   </script>
 </body>

@@ -8,7 +8,9 @@
 //! `web_sys::FileSystemDirectoryHandle` API, which will be added
 //! when the browser build tooling is set up.
 
-use crate::{DirEntry, FileHandle, FsError, Metadata, OpenOptions, Vfs};
+use std::io::Read;
+
+use crate::{DirEntry, FileHandle, FsError, Metadata, OpenOptions, Vfs, VfsWriteSink};
 
 /// OPFS-backed virtual filesystem for persistent browser storage.
 ///
@@ -51,8 +53,28 @@ impl Vfs for OpfsFs {
         Err(FsError::Io("OPFS not available on this platform".into()))
     }
 
+    fn stream_file(&self, _handle: FileHandle) -> Result<Box<dyn Read>, FsError> {
+        Err(FsError::Io("OPFS not available on this platform".into()))
+    }
+
     fn write_file(&mut self, _handle: FileHandle, _data: &[u8]) -> Result<(), FsError> {
         Err(FsError::Io("OPFS not available on this platform".into()))
+    }
+
+    fn open_write_sink(
+        &mut self,
+        path: &str,
+        _append: bool,
+    ) -> Result<Box<dyn VfsWriteSink>, FsError> {
+        Err(FsError::Io(format!(
+            "OPFS not available on this platform: {path}"
+        )))
+    }
+
+    fn install_stream_reader(&mut self, path: &str, _reader: Box<dyn Read>) -> Result<(), FsError> {
+        Err(FsError::Io(format!(
+            "OPFS not available on this platform: {path}"
+        )))
     }
 
     fn close(&mut self, _handle: FileHandle) {}

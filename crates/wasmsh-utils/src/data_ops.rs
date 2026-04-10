@@ -1,6 +1,8 @@
 //! Data/string utilities: seq, basename, dirname, expr, xargs, yes, md5sum, sha256sum, base64.
 
-use crate::helpers::{get_input_text, hashsum_util, hex_encode, require_args};
+use crate::helpers::{
+    hashsum_util, hex_encode, require_args, stream_input_chunks, stream_input_whitespace_tokens,
+};
 use crate::UtilContext;
 
 const SEQ_MAX_ITERATIONS: usize = 10_000_000;
@@ -355,16 +357,35 @@ pub(crate) fn util_xargs(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     } else {
         Vec::new()
     };
-    let data = if let Some(d) = ctx.stdin {
-        String::from_utf8_lossy(d).to_string()
-    } else {
-        return 0;
-    };
-    let items: Vec<&str> = if null_delim {
-        data.split('\0').filter(|s| !s.is_empty()).collect()
-    } else {
-        data.split_whitespace().collect()
-    };
+    let mut items = Vec::new();
+    if null_delim {
+        let mut pending = Vec::new();
+        if stream_input_chunks(ctx, &[], "xargs", |chunk, _| {
+            pending.extend_from_slice(chunk);
+            while let Some(pos) = pending.iter().position(|&b| b == b'\0') {
+                let item = pending.drain(..pos).collect::<Vec<u8>>();
+                pending.drain(..1);
+                if !item.is_empty() {
+                    items.push(String::from_utf8_lossy(&item).to_string());
+                }
+            }
+            Ok(())
+        })
+        .is_err()
+        {
+            return 1;
+        }
+        if !pending.is_empty() {
+            items.push(String::from_utf8_lossy(&pending).to_string());
+        }
+    } else if stream_input_whitespace_tokens(ctx, &[], "xargs", |token, _| {
+        items.push(token.to_string());
+        Ok(())
+    })
+    .is_err()
+    {
+        return 1;
+    }
     if items.is_empty() {
         return 0;
     }
@@ -395,7 +416,14 @@ pub(crate) fn util_xargs(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     } else if let Some(n) = max_args {
         for chunk in items.chunks(n) {
             if cmd == "echo" {
-                ctx.output.stdout(chunk.join(" ").as_bytes());
+                ctx.output.stdout(
+                    chunk
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .as_bytes(),
+                );
                 ctx.output.stdout(b"\n");
             } else {
                 let mut line = String::from(cmd);
@@ -412,7 +440,14 @@ pub(crate) fn util_xargs(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             }
         }
     } else if cmd == "echo" {
-        ctx.output.stdout(items.join(" ").as_bytes());
+        ctx.output.stdout(
+            items
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+                .as_bytes(),
+        );
         ctx.output.stdout(b"\n");
     } else {
         let mut line = String::from(cmd);
@@ -798,46 +833,6 @@ fn b64_decode_char(c: u8) -> Option<u8> {
     }
 }
 
-fn b64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
-    // Strip whitespace
-    let clean: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    if clean.is_empty() {
-        return Ok(Vec::new());
-    }
-    if !clean.len().is_multiple_of(4) {
-        return Err("invalid base64 input length");
-    }
-    let mut out = Vec::with_capacity(clean.len() / 4 * 3);
-    for chunk in clean.chunks_exact(4) {
-        let a = b64_decode_char(chunk[0]).ok_or("invalid base64 character")?;
-        let b = b64_decode_char(chunk[1]).ok_or("invalid base64 character")?;
-        let c_val = if chunk[2] == b'=' {
-            None
-        } else {
-            Some(b64_decode_char(chunk[2]).ok_or("invalid base64 character")?)
-        };
-        let d_val = if chunk[3] == b'=' {
-            None
-        } else {
-            Some(b64_decode_char(chunk[3]).ok_or("invalid base64 character")?)
-        };
-
-        let triple = (u32::from(a) << 18)
-            | (u32::from(b) << 12)
-            | (u32::from(c_val.unwrap_or(0)) << 6)
-            | u32::from(d_val.unwrap_or(0));
-
-        out.push((triple >> 16) as u8);
-        if c_val.is_some() {
-            out.push((triple >> 8) as u8);
-        }
-        if d_val.is_some() {
-            out.push(triple as u8);
-        }
-    }
-    Ok(out)
-}
-
 struct Base64Flags {
     decode: bool,
     wrap_col: usize,
@@ -865,57 +860,137 @@ fn parse_base64_flags<'a>(argv: &'a [&'a str]) -> (Base64Flags, &'a [&'a str]) {
     (flags, args)
 }
 
-fn base64_get_input(ctx: &mut UtilContext<'_>, args: &[&str]) -> Vec<u8> {
-    let text = get_input_text(ctx, args);
-    if !args.is_empty() || !text.is_empty() {
-        text.into_bytes()
-    } else if let Some(d) = ctx.stdin {
-        d.to_vec()
-    } else {
-        Vec::new()
-    }
-}
-
-fn base64_decode_and_emit(ctx: &mut UtilContext<'_>, input_data: &[u8]) -> i32 {
-    let input_str = String::from_utf8_lossy(input_data);
-    match b64_decode(&input_str) {
-        Ok(decoded) => {
-            ctx.output.stdout(&decoded);
-            0
-        }
-        Err(e) => {
-            let msg = format!("base64: {e}\n");
-            ctx.output.stderr(msg.as_bytes());
-            1
-        }
-    }
-}
-
-fn base64_encode_and_emit(ctx: &mut UtilContext<'_>, input_data: &[u8], wrap_col: usize) {
-    let encoded = b64_encode(input_data);
+fn emit_base64_encoded(
+    output: &mut dyn crate::UtilOutput,
+    encoded: &str,
+    wrap_col: usize,
+    current_col: &mut usize,
+) {
     if wrap_col == 0 {
-        ctx.output.stdout(encoded.as_bytes());
-        ctx.output.stdout(b"\n");
+        output.stdout(encoded.as_bytes());
         return;
     }
-    let bytes = encoded.as_bytes();
-    let mut pos = 0;
-    while pos < bytes.len() {
-        let end = (pos + wrap_col).min(bytes.len());
-        ctx.output.stdout(&bytes[pos..end]);
-        ctx.output.stdout(b"\n");
-        pos = end;
+    for &byte in encoded.as_bytes() {
+        if *current_col == wrap_col {
+            output.stdout(b"\n");
+            *current_col = 0;
+        }
+        output.stdout(&[byte]);
+        *current_col += 1;
     }
+}
+
+fn base64_encode_stream(
+    ctx: &mut UtilContext<'_>,
+    args: &[&str],
+    wrap_col: usize,
+) -> Result<(), i32> {
+    let mut carry = Vec::new();
+    let mut current_col = 0usize;
+    let mut saw_output = false;
+
+    stream_input_chunks(ctx, args, "base64", |chunk, ctx| {
+        let mut combined = Vec::with_capacity(carry.len() + chunk.len());
+        combined.extend_from_slice(&carry);
+        combined.extend_from_slice(chunk);
+        let remainder = combined.len() % 3;
+        let encode_len = combined.len() - remainder;
+        if encode_len > 0 {
+            let encoded = b64_encode(&combined[..encode_len]);
+            emit_base64_encoded(ctx.output, &encoded, wrap_col, &mut current_col);
+            saw_output = true;
+        }
+        carry.clear();
+        carry.extend_from_slice(&combined[encode_len..]);
+        Ok(())
+    })?;
+
+    if !carry.is_empty() {
+        let encoded = b64_encode(&carry);
+        emit_base64_encoded(ctx.output, &encoded, wrap_col, &mut current_col);
+        saw_output = true;
+    }
+    if wrap_col == 0 || current_col > 0 || !saw_output {
+        ctx.output.stdout(b"\n");
+    }
+    Ok(())
+}
+
+fn decode_quartet(chunk: &[u8]) -> Result<Vec<u8>, &'static str> {
+    debug_assert_eq!(chunk.len(), 4);
+    let a = b64_decode_char(chunk[0]).ok_or("invalid base64 character")?;
+    let b = b64_decode_char(chunk[1]).ok_or("invalid base64 character")?;
+    let c_val = if chunk[2] == b'=' {
+        None
+    } else {
+        Some(b64_decode_char(chunk[2]).ok_or("invalid base64 character")?)
+    };
+    let d_val = if chunk[3] == b'=' {
+        None
+    } else {
+        Some(b64_decode_char(chunk[3]).ok_or("invalid base64 character")?)
+    };
+
+    let triple = (u32::from(a) << 18)
+        | (u32::from(b) << 12)
+        | (u32::from(c_val.unwrap_or(0)) << 6)
+        | u32::from(d_val.unwrap_or(0));
+
+    let mut out = vec![(triple >> 16) as u8];
+    if c_val.is_some() {
+        out.push((triple >> 8) as u8);
+    }
+    if d_val.is_some() {
+        out.push(triple as u8);
+    }
+    Ok(out)
+}
+
+fn base64_decode_stream(ctx: &mut UtilContext<'_>, args: &[&str]) -> Result<(), i32> {
+    let mut clean = Vec::new();
+    let mut decode_err = None::<&'static str>;
+    let stream_result = stream_input_chunks(ctx, args, "base64", |chunk, ctx| {
+        for &byte in chunk {
+            if byte.is_ascii_whitespace() {
+                continue;
+            }
+            clean.push(byte);
+            while clean.len() >= 4 {
+                let quartet = clean.drain(..4).collect::<Vec<u8>>();
+                match decode_quartet(&quartet) {
+                    Ok(decoded) => ctx.output.stdout(&decoded),
+                    Err(err) => {
+                        decode_err = Some(err);
+                        return Err(1);
+                    }
+                }
+            }
+        }
+        Ok(())
+    });
+    if let Some(err) = decode_err {
+        let msg = format!("base64: {err}\n");
+        ctx.output.stderr(msg.as_bytes());
+        return Err(1);
+    }
+    stream_result?;
+    if !clean.is_empty() {
+        ctx.output.stderr(b"base64: invalid base64 input length\n");
+        return Err(1);
+    }
+    Ok(())
 }
 
 pub(crate) fn util_base64(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let (flags, args) = parse_base64_flags(argv);
-    let input_data = base64_get_input(ctx, args);
-
     if flags.decode {
-        base64_decode_and_emit(ctx, &input_data)
+        if base64_decode_stream(ctx, args).is_err() {
+            return 1;
+        }
     } else {
-        base64_encode_and_emit(ctx, &input_data, flags.wrap_col);
-        0
+        if base64_encode_stream(ctx, args, flags.wrap_col).is_err() {
+            return 1;
+        }
     }
+    0
 }

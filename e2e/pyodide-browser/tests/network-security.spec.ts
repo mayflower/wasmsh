@@ -24,24 +24,7 @@ function decodeBytes(arr: number[]): string {
 }
 
 async function send(page: any, msg: any): Promise<any[]> {
-  return page.evaluate(
-    async (m: any) => {
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(
-          () => reject(new Error("worker timeout")),
-          60_000,
-        );
-        const worker = (window as any)._pyWorker;
-        worker.onmessage = (e: MessageEvent) => {
-          clearTimeout(timeout);
-          if (e.data.error) reject(new Error(e.data.error));
-          else resolve(e.data.events);
-        };
-        worker.postMessage(m);
-      });
-    },
-    msg,
-  );
+  return page.evaluate(async (m: any) => (window as any)._pySend(m), msg);
 }
 
 function findStdout(events: any[]): string {
@@ -69,10 +52,7 @@ function findExitCode(events: any[]): number | null {
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/");
-  await page.waitForFunction(
-    () => (window as any)._pyWorkerReady === true,
-    { timeout: 90_000 },
-  );
+  await page.evaluate(() => (window as any)._pyWorkerReadyPromise);
 });
 
 async function initWithHosts(page: any, allowedHosts: string[]) {

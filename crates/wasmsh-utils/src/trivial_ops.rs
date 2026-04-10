@@ -1,12 +1,15 @@
 //! Trivial utilities: which, rmdir, tac, nl, shuf, cmp, comm, fold, nproc, expand, unexpand,
 //! truncate, factor, strings, cksum, tsort, install, timeout, cal.
 
+use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use wasmsh_fs::{OpenOptions, Vfs};
 
 use crate::helpers::{
-    copy_file_contents, crc32, emit_error, get_input_text, read_text, resolve_path, XorShift64,
+    collect_input_lines, copy_file_contents, crc32, crc32_update, emit_error, open_reader_for_path,
+    read_next_line_from_reader, resolve_path, stream_input_lines, stream_input_whitespace_tokens,
+    XorShift64,
 };
 use crate::UtilContext;
 
@@ -317,12 +320,14 @@ fn rmdir_one(ctx: &mut UtilContext<'_>, full: &str, display: &str) -> Result<(),
 
 pub(crate) fn util_tac(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let file_args = &argv[1..];
-    let text = get_input_text(ctx, file_args);
-    if text.is_empty() && file_args.is_empty() && ctx.stdin.is_none() {
+    let lines = match collect_input_lines(ctx, file_args, "tac") {
+        Ok(lines) => lines,
+        Err(status) => return status,
+    };
+    if lines.is_empty() && file_args.is_empty() && ctx.stdin.is_none() {
         ctx.output.stderr(b"tac: missing operand\n");
         return 1;
     }
-    let lines: Vec<&str> = text.lines().collect();
     for line in lines.iter().rev() {
         ctx.output.stdout(line.as_bytes());
         ctx.output.stdout(b"\n");
@@ -336,16 +341,19 @@ pub(crate) fn util_tac(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
 pub(crate) fn util_nl(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let (number_all, args) = parse_nl_args(argv);
-
-    let text = get_input_text(ctx, args);
-    if text.is_empty() && args.is_empty() && ctx.stdin.is_none() {
+    if args.is_empty() && !ctx.has_stdin() {
         ctx.output.stderr(b"nl: missing operand\n");
         return 1;
     }
 
     let mut line_num: u64 = 0;
-    for line in text.lines() {
+    if stream_input_lines(ctx, args, "nl", |line, _had_newline, ctx| {
         nl_emit_line(ctx, line, number_all, &mut line_num);
+        Ok(())
+    })
+    .is_err()
+    {
+        return 1;
     }
     0
 }
@@ -398,13 +406,14 @@ pub(crate) fn util_shuf(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     }
 
-    let text = get_input_text(ctx, args);
-    if text.is_empty() && args.is_empty() && ctx.stdin.is_none() {
+    let mut lines = match collect_input_lines(ctx, args, "shuf") {
+        Ok(lines) => lines,
+        Err(status) => return status,
+    };
+    if lines.is_empty() && args.is_empty() && ctx.stdin.is_none() {
         ctx.output.stderr(b"shuf: missing operand\n");
         return 1;
     }
-
-    let mut lines: Vec<&str> = text.lines().collect();
     let len = lines.len();
     if len == 0 {
         return 0;
@@ -619,75 +628,83 @@ pub(crate) fn util_comm(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let full1 = resolve_path(ctx.cwd, args[0]);
     let full2 = resolve_path(ctx.cwd, args[1]);
 
-    let text1 = match read_text(ctx.fs, &full1) {
-        Ok(t) => t,
-        Err(e) => {
-            emit_error(ctx.output, "comm", args[0], &e);
-            return 1;
-        }
+    let mut reader1 = match open_reader_for_path(ctx, &full1, args[0], "comm") {
+        Ok(reader) => reader,
+        Err(code) => return code,
     };
-    let text2 = match read_text(ctx.fs, &full2) {
-        Ok(t) => t,
-        Err(e) => {
-            emit_error(ctx.output, "comm", args[1], &e);
-            return 1;
-        }
+    let mut reader2 = match open_reader_for_path(ctx, &full2, args[1], "comm") {
+        Ok(reader) => reader,
+        Err(code) => return code,
     };
 
-    let lines1: Vec<&str> = text1.lines().collect();
-    let lines2: Vec<&str> = text2.lines().collect();
-    comm_merge(
+    match comm_merge_streaming(
         ctx,
-        &lines1,
-        &lines2,
+        reader1.as_mut(),
+        reader2.as_mut(),
         opts.suppress1,
         opts.suppress2,
         opts.suppress3,
-    );
-    0
+    ) {
+        Ok(()) => 0,
+        Err(code) => code,
+    }
 }
 
-fn comm_merge(
+fn comm_merge_streaming(
     ctx: &mut UtilContext<'_>,
-    lines1: &[&str],
-    lines2: &[&str],
+    reader1: &mut dyn Read,
+    reader2: &mut dyn Read,
     suppress1: bool,
     suppress2: bool,
     suppress3: bool,
-) {
+) -> Result<(), i32> {
     let col2_prefix = if suppress1 { "" } else { "\t" };
     let col3_prefix = match (suppress1, suppress2) {
         (true, true) => "",
         (true, _) | (_, true) => "\t",
         _ => "\t\t",
     };
-    let mut i = 0;
-    let mut j = 0;
-    while i < lines1.len() && j < lines2.len() {
-        match lines1[i].cmp(lines2[j]) {
+    let mut pending1 = Vec::new();
+    let mut pending2 = Vec::new();
+    let mut line1 = read_next_line_from_reader(reader1, &mut pending1, ctx.output, "comm")?
+        .map(|(line, _had_newline)| line);
+    let mut line2 = read_next_line_from_reader(reader2, &mut pending2, ctx.output, "comm")?
+        .map(|(line, _had_newline)| line);
+
+    while let (Some(left), Some(right)) = (line1.as_deref(), line2.as_deref()) {
+        match left.cmp(right) {
             std::cmp::Ordering::Less => {
-                comm_emit(ctx, "", lines1[i], !suppress1);
-                i += 1;
+                comm_emit(ctx, "", left, !suppress1);
+                line1 = read_next_line_from_reader(reader1, &mut pending1, ctx.output, "comm")?
+                    .map(|(line, _had_newline)| line);
             }
             std::cmp::Ordering::Greater => {
-                comm_emit(ctx, col2_prefix, lines2[j], !suppress2);
-                j += 1;
+                comm_emit(ctx, col2_prefix, right, !suppress2);
+                line2 = read_next_line_from_reader(reader2, &mut pending2, ctx.output, "comm")?
+                    .map(|(line, _had_newline)| line);
             }
             std::cmp::Ordering::Equal => {
-                comm_emit(ctx, col3_prefix, lines1[i], !suppress3);
-                i += 1;
-                j += 1;
+                comm_emit(ctx, col3_prefix, left, !suppress3);
+                line1 = read_next_line_from_reader(reader1, &mut pending1, ctx.output, "comm")?
+                    .map(|(line, _had_newline)| line);
+                line2 = read_next_line_from_reader(reader2, &mut pending2, ctx.output, "comm")?
+                    .map(|(line, _had_newline)| line);
             }
         }
     }
-    while i < lines1.len() {
-        comm_emit(ctx, "", lines1[i], !suppress1);
-        i += 1;
+
+    while let Some(left) = line1.as_deref() {
+        comm_emit(ctx, "", left, !suppress1);
+        line1 = read_next_line_from_reader(reader1, &mut pending1, ctx.output, "comm")?
+            .map(|(line, _had_newline)| line);
     }
-    while j < lines2.len() {
-        comm_emit(ctx, col2_prefix, lines2[j], !suppress2);
-        j += 1;
+
+    while let Some(right) = line2.as_deref() {
+        comm_emit(ctx, col2_prefix, right, !suppress2);
+        line2 = read_next_line_from_reader(reader2, &mut pending2, ctx.output, "comm")?
+            .map(|(line, _had_newline)| line);
     }
+    Ok(())
 }
 
 fn comm_emit(ctx: &mut UtilContext<'_>, prefix: &str, line: &str, show: bool) {
@@ -773,13 +790,12 @@ pub(crate) fn util_fold(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         Err(code) => return code,
     };
 
-    let text = get_input_text(ctx, args);
-    if text.is_empty() && args.is_empty() && ctx.stdin.is_none() {
+    if args.is_empty() && !ctx.has_stdin() {
         ctx.output.stderr(b"fold: missing operand\n");
         return 1;
     }
 
-    for line in text.lines() {
+    if stream_input_lines(ctx, args, "fold", |line, _had_newline, ctx| {
         if line.len() <= opts.width {
             ctx.output.stdout(line.as_bytes());
             ctx.output.stdout(b"\n");
@@ -788,6 +804,11 @@ pub(crate) fn util_fold(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         } else {
             fold_hard_break(ctx, line, opts.width);
         }
+        Ok(())
+    })
+    .is_err()
+    {
+        return 1;
     }
     0
 }
@@ -904,14 +925,18 @@ pub(crate) fn util_expand(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         Err(code) => return code,
     };
 
-    let text = get_input_text(ctx, args);
-    if text.is_empty() && args.is_empty() && ctx.stdin.is_none() {
+    if args.is_empty() && !ctx.has_stdin() {
         return 0;
     }
 
-    for line in text.lines() {
+    if stream_input_lines(ctx, args, "expand", |line, _had_newline, ctx| {
         let out = expand_line(line, tab_width);
         ctx.output.stdout(out.as_bytes());
+        Ok(())
+    })
+    .is_err()
+    {
+        return 1;
     }
     0
 }
@@ -977,12 +1002,11 @@ pub(crate) fn util_unexpand(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         Err(code) => return code,
     };
 
-    let text = get_input_text(ctx, args);
-    if text.is_empty() && args.is_empty() && ctx.stdin.is_none() {
+    if args.is_empty() && !ctx.has_stdin() {
         return 0;
     }
 
-    for line in text.lines() {
+    if stream_input_lines(ctx, args, "unexpand", |line, _had_newline, ctx| {
         let out = if opts.all {
             unexpand_line(line, opts.tab_width)
         } else {
@@ -990,6 +1014,11 @@ pub(crate) fn util_unexpand(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         };
         ctx.output.stdout(out.as_bytes());
         ctx.output.stdout(b"\n");
+        Ok(())
+    })
+    .is_err()
+    {
+        return 1;
     }
     0
 }
@@ -1201,13 +1230,20 @@ pub(crate) fn util_factor(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     // Read from arguments or stdin
     let numbers: Vec<String> = if args.is_empty() {
-        if let Some(data) = ctx.stdin {
-            let text = String::from_utf8_lossy(data);
-            text.split_whitespace().map(String::from).collect()
-        } else {
+        let mut numbers = Vec::new();
+        if !ctx.has_stdin() {
             ctx.output.stderr(b"factor: missing operand\n");
             return 1;
         }
+        if stream_input_whitespace_tokens(ctx, &[], "factor", |token, _| {
+            numbers.push(token.to_string());
+            Ok(())
+        })
+        .is_err()
+        {
+            return 1;
+        }
+        numbers
     } else {
         args.iter().map(|s| (*s).to_string()).collect()
     };
@@ -1251,14 +1287,27 @@ pub(crate) fn util_cksum(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let file_args = &argv[1..];
 
     if file_args.is_empty() {
-        // Read from stdin
-        let data = if let Some(d) = ctx.stdin {
-            d.to_vec()
-        } else {
-            Vec::new()
-        };
-        let checksum = crc32(&data);
-        let out = format!("{checksum} {}\n", data.len());
+        let mut crc = 0xFFFF_FFFFu32;
+        let mut len = 0usize;
+        if let Some(mut stdin) = ctx.stdin.take() {
+            let mut buffer = [0u8; 4096];
+            loop {
+                match stdin.read_chunk(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        crc = crc32_update(crc, &buffer[..read]);
+                        len += read;
+                    }
+                    Err(err) => {
+                        let msg = format!("cksum: stdin read error: {err}\n");
+                        ctx.output.stderr(msg.as_bytes());
+                        return 1;
+                    }
+                }
+            }
+        }
+        let checksum = !crc;
+        let out = format!("{checksum} {len}\n");
         ctx.output.stdout(out.as_bytes());
         return 0;
     }
@@ -1371,19 +1420,26 @@ fn tsort_kahn(graph: &mut TsortGraph) -> Result<Vec<usize>, Vec<usize>> {
 
 pub(crate) fn util_tsort(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let file_args = &argv[1..];
-    let text = get_input_text(ctx, file_args);
-    if text.is_empty() && file_args.is_empty() && ctx.stdin.is_none() {
+    let mut tokens = Vec::new();
+    if stream_input_whitespace_tokens(ctx, file_args, "tsort", |token, _ctx| {
+        tokens.push(token.to_string());
+        Ok(())
+    })
+    .is_err()
+    {
+        return 1;
+    }
+    if tokens.is_empty() && file_args.is_empty() && ctx.stdin.is_none() {
         ctx.output.stderr(b"tsort: missing operand\n");
         return 1;
     }
-
-    let tokens: Vec<&str> = text.split_whitespace().collect();
     if !tokens.len().is_multiple_of(2) {
         ctx.output.stderr(b"tsort: odd number of tokens\n");
         return 1;
     }
 
-    let mut graph = tsort_build_graph(&tokens);
+    let token_refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let mut graph = tsort_build_graph(&token_refs);
     match tsort_kahn(&mut graph) {
         Ok(order) => {
             for idx in &order {
@@ -1742,7 +1798,7 @@ mod tests {
                 fs,
                 output: &mut output,
                 cwd: "/",
-                stdin: Some(stdin),
+                stdin: Some(crate::UtilStdin::from_bytes(stdin)),
                 state: None,
                 network: None,
             };

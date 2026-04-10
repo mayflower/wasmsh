@@ -16,30 +16,10 @@ import { test, expect } from "@playwright/test";
 async function initWorker(page: any, stepBudget: number) {
   return page.evaluate(
     async (budget: number) => {
-      const worker = (window as any).createShellWorker();
-      (window as any)._testWorker = worker;
+      const client = (window as any).createShellWorkerClient(15_000);
+      (window as any)._send = (msg: any) => client.send(msg);
 
-      function sendAndReceive(msg: any): Promise<any> {
-        return new Promise((resolve, reject) => {
-          const timeout = setTimeout(
-            () => reject(new Error("worker timeout")),
-            15_000,
-          );
-          worker.onmessage = (e: MessageEvent) => {
-            clearTimeout(timeout);
-            resolve(e.data);
-          };
-          worker.onerror = (e: ErrorEvent) => {
-            clearTimeout(timeout);
-            reject(new Error(e.message));
-          };
-          worker.postMessage(msg);
-        });
-      }
-
-      (window as any)._send = sendAndReceive;
-
-      const initReply = await sendAndReceive({
+      const initReply = await client.send({
         type: "Init",
         step_budget: budget,
       });

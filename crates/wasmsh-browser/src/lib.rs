@@ -398,6 +398,57 @@ mod tests {
     }
 
     #[test]
+    fn command_substitution_captures_stdout_without_leak() {
+        let (events, status) = run_shell("echo $(printf 'hello')");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "hello\n");
+    }
+
+    #[test]
+    fn command_substitution_preserves_inner_stderr_visibility() {
+        let (events, status) = run_shell("echo $(printf 'hello'; echo err >&2)");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "hello\n");
+        assert_eq!(get_stderr(&events), "err\n");
+    }
+
+    #[test]
+    fn command_substitution_isolates_shell_state() {
+        let (events, status) = run_shell("foo=before; echo $(foo=after; printf hi); echo $foo");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "hi\nbefore\n");
+    }
+
+    #[test]
+    fn scheduler_executes_single_redirect_only_command() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        let events = rt.handle_command(HostCommand::Run {
+            input: "> /created.txt".into(),
+        });
+        let status = events
+            .iter()
+            .find_map(|e| {
+                if let WorkerEvent::Exit(s) = e {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(-1);
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "");
+        assert_eq!(get_stderr(&events), "");
+        let read_events = rt.handle_command(HostCommand::ReadFile {
+            path: "/created.txt".into(),
+        });
+        assert_eq!(get_stdout(&read_events), "");
+    }
+
+    #[test]
     fn pipe_three_stages() {
         let (events, status) = run_shell("echo hello world | cat | cat");
         assert_eq!(status, 0);
@@ -411,6 +462,240 @@ mod tests {
         let stdout = get_stdout(&events);
         assert!(stdout.contains('1')); // 1 line
         assert!(stdout.contains('2')); // 2 words
+    }
+
+    #[test]
+    fn streaming_yes_head_stops_after_requested_lines() {
+        let (events, status) = run_shell("yes | head -n 5");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "y\ny\ny\ny\ny\n");
+    }
+
+    #[test]
+    fn streaming_yes_cat_head_stops_after_requested_lines() {
+        let (events, status) = run_shell("yes | cat | head -n 5");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "y\ny\ny\ny\ny\n");
+    }
+
+    #[test]
+    fn streaming_yes_head_wc_counts_lines() {
+        let (events, status) = run_shell("yes | head -n 5 | wc -l");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "      5\n");
+    }
+
+    #[test]
+    fn streaming_cat_file_head_stops_at_requested_bytes() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        rt.handle_command(HostCommand::WriteFile {
+            path: "/big.txt".into(),
+            data: b"abcdefghijklmnopqrstuvwxyz".to_vec(),
+        });
+        let events = rt.handle_command(HostCommand::Run {
+            input: "cat /big.txt | head -c 10".into(),
+        });
+        let status = events
+            .iter()
+            .find_map(|e| {
+                if let WorkerEvent::Exit(s) = e {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(-1);
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "abcdefghij");
+    }
+
+    #[test]
+    fn streaming_yes_tr_head_transforms_lines() {
+        let (events, status) = run_shell("yes | tr y z | head -n 5");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "z\nz\nz\nz\nz\n");
+    }
+
+    #[test]
+    fn streaming_yes_grep_head_stops_after_requested_lines() {
+        let (events, status) = run_shell("yes | grep y | head -n 5");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "y\ny\ny\ny\ny\n");
+    }
+
+    #[test]
+    fn streaming_yes_tee_head_writes_only_pulled_output() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        let events = rt.handle_command(HostCommand::Run {
+            input: "yes | tee /tee.txt | head -n 5".into(),
+        });
+        let status = events
+            .iter()
+            .find_map(|event| {
+                if let WorkerEvent::Exit(code) = event {
+                    Some(*code)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(-1);
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "y\ny\ny\ny\ny\n");
+
+        let file_events = rt.handle_command(HostCommand::ReadFile {
+            path: "/tee.txt".into(),
+        });
+        assert_eq!(get_stdout(&file_events), "y\ny\ny\ny\ny\n");
+    }
+
+    #[test]
+    fn streaming_buffered_sort_tee_cat_preserves_sorted_output() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        let events = rt.handle_command(HostCommand::Run {
+            input: "printf 'b\\na\\n' | sort | tee /sorted.txt | cat".into(),
+        });
+        let status = events
+            .iter()
+            .find_map(|event| {
+                if let WorkerEvent::Exit(code) = event {
+                    Some(*code)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(-1);
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "a\nb\n");
+
+        let file_events = rt.handle_command(HostCommand::ReadFile {
+            path: "/sorted.txt".into(),
+        });
+        assert_eq!(get_stdout(&file_events), "a\nb\n");
+    }
+
+    #[test]
+    fn streaming_yes_rev_head_stops_after_requested_lines() {
+        let (events, status) = run_shell("yes | rev | head -n 5");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "y\ny\ny\ny\ny\n");
+    }
+
+    #[test]
+    fn streaming_echo_cut_selects_field() {
+        let (events, status) = run_shell("echo abc:def | cut -d: -f2 | head -c 4");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "def\n");
+    }
+
+    #[test]
+    fn streaming_echo_tail_head_selects_last_lines() {
+        let (events, status) = run_shell("echo -e 'a\\nb\\nc' | tail -n 2 | head -n 1");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "b\n");
+    }
+
+    #[test]
+    fn streaming_buffered_printf_sort_head_outputs_sorted_first_line() {
+        let (events, status) = run_shell("printf 'b\\na\\n' | sort | head -n 1");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "a\n");
+    }
+
+    #[test]
+    fn streaming_buffered_function_stage_preserves_output() {
+        let (events, status) = run_shell("f(){ cat; }\nprintf hi | f | head -c 2");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "hi");
+    }
+
+    #[test]
+    fn streaming_buffered_function_pipe_stderr_preserves_output() {
+        let (events, status) = run_shell("f(){ echo out; echo err >&2; }\nf |& head -n 2");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "out\nerr\n");
+    }
+
+    #[test]
+    fn scheduled_group_stage_pipe_stderr_preserves_output() {
+        let (events, status) = run_shell("printf x | { cat; echo err >&2; } |& cat");
+        assert_eq!(status, 0);
+        let stdout = get_stdout(&events);
+        assert!(stdout.contains("x"));
+        assert!(stdout.contains("err"));
+    }
+
+    #[test]
+    fn streaming_tee_pipe_stderr_preserves_output() {
+        let (events, status) = run_shell("printf x | tee / |& cat");
+        assert_eq!(status, 0);
+        let stdout = get_stdout(&events);
+        assert!(stdout.contains("x"));
+        assert!(stdout.contains("tee: /: is a directory: /"));
+        assert_eq!(get_stderr(&events), "");
+    }
+
+    #[test]
+    fn streaming_tee_pipe_stderr_respects_pipefail_status() {
+        let (events, status) = run_shell("set -o pipefail\nprintf x | tee / |& cat");
+        assert_eq!(status, 1);
+        let stdout = get_stdout(&events);
+        assert!(stdout.contains("x"));
+        assert!(stdout.contains("tee: /: is a directory: /"));
+        assert_eq!(get_stderr(&events), "");
+    }
+
+    #[test]
+    fn streaming_yes_bat_head_formats_numbered_lines() {
+        let (events, status) = run_shell("yes | bat --style=numbers | head -n 2");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "    1   │ y\n    2   │ y\n");
+    }
+
+    #[test]
+    fn streaming_yes_sed_head_rewrites_lines() {
+        let (events, status) = run_shell("yes | sed 's/y/z/' | head -n 5");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "z\nz\nz\nz\nz\n");
+    }
+
+    #[test]
+    fn streaming_echo_paste_serial_joins_lines() {
+        let (events, status) = run_shell("echo -e 'a\\nb\\nc' | paste -s -d , | head -c 6");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "a,b,c\n");
+    }
+
+    #[test]
+    fn streaming_echo_column_preserves_plain_output() {
+        let (events, status) = run_shell("echo abc | column | head -c 4");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "abc\n");
+    }
+
+    #[test]
+    fn streaming_echo_uniq_deduplicates_lines() {
+        let (events, status) = run_shell("echo -e 'a\\na\\nb' | uniq | head -n 2");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "a\nb\n");
+    }
+
+    #[test]
+    fn generic_pipeline_grep_preserves_visible_output_budget_behavior() {
+        let (events, status) = run_shell("echo -e 'a\\nb' | grep b");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "b\n");
     }
 
     #[test]
@@ -711,20 +996,18 @@ mod tests {
             step_budget: 0,
             allowed_hosts: vec![],
         });
-        // 2>&1 merges stderr into stdout, then redirect stdout to file
-        let _events = rt.handle_command(HostCommand::Run {
+        // Redirections are applied left-to-right: stderr duplicates the original
+        // stdout, then stdout is redirected to the file. The error stays visible.
+        let events = rt.handle_command(HostCommand::Run {
             input: "nonexistent_cmd 2>&1 > /out.txt".into(),
         });
         let read_events = rt.handle_command(HostCommand::ReadFile {
             path: "/out.txt".into(),
         });
         let content = get_stdout(&read_events);
-        // The merged stderr (now in stdout) goes to the file
-        // But the order matters: 2>&1 first merges stderr to stdout buffer,
-        // then > /out.txt captures all of stdout.
-        // Actually in this shell's execution model, redirections are applied after
-        // the command runs. 2>&1 merges stderr into stdout, then > captures it.
-        assert!(content.contains("command not found"));
+        assert_eq!(content, "");
+        assert!(get_stdout(&events).contains("command not found"));
+        assert_eq!(get_stderr(&events), "");
     }
 
     #[test]
@@ -1469,6 +1752,28 @@ mod tests {
     }
 
     #[test]
+    fn streaming_grep_no_match_returns_failure() {
+        let (events, status) = run_shell("echo a | grep b");
+        assert_eq!(status, 1);
+        assert_eq!(get_stdout(&events), "");
+    }
+
+    #[test]
+    fn streaming_grep_updates_pipestatus() {
+        let (events, status) = run_shell(
+            "echo a | grep b | cat; echo ${PIPESTATUS[0]} ${PIPESTATUS[1]} ${PIPESTATUS[2]}",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "0 1 0\n");
+    }
+
+    #[test]
+    fn streaming_grep_respects_pipefail_status() {
+        let (_, status) = run_shell("set -o pipefail; echo a | grep b | cat");
+        assert_eq!(status, 1);
+    }
+
+    #[test]
     fn dynamic_bash_source() {
         let mut rt = WorkerRuntime::new();
         rt.handle_command(HostCommand::Init {
@@ -1499,6 +1804,22 @@ mod tests {
         let (events, status) = run_shell("alias greet='echo hello'; greet world");
         assert_eq!(status, 0);
         assert_eq!(get_stdout(&events), "hello world\n");
+    }
+
+    #[test]
+    fn shopt_expand_aliases_can_disable_alias_expansion() {
+        let (events, status) = run_shell("alias ll='echo listing'; shopt -u expand_aliases; ll");
+        assert_eq!(status, 127);
+        assert!(get_stderr(&events).contains("command not found"));
+    }
+
+    #[test]
+    fn shopt_expand_aliases_can_reenable_alias_expansion() {
+        let (events, status) = run_shell(
+            "alias ll='echo listing'; shopt -u expand_aliases; shopt -s expand_aliases; ll",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "listing\n");
     }
 
     #[test]
@@ -1661,6 +1982,16 @@ mod tests {
         assert!(stderr.contains("not a shell builtin"));
     }
 
+    #[test]
+    fn builtin_keyword_inside_function_uses_real_builtin() {
+        let (events, status) = run_shell(
+            "echo() { builtin echo \"wrapped: $@\"; }\n\
+             echo hello",
+        );
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "wrapped: hello\n");
+    }
+
     // ---- source PATH search ----
 
     #[test]
@@ -1724,6 +2055,42 @@ mod tests {
         assert_eq!(get_stdout(&events), "a b\n");
     }
 
+    #[test]
+    fn process_subst_out_feeds_inner_command() {
+        let (events, status) = run_shell("printf hi > >(cat)");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "hi");
+    }
+
+    #[test]
+    fn process_subst_out_runs_schedulable_inner_pipeline() {
+        let (events, status) = run_shell("printf 'a\\nb\\n' > >(head -n 1 | cat)");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "a\n");
+    }
+
+    #[test]
+    fn process_subst_out_runs_live_tail_pipeline() {
+        let (events, status) = run_shell("printf 'a\\nb\\n' > >(tail -n 1 | cat)");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "b\n");
+    }
+
+    #[test]
+    fn process_subst_out_runs_live_buffered_pipeline() {
+        let (events, status) = run_shell("printf 'b\\na\\n' > >(sort | cat)");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "a\nb\n");
+    }
+
+    #[test]
+    fn process_subst_out_isolates_shell_state() {
+        let (events, status) =
+            run_shell("foo=before; printf hi > >(foo=after; wc -c >/count.txt); echo $foo");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "before\n");
+    }
+
     // ---- Pipe-ampersand (|&) ----
 
     #[test]
@@ -1731,6 +2098,14 @@ mod tests {
         let (events, status) = run_shell("echo error >&2 |& cat");
         assert_eq!(status, 0);
         assert_eq!(get_stdout(&events), "error\n");
+    }
+
+    #[test]
+    fn plain_pipeline_leaves_stderr_unpiped() {
+        let (events, status) = run_shell("echo error >&2 | cat");
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "");
+        assert_eq!(get_stderr(&events), "error\n");
     }
 
     #[test]
@@ -2002,6 +2377,154 @@ mod tests {
         assert!(stdout.contains("a.txt"), "got: {stdout}");
         assert!(stdout.contains("sub/b.txt"), "got: {stdout}");
         assert!(stdout.contains("sub/deep/c.txt"), "got: {stdout}");
+    }
+
+    #[test]
+    fn exec_live_redirections_preserve_left_to_right_dup_order() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = rt.handle_command(HostCommand::Run {
+            input: "printf hi > /first.txt 1>&2\nprintf hi 1>&2 > /second.txt".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "");
+        assert_eq!(get_stderr(&events), "hi");
+
+        let first = rt.handle_command(HostCommand::ReadFile {
+            path: "/first.txt".into(),
+        });
+        assert_eq!(get_stdout(&first), "");
+
+        let second = rt.handle_command(HostCommand::ReadFile {
+            path: "/second.txt".into(),
+        });
+        assert_eq!(get_stdout(&second), "hi");
+    }
+
+    #[test]
+    fn exec_process_subst_redirections_preserve_left_to_right_dup_order() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = rt.handle_command(HostCommand::Run {
+            input: "printf hi > >(cat) 1>&2\nprintf hi 1>&2 > >(cat)".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "hi");
+        assert_eq!(get_stderr(&events), "hi");
+    }
+
+    #[test]
+    fn process_subst_in_streams_native_pipeline() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = rt.handle_command(HostCommand::Run {
+            input: "cat <(yes | head -n 5)".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "y\ny\ny\ny\ny\n");
+        assert_eq!(get_stderr(&events), "");
+    }
+
+    #[test]
+    fn process_subst_in_streams_native_sed_pipeline() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = rt.handle_command(HostCommand::Run {
+            input: "cat <(yes | sed 's/y/z/' | head -n 3)".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "z\nz\nz\n");
+        assert_eq!(get_stderr(&events), "");
+    }
+
+    #[test]
+    fn process_subst_in_buffered_pipeline_still_works() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = rt.handle_command(HostCommand::Run {
+            input: "cat <(printf 'b\\na\\n' | sort)".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "a\nb\n");
+        assert_eq!(get_stderr(&events), "");
+    }
+
+    #[test]
+    fn process_subst_out_runs_live_tee_pipeline() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = rt.handle_command(HostCommand::Run {
+            input: "printf 'a\\nb\\n' > >(tee /tee.txt | cat)".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "a\nb\n");
+        assert_eq!(get_stderr(&events), "");
+
+        let file = rt.handle_command(HostCommand::ReadFile {
+            path: "/tee.txt".into(),
+        });
+        assert_eq!(get_stdout(&file), "a\nb\n");
+    }
+
+    #[test]
+    fn builtin_and_utility_redirections_write_files_during_execution() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let events = rt.handle_command(HostCommand::Run {
+            input: "type printf > /builtin.txt\nprintf hi > /utility.txt".into(),
+        });
+
+        let status = events
+            .iter()
+            .find_map(|event| {
+                if let WorkerEvent::Exit(code) = event {
+                    Some(*code)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(-1);
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "");
+        assert_eq!(get_stderr(&events), "");
+
+        let builtin = rt.handle_command(HostCommand::ReadFile {
+            path: "/builtin.txt".into(),
+        });
+        assert!(get_stdout(&builtin).contains("printf"));
+
+        let utility = rt.handle_command(HostCommand::ReadFile {
+            path: "/utility.txt".into(),
+        });
+        assert_eq!(get_stdout(&utility), "hi");
     }
 }
 // ── wasm-bindgen entry points (wasm32 only) ────────────────────────

@@ -4,6 +4,8 @@
 //! Output goes through an `OutputSink` abstraction suitable for
 //! browser streaming.
 
+use std::io::{Cursor, Read};
+
 use indexmap::IndexMap;
 use smol_str::SmolStr;
 use wasmsh_fs::Vfs;
@@ -42,19 +44,59 @@ impl VecSink {
     }
 }
 
+pub struct BuiltinStdin<'a> {
+    reader: Box<dyn Read + 'a>,
+}
+
+impl std::fmt::Debug for BuiltinStdin<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuiltinStdin").finish_non_exhaustive()
+    }
+}
+
+impl<'a> BuiltinStdin<'a> {
+    #[must_use]
+    pub fn from_bytes(data: &'a [u8]) -> Self {
+        Self {
+            reader: Box::new(Cursor::new(data)),
+        }
+    }
+
+    #[must_use]
+    pub fn from_reader<R>(reader: R) -> Self
+    where
+        R: Read + 'a,
+    {
+        Self {
+            reader: Box::new(reader),
+        }
+    }
+
+    pub fn read_chunk(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.reader.read(buf)
+    }
+}
+
 /// Context passed to builtin implementations.
 pub struct BuiltinContext<'a> {
     pub state: &'a mut ShellState,
     pub output: &'a mut dyn OutputSink,
     /// Optional VFS access (needed by `test -f`, etc.).
     pub fs: Option<&'a dyn Vfs>,
-    /// Stdin data from pipe or here-doc.
-    pub stdin: Option<&'a [u8]>,
+    /// Stdin source from pipe or here-doc.
+    pub stdin: Option<BuiltinStdin<'a>>,
 }
 
 impl std::fmt::Debug for BuiltinContext<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BuiltinContext").finish_non_exhaustive()
+    }
+}
+
+impl BuiltinContext<'_> {
+    #[must_use]
+    pub fn has_stdin(&self) -> bool {
+        self.stdin.is_some()
     }
 }
 
@@ -991,11 +1033,10 @@ fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     let opts = parse_read_opts(argv);
     emit_read_prompt(ctx, opts.prompt);
     let var_names = read_var_names(&opts);
-    let Some(input_text) = read_input_text(ctx) else {
+    let Some((line, remaining)) = read_input(ctx, &opts) else {
         return 1;
     };
 
-    let (line, remaining) = read_split_input(&input_text, &opts);
     store_read_remaining(ctx, &remaining);
     if let Some(arr_name) = opts.array_name {
         read_into_array(ctx.state, &line, arr_name);
@@ -1025,15 +1066,65 @@ fn store_read_remaining(ctx: &mut BuiltinContext<'_>, remaining: &str) {
 }
 
 /// Obtain input text for `read` from stdin or the `_STDIN_REMAINING` variable.
-fn read_input_text(ctx: &mut BuiltinContext<'_>) -> Option<String> {
-    if let Some(data) = ctx.stdin {
-        return Some(String::from_utf8_lossy(data).to_string());
+fn read_input(ctx: &mut BuiltinContext<'_>, opts: &ReadOpts<'_>) -> Option<(String, String)> {
+    if let Some(mut stdin) = ctx.stdin.take() {
+        return read_input_from_stdin(ctx, &mut stdin, opts).ok();
     }
+    let input_text = read_input_text(ctx)?;
+    Some(read_split_input(&input_text, opts))
+}
+
+fn read_input_text(ctx: &mut BuiltinContext<'_>) -> Option<String> {
     let rem = ctx.state.get_var("_STDIN_REMAINING")?;
     if rem.is_empty() {
         return None;
     }
     Some(rem.to_string())
+}
+
+fn read_input_from_stdin(
+    ctx: &mut BuiltinContext<'_>,
+    stdin: &mut BuiltinStdin<'_>,
+    opts: &ReadOpts<'_>,
+) -> Result<(String, String), ()> {
+    let mut data = Vec::new();
+    let delimiter = opts.delimiter as u8;
+    let mut buf = [0u8; 1];
+
+    loop {
+        match stdin.read_chunk(&mut buf) {
+            Ok(0) => break,
+            Ok(_) => {
+                let byte = buf[0];
+                if let Some(n) = opts.exact_nchars {
+                    if data.len() < n {
+                        data.push(byte);
+                    }
+                    if data.len() >= n {
+                        break;
+                    }
+                    continue;
+                }
+
+                if byte == delimiter {
+                    break;
+                }
+                data.push(byte);
+                if let Some(n) = opts.nchars {
+                    if data.len() >= n {
+                        break;
+                    }
+                }
+            }
+            Err(err) => {
+                let msg = format!("read: stdin read error: {err}\n");
+                ctx.output.stderr(msg.as_bytes());
+                return Err(());
+            }
+        }
+    }
+
+    Ok((String::from_utf8_lossy(&data).to_string(), String::new()))
 }
 
 /// Split input into (`current_line`, remaining) according to `read` options (-N, -n, delimiter).
