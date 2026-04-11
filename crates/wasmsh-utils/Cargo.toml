@@ -28,6 +28,8 @@ jaq-core = { workspace = true }
 jaq-std = { workspace = true }
 jaq-json = { workspace = true }
 hifijson = { workspace = true }
+saphyr = { workspace = true }
+foldhash = { workspace = true }
 
 [lints]
 workspace = true

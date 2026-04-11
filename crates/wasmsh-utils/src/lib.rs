@@ -23,6 +23,7 @@ mod file_ops;
 mod hash_ops;
 mod helpers;
 mod jq_ops;
+mod jaq_runner;
 mod math_ops;
 mod regex_posix;
 mod search_ops;

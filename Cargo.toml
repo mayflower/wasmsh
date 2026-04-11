@@ -72,6 +72,13 @@ jaq-core = { version = "2" }
 jaq-std = { version = "2" }
 jaq-json = { version = "1", features = ["parse"] }
 hifijson = { version = "0.2" }
+# YAML 1.2 parser — pure Rust, no_std-friendly.  Used by yq to
+# parse input and emit output in the shared jaq Val space.  See
+# ADR-0027.
+saphyr = "0.0.6"
+# Needed so yaml_ops can construct `jaq_json::Val::Obj` values
+# with the same hasher jaq-json uses internally (foldhash::fast).
+foldhash = { version = "0.1", default-features = false }
 
 # Internal crates. The `version` field is consumed by `cargo publish` and
 # the `path` field by local workspace builds.  Kept in lockstep with the

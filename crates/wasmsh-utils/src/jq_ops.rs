@@ -8,13 +8,11 @@
 //! is unchanged: same flags, same stdin/file handling, same exit
 //! codes.
 
-use std::rc::Rc;
-
-use jaq_core::load::{Arena, File, Loader};
-use jaq_core::{Compiler, Ctx, Filter, Native, RcIter};
+use jaq_core::{Filter, Native};
 use jaq_json::Val;
 
 use crate::helpers::{collect_input_text, collect_path_text, resolve_path};
+use crate::jaq_runner;
 use crate::UtilContext;
 
 // ---------------------------------------------------------------------------
@@ -214,20 +212,7 @@ fn parse_jq_named_json_arg(
 /// Compile a jq filter source string with the combined `jaq-std` +
 /// `jaq-json` standard library available.
 fn compile_filter(source: &str, var_names: &[&str]) -> Result<Filter<Native<Val>>, String> {
-    let arena = Arena::default();
-    let loader = Loader::new(jaq_std::defs().chain(jaq_json::defs()));
-    let program = File {
-        code: source,
-        path: (),
-    };
-    let modules = loader
-        .load(&arena, program)
-        .map_err(|errs| format!("{errs:?}"))?;
-    Compiler::default()
-        .with_funs(jaq_std::funs().chain(jaq_json::funs()))
-        .with_global_vars(var_names.iter().copied())
-        .compile(modules)
-        .map_err(|errs| format!("{errs:?}"))
+    jaq_runner::compile_filter(source, var_names)
 }
 
 // ---------------------------------------------------------------------------
@@ -313,28 +298,8 @@ fn parse_jq_input_values(
     Ok(out)
 }
 
-/// Parse a single JSON value.
-fn parse_json_single(s: &str) -> Result<Val, String> {
-    use hifijson::token::Lex;
-    let mut lexer = hifijson::SliceLexer::new(s.as_bytes());
-    lexer
-        .exactly_one(Val::parse)
-        .map_err(|e| format!("{e}"))
-}
-
-/// Parse a stream of whitespace-separated JSON values (the jq
-/// convention: a file may contain multiple concatenated JSON
-/// documents).
-fn parse_json_all(s: &str) -> Result<Vec<Val>, String> {
-    use hifijson::token::Lex;
-    let mut out = Vec::new();
-    let mut lexer = hifijson::SliceLexer::new(s.as_bytes());
-    while let Some(token) = lexer.ws_token() {
-        let val = Val::parse(token, &mut lexer).map_err(|e| format!("{e}"))?;
-        out.push(val);
-    }
-    Ok(out)
-}
+// Parsing helpers are shared with yaml_ops via `jaq_runner`.
+use jaq_runner::{parse_json_all, parse_json_single};
 
 fn execute_filter(
     ctx: &mut UtilContext<'_>,
@@ -346,27 +311,19 @@ fn execute_filter(
     let mut had_output = false;
     let mut last_value: Option<Val> = None;
 
-    // The `inputs` iterator is for jq's `input`/`inputs` filters — it
-    // yields the remaining input values when the filter asks for
-    // more.  For the common case of "run filter once per input", we
-    // use an empty iterator.
-    let empty_inputs = RcIter::new(core::iter::empty());
+    let vars: Vec<Val> = opts.vars.iter().map(|(_, v)| v.clone()).collect();
 
     for input in inputs {
-        let ctx_filter = Ctx::new(opts.vars.iter().map(|(_, v)| v.clone()), &empty_inputs);
-        for result in filter.run((ctx_filter, input.clone())) {
-            match result {
-                Ok(val) => {
-                    emit_value(ctx, &val, opts);
-                    had_output = true;
-                    last_value = Some(val);
-                }
-                Err(err) => {
-                    let msg = format!("jq: error: {err:?}\n");
-                    ctx.output.stderr(msg.as_bytes());
-                    status = 5;
-                }
-            }
+        let (values, err) = jaq_runner::run_filter(filter, input.clone(), &vars);
+        for val in values {
+            emit_value(ctx, &val, opts);
+            had_output = true;
+            last_value = Some(val);
+        }
+        if let Some(e) = err {
+            let msg = format!("jq: error: {e}\n");
+            ctx.output.stderr(msg.as_bytes());
+            status = 5;
         }
     }
 
@@ -379,74 +336,15 @@ fn emit_value(ctx: &mut UtilContext<'_>, val: &Val, opts: &JqOpts) {
         if let Val::Str(s) = val {
             buf.push_str(s);
         } else {
-            format_value(&mut buf, val, opts.compact);
+            jaq_runner::format_json(&mut buf, val, opts.compact);
         }
     } else {
-        format_value(&mut buf, val, opts.compact);
+        jaq_runner::format_json(&mut buf, val, opts.compact);
     }
     if !opts.join_output {
         buf.push('\n');
     }
     ctx.output.stdout(buf.as_bytes());
-}
-
-/// Format a Val in either compact or jq-style pretty form.
-///
-/// jaq-json's `Display` impl only produces compact output, so for
-/// pretty printing we walk the value tree ourselves and emit 2-space
-/// indentation matching real `jq`'s default output.
-fn format_value(buf: &mut String, val: &Val, compact: bool) {
-    if compact {
-        use core::fmt::Write;
-        let _ = write!(buf, "{val}");
-    } else {
-        format_pretty(buf, val, 0);
-    }
-}
-
-fn format_pretty(buf: &mut String, val: &Val, indent: usize) {
-    use core::fmt::Write;
-    match val {
-        Val::Arr(arr) if !arr.is_empty() => {
-            buf.push_str("[\n");
-            let inner = indent + 1;
-            let pad = "  ".repeat(inner);
-            for (i, item) in arr.iter().enumerate() {
-                buf.push_str(&pad);
-                format_pretty(buf, item, inner);
-                if i + 1 < arr.len() {
-                    buf.push(',');
-                }
-                buf.push('\n');
-            }
-            buf.push_str(&"  ".repeat(indent));
-            buf.push(']');
-        }
-        Val::Obj(obj) if !obj.is_empty() => {
-            buf.push_str("{\n");
-            let inner = indent + 1;
-            let pad = "  ".repeat(inner);
-            let entries: Vec<_> = obj.iter().collect();
-            for (i, (k, v)) in entries.iter().enumerate() {
-                buf.push_str(&pad);
-                // Keys are always JSON-quoted strings.
-                let key = Val::Str(Rc::clone(k));
-                let _ = write!(buf, "{key}: ");
-                format_pretty(buf, v, inner);
-                if i + 1 < entries.len() {
-                    buf.push(',');
-                }
-                buf.push('\n');
-            }
-            buf.push_str(&"  ".repeat(indent));
-            buf.push('}');
-        }
-        // Scalars and empty composites use the compact Display impl,
-        // which is already correct for the pretty output.
-        _ => {
-            let _ = write!(buf, "{val}");
-        }
-    }
 }
 
 fn finalize_jq_status(
