@@ -18,6 +18,15 @@ Both transports carry the same payloads. The Rust definitions are the
 canonical schema; the JSON form is `serde_json`'s default tagged
 representation of those enums (see [JSON Wire Format](#json-wire-format)).
 
+An experimental typed WIT projection also ships with the protocol crate at
+[`crates/wasmsh-protocol/wit/worker-protocol.wit`](../../crates/wasmsh-protocol/wit/worker-protocol.wit).
+It exposes the same operations as typed functions (`init`, `run`,
+`start-run`, `poll-run`, `cancel`, `read-file`, `write-file`, `list-dir`,
+`mount`) and reuses typed event/value definitions for `worker-event` and
+`diagnostic-level`. The serde enums remain the canonical contract for current
+Rust and JSON embedders; the WIT world is an additive, experimental projection
+for future component-model integrations.
+
 ## Protocol Version
 
 Current: `0.1.0` (`wasmsh_protocol::PROTOCOL_VERSION`).
@@ -43,13 +52,17 @@ sequenceDiagram
     Host->>Runtime: WriteFile { path, data }
     Runtime-->>Host: FsChanged(path)
 
-    Host->>Runtime: Run { input: "echo hello | wc -l" }
+    Host->>Runtime: StartRun { input: "echo hello | wc -l" }
+    Runtime-->>Host: Yielded
+    Host->>Runtime: PollRun
     Runtime-->>Host: Stdout(b"1\n")
     Runtime-->>Host: Exit(0)
 
-    Host->>Runtime: Run { input: "long_running" }
+    Host->>Runtime: StartRun { input: "long_running" }
+    Runtime-->>Host: Yielded
     Host->>Runtime: Cancel
     Runtime-->>Host: Diagnostic(Info, "cancel received")
+    Host->>Runtime: PollRun
     Runtime-->>Host: Exit(130)
 
     Host->>Runtime: ReadFile { path }
@@ -57,27 +70,37 @@ sequenceDiagram
 ```
 
 A session always begins with `Init`. After that, the host may interleave
-`Run`, `ReadFile`, `WriteFile`, `ListDir`, and `Cancel` calls in any order.
+`Run`, `StartRun`, `PollRun`, `ReadFile`, `WriteFile`, `ListDir`, and
+`Cancel` calls in any order. `Run` is the one-shot convenience wrapper: it
+starts a resumable execution and polls it to completion before returning.
 Sending `Run` (or any other command) before `Init` produces
 `Diagnostic(Error, "runtime not initialized")`.
 
 ## Ordering and Delivery Guarantees
 
-- Events for a given command are returned **synchronously** as a single
-  `Vec<WorkerEvent>`. There is no async streaming inside one call.
-- Within that vector, events appear in the order the runtime produced them:
-  `Diagnostic` events for parse errors come before any execution output;
-  `Stdout` and `Stderr` chunks are interleaved in production order; `Exit`
-  is always the last event for `Run` calls that ran a command.
+- `Run` returns **synchronously** as a single `Vec<WorkerEvent>`, but it is
+  implemented by draining the same resumable executor used by
+  `StartRun` / `PollRun`.
+- `StartRun` returns either `[Yielded]` when execution was accepted, or an
+  immediate error vector if startup failed.
+- `PollRun` returns the next batch of events for the active execution. If
+  more work remains, the batch ends with `Yielded`. The final poll ends with
+  `Exit(code)` and no trailing `Yielded`.
+- Within a batch, `Stdout` and `Stderr` chunks appear in production order.
+  `Exit` is always the last event in a completed execution batch.
 - For `WriteFile`, exactly one `FsChanged(path)` is emitted on success, or
   one `Diagnostic(Error, …)` on failure.
 - For `ReadFile`, exactly one `Stdout(bytes)` is emitted on success, or one
   `Diagnostic(Error, …)` on failure.
-- `Cancel` cooperatively interrupts a running command. Because the VM is
-  cooperative, the in-flight `Run` call returns *its* event vector
-  immediately, and the next `Run` call is unaffected.
+- `Cancel` is cooperative. It acknowledges with
+  `Diagnostic(Info, "cancel received")`; the active execution then finishes
+  with `Exit(130)` on the next `PollRun` or during the internal drain done by
+  `Run`.
 - Sending a command variant the runtime does not recognise yields
   `Diagnostic(Warning, "unknown command")`.
+- User-facing shell failures such as parse text, command-not-found text, and
+  many runtime errors may be emitted on `Stderr`. `Diagnostic` is reserved for
+  protocol-level or structured runtime notices.
 
 ## Host → Worker Commands
 
@@ -107,13 +130,36 @@ Execute a shell command string.
 by exactly one `Exit(code)`. Exit code 130 indicates cancellation; 127
 indicates command-not-found; 0 is success.
 
+Internally, `Run` uses the same resumable executor as `StartRun` / `PollRun`
+and simply drains it to completion before returning.
+
+### `StartRun`
+
+Start a progressive shell execution without draining it to completion.
+
+| Field   | Type     | Description |
+|---------|----------|-------------|
+| `input` | `String` | Shell source code. May contain multiple commands, functions, here-documents, etc. |
+
+**Response**: `[Yielded]` when execution started successfully, or an
+immediate error vector if startup failed.
+
+### `PollRun`
+
+Poll the active progressive execution.
+
+**Response**: the next batch of `Stdout` / `Stderr` / `Diagnostic` events.
+If execution is still active, the batch ends with `Yielded`. The final poll
+ends with `Exit(code)`.
+
 ### `Cancel`
 
 Abort the currently running execution. Cooperative — actual interruption
 happens at the next VM step.
 
-**Response**: `Diagnostic(Info, "cancel received")`. The in-flight `Run`
-call observes the cancellation token and returns soon after.
+**Response**: `Diagnostic(Info, "cancel received")`. The active execution
+observes the cancellation token cooperatively and completes with `Exit(130)`
+on the next `PollRun` (or during `Run`'s internal drain).
 
 ### `Mount`
 
@@ -168,9 +214,10 @@ List directory contents.
 
 | Event                    | Fields            | Emitted by                                  | Meaning |
 |--------------------------|-------------------|---------------------------------------------|---------|
-| `Stdout(Vec<u8>)`        | bytes             | `Run`, `ReadFile`, `ListDir`                | Standard output / file payload bytes. |
-| `Stderr(Vec<u8>)`        | bytes             | `Run`                                       | Standard error bytes (e.g. from `2>&1`, builtin error messages). |
-| `Exit(i32)`              | exit code         | `Run`                                       | Final event for a `Run` call. 0 = success; 1+ = command exit; 127 = not found; 130 = cancelled. |
+| `Stdout(Vec<u8>)`        | bytes             | `Run`, `PollRun`, `ReadFile`, `ListDir`     | Standard output / file payload bytes. |
+| `Stderr(Vec<u8>)`        | bytes             | `Run`, `PollRun`                            | Standard error bytes (including many user-facing shell errors). |
+| `Exit(i32)`              | exit code         | `Run`, `PollRun`                            | Final event for a completed execution. 0 = success; 1+ = command exit; 127 = not found; 130 = cancelled. |
+| `Yielded`                | none              | `StartRun`, `PollRun`                       | Execution is still active; poll again. |
 | `Diagnostic(level, msg)` | level + message   | any command                                 | Runtime-level message (parse errors, init errors, network denials, …). |
 | `FsChanged(String)`      | path              | `WriteFile`, runtime when scripts touch FS  | Notifies the host that a VFS file changed so it can re-read or re-render. |
 | `Version(String)`        | version           | `Init`                                      | Protocol version announcement. |
@@ -208,6 +255,13 @@ variant with its name. Field names are `snake_case`.
 { "Run": { "input": "echo hello | wc -l" } }
 ```
 
+`StartRun` / `PollRun`:
+
+```json
+{ "StartRun": { "input": "echo hello | wc -l" } }
+"PollRun"
+```
+
 `Cancel`:
 
 ```json
@@ -223,6 +277,16 @@ variant with its name. Field names are `snake_case`.
 A response is a JSON array of events:
 
 ```json
+[
+  { "Stdout": [49, 10] },
+  { "Exit": 0 }
+]
+```
+
+Progressive polling batches:
+
+```json
+[ "Yielded" ]
 [
   { "Stdout": [49, 10] },
   { "Exit": 0 }
@@ -254,7 +318,7 @@ through the Pyodide / Emscripten module. See
 
 ## See Also
 
-- [Architecture: Execution Flow](../explanation/architecture.md#execution-flow) for what happens between `Run` and the resulting events.
+- [Architecture: Execution Flow](../explanation/architecture.md#execution-flow) for what happens between `Run` / `StartRun` and the resulting events.
 - [Sandbox and Capabilities](sandbox-and-capabilities.md) for the security model behind `step_budget` and `allowed_hosts`.
 - [Embedding wasmsh](../guides/embedding.md) for how to drive the protocol from a host.
 - [ADR-0021](../adr/adr-0021-network-capability.md) for the network allowlist design.

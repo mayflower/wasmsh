@@ -1,0 +1,19 @@
+[test]
+name = "buffered-pipeline-oracle-parity"
+tags = ["pipeline", "invariant", "differential", "P1"]
+tier = "P1"
+class = "compat-bash"
+stage = "differential"
+requires = ["pipeline", "printf", "sort", "head"]
+
+[input]
+script = "printf 'b\\nc\\na\\n' | sort | head -n 2"
+
+[expect]
+status = 0
+stdout = "a\nb\n"
+
+[oracle]
+compare = true
+shells = ["bash"]
+ignore_stderr = true

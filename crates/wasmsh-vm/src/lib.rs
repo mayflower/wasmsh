@@ -1,8 +1,9 @@
-//! Cooperative virtual machine for the wasmsh shell.
+//! Cooperative virtual machine for the wasmsh executor subset.
 //!
-//! Executes IR instructions with step budgets, yield points,
-//! and cancellation tokens. All execution is in-process — no
-//! OS processes are spawned.
+//! The full shell still runs primarily in `wasmsh-runtime`. This VM is
+//! used for the lowered IR subset and provides the shared budgeting,
+//! cancellation, diagnostics, and output accounting primitives that the
+//! runtime also relies on for resumable execution.
 
 pub mod pipe;
 
@@ -10,7 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use wasmsh_builtins::{BuiltinContext, BuiltinRegistry, VecSink as BuiltinSink};
-use wasmsh_ir::{Ir, IrProgram};
+use wasmsh_ast::Word;
+use wasmsh_ir::{Ir, IrProgram, IrRedirection};
 use wasmsh_state::ShellState;
 
 /// Outcome of VM execution.
@@ -33,6 +35,10 @@ pub struct ExecutionLimits {
     pub step_limit: u64,
     /// Maximum bytes of combined stdout+stderr output (0 = unlimited).
     pub output_byte_limit: u64,
+    /// Maximum bytes buffered in pipes/streaming buffers (0 = unlimited).
+    pub pipe_byte_limit: u64,
+    /// Maximum nested execution depth (0 = unlimited).
+    pub recursion_limit: u32,
 }
 
 /// A structured diagnostic event emitted during execution.
@@ -61,6 +67,135 @@ pub enum DiagCategory {
     Filesystem,
     Builtin,
     Budget,
+}
+
+/// Structured budget category tracked during execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetCategory {
+    Steps,
+    VisibleOutputBytes,
+    PipeBytes,
+    RecursionDepth,
+}
+
+/// Stable exhaustion reason for a specific tracked budget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExhaustionReason {
+    pub category: BudgetCategory,
+    pub used: u64,
+    pub limit: u64,
+}
+
+impl ExhaustionReason {
+    #[must_use]
+    pub fn diagnostic_message(&self) -> String {
+        match self.category {
+            BudgetCategory::Steps => {
+                format!("step budget exhausted: {} steps (limit: {})", self.used, self.limit)
+            }
+            BudgetCategory::VisibleOutputBytes => format!(
+                "output limit exceeded: {} bytes (limit: {})",
+                self.used, self.limit
+            ),
+            BudgetCategory::PipeBytes => format!(
+                "pipe buffer limit exceeded: {} bytes (limit: {})",
+                self.used, self.limit
+            ),
+            BudgetCategory::RecursionDepth => format!(
+                "maximum recursion depth exceeded: {} frames (limit: {})",
+                self.used, self.limit
+            ),
+        }
+    }
+}
+
+/// Structured stop reason for the current execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopReason {
+    Exhausted(ExhaustionReason),
+    Cancelled,
+}
+
+/// Shared budget accounting across the VM and runtime layers.
+#[derive(Debug, Clone, Default)]
+pub struct BudgetTracker {
+    pub steps: u64,
+    pub visible_output_bytes: u64,
+    pub pipe_bytes: u64,
+    pub recursion_depth: u32,
+    stop_reason: Option<StopReason>,
+}
+
+impl BudgetTracker {
+    #[must_use]
+    pub fn stop_reason(&self) -> Option<&StopReason> {
+        self.stop_reason.as_ref()
+    }
+
+    pub fn clear_stop_reason(&mut self) {
+        self.stop_reason = None;
+    }
+
+    fn exhaust(&mut self, reason: ExhaustionReason) -> ExhaustionReason {
+        self.stop_reason = Some(StopReason::Exhausted(reason.clone()));
+        reason
+    }
+
+    pub fn note_cancelled(&mut self) {
+        self.stop_reason = Some(StopReason::Cancelled);
+    }
+
+    pub fn begin_step(&mut self, limit: u64) -> Result<(), ExhaustionReason> {
+        if limit > 0 && self.steps >= limit {
+            return Err(self.exhaust(ExhaustionReason {
+                category: BudgetCategory::Steps,
+                used: self.steps,
+                limit,
+            }));
+        }
+        self.steps += 1;
+        Ok(())
+    }
+
+    pub fn track_visible_output(&mut self, bytes: u64, limit: u64) -> Result<(), ExhaustionReason> {
+        self.visible_output_bytes = self.visible_output_bytes.saturating_add(bytes);
+        if limit > 0 && self.visible_output_bytes > limit {
+            return Err(self.exhaust(ExhaustionReason {
+                category: BudgetCategory::VisibleOutputBytes,
+                used: self.visible_output_bytes,
+                limit,
+            }));
+        }
+        Ok(())
+    }
+
+    pub fn set_pipe_bytes(&mut self, bytes: u64, limit: u64) -> Result<(), ExhaustionReason> {
+        self.pipe_bytes = bytes;
+        if limit > 0 && self.pipe_bytes > limit {
+            return Err(self.exhaust(ExhaustionReason {
+                category: BudgetCategory::PipeBytes,
+                used: self.pipe_bytes,
+                limit,
+            }));
+        }
+        Ok(())
+    }
+
+    pub fn enter_recursion(&mut self, limit: u32) -> Result<(), ExhaustionReason> {
+        self.recursion_depth = self.recursion_depth.saturating_add(1);
+        if limit > 0 && self.recursion_depth > limit {
+            return Err(self.exhaust(ExhaustionReason {
+                category: BudgetCategory::RecursionDepth,
+                used: self.recursion_depth as u64,
+                limit: limit as u64,
+            }));
+        }
+        Ok(())
+    }
+
+    pub fn exit_recursion(&mut self) {
+        self.recursion_depth = self.recursion_depth.saturating_sub(1);
+    }
 }
 
 /// A cancellation token that can be shared across threads.
@@ -111,6 +246,8 @@ pub struct Vm {
     pub limits: ExecutionLimits,
     /// Bytes of output produced so far.
     pub output_bytes: u64,
+    /// Shared budget accounting and stable stop reasons.
+    pub budget: BudgetTracker,
     /// Cancellation token.
     cancel: CancellationToken,
     /// Collected diagnostic events.
@@ -121,6 +258,69 @@ pub struct Vm {
     pub stdout: Vec<u8>,
     /// Collected stderr output from command execution.
     pub stderr: Vec<u8>,
+}
+
+pub trait VmExecutor {
+    fn assign(&mut self, vm: &mut Vm, name: &str, value: Option<&Word>);
+
+    fn execute_builtin(
+        &mut self,
+        vm: &mut Vm,
+        name: &str,
+        argv: &[Word],
+        redirections: &[IrRedirection],
+    ) -> i32;
+}
+
+struct BuiltinVmExecutor {
+    builtins: BuiltinRegistry,
+}
+
+impl VmExecutor for BuiltinVmExecutor {
+    fn assign(&mut self, vm: &mut Vm, name: &str, value: Option<&Word>) {
+        let value = value.map_or_else(String::new, |word| {
+            wasmsh_expand::expand_word(word, &mut vm.state)
+        });
+        vm.state.set_var(name.into(), value.into());
+        vm.state.last_status = 0;
+    }
+
+    fn execute_builtin(
+        &mut self,
+        vm: &mut Vm,
+        name: &str,
+        argv: &[Word],
+        _redirections: &[IrRedirection],
+    ) -> i32 {
+        let Some(builtin_fn) = self.builtins.get(name) else {
+            vm.emit_diagnostic(
+                DiagLevel::Error,
+                DiagCategory::Builtin,
+                format!("unknown builtin: {name}"),
+            );
+            vm.state.last_status = 127;
+            return 127;
+        };
+
+        let expanded: Vec<String> = argv
+            .iter()
+            .map(|word| wasmsh_expand::expand_word(word, &mut vm.state))
+            .collect();
+        let argv_refs: Vec<&str> = expanded.iter().map(String::as_str).collect();
+        let mut sink = BuiltinSink::default();
+        let status = {
+            let mut ctx = BuiltinContext {
+                state: &mut vm.state,
+                output: &mut sink,
+                fs: None,
+                stdin: None,
+            };
+            builtin_fn(&mut ctx, &argv_refs)
+        };
+        vm.write_streams(&sink.stdout, &sink.stderr);
+        vm.state.last_status = status;
+        status
+    }
 }
 
 impl Vm {
@@ -135,6 +335,7 @@ impl Vm {
                 ..ExecutionLimits::default()
             },
             output_bytes: 0,
+            budget: BudgetTracker::default(),
             cancel: CancellationToken::new(),
             diagnostics: Vec::new(),
             builtins: BuiltinRegistry::new(),
@@ -151,6 +352,7 @@ impl Vm {
             steps: 0,
             limits,
             output_bytes: 0,
+            budget: BudgetTracker::default(),
             cancel: CancellationToken::new(),
             diagnostics: Vec::new(),
             builtins: BuiltinRegistry::new(),
@@ -173,10 +375,17 @@ impl Vm {
         result
     }
 
+    #[must_use]
+    pub fn stop_reason(&self) -> Option<&StopReason> {
+        self.budget.stop_reason()
+    }
+
     /// Track output bytes and check the limit. Returns true if within limits.
     pub fn track_output(&mut self, bytes: u64) -> bool {
         self.output_bytes += bytes;
-        self.limits.output_byte_limit == 0 || self.output_bytes <= self.limits.output_byte_limit
+        self.budget
+            .track_visible_output(bytes, self.limits.output_byte_limit)
+            .is_ok()
     }
 
     /// Append stdout bytes and update output accounting.
@@ -200,14 +409,13 @@ impl Vm {
 
     /// Check whether the accumulated output has exceeded the configured limit.
     pub fn check_output_limit(&mut self) -> Result<(), StepResult> {
-        if self.limits.output_byte_limit > 0 && self.output_bytes > self.limits.output_byte_limit {
-            return Err(self.budget_stop(
-                StepResult::OutputLimitExceeded,
-                format!(
-                    "output limit exceeded: {} bytes (limit: {})",
-                    self.output_bytes, self.limits.output_byte_limit
-                ),
-            ));
+        if let Some(StopReason::Exhausted(reason)) = self.stop_reason() {
+            if reason.category == BudgetCategory::VisibleOutputBytes {
+                return Err(self.budget_stop(
+                    StepResult::OutputLimitExceeded,
+                    reason.diagnostic_message(),
+                ));
+            }
         }
         Ok(())
     }
@@ -215,19 +423,18 @@ impl Vm {
     /// Consume one execution step using the VM's shared budget/cancel semantics.
     pub fn begin_step(&mut self) -> Result<(), StepResult> {
         if self.cancel.is_cancelled() {
+            self.budget.note_cancelled();
             return Err(self.budget_stop(StepResult::Cancelled, "execution cancelled".to_string()));
         }
         self.check_output_limit()?;
-        if self.limits.step_limit > 0 && self.steps >= self.limits.step_limit {
+        if let Err(reason) = self.budget.begin_step(self.limits.step_limit) {
+            self.steps = self.budget.steps;
             return Err(self.budget_stop(
                 StepResult::Yield,
-                format!(
-                    "step budget exhausted: {} steps (limit: {})",
-                    self.steps, self.limits.step_limit
-                ),
+                reason.diagnostic_message(),
             ));
         }
-        self.steps += 1;
+        self.steps = self.budget.steps;
         Ok(())
     }
 
@@ -239,8 +446,19 @@ impl Vm {
 
     /// Execute an IR program to completion (or until yield/cancel).
     pub fn run(&mut self, program: &IrProgram) -> StepResult {
+        let builtins = std::mem::take(&mut self.builtins);
+        let mut executor = BuiltinVmExecutor { builtins };
+        let result = self.run_with_executor(program, &mut executor);
+        self.builtins = executor.builtins;
+        result
+    }
+
+    pub fn run_with_executor<E: VmExecutor>(
+        &mut self,
+        program: &IrProgram,
+        executor: &mut E,
+    ) -> StepResult {
         let mut pc = 0;
-        let mut argv: Vec<String> = Vec::new();
         let instructions = &program.instructions;
 
         while pc < instructions.len() {
@@ -249,43 +467,31 @@ impl Vm {
             }
 
             match &instructions[pc] {
-                Ir::SetVar { name, value } => {
-                    self.state.set_var(name.clone(), value.clone());
+                Ir::Assign { name, value } => {
+                    executor.assign(self, name.as_str(), value.as_ref());
                 }
-                Ir::PushArg { value } => {
-                    argv.push(value.to_string());
+                Ir::ExecuteBuiltin {
+                    name,
+                    argv,
+                    redirections,
+                } => {
+                    let status = executor.execute_builtin(self, name, argv, redirections);
+                    self.state.last_status = status;
                 }
-                Ir::CallBuiltin { name } => {
-                    if let Some(builtin_fn) = self.builtins.get(name) {
-                        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-                        let mut sink = BuiltinSink::default();
-                        let status = {
-                            let mut ctx = BuiltinContext {
-                                state: &mut self.state,
-                                output: &mut sink,
-                                fs: None,
-                                stdin: None,
-                            };
-                            builtin_fn(&mut ctx, &argv_refs)
-                        };
-                        self.write_streams(&sink.stdout, &sink.stderr);
-                        self.state.last_status = status;
-                    } else {
-                        self.emit_diagnostic(
-                            DiagLevel::Error,
-                            DiagCategory::Builtin,
-                            format!("unknown builtin: {name}"),
-                        );
-                        self.state.last_status = 127;
+                Ir::JumpIfFailure { target } => {
+                    if self.state.last_status != 0 {
+                        pc = *target;
+                        continue;
                     }
-                    argv.clear();
                 }
-                Ir::CallUtility { name: _ } => {
-                    // Utility dispatch requires a VFS instance which is managed
-                    // by the runtime layer. Set status to 127 (command not found)
-                    // at this level; the runtime handles utility dispatch directly.
-                    self.state.last_status = 127;
-                    argv.clear();
+                Ir::JumpIfSuccess { target } => {
+                    if self.state.last_status == 0 {
+                        pc = *target;
+                        continue;
+                    }
+                }
+                Ir::ReturnLastStatus => {
+                    return StepResult::Done(self.state.last_status);
                 }
                 Ir::Return { status } => {
                     self.state.last_status = *status;
@@ -308,8 +514,50 @@ impl Default for Vm {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+    mod tests {
+        use super::*;
+        use wasmsh_ast::{RedirectionOp, Span, WordPart};
+
+        #[derive(Default)]
+        struct TestExecutor {
+            seen_redirections: Vec<Vec<IrRedirection>>,
+        }
+
+        impl VmExecutor for TestExecutor {
+            fn assign(&mut self, vm: &mut Vm, name: &str, value: Option<&Word>) {
+                let value = value.map_or_else(String::new, |word| {
+                    wasmsh_expand::expand_word(word, &mut vm.state)
+                });
+                vm.state.set_var(name.into(), value.into());
+                vm.state.last_status = 0;
+            }
+
+            fn execute_builtin(
+                &mut self,
+                vm: &mut Vm,
+                name: &str,
+                argv: &[Word],
+                redirections: &[IrRedirection],
+            ) -> i32 {
+                self.seen_redirections.push(redirections.to_vec());
+                let expanded: Vec<String> = argv
+                    .iter()
+                    .map(|word| wasmsh_expand::expand_word(word, &mut vm.state))
+                    .collect();
+                let status = match name {
+                    "echo" => {
+                        let text = expanded[1..].join(" ");
+                        vm.write_stdout(format!("{text}\n").as_bytes());
+                        0
+                    }
+                    "true" => 0,
+                    "false" => 1,
+                    _ => 127,
+                };
+                vm.state.last_status = status;
+                status
+            }
+        }
 
     #[test]
     fn run_empty_program() {
@@ -330,9 +578,9 @@ mod tests {
     fn run_set_var() {
         let mut vm = Vm::default();
         let prog = IrProgram::new(vec![
-            Ir::SetVar {
+            Ir::Assign {
                 name: "FOO".into(),
-                value: "bar".into(),
+                value: Some(literal_word("bar")),
             },
             Ir::Return { status: 0 },
         ]);
@@ -344,18 +592,15 @@ mod tests {
     fn run_builtin_placeholder() {
         let mut vm = Vm::default();
         let prog = IrProgram::new(vec![
-            Ir::PushArg {
-                value: "echo".into(),
-            },
-            Ir::PushArg {
-                value: "hello".into(),
-            },
-            Ir::CallBuiltin {
+            Ir::ExecuteBuiltin {
                 name: "echo".into(),
+                argv: vec![literal_word("echo"), literal_word("hello")],
+                redirections: Vec::new(),
             },
             Ir::Return { status: 0 },
         ]);
         assert_eq!(vm.run(&prog), StepResult::Done(0));
+        assert_eq!(String::from_utf8(vm.stdout).unwrap(), "hello\n");
     }
 
     #[test]
@@ -381,6 +626,7 @@ mod tests {
             ExecutionLimits {
                 step_limit: 0,
                 output_byte_limit: 10,
+                ..ExecutionLimits::default()
             },
         );
         assert!(vm.track_output(5));
@@ -428,9 +674,9 @@ mod tests {
     fn status_propagation() {
         let mut vm = Vm::default();
         let prog = IrProgram::new(vec![
-            Ir::SetVar {
+            Ir::Assign {
                 name: "X".into(),
-                value: "1".into(),
+                value: Some(literal_word("1")),
             },
             Ir::Return { status: 7 },
         ]);
@@ -459,6 +705,7 @@ mod tests {
             ExecutionLimits {
                 step_limit: 0,
                 output_byte_limit: 3,
+                ..ExecutionLimits::default()
             },
         );
         vm.write_stdout(b"four");
@@ -467,5 +714,144 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.message.contains("output limit exceeded")));
+    }
+
+    #[test]
+    fn step_limit_exposes_structured_stop_reason() {
+        let mut vm = Vm::new(ShellState::new(), 1);
+        assert_eq!(vm.begin_step(), Ok(()));
+        assert_eq!(vm.begin_step(), Err(StepResult::Yield));
+        assert_eq!(
+            vm.stop_reason(),
+            Some(&StopReason::Exhausted(ExhaustionReason {
+                category: BudgetCategory::Steps,
+                used: 1,
+                limit: 1,
+            }))
+        );
+    }
+
+    #[test]
+    fn cancellation_remains_distinct_from_budget_exhaustion() {
+        let mut vm = Vm::default();
+        vm.cancellation_token().cancel();
+        assert_eq!(vm.begin_step(), Err(StepResult::Cancelled));
+        assert_eq!(vm.stop_reason(), Some(&StopReason::Cancelled));
+    }
+
+    #[test]
+    fn budget_tracker_tracks_pipe_and_recursion_limits() {
+        let mut tracker = BudgetTracker::default();
+        let pipe = tracker.set_pipe_bytes(9, 8).unwrap_err();
+        assert_eq!(pipe.category, BudgetCategory::PipeBytes);
+        assert_eq!(pipe.limit, 8);
+
+        let mut tracker = BudgetTracker::default();
+        tracker.enter_recursion(2).unwrap();
+        tracker.enter_recursion(2).unwrap();
+        let recursion = tracker.enter_recursion(2).unwrap_err();
+        assert_eq!(recursion.category, BudgetCategory::RecursionDepth);
+        assert_eq!(recursion.used, 3);
+    }
+
+    #[test]
+    fn run_assignment_and_expanding_builtin_with_executor() {
+        let mut vm = Vm::default();
+        let mut executor = TestExecutor::default();
+        let prog = IrProgram::new(vec![
+            Ir::Assign {
+                name: "FOO".into(),
+                value: Some(literal_word("bar")),
+            },
+            Ir::ExecuteBuiltin {
+                name: "echo".into(),
+                argv: vec![literal_word("echo"), parameter_word("FOO")],
+                redirections: Vec::new(),
+            },
+            Ir::ReturnLastStatus,
+        ]);
+        assert_eq!(vm.run_with_executor(&prog, &mut executor), StepResult::Done(0));
+        assert_eq!(vm.state.get_var("FOO").unwrap(), "bar");
+        assert_eq!(String::from_utf8(vm.stdout).unwrap(), "bar\n");
+    }
+
+    #[test]
+    fn jump_if_failure_skips_rhs_of_and_list() {
+        let mut vm = Vm::default();
+        let mut executor = TestExecutor::default();
+        let prog = IrProgram::new(vec![
+            Ir::ExecuteBuiltin {
+                name: "false".into(),
+                argv: vec![literal_word("false")],
+                redirections: Vec::new(),
+            },
+            Ir::JumpIfFailure { target: 3 },
+            Ir::ExecuteBuiltin {
+                name: "echo".into(),
+                argv: vec![literal_word("echo"), literal_word("nope")],
+                redirections: Vec::new(),
+            },
+            Ir::ReturnLastStatus,
+        ]);
+        assert_eq!(vm.run_with_executor(&prog, &mut executor), StepResult::Done(1));
+        assert!(vm.stdout.is_empty());
+    }
+
+    #[test]
+    fn jump_if_success_skips_rhs_of_or_list() {
+        let mut vm = Vm::default();
+        let mut executor = TestExecutor::default();
+        let prog = IrProgram::new(vec![
+            Ir::ExecuteBuiltin {
+                name: "true".into(),
+                argv: vec![literal_word("true")],
+                redirections: Vec::new(),
+            },
+            Ir::JumpIfSuccess { target: 3 },
+            Ir::ExecuteBuiltin {
+                name: "echo".into(),
+                argv: vec![literal_word("echo"), literal_word("nope")],
+                redirections: Vec::new(),
+            },
+            Ir::ReturnLastStatus,
+        ]);
+        assert_eq!(vm.run_with_executor(&prog, &mut executor), StepResult::Done(0));
+        assert!(vm.stdout.is_empty());
+    }
+
+    #[test]
+    fn executor_receives_redirection_plan() {
+        let mut vm = Vm::default();
+        let mut executor = TestExecutor::default();
+        let prog = IrProgram::new(vec![
+            Ir::ExecuteBuiltin {
+                name: "echo".into(),
+                argv: vec![literal_word("echo"), literal_word("hello")],
+                redirections: vec![IrRedirection {
+                    fd: None,
+                    op: RedirectionOp::Output,
+                    target: literal_word("/out.txt"),
+                    here_doc_body: None,
+                }],
+            },
+            Ir::ReturnLastStatus,
+        ]);
+        assert_eq!(vm.run_with_executor(&prog, &mut executor), StepResult::Done(0));
+        assert_eq!(executor.seen_redirections.len(), 1);
+        assert_eq!(executor.seen_redirections[0][0].op, RedirectionOp::Output);
+    }
+
+    fn literal_word(text: &str) -> Word {
+        Word {
+            parts: vec![WordPart::Literal(text.into())],
+            span: Span { start: 0, end: 0 },
+        }
+    }
+
+    fn parameter_word(name: &str) -> Word {
+        Word {
+            parts: vec![WordPart::Parameter(name.into())],
+            span: Span { start: 0, end: 0 },
+        }
     }
 }

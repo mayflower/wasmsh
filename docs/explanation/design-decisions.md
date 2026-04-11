@@ -78,27 +78,25 @@ See [ADR-0004: Word AST and expansion phases](../adr/ADR-0004-word-ast-and-expan
 
 ## Why HIR and IR (Two Intermediate Forms)?
 
-Going directly from AST to execution would tangle three concerns:
-classification (Exec vs Assign vs RedirectOnly), expansion ordering, and
-control-flow lowering. We split it into two passes:
+HIR is the runtime's main semantic form. Every command becomes one of a
+small set of shapes (`Exec`, `Assign`, `RedirectOnly`, `Function`, `If`,
+`While`, ...) with explicit redirection lists, which keeps the fallback
+interpreter manageable.
 
-- **HIR** normalises the AST. Every command becomes one of a small set of
-  shapes (`Exec`, `Assign`, `RedirectOnly`, `Function`, `If`, `While`, ...)
-  with explicit redirection lists. This makes the dispatcher trivial.
-- **IR** is a linear instruction stream with explicit jumps (`SetVar`,
-  `PushArg`, `CallBuiltin`, `Jump`, `JumpIfFalse`, ...). This is what the
-  cooperative VM steps through. Linear IR is much easier to budget,
-  cancel, and trace than tree-walking the HIR.
+IR exists for the executor subset that currently lowers into
+`wasmsh-vm`: scalar assignments, builtin execution, selected
+redirections, and top-level `&&` / `||` short-circuiting. This keeps the
+IR/VM path testable and expandable without pretending the whole shell is
+already running through it.
 
-The two-stage lowering also keeps each stage testable in isolation.
+See [ADR-0005: HIR / IR / VM](../adr/ADR-0005-hir-ir-vm.md) and
+[ADR-0029: Dual-path executor](../adr/adr-0029-dual-path-executor.md).
 
-See [ADR-0005: HIR / IR / VM](../adr/ADR-0005-hir-ir-vm.md).
+## Cooperative Execution with Step Budgets
 
-## Cooperative VM with Step Budgets
-
-The VM is cooperative, not preemptive. Every IR instruction increments a
-step counter; when it exceeds the budget the VM exits with a diagnostic.
-A cancellation token is checked at the same boundary. This means:
+Execution is cooperative, not preemptive. The IR/VM subset checks
+budgets at instruction boundaries, and the fallback runtime path shares
+the same budgeting and cancellation model. This means:
 
 - Runaway scripts cannot hang the host page or block the JS event loop.
 - Cancellation is observable and predictable (it happens between

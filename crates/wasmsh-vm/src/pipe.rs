@@ -242,4 +242,43 @@ mod tests {
         pipe.close_read();
         assert!(matches!(pipe.write(b"hello"), WriteResult::BrokenPipe));
     }
+
+    #[test]
+    fn reader_drain_unblocks_writer() {
+        let mut pipe = PipeBuffer::new(4);
+        assert!(matches!(pipe.write(b"abcd"), WriteResult::Written(4)));
+        assert!(matches!(pipe.write(b"e"), WriteResult::WouldBlock(0)));
+
+        let mut buf = [0u8; 2];
+        assert!(matches!(pipe.read(&mut buf), ReadResult::Read(2)));
+        assert_eq!(&buf, b"ab");
+
+        assert!(matches!(pipe.write(b"ef"), WriteResult::Written(2)));
+        assert_eq!(pipe.drain(), b"cdef");
+    }
+
+    #[test]
+    fn bounded_multi_stage_chain_makes_incremental_progress() {
+        let mut first = PipeBuffer::new(1);
+        let mut second = PipeBuffer::new(1);
+        let mut delivered = Vec::new();
+
+        for byte in *b"abc" {
+            assert!(matches!(first.write(&[byte]), WriteResult::Written(1)));
+            assert!(matches!(first.write(b"!"), WriteResult::WouldBlock(0)));
+
+            let mut stage_buf = [0u8; 1];
+            assert!(matches!(first.read(&mut stage_buf), ReadResult::Read(1)));
+            assert!(matches!(second.write(&stage_buf), WriteResult::Written(1)));
+            assert!(matches!(second.write(b"!"), WriteResult::WouldBlock(0)));
+
+            let mut out = [0u8; 1];
+            assert!(matches!(second.read(&mut out), ReadResult::Read(1)));
+            delivered.push(out[0]);
+        }
+
+        assert_eq!(delivered, b"abc");
+        assert!(first.is_empty());
+        assert!(second.is_empty());
+    }
 }

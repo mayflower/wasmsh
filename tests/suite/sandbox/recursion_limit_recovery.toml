@@ -1,0 +1,17 @@
+[test]
+name = "recursion limit reports and later commands still run"
+tags = ["sandbox", "P0"]
+tier = "P0"
+requires = ["function", "echo", "or-list"]
+
+[input]
+script = """
+f(){ f; }
+f || true
+echo after
+"""
+
+[expect]
+status = 0
+stdout = "after\n"
+stderr_contains = ["maximum recursion depth exceeded"]

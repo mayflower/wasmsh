@@ -1,7 +1,14 @@
 //! Shared shell runtime core for wasmsh.
 //!
-//! Platform-agnostic execution engine: parse → HIR → expand → execute.
-//! Used by `wasmsh-browser` (standalone WASM) and future embedding crates.
+//! Platform-agnostic execution engine:
+//! `parse -> AST -> HIR -> runtime executor`.
+//!
+//! Most shell semantics are executed by interpreting HIR directly inside
+//! this crate. A bounded subset of top-level `and/or` lists is lowered
+//! through `wasmsh-ir` into `wasmsh-vm`, but that is an optimization and
+//! parity path rather than the primary executor for the whole grammar.
+
+mod fd_table;
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -10,18 +17,21 @@ use std::rc::Rc;
 
 use indexmap::IndexMap;
 
-use wasmsh_ast::CaseTerminator;
-use wasmsh_ast::RedirectionOp;
+use crate::fd_table::{ExecIo, InputTarget, OutputTarget};
+use wasmsh_ast::{CaseTerminator, RedirectionOp, Word, WordPart};
 use wasmsh_expand::expand_words_argv;
 use wasmsh_fs::{BackendFs, FileHandle, OpenOptions, Vfs, VfsWriteSink};
 use wasmsh_hir::{
-    HirAndOr, HirAndOrOp, HirCommand, HirCompleteCommand, HirPipeline, HirRedirection,
+    HirAndOr, HirAndOrOp, HirCommand, HirCompleteCommand, HirPipeline, HirProgram, HirRedirection,
 };
+use wasmsh_ir::{lower_supported_and_or, IrProgram, IrRedirection, LoweringError};
 use wasmsh_protocol::{DiagnosticLevel, HostCommand, WorkerEvent, PROTOCOL_VERSION};
 use wasmsh_state::ShellState;
 use wasmsh_utils::{UtilContext, UtilRegistry, VecOutput as UtilOutput};
 use wasmsh_vm::pipe::{PipeBuffer, ReadResult, WriteResult};
-use wasmsh_vm::Vm;
+use wasmsh_vm::{
+    BudgetCategory, ExecutionLimits, ExhaustionReason, StopReason, Vm, VmExecutor,
+};
 
 /// Sentinel FD value for `&>` (redirect both stdout and stderr).
 const FD_BOTH: u32 = u32::MAX;
@@ -51,6 +61,10 @@ pub struct BrowserConfig {
     pub step_budget: u64,
     /// Hostnames/IPs allowed for network access (empty = no network).
     pub allowed_hosts: Vec<String>,
+    pub output_byte_limit: u64,
+    pub pipe_byte_limit: u64,
+    pub recursion_limit: u32,
+    pub vm_subset_enabled: bool,
 }
 
 impl Default for BrowserConfig {
@@ -58,6 +72,10 @@ impl Default for BrowserConfig {
         Self {
             step_budget: 100_000,
             allowed_hosts: Vec::new(),
+            output_byte_limit: 0,
+            pipe_byte_limit: 0,
+            recursion_limit: MAX_RECURSION_DEPTH,
+            vm_subset_enabled: true,
         }
     }
 }
@@ -76,6 +94,7 @@ struct ExecState {
     recursion_depth: u32,
     /// Set when a resource limit (step budget, output limit, cancel) is hit.
     resource_exhausted: bool,
+    stop_reason: Option<StopReason>,
     /// Set when word expansion reports a hard semantic error.
     expansion_failed: bool,
     /// Nested output capture scopes for pipelines and substitutions.
@@ -92,6 +111,7 @@ impl ExecState {
             local_save_stack: Vec::new(),
             recursion_depth: 0,
             resource_exhausted: false,
+            stop_reason: None,
             expansion_failed: false,
             output_captures: Vec::new(),
         }
@@ -103,6 +123,7 @@ impl ExecState {
         self.exit_requested = None;
         self.errexit_suppressed = false;
         self.resource_exhausted = false;
+        self.stop_reason = None;
         self.expansion_failed = false;
         self.output_captures.clear();
     }
@@ -125,41 +146,9 @@ struct CapturedOutput {
     stderr: Vec<u8>,
 }
 
-#[derive(Clone)]
-enum OutputDestination {
-    VisibleStdout,
-    VisibleStderr,
-    File {
-        path: String,
-        sink: Rc<RefCell<Box<dyn VfsWriteSink>>>,
-    },
-    ProcessSubst {
-        path: String,
-    },
-}
-
-impl std::fmt::Debug for OutputDestination {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::VisibleStdout => f.write_str("VisibleStdout"),
-            Self::VisibleStderr => f.write_str("VisibleStderr"),
-            Self::File { path, .. } => f.debug_struct("File").field("path", path).finish(),
-            Self::ProcessSubst { path } => {
-                f.debug_struct("ProcessSubst").field("path", path).finish()
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct LiveRedirectionScope {
-    stdout: OutputDestination,
-    stderr: OutputDestination,
-}
-
 struct RuntimeOutputRouter<'a> {
     exec: &'a mut ExecState,
-    live_redirections: &'a mut Vec<LiveRedirectionScope>,
+    exec_io: Option<&'a mut ExecIo>,
     proc_subst_out_scopes: &'a mut Vec<Vec<PendingProcessSubstOut>>,
     vm_stdout: &'a mut Vec<u8>,
     vm_stderr: &'a mut Vec<u8>,
@@ -188,25 +177,25 @@ impl RuntimeOutputRouter<'_> {
 
     fn write_output_destination_direct(
         &mut self,
-        destination: &OutputDestination,
+        destination: &OutputTarget,
         data: &[u8],
     ) -> bool {
         match destination {
-            OutputDestination::VisibleStdout => {
+            OutputTarget::InheritStdout => {
                 self.append_visible_output_direct(data, true);
                 true
             }
-            OutputDestination::VisibleStderr => {
+            OutputTarget::InheritStderr => {
                 self.append_visible_output_direct(data, false);
                 true
             }
-            OutputDestination::ProcessSubst { path } => {
+            OutputTarget::ProcessSubst { path } => {
                 if let Some(sink) = self.process_subst_out_sink_mut(path) {
                     sink.write(data);
                 }
                 false
             }
-            OutputDestination::File { path, sink } => {
+            OutputTarget::File { path, sink, .. } => {
                 if let Err(err) = sink.borrow_mut().write(data) {
                     let msg = format!("wasmsh: write error: {err}\n");
                     self.append_visible_output_direct(msg.as_bytes(), false);
@@ -218,21 +207,29 @@ impl RuntimeOutputRouter<'_> {
                 }
                 false
             }
+            OutputTarget::Pipe(pipe) => {
+                pipe.borrow_mut().write_all(data);
+                false
+            }
+            OutputTarget::Closed => false,
         }
     }
 
     fn route_output(&mut self, data: &[u8], stdout: bool) -> bool {
         let mut routed_stdout = stdout;
-        if let Some(scope) = self.live_redirections.last().cloned() {
-            let destination = if stdout { scope.stdout } else { scope.stderr };
+        if let Some(exec_io) = self.exec_io.as_deref_mut() {
+            let destination = exec_io.output_target(stdout);
             match destination {
-                OutputDestination::VisibleStdout => {
+                OutputTarget::InheritStdout => {
                     routed_stdout = true;
                 }
-                OutputDestination::VisibleStderr => {
+                OutputTarget::InheritStderr => {
                     routed_stdout = false;
                 }
-                OutputDestination::File { .. } | OutputDestination::ProcessSubst { .. } => {
+                OutputTarget::File { .. }
+                | OutputTarget::ProcessSubst { .. }
+                | OutputTarget::Pipe(_)
+                | OutputTarget::Closed => {
                     return self.write_output_destination_direct(&destination, data);
                 }
             }
@@ -261,18 +258,23 @@ impl RuntimeOutputRouter<'_> {
 
     fn account_output(&mut self, bytes: usize) {
         *self.vm_output_bytes += bytes as u64;
+        self.exec.stop_reason = None;
         if self.exec.resource_exhausted {
             return;
         }
-        if self.vm_output_limit > 0 && *self.vm_output_bytes > self.vm_output_limit {
+        let used = *self.vm_output_bytes;
+        if self.vm_output_limit > 0 && used > self.vm_output_limit {
+            let reason = ExhaustionReason {
+                category: BudgetCategory::VisibleOutputBytes,
+                used,
+                limit: self.vm_output_limit,
+            };
             self.exec.resource_exhausted = true;
+            self.exec.stop_reason = Some(StopReason::Exhausted(reason.clone()));
             self.vm_diagnostics.push(wasmsh_vm::DiagnosticEvent {
                 level: wasmsh_vm::DiagLevel::Error,
                 category: wasmsh_vm::DiagCategory::Budget,
-                message: format!(
-                    "output limit exceeded: {} bytes (limit: {})",
-                    *self.vm_output_bytes, self.vm_output_limit
-                ),
+                message: reason.diagnostic_message(),
             });
         }
     }
@@ -500,16 +502,19 @@ impl LiveProcessSubstRunner {
         if current_steps > self.synced_steps {
             let delta = current_steps - self.synced_steps;
             parent.vm.steps = parent.vm.steps.saturating_add(delta);
+            parent.vm.budget.steps = parent.vm.steps;
             self.synced_steps = current_steps;
             if parent.vm.steps > parent.vm.limits.step_limit && parent.vm.limits.step_limit > 0 {
-                parent.exec.resource_exhausted = true;
+                let reason = ExhaustionReason {
+                    category: BudgetCategory::Steps,
+                    used: parent.vm.steps,
+                    limit: parent.vm.limits.step_limit,
+                };
+                parent.mark_budget_exhaustion(reason.clone());
                 parent.vm.emit_diagnostic(
                     wasmsh_vm::DiagLevel::Error,
                     wasmsh_vm::DiagCategory::Budget,
-                    format!(
-                        "step budget exceeded: {} steps (limit: {})",
-                        parent.vm.steps, parent.vm.limits.step_limit
-                    ),
+                    reason.diagnostic_message(),
                 );
                 runtime.vm.cancellation_token().cancel();
             }
@@ -922,14 +927,13 @@ impl BufferedPipeProcess {
         if let Some(handle) = self.staging_handle.take() {
             runtime.fs.close(handle);
         }
-        let cmd_name = self.command_label();
-        let saved_pending = runtime.pending_stdin.take();
+        let saved_exec_io = runtime.current_exec_io.take();
         if let Some(path) = self.staging_path.take() {
             runtime.set_pending_input_file(path, true);
         }
         let (_, captured) =
             runtime.with_output_capture(true, self.pipe_stderr, |runtime| match &self.command {
-                BufferedPipelineCommand::Argv(argv) => runtime.dispatch_command(&cmd_name, argv),
+                BufferedPipelineCommand::Argv(argv) => runtime.execute_argv_command(argv),
                 BufferedPipelineCommand::Hir(cmd) => runtime.execute_command(cmd),
             });
         *self.stage_status.borrow_mut() = runtime.vm.state.last_status;
@@ -943,7 +947,7 @@ impl BufferedPipeProcess {
                 .extend_from_slice(&captured.stderr);
         }
         runtime.clear_pending_input();
-        runtime.pending_stdin = saved_pending;
+        runtime.current_exec_io = saved_exec_io;
         self.pending_offset = 0;
         self.command_ran = true;
         if self.pending_stdout.is_empty() {
@@ -3380,15 +3384,6 @@ impl<R: Read> Read for TrStreamReader<R> {
     }
 }
 
-#[derive(Clone, Debug)]
-enum PendingInput {
-    Bytes(Vec<u8>),
-    File {
-        path: String,
-        remove_after_read: bool,
-    },
-}
-
 /// Result from an external command handler.
 #[derive(Debug)]
 pub struct ExternalCommandResult {
@@ -3448,6 +3443,326 @@ pub type ExternalCommandHandler = Box<
     dyn FnMut(&str, &[String], Option<ExternalCommandStdin<'_>>) -> Option<ExternalCommandResult>,
 >;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeCommandKind {
+    Local,
+    Break,
+    Continue,
+    Exit,
+    Eval,
+    Source,
+    Declare,
+    Let,
+    Shopt,
+    Alias,
+    Unalias,
+    BuiltinKeyword,
+    Mapfile,
+    Type,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UtilityCommandKind {
+    Plain,
+    FindWithExec,
+    Xargs,
+}
+
+#[derive(Clone, Debug)]
+enum ResolvedCommand {
+    Runtime(RuntimeCommandKind),
+    ShellScript,
+    Function(HirCommand),
+    Builtin,
+    Utility(UtilityCommandKind),
+    External,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveRun {
+    input: String,
+    hir: HirProgram,
+    complete_index: usize,
+    and_or_index: usize,
+}
+
+impl ActiveRun {
+    fn new(input: String, hir: HirProgram) -> Self {
+        Self {
+            input,
+            hir,
+            complete_index: 0,
+            and_or_index: 0,
+        }
+    }
+
+    fn is_done(&self) -> bool {
+        self.complete_index >= self.hir.items.len()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActiveRunStep {
+    Pending,
+    Done,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExecutionPoll {
+    Yield(Vec<WorkerEvent>),
+    Done(Vec<WorkerEvent>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum VmSubsetFallbackReason {
+    Disabled,
+    Lowering(LoweringError),
+    AssignmentShape,
+    UnsupportedWord,
+    ShellExpansion,
+    AliasExpansion,
+    NonBuiltinCommand,
+    CommandEnvPrefixes,
+    UnsupportedRedirection,
+}
+
+struct RuntimeVmExecutor<'a> {
+    fs: &'a mut BackendFs,
+    builtins: &'a wasmsh_builtins::BuiltinRegistry,
+    current_exec_io: &'a mut Option<ExecIo>,
+    proc_subst_out_scopes: &'a mut Vec<Vec<PendingProcessSubstOut>>,
+    exec: &'a mut ExecState,
+}
+
+impl RuntimeVmExecutor<'_> {
+    fn prepare_exec_io(
+        &mut self,
+        state: &mut ShellState,
+        redirections: &[IrRedirection],
+    ) -> Result<Option<ExecIo>, String> {
+        let mut exec_io = self.current_exec_io.clone().unwrap_or_default();
+        let mut handled_any = false;
+
+        for redirection in redirections {
+            let fd = redirection.fd.unwrap_or(1);
+            let append = matches!(redirection.op, RedirectionOp::Append);
+            let target = wasmsh_expand::expand_word(&redirection.target, state);
+            let path = resolve_path_from_cwd(&state.cwd, &target);
+            let sink = match self.fs.open_write_sink(&path, append) {
+                Ok(sink) => sink,
+                Err(err) => {
+                    return Err(format!("wasmsh: {target}: {err}\n"));
+                }
+            };
+            exec_io.fds_mut().open_output(
+                fd,
+                OutputTarget::File {
+                    path,
+                    append,
+                    sink: Rc::new(RefCell::new(sink)),
+                },
+            );
+            handled_any = true;
+        }
+
+        Ok(handled_any.then_some(exec_io))
+    }
+
+    fn with_exec_io_scope<T>(
+        current_exec_io: &mut Option<ExecIo>,
+        proc_subst_out_scopes: &mut Vec<Vec<PendingProcessSubstOut>>,
+        exec: &mut ExecState,
+        exec_io: Option<ExecIo>,
+        f: impl FnOnce(
+            &mut Option<ExecIo>,
+            &mut Vec<Vec<PendingProcessSubstOut>>,
+            &mut ExecState,
+        ) -> T,
+    ) -> T {
+        if let Some(exec_io) = exec_io {
+            let saved = current_exec_io.replace(exec_io);
+            let result = f(current_exec_io, proc_subst_out_scopes, exec);
+            let current = current_exec_io.take();
+            *current_exec_io = match (saved, current) {
+                (Some(mut saved), Some(mut current)) => {
+                    let stdin = current.take_stdin();
+                    saved.fds_mut().set_input(stdin);
+                    Some(saved)
+                }
+                (saved, _) => saved,
+            };
+            result
+        } else {
+            f(current_exec_io, proc_subst_out_scopes, exec)
+        }
+    }
+
+    fn write_visible_stderr(&mut self, vm: &mut Vm, data: &[u8]) {
+        let mut router = RuntimeOutputRouter {
+            exec: self.exec,
+            exec_io: self.current_exec_io.as_mut(),
+            proc_subst_out_scopes: self.proc_subst_out_scopes,
+            vm_stdout: &mut vm.stdout,
+            vm_stderr: &mut vm.stderr,
+            vm_output_bytes: &mut vm.output_bytes,
+            vm_output_limit: vm.limits.output_byte_limit,
+            vm_diagnostics: &mut vm.diagnostics,
+        };
+        router.write_stderr(data);
+    }
+
+    fn take_pending_input_reader(&mut self, cmd_name: &str) -> Result<Option<Box<dyn Read>>, String> {
+        let Some(exec_io) = self.current_exec_io.as_mut() else {
+            return Ok(None);
+        };
+        match exec_io.take_stdin() {
+            InputTarget::Inherit | InputTarget::Closed => Ok(None),
+            InputTarget::Bytes(data) => Ok(Some(Box::new(Cursor::new(data)))),
+            InputTarget::File {
+                path,
+                remove_after_read,
+            } => {
+                let handle = self
+                    .fs
+                    .open(&path, OpenOptions::read())
+                    .map_err(|err| format!("wasmsh: {cmd_name}: {err}\n"))?;
+                let reader = self
+                    .fs
+                    .stream_file(handle)
+                    .map_err(|err| format!("wasmsh: {cmd_name}: {err}\n"));
+                self.fs.close(handle);
+                if remove_after_read {
+                    let _ = self.fs.remove_file(&path);
+                }
+                reader.map(Some)
+            }
+            InputTarget::Pipe(pipe) => Ok(Some(Box::new(PipeReader::new(pipe)))),
+        }
+    }
+
+    fn take_builtin_stdin(
+        &mut self,
+        cmd_name: &str,
+    ) -> Result<Option<wasmsh_builtins::BuiltinStdin<'static>>, String> {
+        let reader = self.take_pending_input_reader(cmd_name)?;
+        Ok(reader.map(wasmsh_builtins::BuiltinStdin::from_reader))
+    }
+}
+
+impl VmExecutor for RuntimeVmExecutor<'_> {
+    fn assign(&mut self, vm: &mut Vm, name: &str, value: Option<&Word>) {
+        let value = value.map_or_else(String::new, |word| {
+            wasmsh_expand::expand_word(word, &mut vm.state)
+        });
+        let trimmed = value.trim();
+        if trimmed.starts_with('(') && trimmed.ends_with(')') {
+            let inner = &trimmed[1..trimmed.len() - 1];
+            let elements = WorkerRuntime::parse_array_elements(inner);
+            let name_key = smol_str::SmolStr::from(name);
+
+            if WorkerRuntime::is_assoc_array_assignment(inner, &elements) {
+                vm.state.init_assoc_array(name_key.clone());
+                for (key, value) in WorkerRuntime::parse_assoc_pairs(inner) {
+                    vm.state.set_array_element(
+                        name_key.clone(),
+                        &key,
+                        smol_str::SmolStr::from(value.as_str()),
+                    );
+                }
+            } else {
+                vm.state.init_indexed_array(name_key.clone());
+                for (idx, element) in elements.iter().enumerate() {
+                    vm.state
+                        .set_array_element(name_key.clone(), &idx.to_string(), element.clone());
+                }
+            }
+            vm.state.last_status = 0;
+            return;
+        }
+
+        let assigned = if vm.state.env.get(name).is_some_and(|var| var.integer) {
+            wasmsh_expand::eval_arithmetic(trimmed, &mut vm.state).to_string()
+        } else {
+            value
+        };
+        vm.state.set_var(name.into(), assigned.into());
+        vm.state.last_status = 0;
+    }
+
+    fn execute_builtin(
+        &mut self,
+        vm: &mut Vm,
+        name: &str,
+        argv: &[Word],
+        redirections: &[IrRedirection],
+    ) -> i32 {
+        let Some(builtin_fn) = self.builtins.get(name) else {
+            vm.emit_diagnostic(
+                wasmsh_vm::DiagLevel::Error,
+                wasmsh_vm::DiagCategory::Builtin,
+                format!("unknown builtin: {name}"),
+            );
+            vm.state.last_status = 127;
+            return 127;
+        };
+        let expanded: Vec<String> = argv
+            .iter()
+            .map(|word| wasmsh_expand::expand_word(word, &mut vm.state))
+            .collect();
+        let argv_refs: Vec<&str> = expanded.iter().map(String::as_str).collect();
+        let stdin = match self.take_builtin_stdin(name) {
+            Ok(stdin) => stdin,
+            Err(message) => {
+                self.write_visible_stderr(vm, message.as_bytes());
+                vm.state.last_status = 1;
+                return 1;
+            }
+        };
+        let exec_io = match self.prepare_exec_io(&mut vm.state, redirections) {
+            Ok(exec_io) => exec_io,
+            Err(message) => {
+                self.write_visible_stderr(vm, message.as_bytes());
+                vm.state.last_status = 1;
+                return 1;
+            }
+        };
+
+        let fs = &*self.fs;
+        Self::with_exec_io_scope(
+            &mut *self.current_exec_io,
+            &mut *self.proc_subst_out_scopes,
+            &mut *self.exec,
+            exec_io,
+            |current_exec_io, proc_subst_out_scopes, exec| {
+                let mut router = RuntimeOutputRouter {
+                    exec,
+                    exec_io: current_exec_io.as_mut(),
+                    proc_subst_out_scopes,
+                    vm_stdout: &mut vm.stdout,
+                    vm_stderr: &mut vm.stderr,
+                    vm_output_bytes: &mut vm.output_bytes,
+                    vm_output_limit: vm.limits.output_byte_limit,
+                    vm_diagnostics: &mut vm.diagnostics,
+                };
+                let mut sink = RuntimeBuiltinSink {
+                    router: &mut router,
+                };
+                let status = {
+                    let mut ctx = wasmsh_builtins::BuiltinContext {
+                        state: &mut vm.state,
+                        output: &mut sink,
+                        fs: Some(fs),
+                        stdin,
+                    };
+                    builtin_fn(&mut ctx, &argv_refs)
+                };
+                vm.state.last_status = status;
+                status
+            },
+        )
+    }
+}
+
 /// The worker-side runtime that processes host commands.
 #[allow(missing_debug_implementations)]
 pub struct WorkerRuntime {
@@ -3457,9 +3772,8 @@ pub struct WorkerRuntime {
     utils: UtilRegistry,
     builtins: wasmsh_builtins::BuiltinRegistry,
     initialized: bool,
-    /// Pending stdin source for the next command (from here-doc, redirect, or pipe).
-    pending_stdin: Option<PendingInput>,
-    live_redirections: Vec<LiveRedirectionScope>,
+    /// Command-scoped stdin/stdout/stderr routing for the currently executing command.
+    current_exec_io: Option<ExecIo>,
     /// Deferred `>(...)` sinks scoped to the currently executing command.
     proc_subst_out_scopes: Vec<Vec<PendingProcessSubstOut>>,
     /// Deferred `<(...)` cleanup and stderr flush scoped to the current command.
@@ -3474,6 +3788,8 @@ pub struct WorkerRuntime {
     external_handler: Option<ExternalCommandHandler>,
     /// Optional network backend for curl/wget utilities.
     network: Option<Box<dyn wasmsh_utils::net_types::NetworkBackend>>,
+    /// Active top-level execution, if a run has been started and not yet completed.
+    active_run: Option<ActiveRun>,
 }
 
 /// Action to take for a character during array element parsing.
@@ -3625,13 +3941,12 @@ impl WorkerRuntime {
     pub fn new() -> Self {
         Self {
             config: BrowserConfig::default(),
-            vm: Vm::new(ShellState::new(), 0),
+            vm: Vm::with_limits(ShellState::new(), ExecutionLimits::default()),
             fs: BackendFs::new(),
             utils: UtilRegistry::new(),
             builtins: wasmsh_builtins::BuiltinRegistry::new(),
             initialized: false,
-            pending_stdin: None,
-            live_redirections: Vec::new(),
+            current_exec_io: None,
             proc_subst_out_scopes: Vec::new(),
             proc_subst_in_scopes: Vec::new(),
             functions: IndexMap::new(),
@@ -3639,6 +3954,7 @@ impl WorkerRuntime {
             aliases: IndexMap::new(),
             external_handler: None,
             network: None,
+            active_run: None,
         }
     }
 
@@ -3664,15 +3980,23 @@ impl WorkerRuntime {
             } => {
                 self.config.step_budget = step_budget;
                 self.config.allowed_hosts = allowed_hosts;
-                self.vm = Vm::new(ShellState::new(), step_budget);
+                self.vm = Vm::with_limits(
+                    ShellState::new(),
+                    ExecutionLimits {
+                        step_limit: step_budget,
+                        output_byte_limit: self.config.output_byte_limit,
+                        pipe_byte_limit: self.config.pipe_byte_limit,
+                        recursion_limit: self.config.recursion_limit,
+                    },
+                );
                 self.fs = BackendFs::new();
-                self.pending_stdin = None;
-                self.live_redirections.clear();
+                self.current_exec_io = None;
                 self.proc_subst_out_scopes.clear();
                 self.proc_subst_in_scopes.clear();
                 self.functions = IndexMap::new();
                 self.exec.reset();
                 self.aliases = IndexMap::new();
+                self.active_run = None;
                 self.initialized = true;
                 // Set default shopt options (bash defaults)
                 self.vm.state.set_var("SHOPT_extglob".into(), "1".into());
@@ -3688,11 +4012,36 @@ impl WorkerRuntime {
                         "runtime not initialized".into(),
                     )];
                 }
-                self.exec.reset();
-                self.execute_input(&input)
+                match self.start_execution(input) {
+                    Ok(()) => self.poll_active_run_to_completion(),
+                    Err(events) => events,
+                }
             }
+            HostCommand::StartRun { input } => {
+                if !self.initialized {
+                    return vec![WorkerEvent::Diagnostic(
+                        DiagnosticLevel::Error,
+                        "runtime not initialized".into(),
+                    )];
+                }
+                match self.start_execution(input) {
+                    Ok(()) => vec![WorkerEvent::Yielded],
+                    Err(events) => events,
+                }
+            }
+            HostCommand::PollRun => match self.poll_active_run() {
+                Some(ExecutionPoll::Yield(mut events)) => {
+                    events.push(WorkerEvent::Yielded);
+                    events
+                }
+                Some(ExecutionPoll::Done(events)) => events,
+                None => vec![WorkerEvent::Diagnostic(
+                    DiagnosticLevel::Error,
+                    "no active run".into(),
+                )],
+            },
             HostCommand::Cancel => {
-                self.vm.cancellation_token().cancel();
+                self.cancel_active_execution();
                 vec![WorkerEvent::Diagnostic(
                     DiagnosticLevel::Info,
                     "cancel received".into(),
@@ -3766,17 +4115,426 @@ impl WorkerRuntime {
         }
     }
 
+    pub fn start_execution(&mut self, input: String) -> Result<(), Vec<WorkerEvent>> {
+        if !self.initialized {
+            return Err(vec![WorkerEvent::Diagnostic(
+                DiagnosticLevel::Error,
+                "runtime not initialized".into(),
+            )]);
+        }
+        if self.active_run.is_some() {
+            return Err(vec![WorkerEvent::Diagnostic(
+                DiagnosticLevel::Error,
+                "execution already active".into(),
+            )]);
+        }
+
+        let hir = match wasmsh_parse::parse(&input) {
+            Ok(ast) => wasmsh_hir::lower(&ast),
+            Err(e) => {
+                self.vm.state.last_status = 2;
+                return Err(vec![
+                    WorkerEvent::Stderr(format!("wasmsh: parse error: {e}\n").into_bytes()),
+                    WorkerEvent::Exit(2),
+                ]);
+            }
+        };
+
+        self.exec.reset();
+        self.current_exec_io = None;
+        self.proc_subst_out_scopes.clear();
+        self.proc_subst_in_scopes.clear();
+        self.vm.steps = 0;
+        self.vm.budget.steps = 0;
+        self.vm.budget.visible_output_bytes = self.vm.output_bytes;
+        self.vm.budget.pipe_bytes = 0;
+        self.vm.budget.recursion_depth = 0;
+        self.vm.budget.clear_stop_reason();
+        self.vm.cancellation_token().reset();
+        self.active_run = Some(ActiveRun::new(input, hir));
+        Ok(())
+    }
+
+    pub fn poll_active_run(&mut self) -> Option<ExecutionPoll> {
+        let mut run = self.active_run.take()?;
+        let previous_step_limit = self.vm.limits.step_limit;
+        self.vm.steps = 0;
+        self.vm.budget.steps = 0;
+        self.vm.limits.step_limit = 0;
+
+        let mut remaining = if self.config.step_budget == 0 {
+            usize::MAX
+        } else {
+            self.config.step_budget as usize
+        };
+        let mut finished = run.is_done();
+
+        while !finished && remaining > 0 {
+            if self.check_resource_limits() {
+                finished = true;
+                break;
+            }
+            if self.exec.exit_requested.is_some() || self.exec.resource_exhausted {
+                finished = true;
+                break;
+            }
+
+            let step_outcome = self.poll_active_run_step(&mut run);
+            remaining -= 1;
+            finished = matches!(step_outcome, ActiveRunStep::Done);
+        }
+
+        self.vm.limits.step_limit = previous_step_limit;
+
+        if finished || self.exec.exit_requested.is_some() || self.exec.resource_exhausted {
+            self.ensure_stop_reason();
+            let mut events = Vec::new();
+            self.run_exit_trap_if_needed(&mut events);
+            self.drain_io_events(&mut events);
+            self.drain_diagnostic_events(&mut events);
+            let exit_status = self.current_run_exit_status();
+            events.push(WorkerEvent::Exit(exit_status));
+            self.active_run = None;
+            Some(ExecutionPoll::Done(events))
+        } else {
+            let events = self.drain_partial_run_events();
+            self.active_run = Some(run);
+            Some(ExecutionPoll::Yield(events))
+        }
+    }
+
+    pub fn cancel_active_execution(&mut self) {
+        self.vm.cancellation_token().cancel();
+    }
+
+    fn poll_active_run_to_completion(&mut self) -> Vec<WorkerEvent> {
+        let mut events = Vec::new();
+        while let Some(poll) = self.poll_active_run() {
+            match poll {
+                ExecutionPoll::Yield(mut batch) => {
+                    events.append(&mut batch);
+                }
+                ExecutionPoll::Done(mut batch) => {
+                    events.append(&mut batch);
+                    break;
+                }
+            }
+        }
+        events
+    }
+
+    fn poll_active_run_step(&mut self, run: &mut ActiveRun) -> ActiveRunStep {
+        if run.is_done() || self.exec.exit_requested.is_some() || self.exec.resource_exhausted {
+            return ActiveRunStep::Done;
+        }
+
+        let cc = &run.hir.items[run.complete_index];
+        self.vm.state.lineno = Self::line_number_for_offset(&run.input, cc.span.start as usize);
+        let and_or = &cc.list[run.and_or_index];
+        self.execute_and_or(and_or);
+        if self.exec.exit_requested.is_none() && self.should_errexit(and_or) {
+            self.exec.exit_requested = Some(self.vm.state.last_status);
+        }
+
+        run.and_or_index += 1;
+        if run.and_or_index >= cc.list.len() {
+            run.complete_index += 1;
+            run.and_or_index = 0;
+        }
+
+        if run.is_done() || self.exec.exit_requested.is_some() || self.exec.resource_exhausted {
+            ActiveRunStep::Done
+        } else {
+            ActiveRunStep::Pending
+        }
+    }
+
+    fn drain_partial_run_events(&mut self) -> Vec<WorkerEvent> {
+        let mut events = Vec::new();
+        self.drain_io_events(&mut events);
+        self.drain_diagnostic_events(&mut events);
+        events
+    }
+
+    fn current_run_exit_status(&self) -> i32 {
+        if self.exec.resource_exhausted {
+            match self.exec.stop_reason.as_ref() {
+                Some(StopReason::Cancelled) => 130,
+                _ => 128,
+            }
+        } else {
+            self.exec.exit_requested.unwrap_or(self.vm.state.last_status)
+        }
+    }
+
+    fn mark_stop_reason(&mut self, reason: StopReason) {
+        self.exec.resource_exhausted = true;
+        self.exec.stop_reason = Some(reason);
+    }
+
+    fn mark_budget_exhaustion(&mut self, reason: ExhaustionReason) {
+        self.mark_stop_reason(StopReason::Exhausted(reason));
+    }
+
+    fn ensure_stop_reason(&mut self) {
+        if !self.exec.resource_exhausted || self.exec.stop_reason.is_some() {
+            return;
+        }
+        if self.vm.cancellation_token().is_cancelled() {
+            self.mark_stop_reason(StopReason::Cancelled);
+            return;
+        }
+        if let Some(reason) = self.vm.stop_reason().cloned() {
+            self.mark_stop_reason(reason);
+            return;
+        }
+        let limit = self.vm.limits.output_byte_limit;
+        if limit > 0 && self.vm.output_bytes > limit {
+            self.mark_budget_exhaustion(ExhaustionReason {
+                category: BudgetCategory::VisibleOutputBytes,
+                used: self.vm.output_bytes,
+                limit,
+            });
+        }
+    }
+
+    fn sync_pipe_budget(&mut self, used: u64) {
+        if self.exec.resource_exhausted {
+            return;
+        }
+        let limit = self.vm.limits.pipe_byte_limit;
+        if let Err(reason) = self.vm.budget.set_pipe_bytes(used, limit) {
+            self.mark_budget_exhaustion(reason.clone());
+            self.vm.emit_diagnostic(
+                wasmsh_vm::DiagLevel::Error,
+                wasmsh_vm::DiagCategory::Budget,
+                reason.diagnostic_message(),
+            );
+        }
+    }
+
+    pub fn set_output_byte_limit(&mut self, limit: u64) {
+        self.config.output_byte_limit = limit;
+        self.vm.limits.output_byte_limit = limit;
+    }
+
+    pub fn set_pipe_byte_limit(&mut self, limit: u64) {
+        self.config.pipe_byte_limit = limit;
+        self.vm.limits.pipe_byte_limit = limit;
+    }
+
+    pub fn set_recursion_limit(&mut self, limit: u32) {
+        self.config.recursion_limit = limit;
+        self.vm.limits.recursion_limit = limit;
+    }
+
+    pub fn set_vm_subset_enabled(&mut self, enabled: bool) {
+        self.config.vm_subset_enabled = enabled;
+    }
+
+    fn execute_and_or(&mut self, and_or: &HirAndOr) {
+        if let Ok(program) = self.lower_vm_subset_and_or(and_or) {
+            self.execute_ir_program(&program);
+            return;
+        }
+        self.execute_pipeline_chain(and_or);
+    }
+
+    fn execute_ir_program(&mut self, program: &IrProgram) {
+        let mut executor = RuntimeVmExecutor {
+            fs: &mut self.fs,
+            builtins: &self.builtins,
+            current_exec_io: &mut self.current_exec_io,
+            proc_subst_out_scopes: &mut self.proc_subst_out_scopes,
+            exec: &mut self.exec,
+        };
+        let _ = self.vm.run_with_executor(program, &mut executor);
+    }
+
+    fn lower_vm_subset_and_or(&self, and_or: &HirAndOr) -> Result<IrProgram, VmSubsetFallbackReason> {
+        if !self.config.vm_subset_enabled {
+            return Err(VmSubsetFallbackReason::Disabled);
+        }
+
+        self.validate_vm_subset_and_or(and_or)?;
+        lower_supported_and_or(and_or).map_err(VmSubsetFallbackReason::Lowering)
+    }
+
+    fn validate_vm_subset_and_or(&self, and_or: &HirAndOr) -> Result<(), VmSubsetFallbackReason> {
+        self.validate_vm_subset_pipeline(&and_or.first)?;
+        for (_, pipeline) in &and_or.rest {
+            self.validate_vm_subset_pipeline(pipeline)?;
+        }
+        Ok(())
+    }
+
+    fn validate_vm_subset_pipeline(
+        &self,
+        pipeline: &HirPipeline,
+    ) -> Result<(), VmSubsetFallbackReason> {
+        if pipeline.negated || pipeline.commands.len() != 1 {
+            return Err(VmSubsetFallbackReason::Lowering(
+                LoweringError::Unsupported("pipeline shape is outside the VM subset"),
+            ));
+        }
+        self.validate_vm_subset_command(&pipeline.commands[0])
+    }
+
+    fn validate_vm_subset_command(&self, cmd: &HirCommand) -> Result<(), VmSubsetFallbackReason> {
+        match cmd {
+            HirCommand::Assign(assign) => {
+                if !assign.redirections.is_empty()
+                    || assign
+                        .assignments
+                        .iter()
+                        .any(|assignment| !Self::vm_supported_assignment_name(&assignment.name))
+                    || assign
+                        .assignments
+                        .iter()
+                        .filter_map(|assignment| assignment.value.as_ref())
+                        .any(|word| !Self::vm_supported_word(word))
+                {
+                    return Err(VmSubsetFallbackReason::AssignmentShape);
+                }
+                Ok(())
+            }
+            HirCommand::Exec(exec) => {
+                if !exec.env.is_empty() {
+                    return Err(VmSubsetFallbackReason::CommandEnvPrefixes);
+                }
+                if exec.argv.is_empty() || exec.argv.iter().any(|word| !Self::vm_supported_word(word))
+                {
+                    return Err(VmSubsetFallbackReason::UnsupportedWord);
+                }
+                if exec
+                    .redirections
+                    .iter()
+                    .any(|redir| !Self::vm_supported_redirection(redir))
+                {
+                    return Err(VmSubsetFallbackReason::UnsupportedRedirection);
+                }
+                if self.vm.state.get_var("SHOPT_x").as_deref() == Some("1")
+                    || exec
+                        .argv
+                        .iter()
+                        .any(Self::vm_word_requires_full_shell_execution)
+                {
+                    return Err(VmSubsetFallbackReason::ShellExpansion);
+                }
+                let Some(name) = Self::literal_word_text(&exec.argv[0]) else {
+                    return Err(VmSubsetFallbackReason::UnsupportedWord);
+                };
+                if self.get_shopt_value("expand_aliases") && self.aliases.contains_key(name.as_str()) {
+                    return Err(VmSubsetFallbackReason::AliasExpansion);
+                }
+                let argv = vec![name.to_string()];
+                if !matches!(self.resolve_command(name.as_str(), &argv), ResolvedCommand::Builtin) {
+                    return Err(VmSubsetFallbackReason::NonBuiltinCommand);
+                }
+                Ok(())
+            }
+            _ => Err(VmSubsetFallbackReason::Lowering(
+                LoweringError::Unsupported("command kind is outside the VM subset"),
+            )),
+        }
+    }
+
+    fn vm_supported_assignment_name(name: &smol_str::SmolStr) -> bool {
+        !name.as_str().contains('[') && !name.as_str().ends_with('+')
+    }
+
+    fn vm_supported_redirection(redirection: &HirRedirection) -> bool {
+        matches!(redirection.op, RedirectionOp::Output | RedirectionOp::Append)
+            && redirection.fd.unwrap_or(1) == 1
+            && redirection.here_doc_body.is_none()
+            && Self::vm_supported_word(&redirection.target)
+    }
+
+    fn vm_supported_word(word: &Word) -> bool {
+        word.parts.iter().all(Self::vm_supported_word_part)
+    }
+
+    fn vm_word_requires_full_shell_execution(word: &Word) -> bool {
+        word.parts
+            .iter()
+            .any(Self::vm_word_part_requires_full_shell_execution)
+    }
+
+    fn vm_word_part_requires_full_shell_execution(part: &WordPart) -> bool {
+        match part {
+            WordPart::Literal(text) => Self::text_has_brace_or_glob_literal(text),
+            WordPart::SingleQuoted(_)
+            | WordPart::DoubleQuoted(_)
+            | WordPart::Parameter(_)
+            | WordPart::Arithmetic(_) => false,
+            WordPart::CommandSubstitution(_)
+            | WordPart::ProcessSubstIn(_)
+            | WordPart::ProcessSubstOut(_)
+            | _ => true,
+        }
+    }
+
+    fn vm_supported_word_part(part: &WordPart) -> bool {
+        match part {
+            WordPart::Literal(_)
+            | WordPart::SingleQuoted(_)
+            | WordPart::Parameter(_)
+            | WordPart::Arithmetic(_) => true,
+            WordPart::DoubleQuoted(parts) => parts.iter().all(Self::vm_supported_word_part),
+            WordPart::CommandSubstitution(_)
+            | WordPart::ProcessSubstIn(_)
+            | WordPart::ProcessSubstOut(_)
+            | _ => false,
+        }
+    }
+
+    fn literal_word_text(word: &Word) -> Option<smol_str::SmolStr> {
+        fn append_literal(part: &WordPart, out: &mut String) -> Option<()> {
+            match part {
+                WordPart::Literal(text) | WordPart::SingleQuoted(text) => {
+                    out.push_str(text);
+                    Some(())
+                }
+                WordPart::DoubleQuoted(parts) => {
+                    for part in parts {
+                        append_literal(part, out)?;
+                    }
+                    Some(())
+                }
+                _ => None,
+            }
+        }
+
+        let mut text = String::new();
+        for part in &word.parts {
+            append_literal(part, &mut text)?;
+        }
+        Some(text.into())
+    }
+
+    fn line_number_for_offset(input: &str, offset: usize) -> u32 {
+        input
+            .as_bytes()
+            .iter()
+            .take(offset)
+            .filter(|&&b| b == b'\n')
+            .count() as u32
+            + 1
+    }
+
     /// Execute input and return collected events (used by eval/source).
     fn execute_input_inner(&mut self, input: &str) -> Vec<WorkerEvent> {
         self.exec.recursion_depth += 1;
-        if self.exec.recursion_depth > MAX_RECURSION_DEPTH {
+        if let Err(reason) = self.vm.budget.enter_recursion(self.vm.limits.recursion_limit) {
             self.exec.recursion_depth -= 1;
+            self.mark_budget_exhaustion(reason);
             return vec![WorkerEvent::Stderr(
                 b"wasmsh: maximum recursion depth exceeded\n".to_vec(),
             )];
         }
         let result = self.execute_input_inner_impl(input);
         self.exec.recursion_depth -= 1;
+        self.vm.budget.exit_recursion();
         result
     }
 
@@ -3806,7 +4564,7 @@ impl WorkerRuntime {
                 + 1;
             self.vm.state.lineno = line;
             for and_or in &cc.list {
-                self.execute_pipeline_chain(and_or);
+                self.execute_and_or(and_or);
                 if self.exec.exit_requested.is_some() {
                     break;
                 }
@@ -3824,25 +4582,6 @@ impl WorkerRuntime {
         if !self.vm.stderr.is_empty() {
             events.push(WorkerEvent::Stderr(std::mem::take(&mut self.vm.stderr)));
         }
-        events
-    }
-
-    fn execute_input(&mut self, input: &str) -> Vec<WorkerEvent> {
-        let mut events = self.execute_input_inner(input);
-        self.run_exit_trap_if_needed(&mut events);
-        self.drain_io_events(&mut events);
-        self.drain_diagnostic_events(&mut events);
-
-        let exit_status = if self.exec.resource_exhausted {
-            // Resource exhaustion (step budget, output limit, cancellation)
-            // must produce a non-zero exit code.
-            128
-        } else {
-            self.exec
-                .exit_requested
-                .unwrap_or(self.vm.state.last_status)
-        };
-        events.push(WorkerEvent::Exit(exit_status));
         events
     }
 
@@ -3926,15 +4665,23 @@ impl WorkerRuntime {
         (result, captured)
     }
 
-    fn with_live_redirection_scope<T>(
+    fn with_exec_io_scope<T>(
         &mut self,
-        scope: Option<LiveRedirectionScope>,
+        exec_io: Option<ExecIo>,
         f: impl FnOnce(&mut Self) -> T,
     ) -> T {
-        if let Some(scope) = scope {
-            self.live_redirections.push(scope);
+        if let Some(exec_io) = exec_io {
+            let saved = self.current_exec_io.replace(exec_io);
             let result = f(self);
-            self.live_redirections.pop();
+            let current = self.current_exec_io.take();
+            self.current_exec_io = match (saved, current) {
+                (Some(mut saved), Some(mut current)) => {
+                    let stdin = current.take_stdin();
+                    saved.fds_mut().set_input(stdin);
+                    Some(saved)
+                }
+                (saved, _) => saved,
+            };
             result
         } else {
             f(self)
@@ -3951,19 +4698,19 @@ impl WorkerRuntime {
 
     fn write_output_destination_direct(
         &mut self,
-        destination: &OutputDestination,
+        destination: &OutputTarget,
         data: &[u8],
     ) -> bool {
         match destination {
-            OutputDestination::VisibleStdout => {
+            OutputTarget::InheritStdout => {
                 self.append_visible_output_direct(data, true);
                 true
             }
-            OutputDestination::VisibleStderr => {
+            OutputTarget::InheritStderr => {
                 self.append_visible_output_direct(data, false);
                 true
             }
-            OutputDestination::File { path, sink } => {
+            OutputTarget::File { path, sink, .. } => {
                 if let Err(err) = sink.borrow_mut().write(data) {
                     let msg = format!("wasmsh: write error: {err}\n");
                     self.emit_visible_stderr_direct(msg.as_bytes());
@@ -3975,7 +4722,7 @@ impl WorkerRuntime {
                 }
                 false
             }
-            OutputDestination::ProcessSubst { path } => {
+            OutputTarget::ProcessSubst { path } => {
                 if let Some(sink) = self.process_subst_out_sink_mut(path) {
                     sink.write(data);
                 } else {
@@ -3984,6 +4731,11 @@ impl WorkerRuntime {
                 }
                 false
             }
+            OutputTarget::Pipe(pipe) => {
+                pipe.borrow_mut().write_all(data);
+                false
+            }
+            OutputTarget::Closed => false,
         }
     }
 
@@ -3994,16 +4746,19 @@ impl WorkerRuntime {
 
     fn route_output(&mut self, data: &[u8], stdout: bool) -> bool {
         let mut routed_stdout = stdout;
-        if let Some(scope) = self.live_redirections.last().cloned() {
-            let destination = if stdout { scope.stdout } else { scope.stderr };
+        if let Some(exec_io) = self.current_exec_io.as_ref() {
+            let destination = exec_io.output_target(stdout);
             match destination {
-                OutputDestination::VisibleStdout => {
+                OutputTarget::InheritStdout => {
                     routed_stdout = true;
                 }
-                OutputDestination::VisibleStderr => {
+                OutputTarget::InheritStderr => {
                     routed_stdout = false;
                 }
-                OutputDestination::File { .. } | OutputDestination::ProcessSubst { .. } => {
+                OutputTarget::File { .. }
+                | OutputTarget::ProcessSubst { .. }
+                | OutputTarget::Pipe(_)
+                | OutputTarget::Closed => {
                     return self.write_output_destination_direct(&destination, data);
                 }
             }
@@ -4131,6 +4886,12 @@ impl WorkerRuntime {
             .map(|(idx, cmd)| self.compile_pipeline_stage(cmd, idx == 0 && source_reader.is_none()))
             .collect();
         if source_reader.is_none() && stages.len() == 1 {
+            if self.command_needs_full_single_stage_execution(&cmds[0]) {
+                self.execute_command(&cmds[0]);
+                let status = self.vm.state.last_status;
+                self.set_pipestatus(&[status]);
+                return;
+            }
             if !matches!(stages[0], StreamingPipelineStage::BufferedCommand(_))
                 && !Self::command_requires_runtime_expansion(&cmds[0])
             {
@@ -4233,12 +4994,8 @@ impl WorkerRuntime {
                 0
             }
             StreamingPipelineStage::BufferedCommand(BufferedPipelineCommand::Argv(argv)) => {
-                let cmd_name = argv.first().map(String::as_str).unwrap_or("command");
                 self.trace_command(argv);
-                if self.try_runtime_command(cmd_name, argv) {
-                    return self.vm.state.last_status;
-                }
-                self.dispatch_command(cmd_name, argv);
+                self.execute_argv_command(argv);
                 self.vm.state.last_status
             }
             StreamingPipelineStage::BufferedCommand(BufferedPipelineCommand::Hir(cmd)) => {
@@ -4499,6 +5256,16 @@ impl WorkerRuntime {
                 }
             }
 
+            let buffered_pipe_bytes = output_pipes
+                .iter()
+                .map(|pipe| pipe.borrow().len() as u64)
+                .sum();
+            self.sync_pipe_budget(buffered_pipe_bytes);
+            if self.exec.resource_exhausted {
+                final_pipe.borrow_mut().close_read();
+                break;
+            }
+
             loop {
                 let mut buffer = [0u8; 4096];
                 let read_result = {
@@ -4614,7 +5381,10 @@ impl WorkerRuntime {
         let HirCommand::Exec(exec) = cmd else {
             return None;
         };
-        if !exec.env.is_empty() || !exec.redirections.is_empty() {
+        if !exec.env.is_empty()
+            || !exec.redirections.is_empty()
+            || Self::command_requires_runtime_expansion(cmd)
+        {
             return None;
         }
         let resolved = self.resolve_command_subst(&exec.argv);
@@ -5513,13 +6283,13 @@ impl WorkerRuntime {
     fn execute_isolated_input_events(
         &mut self,
         input: &str,
-        pending_input: Option<PendingInput>,
+        pending_input: Option<InputTarget>,
     ) -> Vec<WorkerEvent> {
         let saved_state = self.vm.state.clone();
         let saved_functions = self.functions.clone();
         let saved_aliases = self.aliases.clone();
         let saved_exec = self.exec.clone();
-        let saved_pending = self.pending_stdin.take();
+        let saved_exec_io = self.current_exec_io.take();
         let saved_stdout = std::mem::take(&mut self.vm.stdout);
         let saved_stderr = std::mem::take(&mut self.vm.stderr);
         let saved_diagnostics = std::mem::take(&mut self.vm.diagnostics);
@@ -5527,7 +6297,11 @@ impl WorkerRuntime {
         let saved_proc_subst_out_scopes = std::mem::take(&mut self.proc_subst_out_scopes);
         let saved_proc_subst_in_scopes = std::mem::take(&mut self.proc_subst_in_scopes);
 
-        self.pending_stdin = pending_input;
+        self.current_exec_io = pending_input.map(|target| {
+            let mut exec_io = ExecIo::default();
+            exec_io.fds_mut().set_input(target);
+            exec_io
+        });
         let (mut inner_events, captured) =
             self.with_output_capture(true, true, |runtime| runtime.execute_input_inner(input));
         let inner_resource_exhausted = self.exec.resource_exhausted;
@@ -5556,11 +6330,12 @@ impl WorkerRuntime {
         self.aliases = saved_aliases;
         self.exec = saved_exec;
         self.exec.resource_exhausted |= inner_resource_exhausted;
-        self.pending_stdin = saved_pending;
+        self.current_exec_io = saved_exec_io;
         self.vm.stdout = saved_stdout;
         self.vm.stderr = saved_stderr;
         self.vm.diagnostics = saved_diagnostics;
         self.vm.output_bytes = saved_output_bytes;
+        self.vm.budget.visible_output_bytes = saved_output_bytes;
         self.proc_subst_out_scopes = saved_proc_subst_out_scopes;
         self.proc_subst_in_scopes = saved_proc_subst_in_scopes;
 
@@ -5600,7 +6375,7 @@ impl WorkerRuntime {
         let saved_functions = self.functions.clone();
         let saved_aliases = self.aliases.clone();
         let saved_exec = self.exec.clone();
-        let saved_pending = self.pending_stdin.take();
+        let saved_exec_io = self.current_exec_io.take();
         let saved_stdout = std::mem::take(&mut self.vm.stdout);
         let saved_stderr = std::mem::take(&mut self.vm.stderr);
         let saved_diagnostics = std::mem::take(&mut self.vm.diagnostics);
@@ -5608,23 +6383,25 @@ impl WorkerRuntime {
         let saved_proc_subst_out_scopes = std::mem::take(&mut self.proc_subst_out_scopes);
         let saved_proc_subst_in_scopes = std::mem::take(&mut self.proc_subst_in_scopes);
 
-        self.pending_stdin = None;
+        self.current_exec_io = None;
         self.proc_subst_out_scopes.clear();
         self.proc_subst_in_scopes.clear();
         self.exec.recursion_depth += 1;
-        if self.exec.recursion_depth > MAX_RECURSION_DEPTH {
+        if let Err(reason) = self.vm.budget.enter_recursion(self.vm.limits.recursion_limit) {
             self.exec.recursion_depth -= 1;
             self.vm.state = saved_state;
             self.functions = saved_functions;
             self.aliases = saved_aliases;
             self.exec = saved_exec;
-            self.pending_stdin = saved_pending;
+            self.current_exec_io = saved_exec_io;
             self.vm.stdout = saved_stdout;
             self.vm.stderr = saved_stderr;
             self.vm.diagnostics = saved_diagnostics;
             self.vm.output_bytes = saved_output_bytes;
+            self.vm.budget.visible_output_bytes = saved_output_bytes;
             self.proc_subst_out_scopes = saved_proc_subst_out_scopes;
             self.proc_subst_in_scopes = saved_proc_subst_in_scopes;
+            self.mark_budget_exhaustion(reason);
             return vec![WorkerEvent::Stderr(
                 b"wasmsh: maximum recursion depth exceeded\n".to_vec(),
             )];
@@ -5638,6 +6415,7 @@ impl WorkerRuntime {
             );
         });
         self.exec.recursion_depth -= 1;
+        self.vm.budget.exit_recursion();
         let inner_resource_exhausted = self.exec.resource_exhausted;
         let inner_diagnostics = self
             .vm
@@ -5666,11 +6444,12 @@ impl WorkerRuntime {
         self.aliases = saved_aliases;
         self.exec = saved_exec;
         self.exec.resource_exhausted |= inner_resource_exhausted;
-        self.pending_stdin = saved_pending;
+        self.current_exec_io = saved_exec_io;
         self.vm.stdout = saved_stdout;
         self.vm.stderr = saved_stderr;
         self.vm.diagnostics = saved_diagnostics;
         self.vm.output_bytes = saved_output_bytes;
+        self.vm.budget.visible_output_bytes = saved_output_bytes;
         self.proc_subst_out_scopes = saved_proc_subst_out_scopes;
         self.proc_subst_in_scopes = saved_proc_subst_in_scopes;
 
@@ -5716,6 +6495,46 @@ impl WorkerRuntime {
             .any(|word| Self::word_parts_require_runtime_expansion(&word.parts))
     }
 
+    fn command_needs_full_single_stage_execution(&self, cmd: &HirCommand) -> bool {
+        if self.vm.state.get_var("SHOPT_x").as_deref() == Some("1") {
+            return true;
+        }
+        let HirCommand::Exec(exec) = cmd else {
+            return false;
+        };
+        exec.argv.iter().any(Self::word_has_brace_or_glob_literal)
+    }
+
+    fn word_has_brace_or_glob_literal(word: &Word) -> bool {
+        word.parts
+            .iter()
+            .any(Self::word_part_has_brace_or_glob_literal)
+    }
+
+    fn word_part_has_brace_or_glob_literal(part: &WordPart) -> bool {
+        match part {
+            WordPart::Literal(text) | WordPart::SingleQuoted(text) | WordPart::Parameter(text) => {
+                Self::text_has_brace_or_glob_literal(text)
+            }
+            WordPart::DoubleQuoted(parts) => parts
+                .iter()
+                .any(Self::word_part_has_brace_or_glob_literal),
+            WordPart::Arithmetic(_) => false,
+            WordPart::CommandSubstitution(_)
+            | WordPart::ProcessSubstIn(_)
+            | WordPart::ProcessSubstOut(_)
+            | _ => true,
+        }
+    }
+
+    fn text_has_brace_or_glob_literal(text: &str) -> bool {
+        text.contains('{')
+            || text.contains('}')
+            || text.contains('*')
+            || text.contains('?')
+            || text.contains('[')
+    }
+
     fn parse_single_pipeline_input(input: &str) -> Option<HirPipeline> {
         let ast = wasmsh_parse::parse(input).ok()?;
         let hir = wasmsh_hir::lower(&ast);
@@ -5742,36 +6561,43 @@ impl WorkerRuntime {
     }
 
     fn set_pending_input_bytes(&mut self, data: Vec<u8>) {
-        self.pending_stdin = Some(PendingInput::Bytes(data));
+        self.current_exec_io
+            .get_or_insert_with(ExecIo::default)
+            .fds_mut()
+            .set_input(InputTarget::Bytes(data));
     }
 
     fn set_pending_input_file(&mut self, path: String, remove_after_read: bool) {
-        self.pending_stdin = Some(PendingInput::File {
-            path,
-            remove_after_read,
-        });
+        self.current_exec_io
+            .get_or_insert_with(ExecIo::default)
+            .fds_mut()
+            .set_input(InputTarget::File {
+                path,
+                remove_after_read,
+            });
     }
 
     fn clear_pending_input(&mut self) {
-        let Some(input) = self.pending_stdin.take() else {
+        let Some(exec_io) = self.current_exec_io.as_mut() else {
             return;
         };
-        if let PendingInput::File {
+        if let InputTarget::File {
             path,
             remove_after_read: true,
-        } = input
+        } = exec_io.take_stdin()
         {
             let _ = self.fs.remove_file(&path);
         }
     }
 
     fn take_pending_input_reader(&mut self, cmd_name: &str) -> Result<Option<Box<dyn Read>>, ()> {
-        let Some(input) = self.pending_stdin.take() else {
+        let Some(exec_io) = self.current_exec_io.as_mut() else {
             return Ok(None);
         };
-        match input {
-            PendingInput::Bytes(data) => Ok(Some(Box::new(Cursor::new(data)))),
-            PendingInput::File {
+        match exec_io.take_stdin() {
+            InputTarget::Inherit | InputTarget::Closed => Ok(None),
+            InputTarget::Bytes(data) => Ok(Some(Box::new(Cursor::new(data)))),
+            InputTarget::File {
                 path,
                 remove_after_read,
             } => {
@@ -5781,6 +6607,7 @@ impl WorkerRuntime {
                 }
                 reader_result.map(Some)
             }
+            InputTarget::Pipe(pipe) => Ok(Some(Box::new(PipeReader::new(pipe)))),
         }
     }
 
@@ -5825,8 +6652,7 @@ impl WorkerRuntime {
             utils: UtilRegistry::new(),
             builtins: wasmsh_builtins::BuiltinRegistry::new(),
             initialized: self.initialized,
-            pending_stdin: None,
-            live_redirections: Vec::new(),
+            current_exec_io: None,
             proc_subst_out_scopes: Vec::new(),
             proc_subst_in_scopes: Vec::new(),
             functions: self.functions.clone(),
@@ -5834,6 +6660,7 @@ impl WorkerRuntime {
             aliases: self.aliases.clone(),
             external_handler: None,
             network: None,
+            active_run: None,
         })
     }
 
@@ -6201,7 +7028,7 @@ impl WorkerRuntime {
                         Box::new(Cursor::new(data.clone())),
                     )
                 } else {
-                    self.execute_isolated_input_events(&sink.inner, Some(PendingInput::Bytes(data)))
+                    self.execute_isolated_input_events(&sink.inner, Some(InputTarget::Bytes(data)))
                 };
                 for event in events {
                     match event {
@@ -6396,27 +7223,17 @@ impl WorkerRuntime {
             self.execute_assignment(&assignment.name, assignment.value.as_ref());
         }
 
-        if self.collect_stdin_from_redirections(&exec.redirections) {
-            return;
-        }
-
         if self.try_alias_expansion(&argv) {
             return;
         }
 
-        let live_redirections = match self.prepare_live_redirections(&exec.redirections) {
-            Ok(scope) => scope,
+        let exec_io = match self.prepare_exec_io(&exec.redirections) {
+            Ok(exec_io) => exec_io,
             Err(()) => return,
         };
-        let cmd_name = &argv[0];
-        self.with_live_redirection_scope(live_redirections, |runtime| {
+        self.with_exec_io_scope(exec_io, |runtime| {
             runtime.trace_command(&argv);
-
-            if runtime.try_runtime_command(cmd_name, &argv) {
-                return;
-            }
-
-            runtime.dispatch_command(cmd_name, &argv);
+            runtime.execute_argv_command(&argv);
         });
     }
 
@@ -6540,76 +7357,108 @@ impl WorkerRuntime {
         }
     }
 
-    /// Try to handle a runtime-level command (local, break, continue, exit, eval,
-    /// source, declare, etc.). Returns true if handled.
-    fn try_runtime_command(&mut self, cmd_name: &str, argv: &[String]) -> bool {
+    fn resolve_runtime_command(cmd_name: &str) -> Option<RuntimeCommandKind> {
         match cmd_name {
-            CMD_LOCAL => {
-                self.execute_local(argv);
-                true
-            }
-            CMD_BREAK => {
+            CMD_LOCAL => Some(RuntimeCommandKind::Local),
+            CMD_BREAK => Some(RuntimeCommandKind::Break),
+            CMD_CONTINUE => Some(RuntimeCommandKind::Continue),
+            CMD_EXIT => Some(RuntimeCommandKind::Exit),
+            CMD_EVAL => Some(RuntimeCommandKind::Eval),
+            CMD_SOURCE | CMD_DOT => Some(RuntimeCommandKind::Source),
+            CMD_DECLARE | CMD_TYPESET => Some(RuntimeCommandKind::Declare),
+            CMD_LET => Some(RuntimeCommandKind::Let),
+            CMD_SHOPT => Some(RuntimeCommandKind::Shopt),
+            CMD_ALIAS => Some(RuntimeCommandKind::Alias),
+            CMD_UNALIAS => Some(RuntimeCommandKind::Unalias),
+            CMD_BUILTIN => Some(RuntimeCommandKind::BuiltinKeyword),
+            CMD_MAPFILE | CMD_READARRAY => Some(RuntimeCommandKind::Mapfile),
+            CMD_TYPE => Some(RuntimeCommandKind::Type),
+            _ => None,
+        }
+    }
+
+    fn resolve_command(&self, cmd_name: &str, argv: &[String]) -> ResolvedCommand {
+        if let Some(kind) = Self::resolve_runtime_command(cmd_name) {
+            return ResolvedCommand::Runtime(kind);
+        }
+        if cmd_name == "bash" || cmd_name == "sh" {
+            return ResolvedCommand::ShellScript;
+        }
+        if let Some(body) = self.functions.get(cmd_name).cloned() {
+            return ResolvedCommand::Function(body);
+        }
+        if self.builtins.is_builtin(cmd_name) {
+            return ResolvedCommand::Builtin;
+        }
+        if self.utils.is_utility(cmd_name) {
+            let kind = if cmd_name == "find" && argv.iter().any(|arg| arg == "-exec") {
+                UtilityCommandKind::FindWithExec
+            } else if cmd_name == "xargs" {
+                UtilityCommandKind::Xargs
+            } else {
+                UtilityCommandKind::Plain
+            };
+            return ResolvedCommand::Utility(kind);
+        }
+        ResolvedCommand::External
+    }
+
+    fn execute_argv_command(&mut self, argv: &[String]) {
+        if self.check_resource_limits() || argv.is_empty() {
+            return;
+        }
+        let resolved = self.resolve_command(&argv[0], argv);
+        self.execute_resolved_command(resolved, argv);
+    }
+
+    fn execute_resolved_command(&mut self, resolved: ResolvedCommand, argv: &[String]) {
+        match resolved {
+            ResolvedCommand::Runtime(kind) => self.execute_runtime_command(kind, argv),
+            ResolvedCommand::ShellScript => self.call_shell_script(argv),
+            ResolvedCommand::Function(body) => self.call_shell_function(&argv[0], argv, &body),
+            ResolvedCommand::Builtin => self.call_builtin(&argv[0], argv),
+            ResolvedCommand::Utility(kind) => match kind {
+                UtilityCommandKind::Plain => self.call_utility(&argv[0], argv),
+                UtilityCommandKind::FindWithExec => self.call_find_with_exec(argv),
+                UtilityCommandKind::Xargs => self.call_xargs_with_exec(argv),
+            },
+            ResolvedCommand::External => self.call_external(argv),
+        }
+    }
+
+    fn execute_runtime_command(&mut self, kind: RuntimeCommandKind, argv: &[String]) {
+        match kind {
+            RuntimeCommandKind::Local => self.execute_local(argv),
+            RuntimeCommandKind::Break => {
                 self.exec.break_depth = argv.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
                 self.vm.state.last_status = 0;
-                true
             }
-            CMD_CONTINUE => {
+            RuntimeCommandKind::Continue => {
                 self.exec.loop_continue = true;
                 self.vm.state.last_status = 0;
-                true
             }
-            CMD_EXIT => {
+            RuntimeCommandKind::Exit => {
                 let code = argv
                     .get(1)
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(self.vm.state.last_status);
                 self.exec.exit_requested = Some(code);
                 self.vm.state.last_status = code;
-                true
             }
-            CMD_EVAL => {
+            RuntimeCommandKind::Eval => {
                 let code = argv[1..].join(" ");
                 let sub_events = self.execute_input_inner(&code);
                 self.merge_sub_events_with_diagnostics(sub_events);
-                true
             }
-            CMD_SOURCE | CMD_DOT => {
-                self.execute_source(argv);
-                true
-            }
-            CMD_DECLARE | CMD_TYPESET => {
-                self.execute_declare(argv);
-                true
-            }
-            CMD_LET => {
-                self.execute_let(argv);
-                true
-            }
-            CMD_SHOPT => {
-                self.execute_shopt(argv);
-                true
-            }
-            CMD_ALIAS => {
-                self.execute_alias(argv);
-                true
-            }
-            CMD_UNALIAS => {
-                self.execute_unalias(argv);
-                true
-            }
-            CMD_BUILTIN => {
-                self.execute_builtin_keyword(argv);
-                true
-            }
-            CMD_MAPFILE | CMD_READARRAY => {
-                self.execute_mapfile(argv);
-                true
-            }
-            CMD_TYPE => {
-                self.execute_type(argv);
-                true
-            }
-            _ => false,
+            RuntimeCommandKind::Source => self.execute_source(argv),
+            RuntimeCommandKind::Declare => self.execute_declare(argv),
+            RuntimeCommandKind::Let => self.execute_let(argv),
+            RuntimeCommandKind::Shopt => self.execute_shopt(argv),
+            RuntimeCommandKind::Alias => self.execute_alias(argv),
+            RuntimeCommandKind::Unalias => self.execute_unalias(argv),
+            RuntimeCommandKind::BuiltinKeyword => self.execute_builtin_keyword(argv),
+            RuntimeCommandKind::Mapfile => self.execute_mapfile(argv),
+            RuntimeCommandKind::Type => self.execute_type(argv),
         }
     }
 
@@ -6749,50 +7598,37 @@ impl WorkerRuntime {
         self.vm.state.positional = old_positional;
     }
 
-    /// Dispatch a command to a shell function, builtin, utility, or report not found.
-    fn dispatch_command(&mut self, cmd_name: &str, argv: &[String]) {
-        if self.check_resource_limits() {
+    fn call_external(&mut self, argv: &[String]) {
+        let cmd_name = &argv[0];
+        let Ok(stdin) = self.take_external_stdin(cmd_name) else {
             return;
-        }
-        if cmd_name == "bash" || cmd_name == "sh" {
-            self.call_shell_script(argv);
-            return;
-        }
-        if let Some(body) = self.functions.get(cmd_name).cloned() {
-            self.call_shell_function(cmd_name, argv, &body);
-        } else if self.builtins.is_builtin(cmd_name) {
-            self.call_builtin(cmd_name, argv);
-        } else if self.utils.is_utility(cmd_name) {
-            if cmd_name == "find" && argv.iter().any(|a| a == "-exec") {
-                self.call_find_with_exec(argv);
-            } else if cmd_name == "xargs" {
-                self.call_xargs_with_exec(argv);
-            } else {
-                self.call_utility(cmd_name, argv);
-            }
-        } else {
-            let Ok(stdin) = self.take_external_stdin(cmd_name) else {
-                return;
-            };
-            if let Some(ref mut handler) = self.external_handler {
-                if let Some(result) = handler(cmd_name, argv, stdin) {
-                    self.write_streams(&result.stdout, &result.stderr);
-                    self.vm.state.last_status = result.status;
-                } else {
-                    let msg = format!("wasmsh: {cmd_name}: command not found\n");
-                    self.write_stderr(msg.as_bytes());
-                    self.vm.state.last_status = 127;
-                }
+        };
+        if let Some(ref mut handler) = self.external_handler {
+            if let Some(result) = handler(cmd_name, argv, stdin) {
+                self.write_streams(&result.stdout, &result.stderr);
+                self.vm.state.last_status = result.status;
             } else {
                 let msg = format!("wasmsh: {cmd_name}: command not found\n");
                 self.write_stderr(msg.as_bytes());
                 self.vm.state.last_status = 127;
             }
+        } else {
+            let msg = format!("wasmsh: {cmd_name}: command not found\n");
+            self.write_stderr(msg.as_bytes());
+            self.vm.state.last_status = 127;
         }
     }
 
     /// Invoke a shell function.
     fn call_shell_function(&mut self, cmd_name: &str, argv: &[String], body: &HirCommand) {
+        self.exec.recursion_depth += 1;
+        if let Err(reason) = self.vm.budget.enter_recursion(self.vm.limits.recursion_limit) {
+            self.exec.recursion_depth -= 1;
+            self.mark_budget_exhaustion(reason);
+            self.write_stderr(b"wasmsh: maximum recursion depth exceeded\n");
+            self.vm.state.last_status = 1;
+            return;
+        }
         let old_positional = std::mem::take(&mut self.vm.state.positional);
         self.vm.state.positional = argv[1..]
             .iter()
@@ -6814,6 +7650,8 @@ impl WorkerRuntime {
         }
         self.vm.state.func_stack.pop();
         self.vm.state.positional = old_positional;
+        self.vm.budget.exit_recursion();
+        self.exec.recursion_depth -= 1;
     }
 
     /// Invoke a builtin command.
@@ -6826,7 +7664,7 @@ impl WorkerRuntime {
         let status = if self.can_use_runtime_output_sink() {
             let mut router = RuntimeOutputRouter {
                 exec: &mut self.exec,
-                live_redirections: &mut self.live_redirections,
+                exec_io: self.current_exec_io.as_mut(),
                 proc_subst_out_scopes: &mut self.proc_subst_out_scopes,
                 vm_stdout: &mut self.vm.stdout,
                 vm_stderr: &mut self.vm.stderr,
@@ -6861,7 +7699,6 @@ impl WorkerRuntime {
             status
         };
         self.vm.state.last_status = status;
-        self.pending_stdin = None;
     }
 
     /// Extract `-exec CMD [args...] {} \;` from find argv.
@@ -6992,7 +7829,7 @@ impl WorkerRuntime {
         let status = if self.can_use_runtime_output_sink() {
             let mut router = RuntimeOutputRouter {
                 exec: &mut self.exec,
-                live_redirections: &mut self.live_redirections,
+                exec_io: self.current_exec_io.as_mut(),
                 proc_subst_out_scopes: &mut self.proc_subst_out_scopes,
                 vm_stdout: &mut self.vm.stdout,
                 vm_stderr: &mut self.vm.stderr,
@@ -7402,51 +8239,10 @@ impl WorkerRuntime {
             self.vm.state.last_status = 0;
             return;
         }
-        let cmd_name = &argv[1];
         let builtin_argv: Vec<String> = argv[1..].to_vec();
-        if let Some(builtin_fn) = self.builtins.get(cmd_name) {
-            let Ok(stdin) = self.take_builtin_stdin(cmd_name) else {
-                return;
-            };
-            let argv_refs: Vec<&str> = builtin_argv.iter().map(String::as_str).collect();
-            let status = if self.can_use_runtime_output_sink() {
-                let mut router = RuntimeOutputRouter {
-                    exec: &mut self.exec,
-                    live_redirections: &mut self.live_redirections,
-                    proc_subst_out_scopes: &mut self.proc_subst_out_scopes,
-                    vm_stdout: &mut self.vm.stdout,
-                    vm_stderr: &mut self.vm.stderr,
-                    vm_output_bytes: &mut self.vm.output_bytes,
-                    vm_output_limit: self.vm.limits.output_byte_limit,
-                    vm_diagnostics: &mut self.vm.diagnostics,
-                };
-                let mut sink = RuntimeBuiltinSink {
-                    router: &mut router,
-                };
-                {
-                    let mut ctx = wasmsh_builtins::BuiltinContext {
-                        state: &mut self.vm.state,
-                        output: &mut sink,
-                        fs: Some(&self.fs),
-                        stdin,
-                    };
-                    builtin_fn(&mut ctx, &argv_refs)
-                }
-            } else {
-                let mut sink = wasmsh_builtins::VecSink::default();
-                let status = {
-                    let mut ctx = wasmsh_builtins::BuiltinContext {
-                        state: &mut self.vm.state,
-                        output: &mut sink,
-                        fs: Some(&self.fs),
-                        stdin,
-                    };
-                    builtin_fn(&mut ctx, &argv_refs)
-                };
-                self.write_streams(&sink.stdout, &sink.stderr);
-                status
-            };
-            self.vm.state.last_status = status;
+        let cmd_name = &builtin_argv[0];
+        if self.builtins.is_builtin(cmd_name) {
+            self.execute_resolved_command(ResolvedCommand::Builtin, &builtin_argv);
         } else {
             let msg = format!("builtin: {cmd_name}: not a shell builtin\n");
             self.write_stderr(msg.as_bytes());
@@ -7814,11 +8610,12 @@ impl WorkerRuntime {
 
     /// Assign a value in `declare`, handling compound arrays and scalar transforms.
     fn declare_assign_value(&mut self, name: &str, val: &str, flags: &DeclareFlags) {
-        if val.starts_with('(') && val.ends_with(')') {
-            self.declare_assign_compound(name, &val[1..val.len() - 1], flags);
+        let trimmed = val.trim();
+        if trimmed.starts_with('(') && trimmed.ends_with(')') {
+            self.declare_assign_compound(name, &trimmed[1..trimmed.len() - 1], flags);
             return;
         }
-        let final_val = Self::transform_declare_scalar(val, flags, &mut self.vm.state);
+        let final_val = Self::transform_declare_scalar(trimmed, flags, &mut self.vm.state);
         self.vm.state.set_var(
             smol_str::SmolStr::from(name),
             smol_str::SmolStr::from(final_val.as_str()),
@@ -7919,6 +8716,7 @@ impl WorkerRuntime {
         }
         if self.vm.begin_step().is_err() {
             self.exec.resource_exhausted = true;
+            self.exec.stop_reason = self.vm.stop_reason().cloned();
             return true;
         }
         false
@@ -7938,7 +8736,7 @@ impl WorkerRuntime {
             if self.should_stop_execution() {
                 break;
             }
-            self.execute_pipeline_chain(and_or);
+            self.execute_and_or(and_or);
             if self.should_errexit(and_or) {
                 self.exec.exit_requested = Some(self.vm.state.last_status);
             }
@@ -7971,8 +8769,9 @@ impl WorkerRuntime {
         }
 
         let val_str = self.expand_assignment_value(value);
-        if val_str.starts_with('(') && val_str.ends_with(')') {
-            self.assign_compound_array(name_str, &val_str, is_append);
+        let trimmed = val_str.trim();
+        if trimmed.starts_with('(') && trimmed.ends_with(')') {
+            self.assign_compound_array(name_str, trimmed, is_append);
             return;
         }
 
@@ -8619,18 +9418,59 @@ impl WorkerRuntime {
         false
     }
 
-    fn prepare_live_redirections(
+    fn prepare_exec_io(
         &mut self,
         redirections: &[HirRedirection],
-    ) -> Result<Option<LiveRedirectionScope>, ()> {
-        let mut scope = LiveRedirectionScope {
-            stdout: OutputDestination::VisibleStdout,
-            stderr: OutputDestination::VisibleStderr,
-        };
+    ) -> Result<Option<ExecIo>, ()> {
+        let mut exec_io = self.current_exec_io.clone().unwrap_or_default();
         let mut handled_any = false;
 
         for redir in redirections {
             match redir.op {
+                RedirectionOp::HereDoc | RedirectionOp::HereDocStrip => {
+                    handled_any = true;
+                    if let Some(body) = &redir.here_doc_body {
+                        let expanded =
+                            wasmsh_expand::expand_string(&body.content, &mut self.vm.state);
+                        exec_io.fds_mut().set_input(InputTarget::Bytes(expanded.into_bytes()));
+                    }
+                }
+                RedirectionOp::HereString => {
+                    handled_any = true;
+                    let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
+                    let resolved_target = resolved.first().unwrap_or(&redir.target);
+                    let content = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
+                    let mut data = content.into_bytes();
+                    data.push(b'\n');
+                    exec_io.fds_mut().set_input(InputTarget::Bytes(data));
+                }
+                RedirectionOp::Input => {
+                    handled_any = true;
+                    let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
+                    let resolved_target = resolved.first().unwrap_or(&redir.target);
+                    let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
+                    let path = self.resolve_cwd_path(&target);
+                    match self.fs.stat(&path) {
+                        Ok(metadata) if !metadata.is_dir => {
+                            exec_io.fds_mut().set_input(InputTarget::File {
+                                path,
+                                remove_after_read: false,
+                            });
+                        }
+                        Ok(_) => {
+                            let msg = format!("wasmsh: {target}: Is a directory\n");
+                            self.write_stderr(msg.as_bytes());
+                            self.vm.state.last_status = 1;
+                            return Err(());
+                        }
+                        Err(_) => {
+                            let msg = format!("wasmsh: {target}: No such file or directory\n");
+                            self.write_stderr(msg.as_bytes());
+                            self.vm.state.last_status = 1;
+                            return Err(());
+                        }
+                    }
+                }
                 RedirectionOp::Output | RedirectionOp::Append => {
                     handled_any = true;
                     let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
@@ -8643,14 +9483,15 @@ impl WorkerRuntime {
                                 sink.clear();
                             }
                         }
-                        OutputDestination::ProcessSubst { path }
+                        OutputTarget::ProcessSubst { path }
                     } else {
                         match self
                             .fs
                             .open_write_sink(&path, matches!(redir.op, RedirectionOp::Append))
                         {
-                            Ok(sink) => OutputDestination::File {
+                            Ok(sink) => OutputTarget::File {
                                 path,
+                                append: matches!(redir.op, RedirectionOp::Append),
                                 sink: Rc::new(RefCell::new(sink)),
                             },
                             Err(err) => {
@@ -8663,11 +9504,11 @@ impl WorkerRuntime {
                     };
                     match redir.fd.unwrap_or(1) {
                         FD_BOTH => {
-                            scope.stdout = destination.clone();
-                            scope.stderr = destination;
+                            exec_io.fds_mut().open_output(1, destination.clone());
+                            exec_io.fds_mut().open_output(2, destination);
                         }
-                        2 => scope.stderr = destination,
-                        _ => scope.stdout = destination,
+                        2 => exec_io.fds_mut().open_output(2, destination),
+                        _ => exec_io.fds_mut().open_output(1, destination),
                     }
                 }
                 RedirectionOp::DupOutput => {
@@ -8677,20 +9518,13 @@ impl WorkerRuntime {
                     let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
                     let target_fd = target.parse().unwrap_or(1);
                     let source_fd = redir.fd.unwrap_or(1);
-                    let destination = match target_fd {
-                        2 => scope.stderr.clone(),
-                        _ => scope.stdout.clone(),
-                    };
-                    match source_fd {
-                        2 => scope.stderr = destination,
-                        _ => scope.stdout = destination,
-                    }
+                    exec_io.fds_mut().dup_output(source_fd, target_fd);
                 }
                 _ => {}
             }
         }
 
-        Ok(handled_any.then_some(scope))
+        Ok(handled_any.then_some(exec_io))
     }
 
     /// Apply redirections: for `>` and `>>`, write captured stdout/stderr to file.
@@ -10173,6 +11007,12 @@ impl Default for WorkerRuntime {
 mod tests {
     use super::*;
 
+    fn first_and_or(source: &str) -> HirAndOr {
+        let ast = wasmsh_parse::parse(source).unwrap();
+        let hir = wasmsh_hir::lower(&ast);
+        hir.items[0].list[0].clone()
+    }
+
     fn get_stdout(events: &[WorkerEvent]) -> String {
         let mut out = Vec::new();
         for event in events {
@@ -10193,6 +11033,16 @@ mod tests {
         String::from_utf8(out).unwrap_or_default()
     }
 
+    fn get_exit(events: &[WorkerEvent]) -> i32 {
+        events
+            .iter()
+            .find_map(|event| match event {
+                WorkerEvent::Exit(status) => Some(*status),
+                _ => None,
+            })
+            .unwrap_or(-1)
+    }
+
     fn has_output_limit_diagnostic(events: &[WorkerEvent]) -> bool {
         events.iter().any(|event| {
             matches!(
@@ -10200,6 +11050,122 @@ mod tests {
                 WorkerEvent::Diagnostic(_, message) if message.contains("output limit exceeded")
             )
         })
+    }
+
+    #[test]
+    fn output_limit_exposes_structured_exhaustion_reason() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.set_output_byte_limit(3);
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "echo hello".into(),
+        });
+
+        assert_eq!(get_exit(&events), 128);
+        assert!(has_output_limit_diagnostic(&events));
+        assert_eq!(
+            runtime.exec.stop_reason,
+            Some(StopReason::Exhausted(ExhaustionReason {
+                category: BudgetCategory::VisibleOutputBytes,
+                used: 6,
+                limit: 3,
+            }))
+        );
+    }
+
+    #[test]
+    fn recursion_limit_exposes_structured_exhaustion_reason() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.set_recursion_limit(2);
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "f(){ f; }\nf".into(),
+        });
+
+        assert_eq!(get_exit(&events), 128);
+        assert!(get_stderr(&events).contains("maximum recursion depth exceeded"));
+        assert_eq!(
+            runtime.exec.stop_reason,
+            Some(StopReason::Exhausted(ExhaustionReason {
+                category: BudgetCategory::RecursionDepth,
+                used: 3,
+                limit: 2,
+            }))
+        );
+    }
+
+    #[test]
+    fn pipe_limit_exposes_structured_exhaustion_reason() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        runtime.set_pipe_byte_limit(1);
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "printf 'ab' | cat".into(),
+        });
+
+        assert_eq!(get_exit(&events), 128);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                WorkerEvent::Diagnostic(_, message) if message.contains("pipe buffer limit exceeded")
+            )
+        }));
+        assert!(matches!(
+            runtime.exec.stop_reason,
+            Some(StopReason::Exhausted(ExhaustionReason {
+                category: BudgetCategory::PipeBytes,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn vm_subset_boundary_accepts_simple_builtin_and_or() {
+        let runtime = WorkerRuntime::new();
+        let program = runtime
+            .lower_vm_subset_and_or(&first_and_or("true && echo ok"))
+            .expect("simple builtin and/or should lower");
+        assert!(!program.instructions.is_empty());
+    }
+
+    #[test]
+    fn vm_subset_boundary_rejects_multi_stage_pipeline() {
+        let runtime = WorkerRuntime::new();
+        let reason = runtime
+            .lower_vm_subset_and_or(&first_and_or("echo hello | cat"))
+            .unwrap_err();
+        assert_eq!(
+            reason,
+            VmSubsetFallbackReason::Lowering(LoweringError::Unsupported(
+                "pipeline shape is outside the VM subset"
+            ))
+        );
+    }
+
+    #[test]
+    fn vm_subset_boundary_rejects_alias_expansion() {
+        let mut runtime = WorkerRuntime::new();
+        runtime
+            .vm
+            .state
+            .set_var("SHOPT_expand_aliases".into(), "1".into());
+        runtime.aliases.insert("echo".into(), "printf".into());
+        let reason = runtime
+            .lower_vm_subset_and_or(&first_and_or("echo hello"))
+            .unwrap_err();
+        assert_eq!(reason, VmSubsetFallbackReason::AliasExpansion);
     }
 
     #[test]

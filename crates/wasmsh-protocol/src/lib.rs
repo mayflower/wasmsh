@@ -1,7 +1,13 @@
-//! Message protocol for the wasmsh browser worker bridge.
+//! Message protocol for wasmsh host adapters.
 //!
-//! Defines versioned, serializable messages exchanged between the host
-//! page and the wasmsh Web Worker.
+//! Defines versioned, serializable messages exchanged between a host and
+//! `wasmsh-runtime`, including the progressive `StartRun` / `PollRun`
+//! execution flow in addition to one-shot `Run`.
+//!
+//! An experimental typed WIT projection of the same surface lives in
+//! `crates/wasmsh-protocol/wit/worker-protocol.wit`. The serde enums remain
+//! the canonical contract today; the WIT world is additive and intended for
+//! future component-model embedders.
 //!
 //! ## Protocol version
 //! Current version: `0.1.0`
@@ -31,6 +37,13 @@ pub enum HostCommand {
         /// The shell source text to execute.
         input: String,
     },
+    /// Start a progressive shell execution without polling it to completion.
+    StartRun {
+        /// The shell source text to execute.
+        input: String,
+    },
+    /// Poll the active progressive execution.
+    PollRun,
     /// Cancel the currently running execution.
     Cancel,
     /// Mount a virtual filesystem at the given path.
@@ -67,6 +80,8 @@ pub enum WorkerEvent {
     Stderr(Vec<u8>),
     /// Command execution finished with exit code.
     Exit(i32),
+    /// Command execution is still active and needs another poll.
+    Yielded,
     /// A diagnostic message (warning, info, trace).
     Diagnostic(DiagnosticLevel, String),
     /// A file in the VFS was changed.
@@ -104,6 +119,13 @@ mod tests {
             input: "echo hello".into(),
         };
         assert!(matches!(cmd, HostCommand::Run { .. }));
+
+        let cmd = HostCommand::StartRun {
+            input: "echo hello".into(),
+        };
+        assert!(matches!(cmd, HostCommand::StartRun { .. }));
+
+        assert_eq!(HostCommand::PollRun, HostCommand::PollRun);
     }
 
     #[test]
@@ -111,10 +133,36 @@ mod tests {
         let evt = WorkerEvent::Exit(0);
         assert_eq!(evt, WorkerEvent::Exit(0));
 
+        assert_eq!(WorkerEvent::Yielded, WorkerEvent::Yielded);
+
         let evt = WorkerEvent::Diagnostic(DiagnosticLevel::Warning, "test".into());
         assert!(matches!(
             evt,
             WorkerEvent::Diagnostic(DiagnosticLevel::Warning, _)
         ));
+    }
+
+    #[test]
+    fn progressive_commands_roundtrip_json() {
+        let start = HostCommand::StartRun {
+            input: "echo hello".into(),
+        };
+        let encoded = serde_json::to_string(&start).unwrap();
+        assert_eq!(encoded, r#"{"StartRun":{"input":"echo hello"}}"#);
+        let decoded: HostCommand = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, start);
+
+        let encoded = serde_json::to_string(&HostCommand::PollRun).unwrap();
+        assert_eq!(encoded, r#""PollRun""#);
+        let decoded: HostCommand = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, HostCommand::PollRun);
+    }
+
+    #[test]
+    fn yielded_event_roundtrips_json() {
+        let encoded = serde_json::to_string(&WorkerEvent::Yielded).unwrap();
+        assert_eq!(encoded, r#""Yielded""#);
+        let decoded: WorkerEvent = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, WorkerEvent::Yielded);
     }
 }

@@ -10,3 +10,4 @@ script = "nonexistent_cmd 2>&1 > /out.txt; cat /out.txt"
 [expect]
 status = 0
 stdout_contains = ["command not found"]
+files = { "/out.txt" = "" }

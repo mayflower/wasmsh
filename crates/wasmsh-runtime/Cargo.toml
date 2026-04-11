@@ -16,6 +16,7 @@ wasmsh-ast = { workspace = true }
 wasmsh-protocol = { workspace = true }
 wasmsh-parse = { workspace = true }
 wasmsh-hir = { workspace = true }
+wasmsh-ir = { workspace = true }
 wasmsh-expand = { workspace = true }
 wasmsh-vm = { workspace = true }
 wasmsh-state = { workspace = true }

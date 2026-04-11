@@ -1689,6 +1689,9 @@ name = "wasmsh-ir"
 version = "0.5.9"
 dependencies = [
  "smol_str",
+ "wasmsh-ast",
+ "wasmsh-hir",
+ "wasmsh-parse",
 ]
 
 [[package]]
@@ -1713,6 +1716,8 @@ name = "wasmsh-protocol"
 version = "0.5.9"
 dependencies = [
  "serde",
+ "serde_json",
+ "wit-parser",
 ]
 
 [[package]]
@@ -1726,6 +1731,7 @@ dependencies = [
  "wasmsh-expand",
  "wasmsh-fs",
  "wasmsh-hir",
+ "wasmsh-ir",
  "wasmsh-parse",
  "wasmsh-protocol",
  "wasmsh-state",
@@ -1782,7 +1788,9 @@ dependencies = [
 name = "wasmsh-vm"
 version = "0.5.9"
 dependencies = [
+ "wasmsh-ast",
  "wasmsh-builtins",
+ "wasmsh-expand",
  "wasmsh-ir",
  "wasmsh-state",
 ]

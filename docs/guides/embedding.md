@@ -172,26 +172,26 @@ The Pyodide adapter installs an `ExternalCommandHandler` that dispatches
 
 ## Output and streaming model
 
-`handle_command` returns a `Vec<WorkerEvent>` synchronously. There is no
-async streaming inside one call; the entire script runs (subject to
-`step_budget`) and then returns its events. This is fine for most
-embedders because:
+`handle_command` supports both one-shot and progressive execution:
+
+- `Run` starts execution and drains it to completion before returning
+- `StartRun` begins a progressive execution and returns `Yielded`
+- `PollRun` returns incremental output until the final `Exit(code)`
+
+This is fine for most embedders because:
 
 - Step budgets bound the wall time of any single `Run`.
 - The host can break long workflows into multiple `Run` calls.
 - Output bytes are tracked and capped, so a runaway `yes` will not OOM
   the host.
 
-If you need progressive output during a single command, the options are:
+If you need progressive output during a single command, use
+`StartRun` / `PollRun` and treat `Yielded` as "call `PollRun` again".
+`Run` remains the simpler compatibility wrapper.
 
-- Split the user's intent into multiple `Run` calls (e.g. one per line).
-- Run the runtime in a worker thread and use `Cancel` from the main
-  thread when you have enough output.
-- Wait for the upstream issue tracking streaming events to land.
-
-`Cancel` is cooperative: it sets a flag that the VM checks at every
-instruction boundary. The in-flight `Run` call returns shortly after
-with whatever events were produced before the flag was observed.
+`Cancel` is cooperative: it sets a flag that the active execution checks
+at its next budget boundary. The execution then completes with
+`Exit(130)`.
 
 ## Threading
 

@@ -1,0 +1,13 @@
+[test]
+name = "stderr-not-in-pipeline-without-merge"
+tags = ["redirection", "stderr", "pipeline", "P0"]
+tier = "P0"
+requires = ["stderr-redirection", "pipeline", "cat"]
+
+[input]
+script = "nonexistent_cmd | cat"
+
+[expect]
+status = 0
+stdout = ""
+stderr_contains = ["command not found"]

@@ -1,0 +1,13 @@
+[test]
+name = "pipe-stderr-into-cat"
+tags = ["pipeline", "stderr-pipe", "P0"]
+tier = "P0"
+requires = ["pipeline", "echo", "cat"]
+
+[input]
+script = "echo err >&2 |& cat"
+
+[expect]
+status = 0
+stdout = "err\n"
+stderr = ""

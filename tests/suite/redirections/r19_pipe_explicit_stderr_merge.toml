@@ -1,0 +1,13 @@
+[test]
+name = "stderr-merge-into-pipeline-with-2dup1"
+tags = ["redirection", "stderr", "pipeline", "P0"]
+tier = "P0"
+requires = ["stderr-redirection", "fd-redirection", "pipeline", "cat"]
+
+[input]
+script = "nonexistent_cmd 2>&1 | cat"
+
+[expect]
+status = 0
+stdout_contains = ["command not found"]
+stderr = ""

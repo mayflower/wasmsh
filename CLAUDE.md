@@ -9,13 +9,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 1. **Standalone** (`wasm32-unknown-unknown`) — browser Web Worker via `wasm-bindgen`
 2. **Pyodide** (`wasm32-unknown-emscripten`) — linked into a custom Pyodide build, sharing the Python interpreter's Emscripten module and filesystem
 
-Pipeline: `source → stateful lexer → handwritten parser → AST → HIR → expand → cooperative VM → builtins/utilities → VFS/capabilities → protocol events`
+Execution pipeline: `source -> lexer -> parser -> AST -> HIR -> runtime executor`.
+
+The runtime currently uses two execution paths:
+- Default path: direct HIR interpretation in `wasmsh-runtime`
+- VM subset path: selected top-level `and/or` lists lower through `wasmsh-ir` into `wasmsh-vm`
+
+Expansion, redirection planning, dispatch, budgeting, and protocol emission are owned by the runtime layer and shared by both paths.
 
 Code, comments, and documentation are in English.
 
 ## Current State
 
-1422 tests across multiple layers, 0 failures. The full pipeline works end-to-end for both targets. See `SUPPORTED.md` for syntax/command coverage.
+The repository has multi-layer coverage across crate tests, runtime/protocol tests, TOML suite cases, and E2E adapters. The runtime/protocol crates are expected to stay green; the broad TOML suite still contains known conformance gaps in areas like arrays, brace expansion, globbing, and `xtrace`. See `SUPPORTED.md` for syntax/command coverage.
 
 **Standalone path**: `wasmsh-browser` wraps `wasmsh-runtime` with wasm-bindgen glue. 6 Playwright E2E tests.
 
@@ -83,8 +89,9 @@ just doc                    # docs with warnings-as-errors
 ## Architecture Layers
 
 - **Syntax**: Lexer (stateful, multi-mode) → Parser (recursive descent) → AST
-- **Semantics**: HIR (normalizes AST) → IR (linear instructions with jumps)
-- **Execution**: Cooperative VM with step budgets, cancellation tokens. Commands resolve to builtin / shell function / bundled utility / external handler
+- **Semantics**: HIR normalizes AST into executable command shapes
+- **Execution**: `wasmsh-runtime` interprets HIR directly and can lower a bounded subset into `wasmsh-ir` / `wasmsh-vm`
+- **VM subset**: simple assignments, builtin execution, selected redirections, and top-level `&&` / `||` short-circuiting
 - **Runtime**: `wasmsh-runtime` — shared platform-agnostic core used by both targets
 - **Platform**: `BackendFs` type alias → `MemoryFs` (standalone) or `EmscriptenFs` (Pyodide, via `emscripten` feature)
 - **Standalone embedding**: `wasmsh-browser` — wasm-bindgen Web Worker with `WasmShell` JS API
@@ -95,7 +102,7 @@ just doc                    # docs with warnings-as-errors
 ADRs are in `docs/adr/`. Key decisions:
 - ADR-0001: Clean-room boundary
 - ADR-0003: Handwritten parser (no generators)
-- ADR-0005: HIR → IR → VM pipeline
+- ADR-0005: HIR / IR / VM direction of travel
 - ADR-0006: Capability-based VFS
 - ADR-0009: Budgets and cancellation
 - ADR-0011: Testing via differential oracles
@@ -104,6 +111,7 @@ ADRs are in `docs/adr/`. Key decisions:
 - ADR-0019: Dual-target packaging
 - ADR-0020: E2E-first testing policy
 - ADR-0021: Network capability model (curl/wget with host allowlist)
+- ADR-0029: Dual-path executor (runtime interpreter + VM subset)
 
 ## Feature Flags
 

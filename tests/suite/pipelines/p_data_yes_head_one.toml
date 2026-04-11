@@ -1,0 +1,12 @@
+[test]
+name = "pipe-data-yes-head-one"
+tags = ["pipeline", "data-flow", "P0"]
+tier = "P0"
+requires = ["pipeline", "yes", "head"]
+
+[input]
+script = "yes | head -n 1"
+
+[expect]
+status = 0
+stdout = "y\n"

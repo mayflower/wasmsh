@@ -1,0 +1,73 @@
+package wasmsh:protocol@0.1.0;
+
+/// Experimental typed projection of the wasmsh worker protocol.
+///
+/// The serde `HostCommand` and `WorkerEvent` enums remain the canonical
+/// contract today. This WIT package is additive and keeps the same semantics
+/// while exposing typed operations for future component-model embedders.
+interface worker {
+  /// Severity for runtime diagnostics.
+  enum diagnostic-level {
+    info,
+    warning,
+    error,
+    trace,
+  }
+
+  /// Initialization settings passed to the runtime.
+  record init-config {
+    /// Maximum step budget per execution. `0` disables the budget.
+    step-budget: u64,
+    /// Host patterns allowed for network access.
+    allowed-hosts: list<string>,
+  }
+
+  /// Structured payload for `worker-event.diagnostic`.
+  record diagnostic-event {
+    level: diagnostic-level,
+    message: string,
+  }
+
+  /// Typed projection of the current `WorkerEvent` enum.
+  variant worker-event {
+    stdout(list<u8>),
+    stderr(list<u8>),
+    exit(s32),
+    yielded,
+    diagnostic(diagnostic-event),
+    fs-changed(string),
+    version(string),
+  }
+
+  /// Initialize the runtime and announce the protocol version.
+  init: func(config: init-config) -> list<worker-event>;
+
+  /// Execute shell input to completion in one shot.
+  run: func(input: string) -> list<worker-event>;
+
+  /// Start a progressive execution without draining it to completion.
+  start-run: func(input: string) -> list<worker-event>;
+
+  /// Poll the active progressive execution for the next event batch.
+  poll-run: func() -> list<worker-event>;
+
+  /// Request cancellation of the active execution.
+  cancel: func() -> list<worker-event>;
+
+  /// Reserve a future mount point in the virtual filesystem.
+  mount: func(path: string) -> list<worker-event>;
+
+  /// Read a file from the virtual filesystem.
+  read-file: func(path: string) -> list<worker-event>;
+
+  /// Write raw bytes into a virtual filesystem file.
+  write-file: func(path: string, data: list<u8>) -> list<worker-event>;
+
+  /// List entries in a virtual filesystem directory.
+  list-dir: func(path: string) -> list<worker-event>;
+}
+
+/// Experimental world exported by future component-model adapters.
+world worker-protocol {
+  export worker;
+}

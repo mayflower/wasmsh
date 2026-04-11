@@ -176,18 +176,20 @@ If you are writing a custom host adapter, the contract is:
    `wasmsh_runtime_free_string()`.
 3. Drop the runtime with `wasmsh_runtime_free()` when done.
 
-There is no streaming inside a single call. If you need progressive output
-during a long-running command, you have to break it into multiple `Run`
-calls or use the `Cancel` mechanism described below.
+The protocol now supports progressive execution directly: start work with
+`StartRun`, then call `PollRun` until the returned batch no longer ends in
+`Yielded`. `Run` is still available as the one-shot wrapper that drains
+that same executor to completion.
 
 ## Cancellation
 
 `Cancel` is cooperative. To interrupt a long-running script:
 
-1. Issue `Run` from one task.
+1. Issue `StartRun` (or `Run`) from one task.
 2. From another task, send `Cancel`. The runtime sets a cancellation token.
-3. The first task's `Run` call observes the token at the next VM step and
-   returns its event vector with an `Exit(130)` event.
+3. The active execution observes the token cooperatively and completes
+   with `Exit(130)` on the next `PollRun` (or during `Run`'s internal
+   drain).
 
 In the Node adapter, `session.run()` is a Promise. To cancel it from the
 host, send a separate `{"Cancel": null}` JSON message via the host's

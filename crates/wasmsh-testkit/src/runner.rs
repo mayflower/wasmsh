@@ -8,7 +8,7 @@ use std::path::Path;
 use wasmsh_protocol::{HostCommand, WorkerEvent};
 use wasmsh_runtime::WorkerRuntime;
 
-use crate::features;
+use crate::{features, oracle};
 use crate::toml_case::TomlTestFile;
 
 /// Outcome of running a single test case.
@@ -42,6 +42,13 @@ pub fn run_toml_file(path: &Path) -> TestOutcome {
 
 /// Run a parsed TOML test case.
 pub fn run_toml_case(case: &TomlTestFile) -> TestOutcome {
+    run_toml_case_with_oracle(case, oracle::run_oracle)
+}
+
+fn run_toml_case_with_oracle<F>(case: &TomlTestFile, run_oracle: F) -> TestOutcome
+where
+    F: Fn(&str, &str) -> Option<oracle::OracleResult>,
+{
     let missing = features::missing_features(&case.test.requires);
     if !missing.is_empty() {
         return TestOutcome::Skipped {
@@ -58,7 +65,9 @@ pub fn run_toml_case(case: &TomlTestFile) -> TestOutcome {
     let mut rt = new_runtime();
     seed_files(&mut rt, case);
     seed_env(&mut rt, case);
-    let events = rt.handle_command(HostCommand::Run { input: script });
+    let events = rt.handle_command(HostCommand::Run {
+        input: script.clone(),
+    });
     let status = extract_exit_status(&events);
     let stdout = collect_event_data(&events, |e| matches!(e, WorkerEvent::Stdout(_)));
     let stderr = collect_event_data(&events, |e| matches!(e, WorkerEvent::Stderr(_)));
@@ -89,6 +98,7 @@ pub fn run_toml_case(case: &TomlTestFile) -> TestOutcome {
         case.expect.stderr_contains.as_ref(),
         &mut failures,
     );
+    compare_oracles(case, &script, status, &stdout, &run_oracle, &mut failures);
     compare_files(case, &mut rt, &mut failures);
     compare_env(case, &mut rt, &mut failures);
 
@@ -98,6 +108,42 @@ pub fn run_toml_case(case: &TomlTestFile) -> TestOutcome {
         TestOutcome::Failed {
             reason: failures.join("\n"),
         }
+    }
+}
+
+fn compare_oracles<F>(
+    case: &TomlTestFile,
+    script: &str,
+    status: i32,
+    stdout: &str,
+    run_oracle: &F,
+    failures: &mut Vec<String>,
+) where
+    F: Fn(&str, &str) -> Option<oracle::OracleResult>,
+{
+    let Some(oracle_config) = case.oracle.as_ref() else {
+        return;
+    };
+    if !oracle_config.compare {
+        return;
+    }
+
+    let shells = if oracle_config.shells.is_empty() {
+        vec!["sh".to_string()]
+    } else {
+        oracle_config.shells.clone()
+    };
+
+    for shell in shells {
+        let Some(result) = run_oracle(script, shell.as_str()) else {
+            continue;
+        };
+        failures.extend(oracle::compare_oracle(
+            status,
+            stdout,
+            &result,
+            oracle_config.ignore_stderr,
+        ));
     }
 }
 
@@ -250,4 +296,83 @@ pub fn discover_cases(dir: &Path) -> Vec<std::path::PathBuf> {
     walk(dir, &mut cases);
     cases.sort();
     cases
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_case(input: &str) -> TomlTestFile {
+        toml::from_str(input).expect("valid toml test case")
+    }
+
+    #[test]
+    fn oracle_mismatch_fails_when_oracle_runner_reports_diff() {
+        let case = parse_case(
+            r#"
+[test]
+name = "oracle mismatch"
+
+[input]
+script = "echo hello"
+
+[expect]
+status = 0
+stdout = "hello\n"
+
+[oracle]
+compare = true
+shells = ["stub-sh"]
+"#,
+        );
+
+        let outcome = run_toml_case_with_oracle(&case, |_, shell| {
+            Some(oracle::OracleResult {
+                shell: shell.to_string(),
+                status: 7,
+                stdout: "goodbye\n".into(),
+                stderr: String::new(),
+            })
+        });
+
+        match outcome {
+            TestOutcome::Failed { reason } => {
+                assert!(reason.contains("[stub-sh] status"), "{reason}");
+                assert!(reason.contains("[stub-sh] stdout differs"), "{reason}");
+            }
+            other => panic!("expected oracle mismatch failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oracle_disabled_case_ignores_oracle_runner() {
+        let case = parse_case(
+            r#"
+[test]
+name = "oracle disabled"
+
+[input]
+script = "echo hello"
+
+[expect]
+status = 0
+stdout = "hello\n"
+
+[oracle]
+compare = false
+shells = ["stub-sh"]
+"#,
+        );
+
+        let outcome = run_toml_case_with_oracle(&case, |_, _| {
+            Some(oracle::OracleResult {
+                shell: "stub-sh".into(),
+                status: 7,
+                stdout: "goodbye\n".into(),
+                stderr: String::new(),
+            })
+        });
+
+        assert!(matches!(outcome, TestOutcome::Passed));
+    }
 }
