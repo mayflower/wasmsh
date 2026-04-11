@@ -690,23 +690,20 @@ fn grep_match_pattern(line: &str, pattern: &str, flags: &GrepFlags) -> bool {
     } else {
         crate::regex_posix::Regex::compile_bre(&p)
     };
-    match compiled {
-        Ok(re) => {
-            if flags.word_match {
-                grep_regex_word_match(&l, &re)
-            } else {
-                re.is_match(&l)
-            }
-        }
-        Err(_) => {
-            if flags.extended && p.contains('|') {
-                return p
-                    .split('|')
-                    .any(|alt| grep_match_single(&l, alt.trim(), flags));
-            }
-            grep_match_single(&l, &p, flags)
-        }
+    if let Ok(re) = compiled {
+        return if flags.word_match {
+            grep_regex_word_match(&l, &re)
+        } else {
+            re.is_match(&l)
+        };
     }
+    // Compile failed — fall back to the historical literal matcher.
+    if flags.extended && p.contains('|') {
+        return p
+            .split('|')
+            .any(|alt| grep_match_single(&l, alt.trim(), flags));
+    }
+    grep_match_single(&l, &p, flags)
 }
 
 fn grep_match_single(line: &str, pattern: &str, flags: &GrepFlags) -> bool {
@@ -1193,8 +1190,7 @@ fn sed_addr_matches(
         SedAddr::Line(n) => line_num == *n,
         SedAddr::Last => is_last,
         SedAddr::Regex(pat) => crate::regex_posix::Regex::compile_bre(pat)
-            .map(|re| re.is_match(line))
-            .unwrap_or_else(|_| grep_matches(line, pat, false)),
+            .map_or_else(|_| grep_matches(line, pat, false), |re| re.is_match(line)),
         SedAddr::Range(start, end) => {
             if *in_range {
                 if sed_addr_matches(end, line_num, is_last, line, &mut false) {

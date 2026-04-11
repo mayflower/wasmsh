@@ -1,7 +1,7 @@
 //! Thin wrapper over the `posix-regex` crate, shared by `sed` and `grep`.
 //!
 //! `posix-regex` is an ASCII-only POSIX BRE/ERE implementation with zero
-//! runtime dependencies and no_std support, which keeps the wasm footprint
+//! runtime dependencies and `no_std` support, which keeps the wasm footprint
 //! small and the license story clean.  We wrap it here so the callers
 //! (`text_ops.rs` for now, potentially `search_ops.rs` later) don't need
 //! to deal with its byte-slice API or builder pattern directly.

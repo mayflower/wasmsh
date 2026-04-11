@@ -1,7 +1,7 @@
 //! jq utility: JSON processor.
 //!
 //! Backed by the `jaq-core` / `jaq-std` / `jaq-json` crates — a pure
-//! Rust reimplementation of jq with an NLnet security audit.  See
+//! Rust reimplementation of jq with an `NLnet` security audit.  See
 //! ADR-0026, which supersedes the previous hand-rolled implementation
 //! (~8000 lines that only supported a subset of the jq filter
 //! language).  The CLI surface that wasmsh exposes to shell scripts
@@ -365,7 +365,7 @@ fn finalize_jq_status(
         return 1;
     }
     match last_value {
-        Some(Val::Null) | Some(Val::Bool(false)) => 1,
+        Some(Val::Null | Val::Bool(false)) => 1,
         _ => 0,
     }
 }

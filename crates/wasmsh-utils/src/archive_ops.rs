@@ -18,7 +18,7 @@ use crate::UtilContext;
 // compression and decompression to `miniz_oxide` — a pure Rust port of
 // miniz, used by flate2 itself.  See ADR-0025.
 
-/// Compression level passed to miniz_oxide.  Level 6 is the classic
+/// Compression level passed to `miniz_oxide`.  Level 6 is the classic
 /// zlib default and offers a good ratio/speed tradeoff.  Sandbox use
 /// prioritises ratio over throughput because the input sizes are
 /// small and the wall-clock budget is bounded by step limits, not by
@@ -1296,13 +1296,13 @@ mod tests {
         // to compress (a stored-block implementation would produce an
         // output of the same size; a real implementation produces a
         // much smaller file).
-        let original: Vec<u8> = (0..6000).map(|i| (b'A' + (i % 26) as u8)).collect();
+        let original: Vec<u8> = (0..6000).map(|i| b'A' + (i % 26) as u8).collect();
 
         // Build a compressed gzip stream via miniz_oxide (same codec
         // path real upstream gzip uses).
         let mut bytes = vec![0x1F, 0x8B, 0x08, 0x00, 0, 0, 0, 0, 0, 0xFF];
         bytes.extend_from_slice(&miniz_oxide::deflate::compress_to_vec(&original, 6));
-        bytes.extend_from_slice(&crate::helpers::crc32(&original).to_le_bytes());
+        bytes.extend_from_slice(&crc32(&original).to_le_bytes());
         bytes.extend_from_slice(&(original.len() as u32).to_le_bytes());
         // Make sure the compressed file is materially smaller than
         // the original — proves it's not a stored-blocks wrapper.
@@ -1533,7 +1533,7 @@ mod tests {
     /// DEFLATE support to unzip.
     fn make_deflated_zip(name: &str, content: &[u8]) -> Vec<u8> {
         let compressed = miniz_oxide::deflate::compress_to_vec(content, 6);
-        let crc = crate::helpers::crc32(content);
+        let crc = crc32(content);
 
         let mut zip = Vec::new();
         zip.extend_from_slice(b"PK\x03\x04"); // signature
@@ -1557,7 +1557,7 @@ mod tests {
         let mut fs = MemoryFs::new();
         // Make the payload large and redundant so DEFLATE actually
         // compresses it — a stored entry would be the same size.
-        let payload: Vec<u8> = (0..4096).map(|i| (b'A' + (i % 26) as u8)).collect();
+        let payload: Vec<u8> = (0..4096).map(|i| b'A' + (i % 26) as u8).collect();
         let zip_data = make_deflated_zip("big.txt", &payload);
         // Sanity check: the deflated archive should be meaningfully
         // smaller than the raw payload.

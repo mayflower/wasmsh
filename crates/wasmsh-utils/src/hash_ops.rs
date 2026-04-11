@@ -1,6 +1,6 @@
 //! Hash utilities: sha1sum, sha512sum.
 //!
-//! Backed by the `sha1` and `sha2` crates from the RustCrypto project.
+//! Backed by the `sha1` and `sha2` crates from the `RustCrypto` project.
 //! See ADR-0024, which supersedes ADR-0015's clean-room mandate.
 
 use crate::helpers::{hashsum_util, hex_encode};

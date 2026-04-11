@@ -654,14 +654,10 @@ fn base64_decode_stream(ctx: &mut UtilContext<'_>, args: &[&str]) -> Result<(), 
 
 pub(crate) fn util_base64(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let (flags, args) = parse_base64_flags(argv);
-    if flags.decode {
-        if base64_decode_stream(ctx, args).is_err() {
-            return 1;
-        }
+    let result = if flags.decode {
+        base64_decode_stream(ctx, args)
     } else {
-        if base64_encode_stream(ctx, args, flags.wrap_col).is_err() {
-            return 1;
-        }
-    }
-    0
+        base64_encode_stream(ctx, args, flags.wrap_col)
+    };
+    i32::from(result.is_err())
 }

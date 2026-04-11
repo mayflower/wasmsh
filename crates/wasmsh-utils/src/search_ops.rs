@@ -545,62 +545,43 @@ struct Matcher {
 }
 
 enum MatcherKind {
-    /// Literal substring search.
+    /// Literal substring search (used for `-F` fixed-string mode).
     Literal(String),
-    /// Simple regex compiled into a list of regex tokens.
-    Regex(Vec<RegexToken>),
-}
-
-#[derive(Debug, Clone)]
-enum RegexToken {
-    /// Match a literal character.
-    Literal(char),
-    /// `.` — match any character.
-    AnyChar,
-    /// `^` — match start of string.
-    StartAnchor,
-    /// `$` — match end of string.
-    EndAnchor,
-    /// Character class `[abc]` or `[^abc]`.
-    CharClass { chars: Vec<char>, negated: bool },
-    /// `\d` — digit.
-    Digit,
-    /// `\w` — word char.
-    WordChar,
-    /// `\s` — whitespace.
-    Space,
-    /// `\b` — word boundary.
-    WordBoundary,
-    /// `*` — zero or more of the previous token.
-    Star(Box<RegexToken>),
-    /// `+` — one or more of the previous token.
-    Plus(Box<RegexToken>),
-    /// `?` — zero or one of the previous token.
-    Optional(Box<RegexToken>),
+    /// POSIX ERE regex compiled via the shared `posix-regex` engine.
+    /// See ADR-0022 and ADR-0023.
+    Regex(crate::regex_posix::Regex),
 }
 
 impl Matcher {
     fn is_match(&self, line: &str) -> bool {
-        let haystack = if self.ignore_case {
-            line.to_lowercase()
+        let haystack_owned;
+        let haystack: &str = if self.ignore_case {
+            haystack_owned = line.to_lowercase();
+            &haystack_owned
         } else {
-            line.to_string()
+            line
         };
 
         match &self.kind {
             MatcherKind::Literal(needle) if self.word_regexp => {
-                word_match_literal(&haystack, needle)
+                word_match_literal(haystack, needle)
             }
             MatcherKind::Literal(needle) => haystack.contains(needle.as_str()),
-            MatcherKind::Regex(tokens) if self.word_regexp => split_words(&haystack)
+            MatcherKind::Regex(re) if self.word_regexp => split_words(haystack)
                 .iter()
-                .any(|w| regex_full_match(tokens, w)),
-            MatcherKind::Regex(tokens) => regex_search(tokens, &haystack),
+                .any(|w| regex_full_match(re, w)),
+            MatcherKind::Regex(re) => re.is_match(haystack),
         }
     }
 }
 
 /// Build a matcher from the user's pattern string.
+///
+/// Patterns with no regex metacharacters are compiled to a literal
+/// substring matcher (faster, and also the only thing that works for
+/// `-F` fixed-string mode).  Otherwise we compile to POSIX ERE via
+/// `posix-regex`, falling back to literal matching on pathological
+/// patterns so a malformed `rg`/`fd` invocation never panics.
 fn build_matcher(
     pattern: &str,
     ignore_case: bool,
@@ -616,7 +597,10 @@ fn build_matcher(
     let kind = if fixed_strings || is_literal_pattern(&pattern_str) {
         MatcherKind::Literal(pattern_str)
     } else {
-        MatcherKind::Regex(parse_regex(&pattern_str))
+        match crate::regex_posix::Regex::compile_ere(&pattern_str) {
+            Ok(re) => MatcherKind::Regex(re),
+            Err(_) => MatcherKind::Literal(pattern_str),
+        }
     };
 
     Matcher {
@@ -632,247 +616,13 @@ fn is_literal_pattern(pattern: &str) -> bool {
     !pattern.chars().any(|c| metas.contains(&c))
 }
 
-/// Parse a simple regex pattern into tokens.
-fn parse_regex(pattern: &str) -> Vec<RegexToken> {
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut tokens = Vec::new();
-    let mut i = 0;
-
-    while i < chars.len() {
-        let (token, next) = parse_regex_atom(&chars, i);
-        i = next;
-        i += 1;
-        let wrapped = apply_quantifier(&chars, token, &mut i);
-        tokens.push(wrapped);
-    }
-
-    tokens
-}
-
-/// Parse a single regex atom starting at position `i`. Returns the token and
-/// the position of the last character consumed (before the final `+1` step).
-fn parse_regex_atom(chars: &[char], mut i: usize) -> (RegexToken, usize) {
-    let token = match chars[i] {
-        '\\' if i + 1 < chars.len() => {
-            i += 1;
-            match chars[i] {
-                'd' => RegexToken::Digit,
-                'w' => RegexToken::WordChar,
-                's' => RegexToken::Space,
-                'b' => RegexToken::WordBoundary,
-                c => RegexToken::Literal(c),
-            }
-        }
-        '.' => RegexToken::AnyChar,
-        '^' => RegexToken::StartAnchor,
-        '$' => RegexToken::EndAnchor,
-        '[' => {
-            let (tok, end) = parse_char_class(chars, i);
-            i = end;
-            tok
-        }
-        c => RegexToken::Literal(c),
-    };
-    (token, i)
-}
-
-/// Parse a `[...]` character class starting at position `i` (the `[`).
-/// Returns the token and the position of the closing `]` (or end).
-fn parse_char_class(chars: &[char], start: usize) -> (RegexToken, usize) {
-    let mut i = start + 1;
-    let negated = i < chars.len() && chars[i] == '^';
-    if negated {
-        i += 1;
-    }
-    let mut class_chars = Vec::new();
-    while i < chars.len() && chars[i] != ']' {
-        if i + 2 < chars.len() && chars[i + 1] == '-' && chars[i + 2] != ']' {
-            for c in chars[i]..=chars[i + 2] {
-                class_chars.push(c);
-            }
-            i += 3;
-        } else {
-            class_chars.push(chars[i]);
-            i += 1;
-        }
-    }
-    (
-        RegexToken::CharClass {
-            chars: class_chars,
-            negated,
-        },
-        i,
-    )
-}
-
-/// If the next character is a quantifier (`*`, `+`, `?`), wrap the token
-/// and advance `i`. Otherwise return the token unchanged.
-fn apply_quantifier(chars: &[char], token: RegexToken, i: &mut usize) -> RegexToken {
-    if *i < chars.len() {
-        match chars[*i] {
-            '*' => {
-                *i += 1;
-                return RegexToken::Star(Box::new(token));
-            }
-            '+' => {
-                *i += 1;
-                return RegexToken::Plus(Box::new(token));
-            }
-            '?' => {
-                *i += 1;
-                return RegexToken::Optional(Box::new(token));
-            }
-            _ => {}
-        }
-    }
-    token
-}
-
-/// Check if a single token matches a character.
-fn token_matches_char(token: &RegexToken, ch: char) -> bool {
-    match token {
-        RegexToken::Literal(c) => *c == ch,
-        RegexToken::AnyChar => true,
-        RegexToken::Digit => ch.is_ascii_digit(),
-        RegexToken::WordChar => ch.is_alphanumeric() || ch == '_',
-        RegexToken::Space => ch.is_whitespace(),
-        RegexToken::CharClass { chars, negated } => {
-            let found = chars.contains(&ch);
-            if *negated {
-                !found
-            } else {
-                found
-            }
-        }
-        _ => false,
-    }
-}
-
-/// Try to match the regex tokens starting at position `start` in the haystack.
-/// Returns true if a match is found starting at `start`.
-fn regex_match_at(tokens: &[RegexToken], haystack: &[char], start: usize) -> bool {
-    try_match(tokens, 0, haystack, start)
-}
-
-/// Check whether `token` is a zero-width assertion and, if so, whether the
-/// assertion holds at position `hi`. Returns `Some(true)` if the assertion
-/// holds, `Some(false)` if it does not, and `None` if the token is not a
-/// zero-width assertion.
-fn try_zero_width_assertion(token: &RegexToken, hay: &[char], hi: usize) -> Option<bool> {
-    match token {
-        RegexToken::StartAnchor => Some(hi == 0),
-        RegexToken::EndAnchor => Some(hi == hay.len()),
-        RegexToken::WordBoundary => Some(is_word_boundary(hay, hi)),
-        _ => None,
-    }
-}
-
-/// Recursive backtracking regex matcher.
-fn try_match(tokens: &[RegexToken], ti: usize, hay: &[char], hi: usize) -> bool {
-    if ti >= tokens.len() {
-        return true;
-    }
-
-    // Check zero-width assertions (anchors and boundaries) first.
-    if let Some(rest_ok) = try_zero_width_assertion(&tokens[ti], hay, hi) {
-        return rest_ok && try_match(tokens, ti + 1, hay, hi);
-    }
-
-    match &tokens[ti] {
-        RegexToken::Star(inner) => try_match_greedy(tokens, ti, hay, hi, inner, 0),
-        RegexToken::Plus(inner) => try_match_greedy(tokens, ti, hay, hi, inner, 1),
-        RegexToken::Optional(inner) => try_match_optional(tokens, ti, hay, hi, inner),
-        other => {
-            hi < hay.len()
-                && token_matches_char(other, hay[hi])
-                && try_match(tokens, ti + 1, hay, hi + 1)
-        }
-    }
-}
-
-/// Handle greedy repetition (`*` with `min_count=0`, `+` with `min_count=1`).
-fn try_match_greedy(
-    tokens: &[RegexToken],
-    ti: usize,
-    hay: &[char],
-    hi: usize,
-    inner: &RegexToken,
-    min_count: usize,
-) -> bool {
-    let mut count = 0;
-    while hi + count < hay.len() && token_matches_char(inner, hay[hi + count]) {
-        count += 1;
-    }
-    (min_count..=count)
-        .rev()
-        .any(|c| try_match(tokens, ti + 1, hay, hi + c))
-}
-
-/// Handle `?` — try with the character first, then without.
-fn try_match_optional(
-    tokens: &[RegexToken],
-    ti: usize,
-    hay: &[char],
-    hi: usize,
-    inner: &RegexToken,
-) -> bool {
-    let with = hi < hay.len()
-        && token_matches_char(inner, hay[hi])
-        && try_match(tokens, ti + 1, hay, hi + 1);
-    with || try_match(tokens, ti + 1, hay, hi)
-}
-
-/// Check if position `pos` is a word boundary in the character array.
-fn is_word_boundary(hay: &[char], pos: usize) -> bool {
-    let prev_word = if pos > 0 {
-        hay[pos - 1].is_alphanumeric() || hay[pos - 1] == '_'
-    } else {
-        false
-    };
-    let curr_word = if pos < hay.len() {
-        hay[pos].is_alphanumeric() || hay[pos] == '_'
-    } else {
-        false
-    };
-    prev_word != curr_word
-}
-
-/// Search for a regex match anywhere in the haystack.
-fn regex_search(tokens: &[RegexToken], haystack: &str) -> bool {
-    let chars: Vec<char> = haystack.chars().collect();
-
-    // If pattern starts with ^, only try at position 0
-    if matches!(tokens.first(), Some(RegexToken::StartAnchor)) {
-        return regex_match_at(tokens, &chars, 0);
-    }
-
-    // Try at every position
-    for start in 0..=chars.len() {
-        if regex_match_at(tokens, &chars, start) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Check if the regex matches the entire string (for word matching).
-fn regex_full_match(tokens: &[RegexToken], word: &str) -> bool {
-    // Wrap tokens with ^ and $ if not already anchored
-    let chars: Vec<char> = word.chars().collect();
-    if regex_match_at(tokens, &chars, 0) {
-        // Verify the match consumed all characters by adding an EndAnchor
-        let mut extended = tokens.to_vec();
-        // Only add EndAnchor if not already present
-        if !matches!(extended.last(), Some(RegexToken::EndAnchor)) {
-            extended.push(RegexToken::EndAnchor);
-        }
-        // Only add StartAnchor if not already present
-        if !matches!(extended.first(), Some(RegexToken::StartAnchor)) {
-            extended.insert(0, RegexToken::StartAnchor);
-        }
-        regex_match_at(&extended, &chars, 0)
-    } else {
-        false
+/// Verify that the regex matches as a full-word occurrence inside
+/// `word` (which is itself already word-bounded by `split_words`).
+/// A word-regex match requires the regex to accept the whole word.
+fn regex_full_match(re: &crate::regex_posix::Regex, word: &str) -> bool {
+    match re.find(word) {
+        Some((start, end)) => start == 0 && end == word.len(),
+        None => false,
     }
 }
 

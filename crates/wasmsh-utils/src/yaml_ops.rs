@@ -18,7 +18,7 @@
 //!
 //! See ADR-0027.
 //!
-//! Field ordering: yaml_rust / saphyr parse mapping keys in document
+//! Field ordering: `yaml_rust` / `saphyr` parse mapping keys in document
 //! order.  jaq's `Val::Obj` uses an insertion-order `IndexMap`, so the
 //! conversion preserves document order end-to-end.
 
@@ -241,13 +241,12 @@ fn yaml_to_val(yaml: &Yaml<'_>) -> Val {
             }
             Val::obj(obj)
         }
-        // Tagged nodes, aliases, and directives unwrap to their
-        // underlying value for filter purposes.  yq is a data
-        // processor, not a schema validator.
+        // Tagged nodes unwrap to their underlying value — yq is a
+        // data processor, not a schema validator.  Aliases,
+        // directives, and malformed nodes collapse to null so the
+        // filter never has to special-case them.
         Yaml::Tagged(_, inner) => yaml_to_val(inner),
-        Yaml::Alias(_) => Val::Null,
-        Yaml::BadValue => Val::Null,
-        Yaml::Representation(_, _, _) => Val::Null,
+        Yaml::Alias(_) | Yaml::BadValue | Yaml::Representation(_, _, _) => Val::Null,
     }
 }
 
@@ -287,14 +286,12 @@ fn format_yq_result(val: &Val, opts: &YqOptions) -> String {
 }
 
 fn raw_string(val: &Val) -> String {
-    match val {
-        Val::Str(s) => s.to_string(),
-        _ => {
-            let mut buf = String::new();
-            jaq_runner::format_json(&mut buf, val, true);
-            buf
-        }
+    if let Val::Str(s) = val {
+        return s.to_string();
     }
+    let mut buf = String::new();
+    jaq_runner::format_json(&mut buf, val, true);
+    buf
 }
 
 /// Serialise a `Val` as a YAML block.
@@ -311,7 +308,6 @@ fn format_yaml(val: &Val) -> String {
 
 fn format_yaml_node(buf: &mut String, val: &Val, indent: usize) {
     match val {
-        Val::Null => buf.push_str("null"),
         Val::Bool(b) => {
             let _ = write!(buf, "{b}");
         }
@@ -322,7 +318,8 @@ fn format_yaml_node(buf: &mut String, val: &Val, indent: usize) {
         Val::Float(f) if f.is_finite() => {
             let _ = write!(buf, "{f}");
         }
-        Val::Float(_) => buf.push_str("null"),
+        // Null, NaN, and ±Inf all serialise as YAML null.
+        Val::Null | Val::Float(_) => buf.push_str("null"),
         Val::Str(s) => buf.push_str(&yaml_format_scalar_string(s)),
         Val::Arr(arr) if arr.is_empty() => buf.push_str("[]"),
         Val::Arr(arr) => yaml_format_array(buf, arr, indent),
@@ -428,7 +425,7 @@ fn yaml_format_object_value(buf: &mut String, val: &Val, indent: usize) {
 mod tests {
     use super::*;
     use crate::{UtilContext, VecOutput};
-    use wasmsh_fs::{MemoryFs, Vfs};
+    use wasmsh_fs::MemoryFs;
 
     fn run_yq(argv: &[&str], stdin: Option<&[u8]>) -> (i32, String, String) {
         let mut fs = MemoryFs::new();
