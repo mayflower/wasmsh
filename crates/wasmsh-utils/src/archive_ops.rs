@@ -11,56 +11,40 @@ use crate::UtilContext;
 // ---------------------------------------------------------------------------
 // gzip / gunzip / zcat
 // ---------------------------------------------------------------------------
+//
+// The gzip file format (RFC 1952) wraps a DEFLATE stream with a small
+// header and an 8-byte trailer (CRC-32 + original size).  wasmsh keeps
+// the handwritten header/trailer wrapping but delegates the actual
+// compression and decompression to `miniz_oxide` — a pure Rust port of
+// miniz, used by flate2 itself.  See ADR-0025.
 
-/// Create a valid gzip file using DEFLATE stored blocks (no actual compression).
+/// Compression level passed to miniz_oxide.  Level 6 is the classic
+/// zlib default and offers a good ratio/speed tradeoff.  Sandbox use
+/// prioritises ratio over throughput because the input sizes are
+/// small and the wall-clock budget is bounded by step limits, not by
+/// gzip wall-time.
+const GZIP_COMPRESSION_LEVEL: u8 = 6;
+
+/// Compress `data` as a gzip file using real DEFLATE compression.
 fn gzip_compress(data: &[u8]) -> Vec<u8> {
-    // Gzip header (RFC 1952)
+    // RFC 1952 header: 10 bytes, no optional fields.
     let mut out = vec![
-        0x1F, // magic
-        0x8B, // magic
-        0x08, // compression method: deflate
-        0x00, // flags: none
+        0x1F, // ID1
+        0x8B, // ID2
+        0x08, // CM: deflate
+        0x00, // FLG: none
+        0x00, 0x00, 0x00, 0x00, // MTIME: unset
+        0x00, // XFL: none
+        0xFF, // OS: unknown
     ];
-    out.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // mtime
-    out.push(0x00); // extra flags
-    out.push(0xFF); // OS: unknown
 
-    // DEFLATE stored blocks — each block max 65535 bytes
-    let mut offset = 0;
-    while offset < data.len() {
-        let remaining = data.len() - offset;
-        let block_size = remaining.min(65535);
-        let is_last = offset + block_size >= data.len();
+    // Real DEFLATE compression via miniz_oxide.
+    let compressed = miniz_oxide::deflate::compress_to_vec(data, GZIP_COMPRESSION_LEVEL);
+    out.extend_from_slice(&compressed);
 
-        // Block header byte: BFINAL (1 bit) | BTYPE=00 (2 bits) = stored
-        out.push(u8::from(is_last));
-
-        // LEN (2 bytes, little-endian)
-        let len = block_size as u16;
-        out.push((len & 0xFF) as u8);
-        out.push((len >> 8) as u8);
-
-        // NLEN (one's complement of LEN)
-        let nlen = !len;
-        out.push((nlen & 0xFF) as u8);
-        out.push((nlen >> 8) as u8);
-
-        // Raw data
-        out.extend_from_slice(&data[offset..offset + block_size]);
-        offset += block_size;
-    }
-
-    // Handle empty data: need at least one stored block
-    if data.is_empty() {
-        out.push(0x01); // final block
-        out.extend_from_slice(&[0x00, 0x00, 0xFF, 0xFF]); // len=0, nlen=0xFFFF
-    }
-
-    // Gzip trailer: CRC-32 + original size (both little-endian)
-    let checksum = crc32(data);
-    out.extend_from_slice(&checksum.to_le_bytes());
-    let orig_size = data.len() as u32;
-    out.extend_from_slice(&orig_size.to_le_bytes());
+    // Trailer: CRC-32 of uncompressed data, then ISIZE mod 2^32.
+    out.extend_from_slice(&crc32(data).to_le_bytes());
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
 
     out
 }
@@ -112,55 +96,42 @@ fn skip_null_terminated(data: &[u8], mut pos: usize) -> usize {
     pos + 1
 }
 
-/// Read DEFLATE stored blocks starting at `pos`, returning `(decompressed, end_pos)`.
-fn read_stored_blocks(data: &[u8], mut pos: usize) -> Result<(Vec<u8>, usize), String> {
-    let mut output = Vec::new();
-    loop {
-        if pos >= data.len() {
-            break;
-        }
-        let header = data[pos];
-        let is_final = header & 0x01 != 0;
-        let btype = (header >> 1) & 0x03;
-        pos += 1;
-
-        if btype != 0 {
-            return Err(format!("unsupported DEFLATE block type {btype}"));
-        }
-
-        // Stored block
-        if pos + 4 > data.len() {
-            return Err("truncated stored block header".to_string());
-        }
-        let len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
-        // Skip nlen (pos+2, pos+3)
-        pos += 4;
-        if pos + len > data.len() {
-            return Err("truncated stored block data".to_string());
-        }
-        output.extend_from_slice(&data[pos..pos + len]);
-        pos += len;
-
-        if is_final {
-            break;
-        }
-    }
-    Ok((output, pos))
-}
-
-/// Decompress a gzip file. Supports DEFLATE stored blocks only.
+/// Decompress a gzip file.  Handles all DEFLATE block types (stored,
+/// fixed Huffman, dynamic Huffman) via `miniz_oxide`, which is what
+/// real-world gzip streams use — wasmsh's previous implementation
+/// only handled stored blocks and therefore could not decompress
+/// files produced by upstream `gzip`, `curl | tar -xz`, etc.
 fn gzip_decompress(data: &[u8]) -> Result<Vec<u8>, String> {
     let pos = parse_gzip_header(data)?;
-    let (output, pos) = read_stored_blocks(data, pos)?;
+    // The trailer is the last 8 bytes: CRC-32 || ISIZE.  Everything in
+    // between the header and the trailer is the raw DEFLATE stream.
+    if data.len() < pos + 8 {
+        return Err("truncated gzip stream".to_string());
+    }
+    let deflate_end = data.len() - 8;
+    let deflate_stream = &data[pos..deflate_end];
 
-    // Verify CRC-32 and size from trailer (if present)
-    if pos + 8 <= data.len() {
-        let expected_crc =
-            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
-        let actual_crc = crc32(&output);
-        if expected_crc != actual_crc {
-            return Err("CRC-32 mismatch".to_string());
-        }
+    let output = miniz_oxide::inflate::decompress_to_vec(deflate_stream)
+        .map_err(|e| format!("inflate failed: {e}"))?;
+
+    // Verify CRC-32 and declared ISIZE against the decoded bytes.
+    let expected_crc = u32::from_le_bytes([
+        data[deflate_end],
+        data[deflate_end + 1],
+        data[deflate_end + 2],
+        data[deflate_end + 3],
+    ]);
+    if crc32(&output) != expected_crc {
+        return Err("CRC-32 mismatch".to_string());
+    }
+    let expected_isize = u32::from_le_bytes([
+        data[deflate_end + 4],
+        data[deflate_end + 5],
+        data[deflate_end + 6],
+        data[deflate_end + 7],
+    ]);
+    if (output.len() as u32) != expected_isize {
+        return Err("ISIZE mismatch".to_string());
     }
 
     Ok(output)
@@ -1070,13 +1041,7 @@ fn unzip_extract_entry(
 
     match entry.compression {
         0 => unzip_extract_stored(ctx, entry, data, &full, &name, opts),
-        8 => {
-            if !opts.quiet {
-                let msg = format!("unzip: {name}: deflate not supported in sandbox\n");
-                ctx.output.stderr(msg.as_bytes());
-            }
-            1
-        }
+        8 => unzip_extract_deflated(ctx, entry, data, &full, &name, opts),
         other => {
             if !opts.quiet {
                 let msg = format!("unzip: {name}: unsupported compression method {other}\n");
@@ -1085,6 +1050,48 @@ fn unzip_extract_entry(
             1
         }
     }
+}
+
+/// Extract a DEFLATE-compressed zip entry via `miniz_oxide`.
+fn unzip_extract_deflated(
+    ctx: &mut UtilContext<'_>,
+    entry: &ZipLocalEntry,
+    data: &[u8],
+    full: &str,
+    name: &str,
+    opts: &UnzipOpts<'_>,
+) -> i32 {
+    let end = (entry.data_start + entry.compressed_size).min(data.len());
+    let compressed = &data[entry.data_start..end];
+
+    let decompressed = match miniz_oxide::inflate::decompress_to_vec(compressed) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            if !opts.quiet {
+                let msg = format!("unzip: {name}: inflate failed: {e}\n");
+                ctx.output.stderr(msg.as_bytes());
+            }
+            return 1;
+        }
+    };
+
+    unzip_ensure_parent(ctx, full);
+
+    if !opts.overwrite && ctx.fs.stat(full).is_ok() {
+        if !opts.quiet {
+            let msg = format!("unzip: {name}: already exists, skipping\n");
+            ctx.output.stderr(msg.as_bytes());
+        }
+        return 0;
+    }
+    if write_file(ctx, "unzip", full, &decompressed) != 0 {
+        return 1;
+    }
+    if !opts.quiet {
+        let msg = format!("  inflating: {name}\n");
+        ctx.output.stdout(msg.as_bytes());
+    }
+    0
 }
 
 fn unzip_extract_dir(ctx: &mut UtilContext<'_>, full: &str, name: &str, quiet: bool) -> i32 {
@@ -1274,6 +1281,45 @@ mod tests {
         let (status, out) = run_util(util_zcat, &["zcat", "/z.txt.gz"], &mut fs, "/");
         assert_eq!(status, 0);
         assert_eq!(&out.stdout, b"content");
+    }
+
+    // Regression: prior to ADR-0025 wasmsh could only decode gzip
+    // files it had produced itself (DEFLATE stored blocks).  Real
+    // world files use fixed or dynamic Huffman blocks.  This test
+    // builds a compressed gzip file via miniz_oxide directly (the
+    // same way upstream `gzip` does) and verifies wasmsh's zcat can
+    // decode it.
+    #[test]
+    fn zcat_decompresses_real_deflate_gzip() {
+        let mut fs = MemoryFs::new();
+        // ~6KB of highly redundant data so real DEFLATE has something
+        // to compress (a stored-block implementation would produce an
+        // output of the same size; a real implementation produces a
+        // much smaller file).
+        let original: Vec<u8> = (0..6000).map(|i| (b'A' + (i % 26) as u8)).collect();
+
+        // Build a compressed gzip stream via miniz_oxide (same codec
+        // path real upstream gzip uses).
+        let mut bytes = vec![0x1F, 0x8B, 0x08, 0x00, 0, 0, 0, 0, 0, 0xFF];
+        bytes.extend_from_slice(&miniz_oxide::deflate::compress_to_vec(&original, 6));
+        bytes.extend_from_slice(&crate::helpers::crc32(&original).to_le_bytes());
+        bytes.extend_from_slice(&(original.len() as u32).to_le_bytes());
+        // Make sure the compressed file is materially smaller than
+        // the original — proves it's not a stored-blocks wrapper.
+        assert!(
+            bytes.len() < original.len() / 2,
+            "expected real compression, got {} bytes for {}",
+            bytes.len(),
+            original.len()
+        );
+
+        let h = fs.open("/real.gz", OpenOptions::write()).unwrap();
+        fs.write_file(h, &bytes).unwrap();
+        fs.close(h);
+
+        let (status, out) = run_util(util_zcat, &["zcat", "/real.gz"], &mut fs, "/");
+        assert_eq!(status, 0);
+        assert_eq!(out.stdout, original);
     }
 
     #[test]
@@ -1480,6 +1526,54 @@ mod tests {
 
     fn run_unzip(argv: &[&str], fs: &mut MemoryFs) -> (i32, VecOutput) {
         run_util(util_unzip, argv, fs, "/")
+    }
+
+    /// Build a minimal DEFLATE-compressed ZIP archive with one file
+    /// entry.  Regression fixture for ADR-0025 which added real
+    /// DEFLATE support to unzip.
+    fn make_deflated_zip(name: &str, content: &[u8]) -> Vec<u8> {
+        let compressed = miniz_oxide::deflate::compress_to_vec(content, 6);
+        let crc = crate::helpers::crc32(content);
+
+        let mut zip = Vec::new();
+        zip.extend_from_slice(b"PK\x03\x04"); // signature
+        zip.extend_from_slice(&[20, 0]); // version needed (2.0)
+        zip.extend_from_slice(&[0, 0]); // flags
+        zip.extend_from_slice(&[8, 0]); // compression method 8 (deflate)
+        zip.extend_from_slice(&[0, 0]); // mod time
+        zip.extend_from_slice(&[0, 0]); // mod date
+        zip.extend_from_slice(&crc.to_le_bytes());
+        zip.extend_from_slice(&(compressed.len() as u32).to_le_bytes()); // compressed size
+        zip.extend_from_slice(&(content.len() as u32).to_le_bytes()); // uncompressed size
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes()); // name length
+        zip.extend_from_slice(&[0, 0]); // extra length
+        zip.extend_from_slice(name.as_bytes());
+        zip.extend_from_slice(&compressed);
+        zip
+    }
+
+    #[test]
+    fn unzip_deflated_entry() {
+        let mut fs = MemoryFs::new();
+        // Make the payload large and redundant so DEFLATE actually
+        // compresses it — a stored entry would be the same size.
+        let payload: Vec<u8> = (0..4096).map(|i| (b'A' + (i % 26) as u8)).collect();
+        let zip_data = make_deflated_zip("big.txt", &payload);
+        // Sanity check: the deflated archive should be meaningfully
+        // smaller than the raw payload.
+        assert!(zip_data.len() < payload.len(), "expected compression");
+
+        let h = fs.open("/d.zip", OpenOptions::write()).unwrap();
+        fs.write_file(h, &zip_data).unwrap();
+        fs.close(h);
+
+        let (status, _) = run_unzip(&["unzip", "/d.zip"], &mut fs);
+        assert_eq!(status, 0);
+
+        let h = fs.open("/big.txt", OpenOptions::read()).unwrap();
+        let data = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(data, payload);
     }
 
     #[test]

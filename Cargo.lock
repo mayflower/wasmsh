@@ -1560,6 +1560,7 @@ dependencies = [
  "hex",
  "indexmap",
  "md-5",
+ "miniz_oxide",
  "posix-regex",
  "sha1",
  "sha2",
