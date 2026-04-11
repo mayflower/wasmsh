@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**wasmsh** is a shell runtime written in Rust that targets two WebAssembly platforms from a shared core:
+**wasmsh** is a shell runtime written in Rust that targets three WebAssembly platforms from a shared core:
 
 1. **Standalone** (`wasm32-unknown-unknown`) — browser Web Worker via `wasm-bindgen`
 2. **Pyodide** (`wasm32-unknown-emscripten`) — linked into a custom Pyodide build, sharing the Python interpreter's Emscripten module and filesystem
+3. **Component Model** (`wasm32-wasip2`) — `wasmsh-component` crate, WASI P2 component with a custom `wasmsh:component/sandbox` interface and a stateful `session` resource. First wasmCloud-facing transport seam; DeepAgents adapter and wasmCloud host plugin are deferred (see ADR-0030).
 
 Execution pipeline: `source -> lexer -> parser -> AST -> HIR -> runtime executor`.
 
@@ -27,11 +28,13 @@ The repository has multi-layer coverage across crate tests, runtime/protocol tes
 
 **Pyodide path**: `wasmsh-pyodide` wraps `wasmsh-runtime` with C ABI + JSON protocol. `EmscriptenFs` backend routes VFS through libc (shared with Python). `python`/`python3` commands run in-process via `PyRun_SimpleString`. `pip install` is intercepted at the JS host and routed through micropip. Both Node and browser use `loadPyodide()` for boot. 19 Node E2E + 12 Playwright browser E2E tests.
 
+**Component path**: `wasmsh-component` wraps `wasmsh-runtime` and exports a custom `wasmsh:component/sandbox` WIT interface with a stateful `session` resource. Built with plain Cargo + `wit-bindgen` targeting `wasm32-wasip2` (no `cargo-component` dependency). A host-testable `SessionCore` layer holds one initialised `WorkerRuntime`; the wit-bindgen glue lives behind the `component-export` feature so native unit tests link on any target. Build-contract test optionally inspects the WIT surface with `wasm-tools` and smoke-invokes `run-once` under `wasmtime` when those binaries are available.
+
 Notable features: `[[ ]]`, `(( ))`, C-style `for (( ))`, arrays, `declare`/`typeset`, `alias`/`unalias`, `let`, `shopt`, extended globbing, globstar, full arithmetic, case modification, indirect expansion, dynamic variables (`$RANDOM`, `$LINENO`, `$SECONDS`, `$FUNCNAME`, `$BASH_SOURCE`, `$PIPESTATUS`), `printf`/`read`, `mapfile`, `builtin`, `select`, `|&`, `case` fall-through, `set -euo pipefail`, 88 utilities (jq, awk, yq, bc, rg, fd, diff/patch, tree, tar, gzip, unzip, xxd, dd, strings, md5sum/sha*sum, curl, wget).
 
 ## Rust Toolchain
 
-Pinned via `rust-toolchain.toml` (stable + rustfmt, clippy, rust-src, llvm-tools, `wasm32-unknown-unknown` + `wasm32-unknown-emscripten` targets). Cargo may not be on PATH by default:
+Pinned via `rust-toolchain.toml` (stable + rustfmt, clippy, rust-src, llvm-tools, `wasm32-unknown-unknown` + `wasm32-unknown-emscripten` + `wasm32-wasip2` targets). Cargo may not be on PATH by default:
 ```bash
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 ```
@@ -55,6 +58,11 @@ just build-pyodide          # custom Pyodide → dist/pyodide-custom/
 just test-e2e-pyodide-node  # Node E2E (19 tests)
 just test-e2e-pyodide-browser # Playwright browser E2E (4 tests)
 just build-emscripten-probe # emscripten staticlib probe
+
+# ── Component (WASI P2, wasmcloud-facing) ──────────
+just build-component        # cargo build --target wasm32-wasip2 -p wasmsh-component
+just clippy-component       # clippy on the wasip2 target
+just test-e2e-component     # build + optional wasm-tools/wasmtime smoke
 
 # ── Quality ─────────────────────────────────────────
 just clippy-wasm            # clippy for wasm32 target
@@ -82,7 +90,7 @@ just doc                    # docs with warnings-as-errors
 
 ## Cargo Workspace Structure
 
-15 workspace crates under `crates/`: `wasmsh-ast`, `wasmsh-lex`, `wasmsh-parse`, `wasmsh-expand`, `wasmsh-hir`, `wasmsh-ir`, `wasmsh-vm`, `wasmsh-state`, `wasmsh-fs`, `wasmsh-builtins`, `wasmsh-utils`, `wasmsh-runtime`, `wasmsh-browser`, `wasmsh-protocol`, `wasmsh-testkit`.
+16 workspace crates under `crates/`: `wasmsh-ast`, `wasmsh-lex`, `wasmsh-parse`, `wasmsh-expand`, `wasmsh-hir`, `wasmsh-ir`, `wasmsh-vm`, `wasmsh-state`, `wasmsh-fs`, `wasmsh-builtins`, `wasmsh-utils`, `wasmsh-runtime`, `wasmsh-browser`, `wasmsh-component`, `wasmsh-protocol`, `wasmsh-testkit`.
 
 2 excluded crates (require emcc): `wasmsh-pyodide-probe`, `wasmsh-pyodide`.
 
@@ -96,6 +104,7 @@ just doc                    # docs with warnings-as-errors
 - **Platform**: `BackendFs` type alias → `MemoryFs` (standalone) or `EmscriptenFs` (Pyodide, via `emscripten` feature)
 - **Standalone embedding**: `wasmsh-browser` — wasm-bindgen Web Worker with `WasmShell` JS API
 - **Pyodide embedding**: `wasmsh-pyodide` — C ABI + JSON protocol, `python`/`python3` via `ExternalCommandHandler`
+- **Component embedding**: `wasmsh-component` — wit-bindgen WASI P2 component exporting `wasmsh:component/sandbox` with a `session` resource; host-testable `SessionCore` layer keeps unit tests target-agnostic
 
 ## Key ADRs
 
@@ -112,6 +121,7 @@ ADRs are in `docs/adr/`. Key decisions:
 - ADR-0020: E2E-first testing policy
 - ADR-0021: Network capability model (curl/wget with host allowlist)
 - ADR-0029: Dual-path executor (runtime interpreter + VM subset)
+- ADR-0030: WASI P2 Component Model transport (wasmcloud-facing)
 
 ## Feature Flags
 

@@ -3,7 +3,7 @@
 Communication protocol between the host application and the wasmsh runtime
 (`WorkerRuntime`). The protocol is defined as Rust enums in the
 [`wasmsh-protocol`](../../crates/wasmsh-protocol/src/lib.rs) crate and
-exposed in two transports:
+exposed in three transports:
 
 - **Native Rust**: enum values are passed directly into
   `WorkerRuntime::handle_command(...)` and a `Vec<WorkerEvent>` is returned.
@@ -13,19 +13,40 @@ exposed in two transports:
   `HostCommand` and returns a JSON-encoded `Vec<WorkerEvent>`. This is the
   path used by the npm package and any embedder talking to wasmsh through
   Pyodide.
+- **Component Model (WASI P2)**: the
+  [`wasmsh-component`](../../crates/wasmsh-component) crate builds for
+  `wasm32-wasip2` and exports a custom
+  [`wasmsh:component/sandbox`](../../crates/wasmsh-component/wit/world.wit)
+  interface with a stateful `session` resource and a `run-once` convenience
+  function. This is the first wasmCloud-facing transport seam; host-side
+  wasmCloud plugin wiring and the DeepAgents adapter are out of scope for
+  this transport. See [ADR-0030](../adr/adr-0030-wasmcloud-component-transport.md).
 
-Both transports carry the same payloads. The Rust definitions are the
-canonical schema; the JSON form is `serde_json`'s default tagged
-representation of those enums (see [JSON Wire Format](#json-wire-format)).
+All three transports carry the same semantics. The Rust definitions remain
+the canonical schema; the JSON form is `serde_json`'s default tagged
+representation of those enums (see [JSON Wire Format](#json-wire-format)),
+and the Component Model transport is a typed projection of the same
+command/event concepts with a session-scoped surface.
 
-An experimental typed WIT projection also ships with the protocol crate at
-[`crates/wasmsh-protocol/wit/worker-protocol.wit`](../../crates/wasmsh-protocol/wit/worker-protocol.wit).
-It exposes the same operations as typed functions (`init`, `run`,
-`start-run`, `poll-run`, `cancel`, `read-file`, `write-file`, `list-dir`,
-`mount`) and reuses typed event/value definitions for `worker-event` and
-`diagnostic-level`. The serde enums remain the canonical contract for current
-Rust and JSON embedders; the WIT world is an additive, experimental projection
-for future component-model integrations.
+There are also two separate WIT files in the tree, both additive projections
+of the same protocol concepts:
+
+- [`crates/wasmsh-protocol/wit/worker-protocol.wit`](../../crates/wasmsh-protocol/wit/worker-protocol.wit)
+  (`package wasmsh:protocol`) — an experimental typed mirror of the serde
+  enums, exposing `init`, `run`, `start-run`, `poll-run`, `cancel`,
+  `read-file`, `write-file`, `list-dir`, and `mount` as typed functions.
+  Used today only by the `wasmsh-protocol` crate's `wit_contract` test to
+  lock the shape of the existing protocol enums.
+- [`crates/wasmsh-component/wit/world.wit`](../../crates/wasmsh-component/wit/world.wit)
+  (`package wasmsh:component`) — the canonical contract for the Component
+  Model transport. Unlike the protocol-level mirror above, this one wraps
+  session state in a WIT `resource session` and is actually linked into a
+  Wasm component via `wit-bindgen`.
+
+The two WIT packages coexist on purpose: `wasmsh:protocol` documents the
+protocol-level enum shape, while `wasmsh:component/sandbox` is the
+consumer-facing session resource that wasmCloud hosts and Component Model
+embedders will call into.
 
 ## Protocol Version
 

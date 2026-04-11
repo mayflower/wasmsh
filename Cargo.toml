@@ -15,6 +15,7 @@ members = [
     "crates/wasmsh-utils",
     "crates/wasmsh-runtime",
     "crates/wasmsh-browser",
+    "crates/wasmsh-component",
     "crates/wasmsh-protocol",
     "crates/wasmsh-testkit",
 ]
@@ -102,6 +103,7 @@ wasmsh-builtins = { version = "0.5.9", path = "crates/wasmsh-builtins" }
 wasmsh-utils = { version = "0.5.9", path = "crates/wasmsh-utils" }
 wasmsh-runtime = { version = "0.5.9", path = "crates/wasmsh-runtime" }
 wasmsh-browser = { version = "0.5.9", path = "crates/wasmsh-browser" }
+wasmsh-component = { version = "0.5.9", path = "crates/wasmsh-component" }
 wasmsh-protocol = { version = "0.5.9", path = "crates/wasmsh-protocol" }
 wasmsh-testkit = { version = "0.5.9", path = "crates/wasmsh-testkit" }
 

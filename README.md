@@ -11,9 +11,10 @@
 
 A sandboxed shell with 88 utilities (grep, sed, awk, jq, tar, curl, …), Python 3.13 with pip/micropip for installing pure-Python packages, and a virtual filesystem — all running in-process as WebAssembly. No OS processes, no network access unless explicitly allowed, step budgets to prevent runaway execution.
 
-Two build targets from one codebase:
+Three build targets from one codebase:
 - **Standalone** (`wasm32-unknown-unknown`) — browser Web Worker
 - **Pyodide** (`wasm32-unknown-emscripten`) — shell and Python share the same filesystem
+- **Component Model** (`wasm32-wasip2`) — WASI P2 component with a custom `wasmsh:component/sandbox` interface and a stateful `session` resource, intended as the first wasmCloud-facing transport. See [ADR-0030](docs/adr/adr-0030-wasmcloud-component-transport.md). The DeepAgents adapter and wasmCloud host-side integration are not part of this target yet.
 
 ## Use with DeepAgents
 
@@ -64,6 +65,7 @@ Pre-built tarballs: [GitHub Releases](https://github.com/mayflower/wasmsh/releas
 cargo build --workspace && cargo test --workspace   # Rust (1.89+)
 just build-standalone                                # standalone wasm
 just build-pyodide                                   # Pyodide wasm (needs emcc)
+just build-component                                 # wasm32-wasip2 component
 ```
 
 ## Docs

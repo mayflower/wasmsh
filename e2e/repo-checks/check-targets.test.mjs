@@ -24,6 +24,9 @@ describe("just targets exist", () => {
     "build-pyodide",
     "test-e2e-pyodide-node",
     "test-e2e-pyodide-browser",
+    "build-component",
+    "clippy-component",
+    "test-e2e-component",
   ]) {
     it("just " + target, () => {
       assert.ok(justTargetExists(target), "missing just target: " + target);
@@ -53,6 +56,7 @@ describe("ADRs exist", () => {
     "ADR-0018-pyodide-same-module.md",
     "ADR-0019-dual-target-packaging.md",
     "ADR-0020-e2e-first-testing.md",
+    "adr-0030-wasmcloud-component-transport.md",
   ]) {
     it(adr, () => {
       assert.ok(
@@ -63,10 +67,58 @@ describe("ADRs exist", () => {
   }
 });
 
-describe("README documents both build paths", () => {
-  it("mentions standalone and pyodide", () => {
+describe("README documents all three build paths", () => {
+  it("mentions standalone, pyodide, and component", () => {
     const readme = readFileSync(resolve(REPO, "README.md"), "utf-8");
     assert.ok(readme.includes("Standalone"), "README should mention Standalone");
     assert.ok(readme.includes("Pyodide"), "README should mention Pyodide");
+    assert.ok(
+      readme.includes("Component Model") || readme.includes("wasm32-wasip2"),
+      "README should mention the Component Model / WASI P2 transport",
+    );
+  });
+});
+
+describe("Component Model transport plumbing", () => {
+  it("rust-toolchain.toml lists wasm32-wasip2", () => {
+    const content = readFileSync(resolve(REPO, "rust-toolchain.toml"), "utf-8");
+    assert.ok(
+      content.includes("wasm32-wasip2"),
+      "rust-toolchain.toml should list wasm32-wasip2",
+    );
+  });
+
+  it("workspace Cargo.toml lists the wasmsh-component member", () => {
+    const content = readFileSync(resolve(REPO, "Cargo.toml"), "utf-8");
+    assert.ok(
+      content.includes("crates/wasmsh-component"),
+      "workspace Cargo.toml should include crates/wasmsh-component",
+    );
+  });
+
+  it("component crate has a wit/ world file", () => {
+    assert.ok(
+      existsSync(resolve(REPO, "crates/wasmsh-component/wit/world.wit")),
+      "wasmsh-component should ship a wit/world.wit",
+    );
+  });
+
+  it("CLAUDE.md documents the new component target", () => {
+    const content = readFileSync(resolve(REPO, "CLAUDE.md"), "utf-8");
+    assert.ok(
+      content.includes("wasm32-wasip2") || content.includes("wasmsh-component"),
+      "CLAUDE.md should mention the WASI P2 component target",
+    );
+  });
+
+  it("docs/reference/protocol.md mentions the third transport", () => {
+    const content = readFileSync(
+      resolve(REPO, "docs/reference/protocol.md"),
+      "utf-8",
+    );
+    assert.ok(
+      content.includes("Component Model") || content.includes("wasm32-wasip2"),
+      "docs/reference/protocol.md should describe the Component Model transport",
+    );
   });
 });
