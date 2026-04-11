@@ -24,6 +24,10 @@ sha1 = { workspace = true }
 sha2 = { workspace = true }
 digest = { workspace = true }
 miniz_oxide = { workspace = true }
+jaq-core = { workspace = true }
+jaq-std = { workspace = true }
+jaq-json = { workspace = true }
+hifijson = { workspace = true }
 
 [lints]
 workspace = true

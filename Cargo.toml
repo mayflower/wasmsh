@@ -66,6 +66,12 @@ digest = { version = "0.10", default-features = false }
 # gzip header/trailer wrapper by gzip/gunzip/zcat and by tar -z.
 # MIT / Apache-2 / Zlib, no_std with alloc.  See ADR-0025.
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+# jq filter-language interpreter — audited pure-Rust reimplementation.
+# MIT, no_std-friendly, wasm32 verified.  See ADR-0026.
+jaq-core = { version = "2" }
+jaq-std = { version = "2" }
+jaq-json = { version = "1", features = ["parse"] }
+hifijson = { version = "0.2" }
 
 # Internal crates. The `version` field is consumed by `cargo publish` and
 # the `path` field by local workspace builds.  Kept in lockstep with the
