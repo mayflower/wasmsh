@@ -91,7 +91,7 @@ fn head_emit_reader(
                         let mut consumed = 0usize;
                         while consumed < read && lines_seen < *limit {
                             let byte = buffer[consumed];
-                            output.stdout(&buffer[consumed..consumed + 1]);
+                            output.stdout(&buffer[consumed..=consumed]);
                             consumed += 1;
                             if byte == b'\n' {
                                 lines_seen += 1;
@@ -727,8 +727,7 @@ fn grep_regex_word_match(line: &str, re: &crate::regex_posix::Regex) -> bool {
             || !line.as_bytes()[start - 1].is_ascii_alphanumeric()
                 && line.as_bytes()[start - 1] != b'_';
         let after_ok = end >= line.len()
-            || !line.as_bytes()[end].is_ascii_alphanumeric()
-                && line.as_bytes()[end] != b'_';
+            || !line.as_bytes()[end].is_ascii_alphanumeric() && line.as_bytes()[end] != b'_';
         if before_ok && after_ok {
             return true;
         }
@@ -758,8 +757,7 @@ fn grep_find_match<'a>(line: &'a str, pattern: &str, flags: &GrepFlags) -> Optio
                         || !l.as_bytes()[start - 1].is_ascii_alphanumeric()
                             && l.as_bytes()[start - 1] != b'_';
                     let after_ok = end >= l.len()
-                        || !l.as_bytes()[end].is_ascii_alphanumeric()
-                            && l.as_bytes()[end] != b'_';
+                        || !l.as_bytes()[end].is_ascii_alphanumeric() && l.as_bytes()[end] != b'_';
                     if !(before_ok && after_ok) {
                         continue;
                     }
@@ -1017,28 +1015,25 @@ pub(crate) fn util_grep(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut found_any = false;
     for path in &file_args {
         let full = resolve_path(ctx.cwd, path);
-        match open_reader_for_path(ctx, &full, path, "grep") {
-            Ok(mut reader) => {
-                let fname = if show_fn { Some(*path) } else { None };
-                let Ok((found, _)) = grep_process_reader(
-                    ctx.output,
-                    reader.as_mut(),
-                    fname,
-                    &adj_flags,
-                    &patterns,
-                    "grep",
-                ) else {
-                    continue;
-                };
-                if found {
-                    found_any = true;
-                    if adj_flags.files_only {
-                        let out = format!("{path}\n");
-                        ctx.output.stdout(out.as_bytes());
-                    }
+        if let Ok(mut reader) = open_reader_for_path(ctx, &full, path, "grep") {
+            let fname = if show_fn { Some(*path) } else { None };
+            let Ok((found, _)) = grep_process_reader(
+                ctx.output,
+                reader.as_mut(),
+                fname,
+                &adj_flags,
+                &patterns,
+                "grep",
+            ) else {
+                continue;
+            };
+            if found {
+                found_any = true;
+                if adj_flags.files_only {
+                    let out = format!("{path}\n");
+                    ctx.output.stdout(out.as_bytes());
                 }
             }
-            Err(_) => {}
         }
     }
     i32::from(!found_any)
@@ -2414,13 +2409,13 @@ impl<'a> PasteSource<'a> {
         if self.finished {
             return Ok(None);
         }
-        match read_next_line_from_reader(self.reader.as_mut(), &mut self.pending, output, "paste")?
+        if let Some((line, _had_newline)) =
+            read_next_line_from_reader(self.reader.as_mut(), &mut self.pending, output, "paste")?
         {
-            Some((line, _had_newline)) => Ok(Some(line)),
-            None => {
-                self.finished = true;
-                Ok(None)
-            }
+            Ok(Some(line))
+        } else {
+            self.finished = true;
+            Ok(None)
         }
     }
 }
@@ -3280,11 +3275,7 @@ mod tests {
     #[test]
     fn grep_bre_char_class() {
         let mut fs = make_fs_with_file("/g.txt", b"foo 123\nbar\nbaz 99\n");
-        let (status, out, _) = run(
-            util_grep,
-            &["grep", "[0-9][0-9]*", "/g.txt"],
-            &mut fs,
-        );
+        let (status, out, _) = run(util_grep, &["grep", "[0-9][0-9]*", "/g.txt"], &mut fs);
         assert_eq!(status, 0);
         assert!(out.contains("foo 123"));
         assert!(out.contains("baz 99"));
@@ -3294,11 +3285,7 @@ mod tests {
     #[test]
     fn grep_ere_alternation() {
         let mut fs = make_fs_with_file("/g.txt", b"foo\nbar\nbaz\nquux\n");
-        let (status, out, _) = run(
-            util_grep,
-            &["grep", "-E", "foo|baz", "/g.txt"],
-            &mut fs,
-        );
+        let (status, out, _) = run(util_grep, &["grep", "-E", "foo|baz", "/g.txt"], &mut fs);
         assert_eq!(status, 0);
         assert_eq!(out, "foo\nbaz\n");
     }
@@ -3306,11 +3293,7 @@ mod tests {
     #[test]
     fn grep_bre_escaped_brackets() {
         let mut fs = make_fs_with_file("/g.txt", b"[section]\nkey=value\n[other]\n");
-        let (status, out, _) = run(
-            util_grep,
-            &["grep", r"\[section\]", "/g.txt"],
-            &mut fs,
-        );
+        let (status, out, _) = run(util_grep, &["grep", r"\[section\]", "/g.txt"], &mut fs);
         assert_eq!(status, 0);
         assert_eq!(out, "[section]\n");
     }
@@ -3390,10 +3373,7 @@ mod tests {
 
     #[test]
     fn sed_bre_escaped_brackets_address() {
-        let mut fs = make_fs_with_file(
-            "/cfg.txt",
-            b"[section]\nkey=value\n[other]\nkey2=value2\n",
-        );
+        let mut fs = make_fs_with_file("/cfg.txt", b"[section]\nkey=value\n[other]\nkey2=value2\n");
         let (status, out, _) = run(
             util_sed,
             &["sed", "-n", r"/\[section\]/p", "/cfg.txt"],
@@ -3431,11 +3411,7 @@ mod tests {
     #[test]
     fn sed_ampersand_backref_in_replacement() {
         let mut fs = make_fs_with_file("/p.txt", b"foo 42 bar\n");
-        let (status, out, _) = run(
-            util_sed,
-            &["sed", "s/[0-9][0-9]*/<&>/", "/p.txt"],
-            &mut fs,
-        );
+        let (status, out, _) = run(util_sed, &["sed", "s/[0-9][0-9]*/<&>/", "/p.txt"], &mut fs);
         assert_eq!(status, 0);
         assert_eq!(out, "foo <42> bar\n");
     }

@@ -393,7 +393,7 @@ pub(crate) fn util_xargs(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         for item in &items {
             if cmd == "echo" {
                 let out = if extra.is_empty() {
-                    item.to_string()
+                    item.clone()
                 } else {
                     extra
                         .iter()
@@ -642,9 +642,7 @@ fn base64_decode_stream(ctx: &mut UtilContext<'_>, args: &[&str]) -> Result<(), 
                 base64::DecodeError::InvalidLength(_) => {
                     "base64: invalid base64 input length\n".to_string()
                 }
-                base64::DecodeError::InvalidPadding => {
-                    "base64: invalid padding\n".to_string()
-                }
+                base64::DecodeError::InvalidPadding => "base64: invalid padding\n".to_string(),
             };
             ctx.output.stderr(msg.as_bytes());
             Err(1)

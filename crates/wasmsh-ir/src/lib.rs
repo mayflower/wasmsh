@@ -14,10 +14,7 @@ use wasmsh_hir::{HirAndOr, HirAndOrOp, HirCommand, HirPipeline, HirRedirection};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ir {
     /// Set a shell variable from a shell word.
-    Assign {
-        name: SmolStr,
-        value: Option<Word>,
-    },
+    Assign { name: SmolStr, value: Option<Word> },
     /// Invoke a builtin command with its argv and redirection plan.
     ExecuteBuiltin {
         name: SmolStr,

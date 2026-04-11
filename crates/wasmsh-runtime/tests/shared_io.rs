@@ -1,15 +1,8 @@
+mod common;
+
+use common::{get_exit, get_stderr, get_stdout};
 use wasmsh_protocol::HostCommand;
 use wasmsh_runtime::{ExternalCommandResult, WorkerRuntime};
-
-fn get_stdout(events: &[wasmsh_protocol::WorkerEvent]) -> String {
-    let mut out = Vec::new();
-    for event in events {
-        if let wasmsh_protocol::WorkerEvent::Stdout(data) = event {
-            out.extend_from_slice(data);
-        }
-    }
-    String::from_utf8(out).unwrap_or_default()
-}
 
 fn install_hostcat(rt: &mut WorkerRuntime) {
     rt.set_external_handler(Box::new(|name, _argv, stdin| {
@@ -159,6 +152,47 @@ fn builtin_keyword_bypasses_function_shadowing() {
     });
 
     assert_eq!(get_stdout(&events), "function\nbuiltin");
+}
+
+#[test]
+fn nounset_builtin_expansion_surfaces_error_through_vm_subset_path() {
+    let mut rt = WorkerRuntime::new();
+    rt.handle_command(HostCommand::Init {
+        step_budget: 0,
+        allowed_hosts: vec![],
+    });
+
+    let events = rt.handle_command(HostCommand::Run {
+        input: "set -u; echo $UNSET_VAR".into(),
+    });
+
+    assert_eq!(get_stdout(&events), "");
+    assert!(
+        get_stderr(&events).contains("UNSET_VAR: unbound variable"),
+        "stderr = {:?}",
+        get_stderr(&events)
+    );
+    assert_eq!(get_exit(&events), 1);
+}
+
+#[test]
+fn nounset_assignment_expansion_surfaces_error_through_vm_subset_path() {
+    let mut rt = WorkerRuntime::new();
+    rt.handle_command(HostCommand::Init {
+        step_budget: 0,
+        allowed_hosts: vec![],
+    });
+
+    let events = rt.handle_command(HostCommand::Run {
+        input: "set -u; FOO=$UNSET_VAR".into(),
+    });
+
+    assert!(
+        get_stderr(&events).contains("UNSET_VAR: unbound variable"),
+        "stderr = {:?}",
+        get_stderr(&events)
+    );
+    assert_eq!(get_exit(&events), 1);
 }
 
 #[test]

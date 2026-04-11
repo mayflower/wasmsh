@@ -5,10 +5,13 @@
 //! Init returns Version, Run returns stdout/exit, WriteFile/ReadFile/ListDir
 //! work end-to-end.
 
-use wasmsh_protocol::{DiagnosticLevel, HostCommand, WorkerEvent, PROTOCOL_VERSION};
-use wasmsh_runtime::{ExecutionPoll, ExternalCommandResult, WorkerRuntime};
+mod common;
+
+use common::{get_exit, get_stderr, get_stdout};
 use wasmsh_ast::WordPart;
 use wasmsh_hir::HirCommand;
+use wasmsh_protocol::{DiagnosticLevel, HostCommand, WorkerEvent, PROTOCOL_VERSION};
+use wasmsh_runtime::{ExecutionPoll, ExternalCommandResult, WorkerRuntime};
 
 fn new_runtime(step_budget: u32) -> WorkerRuntime {
     let mut rt = WorkerRuntime::new();
@@ -17,39 +20,6 @@ fn new_runtime(step_budget: u32) -> WorkerRuntime {
         allowed_hosts: vec![],
     });
     rt
-}
-
-fn get_stdout(events: &[WorkerEvent]) -> String {
-    let mut out = Vec::new();
-    for e in events {
-        if let WorkerEvent::Stdout(data) = e {
-            out.extend_from_slice(data);
-        }
-    }
-    String::from_utf8(out).unwrap_or_default()
-}
-
-fn get_stderr(events: &[WorkerEvent]) -> String {
-    let mut out = Vec::new();
-    for e in events {
-        if let WorkerEvent::Stderr(data) = e {
-            out.extend_from_slice(data);
-        }
-    }
-    String::from_utf8(out).unwrap_or_default()
-}
-
-fn get_exit(events: &[WorkerEvent]) -> i32 {
-    events
-        .iter()
-        .find_map(|e| {
-            if let WorkerEvent::Exit(s) = e {
-                Some(*s)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(-1)
 }
 
 fn install_hosterr(rt: &mut WorkerRuntime) {
@@ -80,7 +50,9 @@ fn collect_execution_events(rt: &mut WorkerRuntime) -> Vec<WorkerEvent> {
 }
 
 fn has_yielded(events: &[WorkerEvent]) -> bool {
-    events.iter().any(|event| matches!(event, WorkerEvent::Yielded))
+    events
+        .iter()
+        .any(|event| matches!(event, WorkerEvent::Yielded))
 }
 
 fn run_with_vm_subset(input: &str, enabled: bool) -> Vec<WorkerEvent> {
@@ -182,12 +154,12 @@ fn parser_lowers_compound_array_assignment_as_assignment_command() {
     let HirCommand::Assign(assign) = &hir.items[0].list[0].first.commands[0] else {
         panic!("expected assignment command");
     };
-    let value = assign.assignments[0].value.as_ref().expect("compound value");
+    let value = assign.assignments[0]
+        .value
+        .as_ref()
+        .expect("compound value");
     assert_eq!(value.parts.len(), 1);
-    assert_eq!(
-        value.parts[0],
-        WordPart::Literal("(one two three)".into())
-    );
+    assert_eq!(value.parts[0], WordPart::Literal("(one two three)".into()));
 }
 
 #[test]
@@ -436,7 +408,9 @@ fn active_execution_matches_run_wrapper_output() {
     install_hosterr(&mut direct);
     install_hosterr(&mut resumable);
 
-    let direct_events = direct.handle_command(HostCommand::Run { input: input.into() });
+    let direct_events = direct.handle_command(HostCommand::Run {
+        input: input.into(),
+    });
     resumable.start_execution(input.into()).unwrap();
     let resumed_events = collect_execution_events(&mut resumable);
 
@@ -447,7 +421,8 @@ fn active_execution_matches_run_wrapper_output() {
 fn cancelling_active_execution_returns_clean_exit_and_next_run_recovers() {
     let mut rt = new_runtime(1);
 
-    rt.start_execution("echo first; echo second".into()).unwrap();
+    rt.start_execution("echo first; echo second".into())
+        .unwrap();
     match rt.poll_active_run().expect("first poll") {
         ExecutionPoll::Yield(events) => assert_eq!(get_stdout(&events), "first\n"),
         ExecutionPoll::Done(events) => panic!("expected yield, got done: {events:?}"),
@@ -478,7 +453,8 @@ fn cancelling_active_execution_returns_clean_exit_and_next_run_recovers() {
 fn yielded_execution_does_not_leak_unreached_state_into_next_run() {
     let mut rt = new_runtime(1);
 
-    rt.start_execution("echo ready; foo=after-yield".into()).unwrap();
+    rt.start_execution("echo ready; foo=after-yield".into())
+        .unwrap();
     match rt.poll_active_run().expect("first poll") {
         ExecutionPoll::Yield(events) => assert_eq!(get_stdout(&events), "ready\n"),
         ExecutionPoll::Done(events) => panic!("expected yield, got done: {events:?}"),
@@ -572,8 +548,12 @@ fn run_remains_compatible_with_progressive_protocol_added() {
     install_hosterr(&mut progressive);
     let input = "echo left; hosterr; echo right";
 
-    let run_events = one_shot.handle_command(HostCommand::Run { input: input.into() });
-    let start = progressive.handle_command(HostCommand::StartRun { input: input.into() });
+    let run_events = one_shot.handle_command(HostCommand::Run {
+        input: input.into(),
+    });
+    let start = progressive.handle_command(HostCommand::StartRun {
+        input: input.into(),
+    });
     assert_eq!(start, vec![WorkerEvent::Yielded]);
 
     let mut progressive_events = Vec::new();

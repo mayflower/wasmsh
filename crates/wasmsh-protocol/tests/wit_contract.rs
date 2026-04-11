@@ -34,7 +34,11 @@ fn worker_interface<'a>(resolve: &'a Resolve) -> &'a wit_parser::Interface {
     &resolve.interfaces[interface_id]
 }
 
-fn named_type<'a>(resolve: &'a Resolve, interface: &'a wit_parser::Interface, name: &str) -> &'a wit_parser::TypeDef {
+fn named_type<'a>(
+    resolve: &'a Resolve,
+    interface: &'a wit_parser::Interface,
+    name: &str,
+) -> &'a wit_parser::TypeDef {
     let type_id = interface
         .types
         .get(name)
@@ -164,12 +168,23 @@ fn experimental_wit_functions_match_progressive_protocol_shape() {
         Type::Id(id) => id,
         other => panic!("expected init-config param, found {other:?}"),
     };
-    assert_eq!(resolve.types[config_id].name.as_deref(), Some("init-config"));
-    expect_list_of_named_type(&resolve, init.result.expect("init should return events"), "worker-event");
+    assert_eq!(
+        resolve.types[config_id].name.as_deref(),
+        Some("init-config")
+    );
+    expect_list_of_named_type(
+        &resolve,
+        init.result.expect("init should return events"),
+        "worker-event",
+    );
 
     let run = interface.functions.get("run").expect("run should exist");
     assert_eq!(run.params, vec![("input".into(), Type::String)]);
-    expect_list_of_named_type(&resolve, run.result.expect("run should return events"), "worker-event");
+    expect_list_of_named_type(
+        &resolve,
+        run.result.expect("run should return events"),
+        "worker-event",
+    );
 
     let start_run = interface
         .functions
@@ -212,7 +227,9 @@ fn experimental_wit_functions_match_progressive_protocol_shape() {
         assert_eq!(function.params, vec![("path".into(), Type::String)]);
         expect_list_of_named_type(
             &resolve,
-            function.result.expect("filesystem operations should return events"),
+            function
+                .result
+                .expect("filesystem operations should return events"),
             "worker-event",
         );
     }
@@ -225,9 +242,7 @@ fn experimental_wit_functions_match_progressive_protocol_shape() {
     expect_list_of_u8(&resolve, write_file.params[1].1);
     expect_list_of_named_type(
         &resolve,
-        write_file
-            .result
-            .expect("write-file should return events"),
+        write_file.result.expect("write-file should return events"),
         "worker-event",
     );
 }

@@ -84,9 +84,7 @@ pub(crate) fn run_filter(
 pub(crate) fn parse_json_single(s: &str) -> Result<Val, String> {
     use hifijson::token::Lex;
     let mut lexer = hifijson::SliceLexer::new(s.as_bytes());
-    lexer
-        .exactly_one(Val::parse)
-        .map_err(|e| format!("{e}"))
+    lexer.exactly_one(Val::parse).map_err(|e| format!("{e}"))
 }
 
 /// Parse a stream of whitespace-separated JSON values (jq's convention:

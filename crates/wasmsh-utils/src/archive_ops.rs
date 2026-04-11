@@ -1,5 +1,7 @@
 //! Archive utilities: tar, gzip, gunzip, zcat.
 
+use std::io::Read;
+
 use wasmsh_fs::Vfs;
 
 use crate::helpers::{
@@ -695,7 +697,6 @@ fn tar_load_data(
 fn read_stdin_bytes(ctx: &mut UtilContext<'_>) -> Vec<u8> {
     let mut data = Vec::new();
     if let Some(mut stdin) = ctx.stdin.take() {
-        use std::io::Read;
         let _ = stdin.read_to_end(&mut data);
     }
     data
@@ -848,7 +849,6 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         // `zip::read::ZipFile` implements `Read` and already handles
         // DEFLATE, stored, deflate64, and (with extra features) bzip2
         // / zstd / lzma.
-        use std::io::Read;
         let mut buf = Vec::with_capacity(uncompressed_size.min(16 * 1024 * 1024) as usize);
         if let Err(e) = entry.read_to_end(&mut buf) {
             let msg = format!("unzip: {raw_name}: {e}\n");

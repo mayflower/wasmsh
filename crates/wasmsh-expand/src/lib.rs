@@ -166,10 +166,7 @@ fn expand_parameter(name: &SmolStr, state: &mut ShellState, out: &mut String, de
         let is_special = matches!(name.as_str(), "?" | "#" | "0" | "@" | "*" | "-" | "$" | "!")
             || name.parse::<usize>().is_ok();
         if !is_special {
-            state.set_var(
-                SmolStr::from("_NOUNSET_ERROR"),
-                SmolStr::from(name.as_str()),
-            );
+            state.set_nounset_error(name);
         }
     }
 }

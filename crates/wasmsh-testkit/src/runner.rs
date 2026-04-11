@@ -8,8 +8,8 @@ use std::path::Path;
 use wasmsh_protocol::{HostCommand, WorkerEvent};
 use wasmsh_runtime::WorkerRuntime;
 
-use crate::{features, oracle};
 use crate::toml_case::TomlTestFile;
+use crate::{features, oracle};
 
 /// Outcome of running a single test case.
 #[derive(Debug)]

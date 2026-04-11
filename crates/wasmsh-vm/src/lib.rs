@@ -10,8 +10,8 @@ pub mod pipe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use wasmsh_builtins::{BuiltinContext, BuiltinRegistry, VecSink as BuiltinSink};
 use wasmsh_ast::Word;
+use wasmsh_builtins::{BuiltinContext, BuiltinRegistry, VecSink as BuiltinSink};
 use wasmsh_ir::{Ir, IrProgram, IrRedirection};
 use wasmsh_state::ShellState;
 
@@ -91,7 +91,10 @@ impl ExhaustionReason {
     pub fn diagnostic_message(&self) -> String {
         match self.category {
             BudgetCategory::Steps => {
-                format!("step budget exhausted: {} steps (limit: {})", self.used, self.limit)
+                format!(
+                    "step budget exhausted: {} steps (limit: {})",
+                    self.used, self.limit
+                )
             }
             BudgetCategory::VisibleOutputBytes => format!(
                 "output limit exceeded: {} bytes (limit: {})",
@@ -411,10 +414,9 @@ impl Vm {
     pub fn check_output_limit(&mut self) -> Result<(), StepResult> {
         if let Some(StopReason::Exhausted(reason)) = self.stop_reason() {
             if reason.category == BudgetCategory::VisibleOutputBytes {
-                return Err(self.budget_stop(
-                    StepResult::OutputLimitExceeded,
-                    reason.diagnostic_message(),
-                ));
+                return Err(
+                    self.budget_stop(StepResult::OutputLimitExceeded, reason.diagnostic_message())
+                );
             }
         }
         Ok(())
@@ -429,10 +431,7 @@ impl Vm {
         self.check_output_limit()?;
         if let Err(reason) = self.budget.begin_step(self.limits.step_limit) {
             self.steps = self.budget.steps;
-            return Err(self.budget_stop(
-                StepResult::Yield,
-                reason.diagnostic_message(),
-            ));
+            return Err(self.budget_stop(StepResult::Yield, reason.diagnostic_message()));
         }
         self.steps = self.budget.steps;
         Ok(())
@@ -514,50 +513,50 @@ impl Default for Vm {
 }
 
 #[cfg(test)]
-    mod tests {
-        use super::*;
-        use wasmsh_ast::{RedirectionOp, Span, WordPart};
+mod tests {
+    use super::*;
+    use wasmsh_ast::{RedirectionOp, Span, WordPart};
 
-        #[derive(Default)]
-        struct TestExecutor {
-            seen_redirections: Vec<Vec<IrRedirection>>,
+    #[derive(Default)]
+    struct TestExecutor {
+        seen_redirections: Vec<Vec<IrRedirection>>,
+    }
+
+    impl VmExecutor for TestExecutor {
+        fn assign(&mut self, vm: &mut Vm, name: &str, value: Option<&Word>) {
+            let value = value.map_or_else(String::new, |word| {
+                wasmsh_expand::expand_word(word, &mut vm.state)
+            });
+            vm.state.set_var(name.into(), value.into());
+            vm.state.last_status = 0;
         }
 
-        impl VmExecutor for TestExecutor {
-            fn assign(&mut self, vm: &mut Vm, name: &str, value: Option<&Word>) {
-                let value = value.map_or_else(String::new, |word| {
-                    wasmsh_expand::expand_word(word, &mut vm.state)
-                });
-                vm.state.set_var(name.into(), value.into());
-                vm.state.last_status = 0;
-            }
-
-            fn execute_builtin(
-                &mut self,
-                vm: &mut Vm,
-                name: &str,
-                argv: &[Word],
-                redirections: &[IrRedirection],
-            ) -> i32 {
-                self.seen_redirections.push(redirections.to_vec());
-                let expanded: Vec<String> = argv
-                    .iter()
-                    .map(|word| wasmsh_expand::expand_word(word, &mut vm.state))
-                    .collect();
-                let status = match name {
-                    "echo" => {
-                        let text = expanded[1..].join(" ");
-                        vm.write_stdout(format!("{text}\n").as_bytes());
-                        0
-                    }
-                    "true" => 0,
-                    "false" => 1,
-                    _ => 127,
-                };
-                vm.state.last_status = status;
-                status
-            }
+        fn execute_builtin(
+            &mut self,
+            vm: &mut Vm,
+            name: &str,
+            argv: &[Word],
+            redirections: &[IrRedirection],
+        ) -> i32 {
+            self.seen_redirections.push(redirections.to_vec());
+            let expanded: Vec<String> = argv
+                .iter()
+                .map(|word| wasmsh_expand::expand_word(word, &mut vm.state))
+                .collect();
+            let status = match name {
+                "echo" => {
+                    let text = expanded[1..].join(" ");
+                    vm.write_stdout(format!("{text}\n").as_bytes());
+                    0
+                }
+                "true" => 0,
+                "false" => 1,
+                _ => 127,
+            };
+            vm.state.last_status = status;
+            status
         }
+    }
 
     #[test]
     fn run_empty_program() {
@@ -770,7 +769,10 @@ impl Default for Vm {
             },
             Ir::ReturnLastStatus,
         ]);
-        assert_eq!(vm.run_with_executor(&prog, &mut executor), StepResult::Done(0));
+        assert_eq!(
+            vm.run_with_executor(&prog, &mut executor),
+            StepResult::Done(0)
+        );
         assert_eq!(vm.state.get_var("FOO").unwrap(), "bar");
         assert_eq!(String::from_utf8(vm.stdout).unwrap(), "bar\n");
     }
@@ -793,7 +795,10 @@ impl Default for Vm {
             },
             Ir::ReturnLastStatus,
         ]);
-        assert_eq!(vm.run_with_executor(&prog, &mut executor), StepResult::Done(1));
+        assert_eq!(
+            vm.run_with_executor(&prog, &mut executor),
+            StepResult::Done(1)
+        );
         assert!(vm.stdout.is_empty());
     }
 
@@ -815,7 +820,10 @@ impl Default for Vm {
             },
             Ir::ReturnLastStatus,
         ]);
-        assert_eq!(vm.run_with_executor(&prog, &mut executor), StepResult::Done(0));
+        assert_eq!(
+            vm.run_with_executor(&prog, &mut executor),
+            StepResult::Done(0)
+        );
         assert!(vm.stdout.is_empty());
     }
 
@@ -836,7 +844,10 @@ impl Default for Vm {
             },
             Ir::ReturnLastStatus,
         ]);
-        assert_eq!(vm.run_with_executor(&prog, &mut executor), StepResult::Done(0));
+        assert_eq!(
+            vm.run_with_executor(&prog, &mut executor),
+            StepResult::Done(0)
+        );
         assert_eq!(executor.seen_redirections.len(), 1);
         assert_eq!(executor.seen_redirections[0][0].op, RedirectionOp::Output);
     }

@@ -22,13 +22,8 @@ pub(crate) enum InputKind {
 pub(crate) enum OutputKind {
     InheritStdout,
     InheritStderr,
-    File {
-        path: String,
-        append: bool,
-    },
-    ProcessSubst {
-        path: String,
-    },
+    File { path: String, append: bool },
+    ProcessSubst { path: String },
     Pipe,
     Closed,
 }

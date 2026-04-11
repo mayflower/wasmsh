@@ -216,10 +216,7 @@ fn xxd_c_include(ctx: &mut UtilContext<'_>, data: &[u8], name: &str) {
 }
 
 fn xxd_reverse_read_input(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> Option<String> {
-    match collect_input_text(ctx, file_args, "xxd") {
-        Ok(text) => Some(text),
-        Err(_) => None,
-    }
+    collect_input_text(ctx, file_args, "xxd").ok()
 }
 
 fn xxd_extract_hex(line: &str) -> String {

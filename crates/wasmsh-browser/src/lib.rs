@@ -632,7 +632,7 @@ mod tests {
         let (events, status) = run_shell("printf x | { cat; echo err >&2; } |& cat");
         assert_eq!(status, 0);
         let stdout = get_stdout(&events);
-        assert!(stdout.contains("x"));
+        assert!(stdout.contains('x'));
         assert!(stdout.contains("err"));
     }
 
@@ -641,7 +641,7 @@ mod tests {
         let (events, status) = run_shell("printf x | tee / |& cat");
         assert_eq!(status, 0);
         let stdout = get_stdout(&events);
-        assert!(stdout.contains("x"));
+        assert!(stdout.contains('x'));
         assert!(stdout.contains("tee: /: is a directory: /"));
         assert_eq!(get_stderr(&events), "");
     }
@@ -651,7 +651,7 @@ mod tests {
         let (events, status) = run_shell("set -o pipefail\nprintf x | tee / |& cat");
         assert_eq!(status, 1);
         let stdout = get_stdout(&events);
-        assert!(stdout.contains("x"));
+        assert!(stdout.contains('x'));
         assert!(stdout.contains("tee: /: is a directory: /"));
         assert_eq!(get_stderr(&events), "");
     }

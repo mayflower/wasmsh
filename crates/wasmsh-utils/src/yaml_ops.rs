@@ -196,7 +196,10 @@ fn read_yq_input(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> Result<String
 /// single root value).
 fn parse_yaml_to_val(text: &str) -> Result<Val, String> {
     let docs = Yaml::load_from_str(text).map_err(|e| format!("{e}"))?;
-    let first = docs.into_iter().next().unwrap_or(Yaml::Value(saphyr::Scalar::Null));
+    let first = docs
+        .into_iter()
+        .next()
+        .unwrap_or(Yaml::Value(saphyr::Scalar::Null));
     Ok(yaml_to_val(&first))
 }
 
@@ -230,11 +233,8 @@ fn yaml_to_val(yaml: &Yaml<'_>) -> Val {
             // jaq-json's Val::Obj uses foldhash::fast::RandomState,
             // so we match it here to satisfy `Val::obj`.
             let hasher = foldhash::fast::RandomState::default();
-            let mut obj: indexmap::IndexMap<
-                Rc<String>,
-                Val,
-                foldhash::fast::RandomState,
-            > = indexmap::IndexMap::with_hasher(hasher);
+            let mut obj: indexmap::IndexMap<Rc<String>, Val, foldhash::fast::RandomState> =
+                indexmap::IndexMap::with_hasher(hasher);
             for (k, v) in map {
                 let key = yaml_key_to_string(k);
                 obj.insert(Rc::new(key), yaml_to_val(v));
@@ -493,7 +493,10 @@ mod tests {
         assert_eq!(status, 0);
         let s = out.trim();
         // jaq's `keys` returns sorted keys.
-        assert!(s.contains('a') && s.contains('b') && s.contains('c'), "got: {s}");
+        assert!(
+            s.contains('a') && s.contains('b') && s.contains('c'),
+            "got: {s}"
+        );
     }
 
     #[test]

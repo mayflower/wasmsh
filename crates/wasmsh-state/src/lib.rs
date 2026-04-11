@@ -8,6 +8,12 @@ use std::cell::Cell;
 use indexmap::IndexMap;
 use smol_str::SmolStr;
 
+/// Reserved shell variable used as a side channel between parameter expansion
+/// and command dispatch to report `set -u` unbound-variable failures. Treated
+/// as an implementation detail of [`ShellState`]; callers should go through
+/// [`ShellState::set_nounset_error`] / [`ShellState::take_nounset_error`].
+const NOUNSET_ERROR_VAR: &str = "_NOUNSET_ERROR";
+
 /// The value held by a shell variable: scalar, indexed array, or associative array.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VarValue {
@@ -337,6 +343,28 @@ impl ShellState {
         }
         self.env.remove(name);
         Ok(())
+    }
+
+    /// Record that `name` was expanded while `nounset` was active. The pending
+    /// error is consumed by [`ShellState::take_nounset_error`] at the next
+    /// command dispatch point, which matches bash semantics of reporting the
+    /// first offender and aborting the current simple command.
+    pub fn set_nounset_error(&mut self, name: &str) {
+        self.env.set(
+            SmolStr::from(NOUNSET_ERROR_VAR),
+            ShellVar::scalar(SmolStr::from(name)),
+        );
+    }
+
+    /// Consume the pending nounset error, if any. Returns the offending
+    /// variable name and clears the sentinel so the next command starts clean.
+    pub fn take_nounset_error(&mut self) -> Option<SmolStr> {
+        let name = self.env.get(NOUNSET_ERROR_VAR)?.value.as_scalar();
+        if name.is_empty() {
+            return None;
+        }
+        self.env.remove(NOUNSET_ERROR_VAR);
+        Some(name)
     }
 
     /// Return all variable names (across all scopes) that start with the given prefix.
@@ -702,6 +730,17 @@ mod tests {
         assert!(state.get_var("X").is_some());
         state.unset_var("X").unwrap();
         assert!(state.get_var("X").is_none());
+    }
+
+    #[test]
+    fn nounset_error_roundtrip() {
+        let mut state = ShellState::new();
+        assert!(state.take_nounset_error().is_none());
+
+        state.set_nounset_error("FOO");
+        assert_eq!(state.take_nounset_error().as_deref(), Some("FOO"));
+        // Second take observes no pending error.
+        assert!(state.take_nounset_error().is_none());
     }
 
     #[test]
