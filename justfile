@@ -160,9 +160,9 @@ build-emscripten-probe:
 test-emscripten-probe:
     node --test e2e/build-contract/tests/pyodide-probe-build.test.mjs
 
-# ── WASI P2 Component (wasmcloud-facing transport) ──────────
+# ── WASI P2 Component (Pyodide-parity JSON transport) ───────
 
-# Build the wasmsh-component crate as a Component Model artifact
+# Build the wasmsh-component crate as a WASI P2 component artifact
 build-component:
     rustup target add wasm32-wasip2 2>/dev/null || true
     bash e2e/build-contract/build-component.sh
@@ -172,8 +172,7 @@ clippy-component:
     rustup target add wasm32-wasip2 2>/dev/null || true
     cargo clippy --target wasm32-wasip2 -p wasmsh-component --features component-export -- -D warnings
 
-# Run the component build-contract test (build + optional wasm-tools /
-# wasmtime smoke invocation when those binaries are installed)
+# Run the component build-contract test (build + WIT/probe contract checks)
 test-e2e-component:
     node --test e2e/build-contract/tests/component-build.test.mjs
 

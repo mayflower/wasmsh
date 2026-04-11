@@ -1661,6 +1661,9 @@ dependencies = [
 name = "wasmsh-component"
 version = "0.5.9"
 dependencies = [
+ "serde_json",
+ "wasmsh-fs",
+ "wasmsh-json-bridge",
  "wasmsh-protocol",
  "wasmsh-runtime",
  "wit-bindgen",
@@ -1701,6 +1704,17 @@ dependencies = [
  "wasmsh-ast",
  "wasmsh-hir",
  "wasmsh-parse",
+]
+
+[[package]]
+name = "wasmsh-json-bridge"
+version = "0.5.9"
+dependencies = [
+ "libc",
+ "serde_json",
+ "wasmsh-protocol",
+ "wasmsh-runtime",
+ "wasmsh-utils",
 ]
 
 [[package]]

@@ -101,11 +101,13 @@ jobs:
   # ── Component Model (wasm32-wasip2) ────────────────────────
   #
   # Builds and validates the `wasmsh-component` crate as a Component Model
-  # component. This is the first wasmCloud-facing transport; see ADR-0030.
+  # component. This target mirrors the Pyodide JSON bridge through a thin
+  # WIT handle surface and shared probe helpers; see ADR-0030.
   # The job installs `wasm-tools` to verify the exported WIT surface and
-  # `wasmtime` to smoke-invoke the `run-once` export. Both assertions are
-  # mandatory in CI; locally they fall back to skips via the SKIP_WASMTOOLS
-  # and SKIP_WASMTIME env vars when those binaries are not installed.
+  # `wasmtime` to invoke the probe helpers against a real preopened
+  # `/workspace`. Both assertions are mandatory in CI; locally they fall
+  # back to skips via the SKIP_WASMTOOLS and SKIP_WASMTIME env vars when
+  # those binaries are not installed.
   component:
     name: component (wasm32-wasip2)
     runs-on: mayflower-k8s-runners

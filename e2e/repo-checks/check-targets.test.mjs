@@ -121,4 +121,50 @@ describe("Component Model transport plumbing", () => {
       "docs/reference/protocol.md should describe the Component Model transport",
     );
   });
+
+  it("protocol docs describe component transport as Pyodide-parity JSON, not a bespoke session API", () => {
+    const content = readFileSync(
+      resolve(REPO, "docs/reference/protocol.md"),
+      "utf-8",
+    );
+    assert.ok(
+      content.includes("Pyodide") && content.includes("JSON"),
+      "protocol docs should describe the component transport as a Pyodide-parity JSON surface",
+    );
+    assert.ok(
+      !content.includes("resource session"),
+      "protocol docs must not describe the component transport as a session resource",
+    );
+    assert.ok(
+      !content.includes("run-once"),
+      "protocol docs must not mention a run-once helper for the component transport",
+    );
+    assert.ok(
+      !content.includes("wasmsh:component/sandbox"),
+      "protocol docs must not describe the old sandbox WIT package as the transport contract",
+    );
+  });
+
+  it("ADR-0030 describes the thin runtime handle contract", () => {
+    const content = readFileSync(
+      resolve(REPO, "docs/adr/adr-0030-wasmcloud-component-transport.md"),
+      "utf-8",
+    );
+    assert.ok(
+      content.includes("handle-json"),
+      "ADR-0030 should document the handle-json component surface",
+    );
+    assert.ok(
+      content.includes("probe-version"),
+      "ADR-0030 should document the shared probe surface",
+    );
+    assert.ok(
+      !content.includes("resource session"),
+      "ADR-0030 must not keep the old session-resource contract",
+    );
+    assert.ok(
+      !content.includes("run-once"),
+      "ADR-0030 must not keep the old run-once helper",
+    );
+  });
 });

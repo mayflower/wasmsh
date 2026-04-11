@@ -168,6 +168,12 @@ representation of `HostCommand` and `WorkerEvent`. See
 [Worker protocol reference](../reference/protocol.md#json-wire-format) for
 the exact shape and a worked example.
 
+The `wasm32-wasip2` component target intentionally reuses this same JSON
+bridge through `wasmsh:component/runtime.handle-json(...)`. Treat this guide
+as the authoritative description of the transport semantics; the component
+target is a different embedder surface over the same payloads, not a second
+protocol.
+
 If you are writing a custom host adapter, the contract is:
 
 1. Allocate a runtime with `wasmsh_runtime_new()`.

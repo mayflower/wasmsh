@@ -13,16 +13,16 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
-use wasmsh_protocol::{DiagnosticLevel, HostCommand, WorkerEvent};
-use wasmsh_runtime::WorkerRuntime;
+use wasmsh_json_bridge::{JsonRuntimeConfig, JsonRuntimeHandle};
+use wasmsh_protocol::{DiagnosticLevel, WorkerEvent};
 
 mod network;
 mod probe;
 mod python_cmd;
 
-/// Opaque handle wrapping a `WorkerRuntime`.
+/// Opaque handle wrapping a shared JSON runtime bridge.
 struct RuntimeHandle {
-    runtime: WorkerRuntime,
+    runtime: JsonRuntimeHandle,
 }
 
 /// Create a new wasmsh runtime instance with python/python3 command support.
@@ -30,8 +30,12 @@ struct RuntimeHandle {
 /// Returns an opaque pointer. Must be freed with [`wasmsh_runtime_free`].
 #[no_mangle]
 pub extern "C" fn wasmsh_runtime_new() -> *mut RuntimeHandle {
-    let mut runtime = WorkerRuntime::new();
-    runtime.set_external_handler(Box::new(python_cmd::handle_python_command));
+    let runtime = JsonRuntimeHandle::with_config(JsonRuntimeConfig {
+        external_handler: Some(Box::new(python_cmd::handle_python_command)),
+        network_backend_factory: Some(Box::new(|allowed_hosts| {
+            Box::new(network::PyodideNetworkBackend::new(allowed_hosts))
+        })),
+    });
     Box::into_raw(Box::new(RuntimeHandle { runtime }))
 }
 
@@ -62,36 +66,8 @@ pub extern "C" fn wasmsh_runtime_handle_json(
         }
     };
 
-    let cmd: HostCommand = match serde_json::from_str(json_str) {
-        Ok(c) => c,
-        Err(e) => {
-            let err = vec![WorkerEvent::Diagnostic(
-                DiagnosticLevel::Error,
-                format!("invalid JSON command: {e}"),
-            )];
-            let json = serde_json::to_string(&err).unwrap_or_else(|_| "[]".to_string());
-            return alloc_cstring(&json);
-        }
-    };
-
     let rt = unsafe { &mut (*handle).runtime };
-
-    // On Init, always configure a network backend.  An empty allowlist
-    // creates a backend that denies every host via `HostAllowlist::check`,
-    // which is more useful than no backend at all (callers get a
-    // `host denied` error instead of `network access not available`).
-    if let HostCommand::Init {
-        ref allowed_hosts, ..
-    } = cmd
-    {
-        let backend = network::PyodideNetworkBackend::new(allowed_hosts.clone());
-        rt.set_network_backend(Box::new(backend));
-    }
-
-    let events = rt.handle_command(cmd);
-
-    let result = serde_json::to_string(&events).unwrap_or_else(|_| "[]".to_string());
-    alloc_cstring(&result)
+    alloc_cstring(&rt.handle_json(json_str))
 }
 
 /// Free a runtime instance created by [`wasmsh_runtime_new`].

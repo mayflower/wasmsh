@@ -31,87 +31,77 @@ lifetimes.
 ## Decision
 
 Add a third transport — `wasmsh-component` — that ships as a
-**WASI P2 Component Model component** exporting a custom WIT interface
-rather than a CLI entrypoint.
+**WASI P2 Component Model component** exporting a thin projection of the
+existing Pyodide JSON bridge rather than a second typed sandbox API or a
+CLI entrypoint.
 
 The WIT world lives in `crates/wasmsh-component/wit/world.wit`:
 
 ```wit
 package wasmsh:component@0.1.0;
 
-interface sandbox {
-  record runtime-config { step-budget: u64, allowed-hosts: list<string> }
-  enum diagnostic-level { info, warning, error, trace }
-  variant event { stdout, stderr, exit, yielded, diagnostic, fs-changed, version }
-
-  resource session {
-    constructor(config: runtime-config);
-    run: func(input: string) -> list<event>;
-    read-file: func(path: string) -> list<event>;
-    write-file: func(path: string, data: list<u8>) -> list<event>;
-    list-dir: func(path: string) -> list<event>;
-    mount: func(path: string) -> list<event>;
+interface runtime {
+  resource handle {
+    constructor();
+    handle-json: func(input: string) -> string;
   }
 
-  run-once: func(config: runtime-config, input: string) -> list<event>;
+  probe-version: func() -> string;
+  probe-write-text: func(path: string, text: string) -> s32;
+  probe-file-equals: func(path: string, expected: string) -> bool;
 }
 
-world wasmsh { export sandbox; }
+world wasmsh { export runtime; }
 ```
 
 Key properties:
 
-- **Stateful `session` resource.** One instance owns one initialised
-  `WorkerRuntime`. Session state lives in the resource — no process-wide
-  singleton, no `static mut`, no sandbox-id registry.
-- **Close to `HostCommand` / `WorkerEvent`.** `runtime-config` mirrors
-  `HostCommand::Init`; `event` mirrors `WorkerEvent` variant-for-variant.
-  The WIT surface is a typed projection of the existing protocol, not a
-  parallel contract.
-- **Host-testable core.** The work happens in a plain Rust `SessionCore`
-  type inside `crates/wasmsh-component` that is unit-tested on the native
-  host. The wit-bindgen-generated bindings and the thin resource glue
-  live under a `component-export` feature flag so `cargo test -p
-  wasmsh-component` links on any target without pulling wit-bindgen.
-- **Convenience `run-once`.** For smoke tests and simple hosts, an
-  ephemeral session is built, the input is executed, and the combined
-  event list is returned. The build-contract test exercises exactly this
-  path with `wasmtime run --invoke` where available.
-- **No network backend today.** `allowed_hosts` is carried through to
-  `HostCommand::Init` for forward compatibility but no network backend is
-  installed on the component target. The host-side wasmCloud integration
-  will wire that in its own layer.
+- **Canonical transport stays JSON.** The serde JSON form of
+  `HostCommand` / `WorkerEvent` remains the contract. `handle-json` is the
+  only command surface for the component target.
+- **Shared implementation with Pyodide.** Both `wasmsh-pyodide` and
+  `wasmsh-component` delegate to the same `wasmsh-json-bridge` crate for
+  JSON parsing, runtime dispatch, and event serialization. This prevents
+  transport drift.
+- **Shared probe surface.** `probe-version`, `probe-write-text`, and
+  `probe-file-equals` mirror the existing Pyodide probe helpers and are
+  backed by the same shared helper implementation.
+- **Shared libc-backed filesystem path.** On `wasm32-wasip2`,
+  `wasmsh-fs::BackendFs` selects the same libc-backed backend that the
+  Pyodide path already uses instead of falling back to `MemoryFs`. The
+  component build-contract test proves this with real `/workspace` file I/O
+  under Wasmtime preopens.
+- **Deterministic network semantics.** `Init.allowed_hosts` still matters.
+  The shared bridge always installs a backend on `Init`; Pyodide uses its
+  host fetch backend, while the component target installs an explicit
+  deterministic deny/error backend until a real host network implementation
+  exists.
 
 ## Consequences
 
 - A Component Model component is the natural seam for the later wasmCloud
   host-plugin and DeepAgents adapter — both are host-side consumers of
-  WIT, not of a hand-rolled JSON framing.
+  WIT, but they now consume the same JSON transport already used by
+  Pyodide instead of a bespoke typed session API.
 - The existing Standalone and Pyodide transports are untouched. Browser
-  and Pyodide E2E behavior is not affected.
+  behavior is untouched; the Pyodide transport now shares the JSON bridge
+  and probe helper implementation with the component target.
 - The toolchain gains `wasm32-wasip2` in `rust-toolchain.toml`. CI
   installs `wasmtime` and `wasm-tools` so the build-contract test can
-  verify both the WIT export shape and a live `run-once` invocation.
+  verify both the WIT export shape and live probe helper invocation.
 - Multi-tenant session registries, sandbox IDs, and the wasmCloud host
   plugin are explicitly deferred. The component contract is deliberately
   minimal so those layers can be designed in their own ADRs on top of
   this one.
-- Python/Pyodide parity for the component target is also deferred. The
-  Pyodide transport already covers the "embedded in a Python runtime"
-  use case; the component target's audience is Component Model hosts.
-- The `wasmsh-protocol` crate remains canonical. The component WIT is a
-  typed projection, not a replacement. `wasmsh-protocol/wit/worker-protocol.wit`
-  (the `package wasmsh:protocol` typed mirror from ADR-0029's prompt 11)
-  stays in place as the reference schema for the protocol-level enums;
-  `wasmsh:component/sandbox` is a different package targeting a different
-  consumer shape (session-resource, not raw command/event enums).
+- The `wasmsh-protocol` crate remains canonical. `wasmsh:component/runtime`
+  is an embedding contract over that schema, while
+  `wasmsh-protocol/wit/worker-protocol.wit` stays as the experimental typed
+  mirror of the raw enums.
 
 ## Out of scope
 
 - DeepAgents adapter
 - wasmCloud host plugin / lattice wiring
 - Multi-tenant sandbox registry / sandbox IDs
-- Python parity for the component target
-- Progressive execution (`StartRun` / `PollRun`) on the component surface
-- Cancellation on the component surface beyond dropping the session
-  resource
+- Any second typed command/event API for the component target
+- Host-managed network backend for the component target

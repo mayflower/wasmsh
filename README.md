@@ -14,7 +14,7 @@ A sandboxed shell with 88 utilities (grep, sed, awk, jq, tar, curl, …), Python
 Three build targets from one codebase:
 - **Standalone** (`wasm32-unknown-unknown`) — browser Web Worker
 - **Pyodide** (`wasm32-unknown-emscripten`) — shell and Python share the same filesystem
-- **Component Model** (`wasm32-wasip2`) — WASI P2 component with a custom `wasmsh:component/sandbox` interface and a stateful `session` resource, intended as the first wasmCloud-facing transport. See [ADR-0030](docs/adr/adr-0030-wasmcloud-component-transport.md). The DeepAgents adapter and wasmCloud host-side integration are not part of this target yet.
+- **Component Model** (`wasm32-wasip2`) — WASI P2 component exporting the same JSON `HostCommand` / `WorkerEvent` transport used by Pyodide through a thin `wasmsh:component/runtime` handle plus shared probe helpers. Reuses the same libc-backed filesystem path as Pyodide. See [ADR-0030](docs/adr/adr-0030-wasmcloud-component-transport.md).
 
 ## Use with DeepAgents
 

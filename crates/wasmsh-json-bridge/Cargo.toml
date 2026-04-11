@@ -1,0 +1,22 @@
+[package]
+name = "wasmsh-json-bridge"
+description = "Shared JSON transport and probe helpers for wasmsh embedders"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+wasmsh-protocol.workspace = true
+wasmsh-runtime.workspace = true
+wasmsh-utils.workspace = true
+serde_json.workspace = true
+libc = "0.2"
+
+[lints]
+workspace = true

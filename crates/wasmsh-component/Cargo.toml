@@ -23,12 +23,17 @@ default = []
 component-export = ["dep:wit-bindgen"]
 
 [dependencies]
+wasmsh-fs = { workspace = true, features = ["emscripten"] }
+wasmsh-json-bridge.workspace = true
 wasmsh-protocol.workspace = true
 wasmsh-runtime.workspace = true
 # Already pinned transitively by `wasi` — re-declared here so the
 # `component-export` feature can opt in to the `generate!` macro without
 # adding a second major version to the lockfile.
 wit-bindgen = { version = "0.51", optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

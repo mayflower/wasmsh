@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 1. **Standalone** (`wasm32-unknown-unknown`) — browser Web Worker via `wasm-bindgen`
 2. **Pyodide** (`wasm32-unknown-emscripten`) — linked into a custom Pyodide build, sharing the Python interpreter's Emscripten module and filesystem
-3. **Component Model** (`wasm32-wasip2`) — `wasmsh-component` crate, WASI P2 component with a custom `wasmsh:component/sandbox` interface and a stateful `session` resource. First wasmCloud-facing transport seam; DeepAgents adapter and wasmCloud host plugin are deferred (see ADR-0030).
+3. **Component Model** (`wasm32-wasip2`) — `wasmsh-component` crate, WASI P2 component exposing the same JSON `HostCommand` / `WorkerEvent` bridge as Pyodide through a thin `wasmsh:component/runtime` handle plus shared probe helpers. It reuses the same libc-backed filesystem path as Pyodide. First wasmCloud-facing transport seam; DeepAgents adapter and wasmCloud host plugin are deferred (see ADR-0030).
 
 Execution pipeline: `source -> lexer -> parser -> AST -> HIR -> runtime executor`.
 
@@ -28,7 +28,7 @@ The repository has multi-layer coverage across crate tests, runtime/protocol tes
 
 **Pyodide path**: `wasmsh-pyodide` wraps `wasmsh-runtime` with C ABI + JSON protocol. `EmscriptenFs` backend routes VFS through libc (shared with Python). `python`/`python3` commands run in-process via `PyRun_SimpleString`. `pip install` is intercepted at the JS host and routed through micropip. Both Node and browser use `loadPyodide()` for boot. 19 Node E2E + 12 Playwright browser E2E tests.
 
-**Component path**: `wasmsh-component` wraps `wasmsh-runtime` and exports a custom `wasmsh:component/sandbox` WIT interface with a stateful `session` resource. Built with plain Cargo + `wit-bindgen` targeting `wasm32-wasip2` (no `cargo-component` dependency). A host-testable `SessionCore` layer holds one initialised `WorkerRuntime`; the wit-bindgen glue lives behind the `component-export` feature so native unit tests link on any target. Build-contract test optionally inspects the WIT surface with `wasm-tools` and smoke-invokes `run-once` under `wasmtime` when those binaries are available.
+**Component path**: `wasmsh-component` wraps the shared `wasmsh-json-bridge` transport and exports `wasmsh:component/runtime` with `resource handle { constructor(); handle-json(input: string) -> string; }` plus `probe-version`, `probe-write-text`, and `probe-file-equals`. Built with plain Cargo + `wit-bindgen` targeting `wasm32-wasip2` (no `cargo-component` dependency). The build-contract test inspects the WIT surface with `wasm-tools` and uses `wasmtime` to prove the probe helpers perform real file I/O through `/workspace`.
 
 Notable features: `[[ ]]`, `(( ))`, C-style `for (( ))`, arrays, `declare`/`typeset`, `alias`/`unalias`, `let`, `shopt`, extended globbing, globstar, full arithmetic, case modification, indirect expansion, dynamic variables (`$RANDOM`, `$LINENO`, `$SECONDS`, `$FUNCNAME`, `$BASH_SOURCE`, `$PIPESTATUS`), `printf`/`read`, `mapfile`, `builtin`, `select`, `|&`, `case` fall-through, `set -euo pipefail`, 88 utilities (jq, awk, yq, bc, rg, fd, diff/patch, tree, tar, gzip, unzip, xxd, dd, strings, md5sum/sha*sum, curl, wget).
 
@@ -101,10 +101,10 @@ just doc                    # docs with warnings-as-errors
 - **Execution**: `wasmsh-runtime` interprets HIR directly and can lower a bounded subset into `wasmsh-ir` / `wasmsh-vm`
 - **VM subset**: simple assignments, builtin execution, selected redirections, and top-level `&&` / `||` short-circuiting
 - **Runtime**: `wasmsh-runtime` — shared platform-agnostic core used by both targets
-- **Platform**: `BackendFs` type alias → `MemoryFs` (standalone) or `EmscriptenFs` (Pyodide, via `emscripten` feature)
+- **Platform**: `BackendFs` type alias → `MemoryFs` (standalone/native tests) or the libc-backed `EmscriptenFs` path (Pyodide and `wasm32-wasip2`, via `emscripten` feature)
 - **Standalone embedding**: `wasmsh-browser` — wasm-bindgen Web Worker with `WasmShell` JS API
 - **Pyodide embedding**: `wasmsh-pyodide` — C ABI + JSON protocol, `python`/`python3` via `ExternalCommandHandler`
-- **Component embedding**: `wasmsh-component` — wit-bindgen WASI P2 component exporting `wasmsh:component/sandbox` with a `session` resource; host-testable `SessionCore` layer keeps unit tests target-agnostic
+- **Component embedding**: `wasmsh-component` — wit-bindgen WASI P2 component exporting the shared JSON bridge as `wasmsh:component/runtime`; host-native tests exercise the same `JsonRuntimeHandle` used by Pyodide
 
 ## Key ADRs
 
@@ -126,7 +126,7 @@ ADRs are in `docs/adr/`. Key decisions:
 ## Feature Flags
 
 - `wasmsh-fs/opfs` — OPFS filesystem adapter (stub, planned)
-- `wasmsh-fs/emscripten` — Emscripten libc filesystem (used by Pyodide path)
+- `wasmsh-fs/emscripten` — libc-backed filesystem path used by Pyodide and `wasm32-wasip2`
 - `wasmsh-runtime/emscripten` — forwards to `wasmsh-fs/emscripten`, swaps `BackendFs` to `EmscriptenFs`
 - `wasmsh-browser/browser-core` (default) — core shell runtime for browser
 - `wasmsh-browser/browser-extended` — adds OPFS persistence

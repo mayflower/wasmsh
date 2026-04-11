@@ -5,25 +5,26 @@
  *   1. `cargo build --target wasm32-wasip2 -p wasmsh-component --features
  *      component-export` succeeds
  *   2. the expected `.wasm` artifact exists and is non-empty
- *   3. when `wasm-tools` is available, the exported WIT surface contains
- *      the custom `wasmsh:component/sandbox` interface with a `session`
- *      resource — proving this is not merely a `wasi:cli/run` wrapper
- *   4. when `wasmtime` is available, invoking `run-once` with `echo hello`
- *      returns a stdout event carrying "hello" and an exit status of 0
+ *   3. when `wasm-tools` is available, the exported WIT surface is the thin
+ *      Pyodide-parity transport:
+ *        - `interface runtime`
+ *        - `resource handle`
+ *        - `handle-json`
+ *        - `probe-version`
+ *        - `probe-write-text`
+ *        - `probe-file-equals`
+ *      and does not expose the old bespoke typed sandbox/session API
  *
- * Skip knobs for ergonomics on hosts that cannot install wasmtime /
- * wasm-tools / the wasip2 target locally:
+ * Skip knobs for ergonomics on hosts that cannot install wasm-tools / the
+ * wasip2 target locally:
  *
  *   SKIP_WASIP2=1        Skip everything in this file (also skips the build)
  *   SKIP_WASMTOOLS=1     Skip only the wasm-tools WIT inspection
- *   SKIP_WASMTIME=1      Skip only the Wasmtime smoke invocation
- *
- * CI installs both wasmtime and wasm-tools and runs without any skip flag
- * so the assertions are strong where it matters.
  */
 import { describe, it } from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import os from "node:os";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
@@ -35,14 +36,53 @@ const ARTIFACT = resolve(
   REPO_ROOT,
   "target/wasm32-wasip2/debug/wasmsh_component.wasm",
 );
+const PROTOCOL_LIB = resolve(
+  REPO_ROOT,
+  "crates/wasmsh-protocol/src/lib.rs",
+);
 
 const SKIP_WASIP2 = process.env.SKIP_WASIP2 === "1";
 const SKIP_WASMTOOLS = process.env.SKIP_WASMTOOLS === "1";
 const SKIP_WASMTIME = process.env.SKIP_WASMTIME === "1";
-
 function commandExists(cmd) {
   const result = spawnSync("which", [cmd], { stdio: "ignore" });
   return result.status === 0;
+}
+
+function protocolVersion() {
+  const content = readFileSync(PROTOCOL_LIB, "utf-8");
+  const match = content.match(/PROTOCOL_VERSION:\s*&str\s*=\s*"([^"]+)"/);
+  assert.ok(match, "failed to read PROTOCOL_VERSION from wasmsh-protocol");
+  return match[1];
+}
+
+function invokeComponent(call, hostWorkspaceDir) {
+  const result = spawnSync(
+    "wasmtime",
+    [
+      "run",
+      "--dir",
+      `${hostWorkspaceDir}::/workspace`,
+      "--invoke",
+      call,
+      ARTIFACT,
+    ],
+    {
+      encoding: "utf-8",
+      timeout: 120_000,
+    },
+  );
+  if (result.status === 0) {
+    return {
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+    };
+  }
+  throw new Error(
+    `wasmtime invoke failed for ${call} with exit ${result.status ?? "?"}\n` +
+      `stdout:\n${result.stdout ?? ""}\n` +
+      `stderr:\n${result.stderr ?? ""}`,
+  );
 }
 
 describe("wasmsh-component wasm32-wasip2 build", () => {
@@ -84,7 +124,7 @@ describe("wasmsh-component wasm32-wasip2 build", () => {
   });
 
   it(
-    "wasm-tools reports the custom wasmsh:component/sandbox interface",
+    "wasm-tools reports the thin Pyodide-parity runtime interface",
     { skip: SKIP_WASIP2 || SKIP_WASMTOOLS || !commandExists("wasm-tools") },
     () => {
       const result = spawnSync("wasm-tools", ["component", "wit", ARTIFACT], {
@@ -104,68 +144,104 @@ describe("wasmsh-component wasm32-wasip2 build", () => {
         "Exported WIT should declare the wasmsh:component package",
       );
       assert.ok(
-        wit.includes("interface sandbox"),
-        "Exported WIT should declare a sandbox interface",
+        wit.includes("interface runtime"),
+        "Exported WIT should declare a runtime interface",
       );
       assert.ok(
-        wit.includes("resource session"),
-        "sandbox interface should declare a stateful session resource",
+        wit.includes("resource handle"),
+        "runtime interface should declare a handle resource",
       );
       assert.ok(
-        wit.includes("run-once:"),
-        "sandbox interface should export the run-once convenience function",
+        wit.includes("handle-json:"),
+        "handle resource should export handle-json",
+      );
+      assert.ok(
+        wit.includes("probe-version:"),
+        "runtime interface should export probe-version",
+      );
+      assert.ok(
+        wit.includes("probe-write-text:"),
+        "runtime interface should export probe-write-text",
+      );
+      assert.ok(
+        wit.includes("probe-file-equals:"),
+        "runtime interface should export probe-file-equals",
+      );
+      assert.ok(
+        !wit.includes("resource session"),
+        "runtime interface must not retain the old session resource",
+      );
+      assert.ok(
+        !wit.includes("run-once:"),
+        "runtime interface must not retain the run-once helper",
+      );
+      assert.ok(
+        !wit.includes("write-file:"),
+        "runtime interface must not export a typed write-file helper",
+      );
+      assert.ok(
+        !wit.includes("read-file:"),
+        "runtime interface must not export a typed read-file helper",
+      );
+      assert.ok(
+        !wit.includes("list-dir:"),
+        "runtime interface must not export a typed list-dir helper",
+      );
+      assert.ok(
+        !wit.includes("mount:"),
+        "runtime interface must not export a typed mount helper",
       );
       // The artifact must not be a CLI-only wrapper. wasi:cli/run is OK as
       // an import if the toolchain pulls it in, but the export surface
-      // must include the custom sandbox interface.
+      // must include the custom runtime interface.
       assert.ok(
         !/^\s*export wasi:cli\/run/m.test(wit),
-        "Component must export the custom sandbox interface, not wasi:cli/run",
+        "Component must export the custom runtime interface, not wasi:cli/run",
       );
     },
   );
 
   it(
-    "wasmtime run --invoke run-once returns echo output and exit 0",
+    "wasmtime probe-version reports the protocol version",
     { skip: SKIP_WASIP2 || SKIP_WASMTIME || !commandExists("wasmtime") },
     () => {
-      // `wasmtime run --invoke` takes a WAVE-style expression for the
-      // exported function. We exercise the `run-once` convenience export
-      // because it does not require threading a resource handle through
-      // the CLI.
-      const invoke =
-        "run-once({step-budget: 100000, allowed-hosts: []}, \"echo hello\")";
-      const result = spawnSync(
-        "wasmtime",
-        [
-          "run",
-          "--wasm",
-          "component-model=y",
-          "--invoke",
-          invoke,
-          ARTIFACT,
-        ],
-        { encoding: "utf-8", timeout: 120_000 },
+      const hostWorkspaceDir = mkdtempSync(
+        resolve(os.tmpdir(), "wasmsh-component-contract-"),
       );
-      const stdout = result.stdout ?? "";
-      const stderr = result.stderr ?? "";
-      console.log("--- wasmtime stdout ---\n" + stdout);
-      console.log("--- wasmtime stderr ---\n" + stderr);
+      const result = invokeComponent("probe-version()", hostWorkspaceDir);
+      assert.equal(
+        JSON.parse(result.stdout.trim()),
+        protocolVersion(),
+        `expected protocol version, got ${result.stdout}`,
+      );
+    },
+  );
 
-      assert.equal(result.status, 0, "wasmtime run should exit 0");
-      // The returned event list is serialized by wasmtime's WAVE printer.
-      // `list<u8>` payloads render as decimal byte literals, so "hello\n"
-      // appears as `[104, 101, 108, 108, 111, 10]` inside a `stdout(...)`
-      // wrapper. We match the exact byte pattern plus the trailing
-      // `exit(0)` event.
-      const helloBytes = "[104, 101, 108, 108, 111, 10]";
-      assert.ok(
-        stdout.includes(`stdout(${helloBytes})`),
-        "wasmtime output should contain the echo bytes in a stdout(...) event",
+  it(
+    "wasmtime probe helpers perform real file I/O through /workspace",
+    { skip: SKIP_WASIP2 || SKIP_WASMTIME || !commandExists("wasmtime") },
+    () => {
+      const hostWorkspaceDir = mkdtempSync(
+        resolve(os.tmpdir(), "wasmsh-component-contract-"),
       );
-      assert.ok(
-        /exit\(0\)/.test(stdout),
-        "wasmtime output should include exit(0) as the final event",
+      const write = invokeComponent(
+        'probe-write-text("/workspace/contract.txt", "hello")',
+        hostWorkspaceDir,
+      );
+      assert.match(
+        write.stdout.trim(),
+        /^(0|\(0\))$/,
+        `expected probe write success, got ${write.stdout}`,
+      );
+
+      const equals = invokeComponent(
+        'probe-file-equals("/workspace/contract.txt", "hello")',
+        hostWorkspaceDir,
+      );
+      assert.match(
+        equals.stdout.trim(),
+        /^(true|1|\(true\)|\(1\))$/,
+        `expected probe file-equals success, got ${equals.stdout}`,
       );
     },
   );

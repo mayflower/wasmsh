@@ -1,84 +1,16 @@
 package wasmsh:component@0.1.0;
 
-/// The `sandbox` interface is the first wasmCloud-facing projection of the
-/// canonical `wasmsh` host protocol. It mirrors the `HostCommand` /
-/// `WorkerEvent` semantics defined in `wasmsh-protocol` and exposes them as
-/// a stateful `session` resource so a Component Model host can run shell
-/// workloads without managing raw JSON messages.
-///
-/// This contract is intentionally narrow: only the operations that the later
-/// wasmCloud host-side layer and the DeepAgents sandbox runner will actually
-/// need in their first cut. Progressive execution (`start-run` / `poll-run`)
-/// and multi-tenant session registries are deliberately deferred — see
-/// `docs/adr/ADR-0030-wasmcloud-component-transport.md`.
-interface sandbox {
-  /// Severity for runtime diagnostics, matching `wasmsh-protocol::DiagnosticLevel`.
-  enum diagnostic-level {
-    info,
-    warning,
-    error,
-    trace,
+interface runtime {
+  resource handle {
+    constructor();
+    handle-json: func(input: string) -> string;
   }
 
-  /// Session configuration captured at construction time. Matches the fields
-  /// carried by `HostCommand::Init` in `wasmsh-protocol`.
-  record runtime-config {
-    /// Maximum number of execution steps per `run`. `0` disables the budget.
-    /// Defaults to `100_000` when constructed via
-    /// `wasmsh-component::SessionCore::default_config`.
-    step-budget: u64,
-    /// Host allow-list for network access. Empty disables all outbound
-    /// network capability. The WASI P2 transport does not install a
-    /// network backend today; the field is preserved for forwards
-    /// compatibility with the wasmCloud host-side layer.
-    allowed-hosts: list<string>,
-  }
-
-  /// Event payload returned by session methods, mirroring `WorkerEvent`.
-  variant event {
-    stdout(list<u8>),
-    stderr(list<u8>),
-    exit(s32),
-    yielded,
-    diagnostic(tuple<diagnostic-level, string>),
-    fs-changed(string),
-    version(string),
-  }
-
-  /// Stateful session resource. One instance owns one initialised
-  /// `WorkerRuntime`; session state lives in the resource, never in a
-  /// process-wide singleton.
-  resource session {
-    /// Create a session and send `HostCommand::Init`. The initial
-    /// `version` event from the runtime is captured and replayed on the
-    /// first `run` call so hosts can observe the protocol version
-    /// without a separate round-trip.
-    constructor(config: runtime-config);
-
-    /// Execute shell input to completion and return the emitted event
-    /// batch.
-    run: func(input: string) -> list<event>;
-
-    /// Read a file from the session's virtual filesystem.
-    read-file: func(path: string) -> list<event>;
-
-    /// Write raw bytes into the session's virtual filesystem.
-    write-file: func(path: string, data: list<u8>) -> list<event>;
-
-    /// List entries in a virtual-filesystem directory.
-    list-dir: func(path: string) -> list<event>;
-
-    /// Reserve a mount point. Preserves the current `HostCommand::Mount`
-    /// semantics (the runtime treats mounts as reserved metadata today).
-    mount: func(path: string) -> list<event>;
-  }
-
-  /// Convenience helper for smoke tests and simple hosts that do not need
-  /// to retain session state between calls: build an ephemeral session,
-  /// run the input, and return the combined event stream.
-  run-once: func(config: runtime-config, input: string) -> list<event>;
+  probe-version: func() -> string;
+  probe-write-text: func(path: string, text: string) -> s32;
+  probe-file-equals: func(path: string, expected: string) -> bool;
 }
 
 world wasmsh {
-  export sandbox;
+  export runtime;
 }

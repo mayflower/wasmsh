@@ -11,6 +11,7 @@ repository = "https://github.com/mayflower/wasmsh"
 crate-type = ["staticlib"]
 
 [dependencies]
+wasmsh-json-bridge = { path = "../wasmsh-json-bridge" }
 wasmsh-protocol = { path = "../wasmsh-protocol" }
 libc = "0.2"
 

@@ -11,6 +11,7 @@ repository = "https://github.com/mayflower/wasmsh"
 crate-type = ["staticlib"]
 
 [dependencies]
+wasmsh-json-bridge = { path = "../wasmsh-json-bridge" }
 wasmsh-runtime = { path = "../wasmsh-runtime" }
 wasmsh-fs = { path = "../wasmsh-fs", features = ["emscripten"] }
 wasmsh-protocol = { path = "../wasmsh-protocol" }

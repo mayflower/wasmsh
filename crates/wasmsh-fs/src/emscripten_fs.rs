@@ -1,7 +1,10 @@
-//! Emscripten-backed filesystem for `wasm32-unknown-emscripten`.
+//! Libc-backed filesystem for embedded wasmsh targets.
 //!
-//! Delegates to libc POSIX calls which go through Emscripten's virtual
-//! filesystem. This shares the same FS that Python sees inside Pyodide.
+//! Delegates to libc POSIX calls which go through the target's in-process
+//! virtual filesystem. On `wasm32-unknown-emscripten` this is Emscripten's
+//! VFS, which is the same filesystem Python sees inside Pyodide. On
+//! `wasm32-wasip2`, the same libc-backed implementation is reused so the
+//! Component Model target does not silently fall back to `MemoryFs`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -61,7 +64,7 @@ enum OpenFileSource {
 }
 
 struct EmscriptenFileReader {
-    fd: libc::c_int,
+    fp: *mut libc::FILE,
 }
 
 struct EmscriptenWriteSink {
@@ -74,11 +77,17 @@ struct EmscriptenSharedReadHandle {
 
 impl Read for EmscriptenFileReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let read = unsafe { libc::read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
-        if read < 0 {
+        let read = unsafe { libc::fread(buf.as_mut_ptr().cast(), 1, buf.len(), self.fp) };
+        if read == 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error().is_some() {
+                return Err(err);
+            }
+        }
+        if read > buf.len() {
             Err(std::io::Error::last_os_error())
         } else {
-            Ok(read as usize)
+            Ok(read)
         }
     }
 }
@@ -91,7 +100,7 @@ impl Read for EmscriptenSharedReadHandle {
 
 impl Drop for EmscriptenFileReader {
     fn drop(&mut self) {
-        unsafe { libc::close(self.fd) };
+        unsafe { libc::fclose(self.fp) };
     }
 }
 
@@ -297,16 +306,13 @@ impl Vfs for EmscriptenFs {
             return Err(FsError::PermissionDenied("not opened for reading".into()));
         }
         match &of.source {
-            OpenFileSource::Path { fp, .. } => {
-                let fd = unsafe { libc::dup(libc::fileno(*fp)) };
-                if fd < 0 {
-                    return Err(FsError::Io("failed to duplicate file descriptor".into()));
+            OpenFileSource::Path { path, .. } => {
+                let cpath = to_cstring(path)?;
+                let fp = unsafe { libc::fopen(cpath.as_ptr(), c"r".as_ptr()) };
+                if fp.is_null() {
+                    return Err(errno_to_fs_error(path));
                 }
-                if unsafe { libc::lseek(fd, 0, libc::SEEK_SET) } < 0 {
-                    unsafe { libc::close(fd) };
-                    return Err(FsError::Io("failed to seek stream reader".into()));
-                }
-                Ok(Box::new(EmscriptenFileReader { fd }))
+                Ok(Box::new(EmscriptenFileReader { fp }))
             }
             OpenFileSource::Virtual(reader) => Ok(Box::new(EmscriptenSharedReadHandle {
                 reader: Rc::clone(reader),

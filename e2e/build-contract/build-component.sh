@@ -34,12 +34,14 @@ if [ "${PROFILE}" = "release" ]; then
         --manifest-path "$REPO_ROOT/crates/wasmsh-component/Cargo.toml" \
         --target wasm32-wasip2 \
         --features component-export \
+        --locked \
         --release
 else
     OUT_DIR="debug"
     cargo build \
         --manifest-path "$REPO_ROOT/crates/wasmsh-component/Cargo.toml" \
         --target wasm32-wasip2 \
+        --locked \
         --features component-export
 fi
 
