@@ -79,6 +79,12 @@ saphyr = "0.0.6"
 # Needed so yaml_ops can construct `jaq_json::Val::Obj` values
 # with the same hasher jaq-json uses internally (foldhash::fast).
 foldhash = { version = "0.1", default-features = false }
+# ZIP archive reader/writer.  We only use its reader side today, via
+# `ZipArchive`.  The `deflate` feature pulls `flate2/rust_backend` +
+# `zopfli` (pure-Rust write-side optimisation — wasmsh doesn't use
+# the writer but the feature toggle is coarse).  All MIT/Apache-2,
+# no C code, no `std::fs` pressure.  See ADR-0028.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Internal crates. The `version` field is consumed by `cargo publish` and
 # the `path` field by local workspace builds.  Kept in lockstep with the

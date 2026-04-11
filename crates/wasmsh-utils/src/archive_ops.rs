@@ -777,48 +777,109 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         Err(status) => return status,
     };
 
+    // Back the whole read through the `zip` crate, which correctly
+    // parses the central directory, honours data descriptors, handles
+    // ZIP64, and inflates DEFLATE via `flate2 + miniz_oxide`.  See
+    // ADR-0028.
+    let mut archive = match zip::ZipArchive::new(std::io::Cursor::new(&archive_data[..])) {
+        Ok(a) => a,
+        Err(e) => {
+            let msg = format!("unzip: {archive_path}: {e}\n");
+            ctx.output.stderr(msg.as_bytes());
+            return 1;
+        }
+    };
+
     let base_dir = unzip_base_dir(ctx, opts.dest_dir.as_deref());
 
     unzip_emit_list_header(ctx, opts.list_only, opts.quiet);
 
     let list_only = opts.list_only;
     let quiet = opts.quiet;
-    let data = &archive_data;
+    let overwrite = opts.overwrite;
     let mut stats = UnzipStats::default();
     let mut status = 0;
-    let extract_opts = UnzipOpts {
-        overwrite: opts.overwrite,
-        quiet,
-        base_dir: &base_dir,
-    };
 
-    let mut pos = 0;
-    while pos + 30 <= data.len() {
-        match unzip_advance_to_header(data, &mut pos) {
-            HeaderSearch::Found => {}
-            HeaderSearch::End => break,
-        }
-
-        let Some(entry) = parse_zip_local_header(data, pos) else {
-            break;
+    for i in 0..archive.len() {
+        let mut entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(e) => {
+                let msg = format!("unzip: entry {i}: {e}\n");
+                ctx.output.stderr(msg.as_bytes());
+                status = 1;
+                continue;
+            }
         };
 
-        pos = entry.data_start;
+        // jaq-independent path sanitisation: fall back to the
+        // historical heuristic if the zip crate's `enclosed_name`
+        // rejects the entry as unsafe.
+        let raw_name = entry.name().to_string();
+        let uncompressed_size = entry.size();
 
         if list_only {
-            unzip_list_entry(ctx, &entry, &mut stats, quiet);
-            pos += entry.compressed_size;
+            if !quiet {
+                let line = format!("{uncompressed_size:>9}  {raw_name}\n");
+                ctx.output.stdout(line.as_bytes());
+            }
+            stats.total_files += 1;
+            stats.total_size += uncompressed_size;
             continue;
         }
 
-        let rc = unzip_extract_entry(ctx, &entry, data, &extract_opts);
-        if rc != 0 {
-            status = rc;
+        if entry.is_dir() || raw_name.ends_with('/') {
+            let sanitised = sanitize_zip_name(&raw_name);
+            let full = resolve_path(&base_dir, &sanitised);
+            if !unzip_check_traversal(ctx, &full, &raw_name, &base_dir) {
+                continue;
+            }
+            unzip_extract_dir(ctx, &full, &sanitised, quiet);
+            stats.total_files += 1;
+            continue;
+        }
+
+        let sanitised = sanitize_zip_name(&raw_name);
+        let full = resolve_path(&base_dir, &sanitised);
+        if !unzip_check_traversal(ctx, &full, &raw_name, &base_dir) {
+            continue;
+        }
+
+        // Read the entry's decompressed bytes through the zip crate.
+        // `zip::read::ZipFile` implements `Read` and already handles
+        // DEFLATE, stored, deflate64, and (with extra features) bzip2
+        // / zstd / lzma.
+        use std::io::Read;
+        let mut buf = Vec::with_capacity(uncompressed_size.min(16 * 1024 * 1024) as usize);
+        if let Err(e) = entry.read_to_end(&mut buf) {
+            let msg = format!("unzip: {raw_name}: {e}\n");
+            ctx.output.stderr(msg.as_bytes());
+            status = 1;
+            continue;
+        }
+        // Drop the entry borrow on `archive` before touching the
+        // filesystem / context (mutable borrow rules).
+        drop(entry);
+
+        unzip_ensure_parent(ctx, &full);
+
+        if !overwrite && ctx.fs.stat(&full).is_ok() {
+            if !quiet {
+                let msg = format!("unzip: {sanitised}: already exists, skipping\n");
+                ctx.output.stderr(msg.as_bytes());
+            }
+            continue;
+        }
+        if write_file(ctx, "unzip", &full, &buf) != 0 {
+            status = 1;
+            continue;
+        }
+        if !quiet {
+            let msg = format!("  inflating: {sanitised}\n");
+            ctx.output.stdout(msg.as_bytes());
         }
 
         stats.total_files += 1;
-        stats.total_size += entry.uncompressed_size as u64;
-        pos += entry.compressed_size;
+        stats.total_size += uncompressed_size;
     }
 
     unzip_emit_list_footer(ctx, &stats, quiet, list_only);
@@ -915,78 +976,10 @@ fn unzip_emit_list_footer(
     }
 }
 
-struct UnzipOpts<'a> {
-    overwrite: bool,
-    quiet: bool,
-    base_dir: &'a str,
-}
-
 #[derive(Default)]
 struct UnzipStats {
     total_files: u32,
     total_size: u64,
-}
-
-enum HeaderSearch {
-    Found,
-    End,
-}
-
-fn unzip_advance_to_header(data: &[u8], pos: &mut usize) -> HeaderSearch {
-    if &data[*pos..*pos + 4] == b"PK\x03\x04" {
-        return HeaderSearch::Found;
-    }
-    if let Some(next) = find_pk_signature(&data[*pos..]) {
-        *pos += next;
-        HeaderSearch::Found
-    } else {
-        HeaderSearch::End
-    }
-}
-
-struct ZipLocalEntry {
-    raw_name: String,
-    compression: u16,
-    compressed_size: usize,
-    uncompressed_size: usize,
-    data_start: usize,
-}
-
-fn parse_zip_local_header(data: &[u8], pos: usize) -> Option<ZipLocalEntry> {
-    let compression = u16_le(&data[pos + 8..pos + 10]);
-    let compressed_size = u32_le(&data[pos + 18..pos + 22]) as usize;
-    let uncompressed_size = u32_le(&data[pos + 22..pos + 26]) as usize;
-    let name_len = u16_le(&data[pos + 26..pos + 28]) as usize;
-    let extra_len = u16_le(&data[pos + 28..pos + 30]) as usize;
-
-    let name_start = pos + 30;
-    if name_start + name_len > data.len() {
-        return None;
-    }
-    let raw_name = String::from_utf8_lossy(&data[name_start..name_start + name_len]).to_string();
-    let data_start = name_start + name_len + extra_len;
-
-    Some(ZipLocalEntry {
-        raw_name,
-        compression,
-        compressed_size,
-        uncompressed_size,
-        data_start,
-    })
-}
-
-fn unzip_list_entry(
-    ctx: &mut UtilContext<'_>,
-    entry: &ZipLocalEntry,
-    stats: &mut UnzipStats,
-    quiet: bool,
-) {
-    if !quiet {
-        let line = format!("{:>9}  {}\n", entry.uncompressed_size, entry.raw_name);
-        ctx.output.stdout(line.as_bytes());
-    }
-    stats.total_files += 1;
-    stats.total_size += entry.uncompressed_size as u64;
 }
 
 /// Sanitize a zip entry name to prevent zip-slip attacks.
@@ -1022,135 +1015,12 @@ fn unzip_ensure_parent(ctx: &mut UtilContext<'_>, full: &str) {
     }
 }
 
-fn unzip_extract_entry(
-    ctx: &mut UtilContext<'_>,
-    entry: &ZipLocalEntry,
-    data: &[u8],
-    opts: &UnzipOpts<'_>,
-) -> i32 {
-    let name = sanitize_zip_name(&entry.raw_name);
-    let full = resolve_path(opts.base_dir, &name);
-
-    if !unzip_check_traversal(ctx, &full, &entry.raw_name, opts.base_dir) {
-        return 0;
-    }
-
-    if name.ends_with('/') {
-        return unzip_extract_dir(ctx, &full, &name, opts.quiet);
-    }
-
-    match entry.compression {
-        0 => unzip_extract_stored(ctx, entry, data, &full, &name, opts),
-        8 => unzip_extract_deflated(ctx, entry, data, &full, &name, opts),
-        other => {
-            if !opts.quiet {
-                let msg = format!("unzip: {name}: unsupported compression method {other}\n");
-                ctx.output.stderr(msg.as_bytes());
-            }
-            1
-        }
-    }
-}
-
-/// Extract a DEFLATE-compressed zip entry via `miniz_oxide`.
-fn unzip_extract_deflated(
-    ctx: &mut UtilContext<'_>,
-    entry: &ZipLocalEntry,
-    data: &[u8],
-    full: &str,
-    name: &str,
-    opts: &UnzipOpts<'_>,
-) -> i32 {
-    let end = (entry.data_start + entry.compressed_size).min(data.len());
-    let compressed = &data[entry.data_start..end];
-
-    let decompressed = match miniz_oxide::inflate::decompress_to_vec(compressed) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            if !opts.quiet {
-                let msg = format!("unzip: {name}: inflate failed: {e}\n");
-                ctx.output.stderr(msg.as_bytes());
-            }
-            return 1;
-        }
-    };
-
-    unzip_ensure_parent(ctx, full);
-
-    if !opts.overwrite && ctx.fs.stat(full).is_ok() {
-        if !opts.quiet {
-            let msg = format!("unzip: {name}: already exists, skipping\n");
-            ctx.output.stderr(msg.as_bytes());
-        }
-        return 0;
-    }
-    if write_file(ctx, "unzip", full, &decompressed) != 0 {
-        return 1;
-    }
-    if !opts.quiet {
-        let msg = format!("  inflating: {name}\n");
-        ctx.output.stdout(msg.as_bytes());
-    }
-    0
-}
-
-fn unzip_extract_dir(ctx: &mut UtilContext<'_>, full: &str, name: &str, quiet: bool) -> i32 {
+fn unzip_extract_dir(ctx: &mut UtilContext<'_>, full: &str, name: &str, quiet: bool) {
     let _ = ctx.fs.create_dir(full);
     if !quiet {
         let msg = format!("   creating: {name}\n");
         ctx.output.stdout(msg.as_bytes());
     }
-    0
-}
-
-fn unzip_extract_stored(
-    ctx: &mut UtilContext<'_>,
-    entry: &ZipLocalEntry,
-    data: &[u8],
-    full: &str,
-    name: &str,
-    opts: &UnzipOpts<'_>,
-) -> i32 {
-    let end = (entry.data_start + entry.uncompressed_size).min(data.len());
-    let file_data = &data[entry.data_start..end];
-
-    unzip_ensure_parent(ctx, full);
-
-    if !opts.overwrite && ctx.fs.stat(full).is_ok() {
-        if !opts.quiet {
-            let msg = format!("unzip: {name}: already exists, skipping\n");
-            ctx.output.stderr(msg.as_bytes());
-        }
-        return 0;
-    }
-    if write_file(ctx, "unzip", full, file_data) != 0 {
-        return 1;
-    }
-    if !opts.quiet {
-        let msg = format!("  inflating: {name}\n");
-        ctx.output.stdout(msg.as_bytes());
-    }
-    0
-}
-
-/// Find the next PK\x03\x04 signature in the data.
-fn find_pk_signature(data: &[u8]) -> Option<usize> {
-    for i in 0..data.len().saturating_sub(3) {
-        if &data[i..i + 4] == b"PK\x03\x04" {
-            return Some(i);
-        }
-    }
-    None
-}
-
-/// Read a little-endian u16 from a 2-byte slice.
-fn u16_le(data: &[u8]) -> u16 {
-    u16::from_le_bytes([data[0], data[1]])
-}
-
-/// Read a little-endian u32 from a 4-byte slice.
-fn u32_le(data: &[u8]) -> u32 {
-    u32::from_le_bytes([data[0], data[1], data[2], data[3]])
 }
 
 fn tar_list(ctx: &mut UtilContext<'_>, archive_path: &str, gzipped: bool) -> i32 {
@@ -1504,52 +1374,46 @@ mod tests {
     // unzip tests
     // -----------------------------------------------------------------------
 
-    /// Build a minimal valid stored ZIP archive with one file entry.
+    /// Build a fully-formed stored ZIP archive (with central directory)
+    /// using the `zip` crate's writer.  The previous hand-rolled
+    /// fixture only emitted a local file header, which the zip crate
+    /// reader correctly rejects — see ADR-0028 for the full story.
     fn make_stored_zip(name: &str, content: &[u8]) -> Vec<u8> {
-        let mut zip = Vec::new();
-        // Local file header
-        zip.extend_from_slice(b"PK\x03\x04"); // signature
-        zip.extend_from_slice(&[20, 0]); // version needed (2.0)
-        zip.extend_from_slice(&[0, 0]); // flags
-        zip.extend_from_slice(&[0, 0]); // compression method 0 (stored)
-        zip.extend_from_slice(&[0, 0]); // mod time
-        zip.extend_from_slice(&[0, 0]); // mod date
-        zip.extend_from_slice(&[0, 0, 0, 0]); // crc32 (unused)
-        zip.extend_from_slice(&(content.len() as u32).to_le_bytes()); // compressed size
-        zip.extend_from_slice(&(content.len() as u32).to_le_bytes()); // uncompressed size
-        zip.extend_from_slice(&(name.len() as u16).to_le_bytes()); // name length
-        zip.extend_from_slice(&[0, 0]); // extra length
-        zip.extend_from_slice(name.as_bytes()); // filename
-        zip.extend_from_slice(content); // data
-        zip
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::CompressionMethod;
+        let mut cur = Cursor::new(Vec::<u8>::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut cur);
+            let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            w.start_file(name, opts).unwrap();
+            w.write_all(content).unwrap();
+            w.finish().unwrap();
+        }
+        cur.into_inner()
+    }
+
+    /// Build a fully-formed DEFLATE-compressed ZIP archive using the
+    /// `zip` crate's writer.
+    fn make_deflated_zip(name: &str, content: &[u8]) -> Vec<u8> {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::CompressionMethod;
+        let mut cur = Cursor::new(Vec::<u8>::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut cur);
+            let opts = SimpleFileOptions::default()
+                .compression_method(CompressionMethod::Deflated)
+                .compression_level(Some(6));
+            w.start_file(name, opts).unwrap();
+            w.write_all(content).unwrap();
+            w.finish().unwrap();
+        }
+        cur.into_inner()
     }
 
     fn run_unzip(argv: &[&str], fs: &mut MemoryFs) -> (i32, VecOutput) {
         run_util(util_unzip, argv, fs, "/")
-    }
-
-    /// Build a minimal DEFLATE-compressed ZIP archive with one file
-    /// entry.  Regression fixture for ADR-0025 which added real
-    /// DEFLATE support to unzip.
-    fn make_deflated_zip(name: &str, content: &[u8]) -> Vec<u8> {
-        let compressed = miniz_oxide::deflate::compress_to_vec(content, 6);
-        let crc = crc32(content);
-
-        let mut zip = Vec::new();
-        zip.extend_from_slice(b"PK\x03\x04"); // signature
-        zip.extend_from_slice(&[20, 0]); // version needed (2.0)
-        zip.extend_from_slice(&[0, 0]); // flags
-        zip.extend_from_slice(&[8, 0]); // compression method 8 (deflate)
-        zip.extend_from_slice(&[0, 0]); // mod time
-        zip.extend_from_slice(&[0, 0]); // mod date
-        zip.extend_from_slice(&crc.to_le_bytes());
-        zip.extend_from_slice(&(compressed.len() as u32).to_le_bytes()); // compressed size
-        zip.extend_from_slice(&(content.len() as u32).to_le_bytes()); // uncompressed size
-        zip.extend_from_slice(&(name.len() as u16).to_le_bytes()); // name length
-        zip.extend_from_slice(&[0, 0]); // extra length
-        zip.extend_from_slice(name.as_bytes());
-        zip.extend_from_slice(&compressed);
-        zip
     }
 
     #[test]
@@ -1574,6 +1438,76 @@ mod tests {
         let data = fs.read_file(h).unwrap();
         fs.close(h);
         assert_eq!(data, payload);
+    }
+
+    /// Regression: before ADR-0028 wasmsh's handwritten unzip
+    /// scanned for `PK\x03\x04` signatures linearly and had no
+    /// understanding of the central directory.  A real zip with
+    /// prefixed garbage (e.g. a self-extracting archive with an
+    /// executable stub before the first local-file header) would
+    /// produce false-positive signature matches.  The zip crate
+    /// reads the end-of-central-directory marker first and is
+    /// immune.
+    #[test]
+    fn unzip_with_prefixed_garbage_uses_central_directory() {
+        let mut fs = MemoryFs::new();
+        let mut zip_data = Vec::new();
+        // Fake binary stub that happens to contain bytes resembling
+        // the PK\x03\x04 signature in the middle, then the real zip.
+        zip_data.extend_from_slice(b"SFX_STUB_START");
+        zip_data.extend_from_slice(b"PK\x03\x04XXXX_NOT_A_REAL_HEADER");
+        zip_data.extend_from_slice(&make_stored_zip("payload.txt", b"inner content"));
+
+        let h = fs.open("/sfx.zip", OpenOptions::write()).unwrap();
+        fs.write_file(h, &zip_data).unwrap();
+        fs.close(h);
+
+        let (status, _) = run_unzip(&["unzip", "/sfx.zip"], &mut fs);
+        assert_eq!(status, 0);
+
+        let h = fs.open("/payload.txt", OpenOptions::read()).unwrap();
+        let data = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&data, b"inner content");
+    }
+
+    #[test]
+    fn unzip_multiple_entries_in_one_archive() {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::CompressionMethod;
+        let mut cur = Cursor::new(Vec::<u8>::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut cur);
+            let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+            w.start_file("a.txt", opts).unwrap();
+            w.write_all(b"first").unwrap();
+            w.start_file("sub/b.txt", opts).unwrap();
+            w.write_all(b"second").unwrap();
+            w.start_file("sub/c.txt", opts).unwrap();
+            w.write_all(b"third").unwrap();
+            w.finish().unwrap();
+        }
+        let zip_data = cur.into_inner();
+
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/multi.zip", OpenOptions::write()).unwrap();
+        fs.write_file(h, &zip_data).unwrap();
+        fs.close(h);
+
+        let (status, _) = run_unzip(&["unzip", "/multi.zip"], &mut fs);
+        assert_eq!(status, 0);
+
+        for (path, expected) in [
+            ("/a.txt", &b"first"[..]),
+            ("/sub/b.txt", &b"second"[..]),
+            ("/sub/c.txt", &b"third"[..]),
+        ] {
+            let h = fs.open(path, OpenOptions::read()).unwrap();
+            let data = fs.read_file(h).unwrap();
+            fs.close(h);
+            assert_eq!(&data[..], expected, "mismatch for {path}");
+        }
     }
 
     #[test]
