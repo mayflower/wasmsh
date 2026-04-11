@@ -677,12 +677,36 @@ fn grep_match_pattern(line: &str, pattern: &str, flags: &GrepFlags) -> bool {
         (line.to_string(), pattern.to_string())
     };
 
-    if flags.extended && p.contains('|') {
-        return p
-            .split('|')
-            .any(|alt| grep_match_single(&l, alt.trim(), flags));
+    // `-F` (fixed strings) bypasses the regex engine entirely.
+    if flags.fixed {
+        return grep_match_single(&l, &p, flags);
     }
-    grep_match_single(&l, &p, flags)
+
+    // Try the POSIX regex engine first (BRE by default, ERE with `-E`).
+    // Fall back to the old literal matcher if the pattern does not parse
+    // — this matches the historical behaviour for malformed patterns.
+    let compiled = if flags.extended {
+        crate::regex_posix::Regex::compile_ere(&p)
+    } else {
+        crate::regex_posix::Regex::compile_bre(&p)
+    };
+    match compiled {
+        Ok(re) => {
+            if flags.word_match {
+                grep_regex_word_match(&l, &re)
+            } else {
+                re.is_match(&l)
+            }
+        }
+        Err(_) => {
+            if flags.extended && p.contains('|') {
+                return p
+                    .split('|')
+                    .any(|alt| grep_match_single(&l, alt.trim(), flags));
+            }
+            grep_match_single(&l, &p, flags)
+        }
+    }
 }
 
 fn grep_match_single(line: &str, pattern: &str, flags: &GrepFlags) -> bool {
@@ -697,12 +721,58 @@ fn grep_match_single(line: &str, pattern: &str, flags: &GrepFlags) -> bool {
     grep_matches(line, pattern, false) // already lowercased if needed
 }
 
+/// Word-boundary match built on top of the regex engine: the regex must
+/// match inside the line AND the matched span must be flanked by
+/// non-word characters (or line boundaries).
+fn grep_regex_word_match(line: &str, re: &crate::regex_posix::Regex) -> bool {
+    for (start, end) in re.find_iter_offsets(line) {
+        let before_ok = start == 0
+            || !line.as_bytes()[start - 1].is_ascii_alphanumeric()
+                && line.as_bytes()[start - 1] != b'_';
+        let after_ok = end >= line.len()
+            || !line.as_bytes()[end].is_ascii_alphanumeric()
+                && line.as_bytes()[end] != b'_';
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
 fn grep_find_match<'a>(line: &'a str, pattern: &str, flags: &GrepFlags) -> Option<&'a str> {
     let (l, p) = if flags.ignore_case {
         (line.to_lowercase(), pattern.to_lowercase())
     } else {
         (line.to_string(), pattern.to_string())
     };
+
+    // Regex-aware match for `-o`: fall through to literal substring on
+    // compile failure, matching the behaviour of `grep_match_pattern`.
+    if !flags.fixed {
+        let compiled = if flags.extended {
+            crate::regex_posix::Regex::compile_ere(&p)
+        } else {
+            crate::regex_posix::Regex::compile_bre(&p)
+        };
+        if let Ok(re) = compiled {
+            for (start, end) in re.find_iter_offsets(&l) {
+                if flags.word_match {
+                    let before_ok = start == 0
+                        || !l.as_bytes()[start - 1].is_ascii_alphanumeric()
+                            && l.as_bytes()[start - 1] != b'_';
+                    let after_ok = end >= l.len()
+                        || !l.as_bytes()[end].is_ascii_alphanumeric()
+                            && l.as_bytes()[end] != b'_';
+                    if !(before_ok && after_ok) {
+                        continue;
+                    }
+                }
+                return Some(&line[start..end]);
+            }
+            return None;
+        }
+    }
+
     if flags.word_match {
         let start = l.find(&p)?;
         // Check word boundaries
@@ -1122,7 +1192,9 @@ fn sed_addr_matches(
         SedAddr::None => true,
         SedAddr::Line(n) => line_num == *n,
         SedAddr::Last => is_last,
-        SedAddr::Regex(pat) => grep_matches(line, pat, false),
+        SedAddr::Regex(pat) => crate::regex_posix::Regex::compile_bre(pat)
+            .map(|re| re.is_match(line))
+            .unwrap_or_else(|_| grep_matches(line, pat, false)),
         SedAddr::Range(start, end) => {
             if *in_range {
                 if sed_addr_matches(end, line_num, is_last, line, &mut false) {
@@ -1185,10 +1257,24 @@ fn sed_process_reader(
             }
             match &instr.cmd {
                 SedCmd::Substitute(sub) => {
-                    current_text = if sub.global {
-                        current_text.replace(&sub.pattern, &sub.replacement)
-                    } else {
-                        current_text.replacen(&sub.pattern, &sub.replacement, 1)
+                    // Use POSIX BRE regex when the pattern compiles;
+                    // fall back to literal replacement otherwise so
+                    // malformed patterns still behave sensibly.
+                    current_text = match crate::regex_posix::Regex::compile_bre(&sub.pattern) {
+                        Ok(re) => {
+                            if sub.global {
+                                re.replace_all(&current_text, &sub.replacement)
+                            } else {
+                                re.replace(&current_text, &sub.replacement)
+                            }
+                        }
+                        Err(_) => {
+                            if sub.global {
+                                current_text.replace(&sub.pattern, &sub.replacement)
+                            } else {
+                                current_text.replacen(&sub.pattern, &sub.replacement, 1)
+                            }
+                        }
                     };
                 }
                 SedCmd::Delete => {
@@ -3194,6 +3280,45 @@ mod tests {
         assert!(!out.contains("world"));
     }
 
+    // Regression: grep must use BRE regex, not literal substring match.
+    #[test]
+    fn grep_bre_char_class() {
+        let mut fs = make_fs_with_file("/g.txt", b"foo 123\nbar\nbaz 99\n");
+        let (status, out, _) = run(
+            util_grep,
+            &["grep", "[0-9][0-9]*", "/g.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        assert!(out.contains("foo 123"));
+        assert!(out.contains("baz 99"));
+        assert!(!out.contains("bar"));
+    }
+
+    #[test]
+    fn grep_ere_alternation() {
+        let mut fs = make_fs_with_file("/g.txt", b"foo\nbar\nbaz\nquux\n");
+        let (status, out, _) = run(
+            util_grep,
+            &["grep", "-E", "foo|baz", "/g.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "foo\nbaz\n");
+    }
+
+    #[test]
+    fn grep_bre_escaped_brackets() {
+        let mut fs = make_fs_with_file("/g.txt", b"[section]\nkey=value\n[other]\n");
+        let (status, out, _) = run(
+            util_grep,
+            &["grep", r"\[section\]", "/g.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "[section]\n");
+    }
+
     // -------------------------------------------------------------------
     // tee  to multiple files
     // -------------------------------------------------------------------
@@ -3259,6 +3384,64 @@ mod tests {
         let (status, out, _) = run(util_sed, &["sed", "s/X/Y/", "/sf.txt"], &mut fs);
         assert_eq!(status, 0);
         assert_eq!(out, "aYbXc\n");
+    }
+
+    // -------------------------------------------------------------------
+    // Regression: the agent harness flagged that `sed /\[section\]/p`
+    // produced no output because sed was doing literal substring matching
+    // instead of BRE regex.  Verify the regex engine is actually wired up.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn sed_bre_escaped_brackets_address() {
+        let mut fs = make_fs_with_file(
+            "/cfg.txt",
+            b"[section]\nkey=value\n[other]\nkey2=value2\n",
+        );
+        let (status, out, _) = run(
+            util_sed,
+            &["sed", "-n", r"/\[section\]/p", "/cfg.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "[section]\n");
+    }
+
+    #[test]
+    fn sed_bre_escaped_brackets_substitute() {
+        let mut fs = make_fs_with_file("/cfg.txt", b"[section]\nkey=secret\n");
+        let (status, out, _) = run(
+            util_sed,
+            &["sed", r"s/\[section\]/[SECRET]/", "/cfg.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "[SECRET]\nkey=secret\n");
+    }
+
+    #[test]
+    fn sed_char_class_substitute() {
+        // A real regex feature: character classes.
+        let mut fs = make_fs_with_file("/nums.txt", b"foo 123 bar 42\n");
+        let (status, out, _) = run(
+            util_sed,
+            &["sed", "s/[0-9][0-9]*/N/g", "/nums.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "foo N bar N\n");
+    }
+
+    #[test]
+    fn sed_ampersand_backref_in_replacement() {
+        let mut fs = make_fs_with_file("/p.txt", b"foo 42 bar\n");
+        let (status, out, _) = run(
+            util_sed,
+            &["sed", "s/[0-9][0-9]*/<&>/", "/p.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "foo <42> bar\n");
     }
 
     // -------------------------------------------------------------------

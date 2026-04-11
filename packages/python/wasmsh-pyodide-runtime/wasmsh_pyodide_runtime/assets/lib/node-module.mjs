@@ -162,6 +162,17 @@ export async function createFullModule(distDir) {
     // micropip not available in this dist — not fatal
   }
 
+  // Pre-load sqlite3 — it's an unvendored cpython_module in Pyodide
+  // 0.28+, so `import sqlite3` would otherwise fault to the CDN on
+  // first use.  Loading it here keeps the sandbox offline-capable for
+  // the Python stdlib surface that agents expect.
+  try {
+    await pyodide.loadPackage("sqlite3");
+  } catch {
+    // Older Pyodide distributions ship sqlite3 in python_stdlib.zip
+    // and have no "sqlite3" lockfile entry; this is fine.
+  }
+
   // Attach the pyodide API to the module so the host can use it
   module._pyodide = pyodide;
   createRuntimeBridge(module);

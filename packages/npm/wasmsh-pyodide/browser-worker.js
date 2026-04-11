@@ -244,6 +244,14 @@ async function boot(baseUrl) {
     // micropip not available — not fatal
   }
 
+  // Pre-load sqlite3 — an unvendored cpython_module in Pyodide 0.28+.
+  // Loading it here keeps the sandbox offline-capable for the stdlib.
+  try {
+    await pyodide.loadPackage("sqlite3");
+  } catch {
+    // Older Pyodide versions ship sqlite3 in python_stdlib.zip.
+  }
+
   module._pyodide = pyodide;
   runtimeBridge = runtimeBridgeModule().createRuntimeBridge(module);
 }

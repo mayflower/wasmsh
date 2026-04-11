@@ -82,4 +82,34 @@ EOF` },
     const exit = events.find((e) => "Exit" in e);
     assert.equal(exit.Exit, 0);
   });
+
+  // ── sqlite3 stdlib: create, insert, query ────────────────
+  // Regression test for a missing sqlite3 wheel in bundled assets.
+  // sqlite3 is an unvendored cpython_module in Pyodide 0.28+; the
+  // runtime must ship the wheel or `import sqlite3` fails offline.
+
+  it("python3 can use sqlite3 stdlib end-to-end", { skip: SKIP, timeout: 60_000 }, async () => {
+    const script = `python3 <<'EOF'
+import sqlite3
+conn = sqlite3.connect(":memory:")
+cur = conn.cursor()
+cur.execute("CREATE TABLE t (id INTEGER, name TEXT)")
+cur.executemany("INSERT INTO t VALUES (?,?)", [(1,"a"),(2,"b"),(3,"c")])
+conn.commit()
+cur.execute("SELECT COUNT(*) FROM t")
+print("count:", cur.fetchone()[0])
+cur.execute("SELECT name FROM t ORDER BY id DESC LIMIT 1")
+print("last:", cur.fetchone()[0])
+conn.close()
+EOF`;
+    const events = await adapter.send({ Run: { input: script } });
+    const stdout = decodeStdout(events);
+    const stderr = decodeStderr(events);
+    assert.ok(
+      stdout?.includes("count: 3") && stdout?.includes("last: c"),
+      `stdout: ${stdout} | stderr: ${stderr}`,
+    );
+    const exit = events.find((e) => "Exit" in e);
+    assert.equal(exit.Exit, 0, `stderr: ${stderr}`);
+  });
 });

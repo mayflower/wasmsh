@@ -51,7 +51,7 @@ export async function generateTasks(count, options = {}) {
   const model = new ChatAnthropic({
     model: "claude-haiku-4-5-20251001",
     temperature: 1.0,
-    maxTokens: 8192,
+    maxTokens: 16384,
   });
 
   const categories = category

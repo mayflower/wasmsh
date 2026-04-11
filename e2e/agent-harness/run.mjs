@@ -11,6 +11,7 @@
  * Requires: ANTHROPIC_API_KEY environment variable
  */
 
+import "dotenv/config";
 import { generateTasks, CATEGORIES } from "./lib/generate.mjs";
 import { executeTask } from "./lib/execute.mjs";
 import { diagnoseFailure } from "./lib/diagnose.mjs";

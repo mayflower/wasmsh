@@ -24,6 +24,7 @@ mod hash_ops;
 mod helpers;
 mod jq_ops;
 mod math_ops;
+mod regex_posix;
 mod search_ops;
 mod system_ops;
 mod text_ops;

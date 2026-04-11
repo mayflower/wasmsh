@@ -45,6 +45,23 @@ console_error_panic_hook = "0.1"
 js-sys = "0.3"
 url = "2"
 ureq = "2"
+# POSIX BRE/ERE regex engine — used by sed, grep, awk.  no_std, zero
+# runtime deps, MIT licensed.  See ADR-0022 and ADR-0023.
+posix-regex = "0.1"
+# Base64 encoder/decoder — replaces handwritten impl.  no_std,
+# zero deps, MIT/Apache.  See ADR-0023.
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+# Hex encoder/decoder — replaces handwritten impl.  no_std, zero
+# deps, MIT/Apache.  See ADR-0023.
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+# RustCrypto hash primitives — audited, constant-time, wasm-ready.
+# Replaces handwritten MD5/SHA-1/SHA-256/SHA-512 implementations.
+# MIT/Apache, no_std with `alloc`.  See ADR-0024 (which supersedes
+# ADR-0015).
+md-5 = { version = "0.10", default-features = false }
+sha1 = { version = "0.10", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+digest = { version = "0.10", default-features = false }
 
 # Internal crates. The `version` field is consumed by `cargo publish` and
 # the `path` field by local workspace builds.  Kept in lockstep with the

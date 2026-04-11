@@ -357,13 +357,12 @@ pub(crate) fn grep_matches(line: &str, pattern: &str, ignore_case: bool) -> bool
 }
 
 /// Encode bytes as lowercase hexadecimal string.
+///
+/// Thin wrapper over the `hex` crate so callers have a single,
+/// crate-local entry point that stays stable across dependency
+/// upgrades.  See ADR-0023.
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
+    hex::encode(bytes)
 }
 
 pub(crate) struct XorShift64 {

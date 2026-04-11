@@ -492,6 +492,10 @@ fn tar_create(
         tar_data
     };
 
+    if archive_path == "-" {
+        ctx.output.stdout(&output_data);
+        return 0;
+    }
     let full_archive = resolve_path(ctx.cwd, archive_path);
     write_file(ctx, "tar", &full_archive, &output_data)
 }
@@ -702,7 +706,11 @@ fn tar_load_data(
     archive_path: &str,
     gzipped: bool,
 ) -> Result<Vec<u8>, i32> {
-    let archive_data = read_file_bytes(ctx, archive_path, "tar")?;
+    let archive_data = if archive_path == "-" {
+        read_stdin_bytes(ctx)
+    } else {
+        read_file_bytes(ctx, archive_path, "tar")?
+    };
     if gzipped {
         gzip_decompress(&archive_data).map_err(|e| {
             emit_error(ctx.output, "tar", archive_path, &e);
@@ -711,6 +719,15 @@ fn tar_load_data(
     } else {
         Ok(archive_data)
     }
+}
+
+fn read_stdin_bytes(ctx: &mut UtilContext<'_>) -> Vec<u8> {
+    let mut data = Vec::new();
+    if let Some(mut stdin) = ctx.stdin.take() {
+        use std::io::Read;
+        let _ = stdin.read_to_end(&mut data);
+    }
+    data
 }
 
 fn tar_extract(
@@ -1314,6 +1331,83 @@ mod tests {
         let (status, out) = run_util(util_tar, &["tar", "-tf", "/list.tar"], &mut fs, "/");
         assert_eq!(status, 0);
         assert!(out.stdout_str().contains("f.txt"));
+    }
+
+    #[test]
+    fn tar_create_to_stdout_dash() {
+        // `tar -cf - src` should write the archive bytes to stdout
+        let mut fs = MemoryFs::new();
+        fs.create_dir("/src").unwrap();
+        let h = fs.open("/src/a.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"file a").unwrap();
+        fs.close(h);
+
+        let (status, out) = run_util(util_tar, &["tar", "-cf", "-", "src"], &mut fs, "/");
+        assert_eq!(status, 0);
+        // Tar stream should be non-empty and contain the filename in the header
+        assert!(!out.stdout.is_empty(), "tar -cf - produced no output");
+        assert!(
+            out.stdout.windows(5).any(|w| w == b"src/a"),
+            "tar stream missing expected header"
+        );
+        // No file named "-" should have been created
+        assert!(fs.stat("/-").is_err());
+    }
+
+    #[test]
+    fn tar_create_gzipped_to_stdout_dash() {
+        // `tar -czf - src` should produce a gzip-wrapped tar on stdout
+        let mut fs = MemoryFs::new();
+        fs.create_dir("/src").unwrap();
+        let h = fs.open("/src/a.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"file a").unwrap();
+        fs.close(h);
+
+        let (status, out) = run_util(util_tar, &["tar", "-czf", "-", "src"], &mut fs, "/");
+        assert_eq!(status, 0);
+        // Gzip magic bytes
+        assert!(out.stdout.len() >= 2, "tar -czf - produced no output");
+        assert_eq!(&out.stdout[0..2], &[0x1f, 0x8b], "missing gzip magic");
+        assert!(fs.stat("/-").is_err());
+    }
+
+    #[test]
+    fn tar_extract_from_stdin_dash() {
+        // Build a tar.gz in memory, then feed it through stdin with `tar -xzf -`
+        let mut fs = MemoryFs::new();
+        fs.create_dir("/src").unwrap();
+        let h = fs.open("/src/a.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"file a").unwrap();
+        fs.close(h);
+
+        let (_, out) = run_util(util_tar, &["tar", "-czf", "-", "src"], &mut fs, "/");
+        let archive_bytes = out.stdout.clone();
+        assert!(!archive_bytes.is_empty());
+
+        // Blow away originals
+        let _ = fs.remove_file("/src/a.txt");
+        let _ = fs.remove_dir("/src");
+
+        // Extract from stdin
+        fs.create_dir("/out").unwrap();
+        let mut output = VecOutput::default();
+        let status = {
+            let mut ctx = UtilContext {
+                fs: &mut fs,
+                output: &mut output,
+                cwd: "/",
+                stdin: Some(crate::UtilStdin::from_bytes(&archive_bytes)),
+                state: None,
+                network: None,
+            };
+            util_tar(&mut ctx, &["tar", "-xzf", "-", "-C", "/out"])
+        };
+        assert_eq!(status, 0);
+
+        let h = fs.open("/out/src/a.txt", OpenOptions::read()).unwrap();
+        let data = fs.read_file(h).unwrap();
+        fs.close(h);
+        assert_eq!(&data, b"file a");
     }
 
     #[test]

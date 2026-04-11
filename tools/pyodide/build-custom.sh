@@ -457,10 +457,14 @@ except Exception as e:
     sys.exit(1)
 "
 
-echo "Fetching micropip + packaging wheels from CDN..."
-# Both are hard requirements — the sandbox cannot run `pip install`
-# without micropip, and micropip pulls in `packaging` transitively.
-for whl_name in micropip packaging; do
+echo "Fetching micropip + packaging + sqlite3 wheels from CDN..."
+# micropip + packaging are hard requirements — the sandbox cannot run
+# `pip install` without micropip, and micropip pulls in `packaging`
+# transitively.  sqlite3 is a cpython_module in Pyodide 0.26+ — the
+# standard library entry is a shim that calls `loadPackage("sqlite3")`
+# at first import, so we must bundle the wheel to keep the sandbox
+# offline-capable.
+for whl_name in micropip packaging sqlite3; do
     whl_file=$(python3 -c "
 import json, sys
 lock = json.load(open('$DIST_DIR/pyodide-lock.json'))

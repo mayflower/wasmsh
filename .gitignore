@@ -18,6 +18,7 @@ pkg/
 packages/npm/wasmsh-pyodide/assets/*
 !packages/npm/wasmsh-pyodide/assets/micropip-*.whl
 !packages/npm/wasmsh-pyodide/assets/packaging-*.whl
+!packages/npm/wasmsh-pyodide/assets/sqlite3-*.whl
 !packages/npm/wasmsh-pyodide/assets/pyodide-lock.json
 
 # ── Pyodide build outputs staged into the Python runtime wheel ─────
@@ -49,3 +50,6 @@ packages/python/wasmsh-pyodide-runtime/*.egg-info/
 
 # ── npm install output for E2E test fixtures ───────────────────────
 e2e/*/node_modules/
+
+# ── Environment files (API keys, secrets) ─────────────────────────
+.env

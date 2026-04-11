@@ -8,7 +8,8 @@
     "@langchain/anthropic": "^0.3",
     "@langchain/core": "^0.3",
     "deepagents": "file:../../../deepagentsjs/libs/deepagents",
-    "@langchain/wasmsh": "file:../../../deepagentsjs/libs/providers/wasmsh"
+    "@langchain/wasmsh": "file:../../../deepagentsjs/libs/providers/wasmsh",
+    "dotenv": "^17.2.4"
   },
   "scripts": {
     "start": "node run.mjs"

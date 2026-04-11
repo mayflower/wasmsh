@@ -242,7 +242,7 @@ All utilities operate on the in-process VFS (no OS calls).
 
 | Command      | Status | Notes |
 |--------------|--------|-------|
-| `tar`        | Done   | Create and extract tar archives |
+| `tar`        | Done   | Create, extract, list (`-f -` reads stdin / writes stdout for piping) |
 | `gzip`       | Done   | Compress files (DEFLATE, clean-room CRC-32) |
 | `gunzip`     | Done   | Decompress gzip files |
 | `zcat`       | Done   | Decompress and print to stdout |

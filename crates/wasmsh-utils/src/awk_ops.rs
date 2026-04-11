@@ -1412,328 +1412,35 @@ impl Parser {
 }
 
 // ---------------------------------------------------------------------------
-// Simple regex engine
+// Regex adapter (awk uses POSIX ERE)
 // ---------------------------------------------------------------------------
+//
+// awk's regex dialect is POSIX ERE — extended regular expressions with
+// bare `(`, `)`, `|`, `+`, `?`, `{n,m}` as metacharacters.  This adapter
+// delegates to the shared `posix-regex` engine used by `sed` and `grep`
+// (see ADR-0022 and ADR-0023).
+//
+// Behaviour on malformed patterns: fall back to literal substring
+// matching.  This preserves the historical behaviour of the handwritten
+// engine, which also treated unknown metacharacters as literals.
 
-/// Strip anchor characters from a pattern and return `(inner_pattern, anchored_start, anchored_end)`.
-fn strip_anchors(pattern: &str) -> (&str, bool, bool) {
-    let anchored_start = pattern.starts_with('^');
-    let anchored_end = pattern.ends_with('$') && !pattern.ends_with("\\$");
-    let pat = if anchored_start {
-        &pattern[1..]
-    } else {
-        pattern
-    };
-    let pat = if anchored_end && !pat.is_empty() {
-        &pat[..pat.len() - 1]
-    } else {
-        pat
-    };
-    (pat, anchored_start, anchored_end)
-}
-
-struct CompiledPattern {
-    nodes: Vec<ReNode>,
-    anchored_start: bool,
-    anchored_end: bool,
-}
-
-fn compile_pattern(pattern: &str) -> CompiledPattern {
-    let (pat, anchored_start, anchored_end) = strip_anchors(pattern);
-    CompiledPattern {
-        nodes: compile_regex(pat),
-        anchored_start,
-        anchored_end,
-    }
-}
-
-fn start_positions(anchored: bool, text_len: usize) -> Box<dyn Iterator<Item = usize>> {
-    if anchored {
-        Box::new(std::iter::once(0))
-    } else {
-        Box::new(0..=text_len)
-    }
-}
-
-/// Simple regex matching supporting: literal chars, `.` (any), `*` (repeat prev),
-/// `+` (one or more), `?` (zero or one), `^` (start), `$` (end), `[...]` char classes,
-/// `[^...]` negated, `\d`, `\w`, `\s` and their negations, escape sequences.
+/// Return `true` if `pattern` (POSIX ERE) matches anywhere in `text`.
 fn regex_match(text: &str, pattern: &str) -> bool {
-    let cp = compile_pattern(pattern);
-    for start in start_positions(cp.anchored_start, text.len()) {
-        if let Some(end) = regex_match_here(&cp.nodes, text, start, 0) {
-            if !cp.anchored_end || end == text.len() {
-                return true;
-            }
-        }
+    match crate::regex_posix::Regex::compile_ere(pattern) {
+        Ok(re) => re.is_match(text),
+        Err(_) => text.contains(pattern),
     }
-    false
 }
 
-/// Find the first match of `pattern` in `text`, returning (start, end) byte offsets.
+/// Find the first match of `pattern` in `text`, returning `(start, end)`
+/// byte offsets.
 fn regex_find(text: &str, pattern: &str) -> Option<(usize, usize)> {
-    let cp = compile_pattern(pattern);
-    for start in start_positions(cp.anchored_start, text.len()) {
-        if let Some(end) = regex_match_here(&cp.nodes, text, start, 0) {
-            if (!cp.anchored_end || end == text.len()) && (start < end || start == text.len()) {
-                return Some((start, end));
-            }
-        }
+    match crate::regex_posix::Regex::compile_ere(pattern) {
+        Ok(re) => re.find(text),
+        Err(_) => text
+            .find(pattern)
+            .map(|start| (start, start + pattern.len())),
     }
-    None
-}
-
-#[derive(Debug, Clone)]
-enum RePiece {
-    Literal(char),
-    Dot,
-    CharClass(Vec<CcRange>, bool), // ranges, negated
-}
-
-#[derive(Debug, Clone)]
-enum ReNode {
-    Piece(RePiece),
-    Repeat(RePiece, RepeatKind),
-}
-
-#[derive(Debug, Clone, Copy)]
-enum RepeatKind {
-    Star,     // *
-    Plus,     // +
-    Question, // ?
-}
-
-#[derive(Debug, Clone)]
-enum CcRange {
-    Single(char),
-    Range(char, char),
-}
-
-/// Parse a backslash escape sequence into a regex piece (e.g. `\d`, `\w`, `\n`).
-fn compile_escape(c: char) -> RePiece {
-    let word_ranges = vec![
-        CcRange::Range('a', 'z'),
-        CcRange::Range('A', 'Z'),
-        CcRange::Range('0', '9'),
-        CcRange::Single('_'),
-    ];
-    let space_ranges = vec![
-        CcRange::Single(' '),
-        CcRange::Single('\t'),
-        CcRange::Single('\n'),
-        CcRange::Single('\r'),
-    ];
-    match c {
-        'd' => RePiece::CharClass(vec![CcRange::Range('0', '9')], false),
-        'D' => RePiece::CharClass(vec![CcRange::Range('0', '9')], true),
-        'w' => RePiece::CharClass(word_ranges, false),
-        'W' => RePiece::CharClass(word_ranges, true),
-        's' => RePiece::CharClass(space_ranges, false),
-        'S' => RePiece::CharClass(space_ranges, true),
-        't' => RePiece::Literal('\t'),
-        'n' => RePiece::Literal('\n'),
-        'r' => RePiece::Literal('\r'),
-        _ => RePiece::Literal(c),
-    }
-}
-
-/// Parse a `[...]` character class from `chars` starting at position `i` (just past `[`).
-fn compile_char_class(chars: &[char], mut i: usize) -> (RePiece, usize) {
-    let negated = i < chars.len() && chars[i] == '^';
-    if negated {
-        i += 1;
-    }
-    let mut ranges = Vec::new();
-    if i < chars.len() && chars[i] == ']' {
-        ranges.push(CcRange::Single(']'));
-        i += 1;
-    }
-    while i < chars.len() && chars[i] != ']' {
-        let ch = chars[i];
-        i += 1;
-        if i + 1 < chars.len() && chars[i] == '-' && chars[i + 1] != ']' {
-            let end_ch = chars[i + 1];
-            ranges.push(CcRange::Range(ch, end_ch));
-            i += 2;
-        } else {
-            ranges.push(CcRange::Single(ch));
-        }
-    }
-    if i < chars.len() {
-        i += 1; // consume ]
-    }
-    (RePiece::CharClass(ranges, negated), i)
-}
-
-fn compile_regex(pat: &str) -> Vec<ReNode> {
-    let chars: Vec<char> = pat.chars().collect();
-    let mut nodes = Vec::new();
-    let mut i = 0;
-
-    while i < chars.len() {
-        let (piece, new_i) = compile_next_piece(&chars, i);
-        i = new_i;
-        let node = attach_quantifier(&chars, &mut i, piece);
-        nodes.push(node);
-    }
-
-    nodes
-}
-
-fn compile_next_piece(chars: &[char], mut i: usize) -> (RePiece, usize) {
-    let piece = match chars[i] {
-        '.' => {
-            i += 1;
-            RePiece::Dot
-        }
-        '\\' if i + 1 < chars.len() => {
-            i += 1;
-            let c = chars[i];
-            i += 1;
-            compile_escape(c)
-        }
-        '[' => {
-            i += 1;
-            let (p, new_i) = compile_char_class(chars, i);
-            i = new_i;
-            p
-        }
-        c => {
-            i += 1;
-            RePiece::Literal(c)
-        }
-    };
-    (piece, i)
-}
-
-fn attach_quantifier(chars: &[char], i: &mut usize, piece: RePiece) -> ReNode {
-    if *i >= chars.len() {
-        return ReNode::Piece(piece);
-    }
-    let kind = match chars[*i] {
-        '*' => RepeatKind::Star,
-        '+' => RepeatKind::Plus,
-        '?' => RepeatKind::Question,
-        _ => return ReNode::Piece(piece),
-    };
-    *i += 1;
-    ReNode::Repeat(piece, kind)
-}
-
-fn piece_matches(piece: &RePiece, ch: char) -> bool {
-    match piece {
-        RePiece::Literal(c) => ch == *c,
-        RePiece::Dot => true,
-        RePiece::CharClass(ranges, negated) => {
-            let found = ranges.iter().any(|r| match r {
-                CcRange::Single(c) => ch == *c,
-                CcRange::Range(lo, hi) => ch >= *lo && ch <= *hi,
-            });
-            found != *negated
-        }
-    }
-}
-
-/// Try matching the compiled regex nodes starting at `text[text_pos..]`, returning
-/// the end position of the match if successful.
-fn regex_match_here(
-    nodes: &[ReNode],
-    text: &str,
-    text_pos: usize,
-    node_idx: usize,
-) -> Option<usize> {
-    if node_idx >= nodes.len() {
-        return Some(text_pos);
-    }
-
-    let text_bytes: Vec<char> = text.chars().collect();
-
-    match &nodes[node_idx] {
-        ReNode::Piece(piece) => {
-            if text_pos < text_bytes.len() && piece_matches(piece, text_bytes[text_pos]) {
-                // Calculate byte offset of next char
-                let next_pos = text_pos + 1;
-                regex_match_chars(nodes, &text_bytes, next_pos, node_idx + 1)
-            } else {
-                None
-            }
-        }
-        ReNode::Repeat(piece, kind) => {
-            regex_match_repeat_chars(nodes, &text_bytes, text_pos, node_idx, piece, *kind)
-        }
-    }
-}
-
-fn regex_match_chars(
-    nodes: &[ReNode],
-    chars: &[char],
-    pos: usize,
-    node_idx: usize,
-) -> Option<usize> {
-    if node_idx >= nodes.len() {
-        return Some(pos);
-    }
-
-    match &nodes[node_idx] {
-        ReNode::Piece(piece) => regex_match_piece_chars(nodes, chars, pos, node_idx, piece),
-        ReNode::Repeat(piece, kind) => {
-            regex_match_repeat_chars(nodes, chars, pos, node_idx, piece, *kind)
-        }
-    }
-}
-
-fn regex_match_piece_chars(
-    nodes: &[ReNode],
-    chars: &[char],
-    pos: usize,
-    node_idx: usize,
-    piece: &RePiece,
-) -> Option<usize> {
-    if pos < chars.len() && piece_matches(piece, chars[pos]) {
-        regex_match_chars(nodes, chars, pos + 1, node_idx + 1)
-    } else {
-        None
-    }
-}
-
-fn regex_match_repeat_chars(
-    nodes: &[ReNode],
-    chars: &[char],
-    pos: usize,
-    node_idx: usize,
-    piece: &RePiece,
-    kind: RepeatKind,
-) -> Option<usize> {
-    // Count max matches
-    let mut count = 0;
-    while pos + count < chars.len() && piece_matches(piece, chars[pos + count]) {
-        count += 1;
-    }
-
-    let min = match kind {
-        RepeatKind::Plus => 1,
-        RepeatKind::Star | RepeatKind::Question => 0,
-    };
-    let max = match kind {
-        RepeatKind::Question => count.min(1),
-        _ => count,
-    };
-
-    // Greedy: try longest first
-    let mut n = max;
-    loop {
-        if n < min {
-            break;
-        }
-        if let Some(end) = regex_match_chars(nodes, chars, pos + n, node_idx + 1) {
-            return Some(end);
-        }
-        if n == 0 {
-            break;
-        }
-        n -= 1;
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------
