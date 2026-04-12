@@ -108,6 +108,8 @@ struct ExecState {
     expansion_failed: bool,
     /// Trap handlers suppress nested trap reentry while they run.
     trap_depth: u32,
+    /// Nested shell scopes (functions, sourced files, command substitutions).
+    nested_shell_depth: u32,
     /// Nested output capture scopes for pipelines and substitutions.
     output_captures: Vec<OutputCapture>,
 }
@@ -125,6 +127,7 @@ impl ExecState {
             stop_reason: None,
             expansion_failed: false,
             trap_depth: 0,
+            nested_shell_depth: 0,
             output_captures: Vec::new(),
         }
     }
@@ -138,12 +141,209 @@ impl ExecState {
         self.stop_reason = None;
         self.expansion_failed = false;
         self.trap_depth = 0;
+        self.nested_shell_depth = 0;
         self.output_captures.clear();
     }
 }
 
 const STREAMING_YES_MAX_LINES: usize = 65_536;
 const PIPEBUFFER_STREAMING_CAPACITY: usize = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SignalDefaultAction {
+    Terminate,
+    Ignore,
+    StopLike,
+    ContinueLike,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RuntimeSignalSpec {
+    name: &'static str,
+    number: i32,
+    handler_var: &'static str,
+    ignore_var: &'static str,
+    default_action: SignalDefaultAction,
+    trappable: bool,
+}
+
+const RUNTIME_SIGNAL_SPECS: &[RuntimeSignalSpec] = &[
+    RuntimeSignalSpec {
+        name: "HUP",
+        number: 1,
+        handler_var: "_TRAP_SIG_HUP",
+        ignore_var: "_TRAP_IGNORE_SIG_HUP",
+        default_action: SignalDefaultAction::Terminate,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "INT",
+        number: 2,
+        handler_var: "_TRAP_SIG_INT",
+        ignore_var: "_TRAP_IGNORE_SIG_INT",
+        default_action: SignalDefaultAction::Terminate,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "QUIT",
+        number: 3,
+        handler_var: "_TRAP_SIG_QUIT",
+        ignore_var: "_TRAP_IGNORE_SIG_QUIT",
+        default_action: SignalDefaultAction::Terminate,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "ILL",
+        number: 4,
+        handler_var: "_TRAP_SIG_ILL",
+        ignore_var: "_TRAP_IGNORE_SIG_ILL",
+        default_action: SignalDefaultAction::Terminate,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "ABRT",
+        number: 6,
+        handler_var: "_TRAP_SIG_ABRT",
+        ignore_var: "_TRAP_IGNORE_SIG_ABRT",
+        default_action: SignalDefaultAction::Terminate,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "FPE",
+        number: 8,
+        handler_var: "_TRAP_SIG_FPE",
+        ignore_var: "_TRAP_IGNORE_SIG_FPE",
+        default_action: SignalDefaultAction::Terminate,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "KILL",
+        number: 9,
+        handler_var: "_TRAP_SIG_KILL",
+        ignore_var: "_TRAP_IGNORE_SIG_KILL",
+        default_action: SignalDefaultAction::Terminate,
+        trappable: false,
+    },
+    RuntimeSignalSpec {
+        name: "USR1",
+        number: 10,
+        handler_var: "_TRAP_SIG_USR1",
+        ignore_var: "_TRAP_IGNORE_SIG_USR1",
+        default_action: SignalDefaultAction::Terminate,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "SEGV",
+        number: 11,
+        handler_var: "_TRAP_SIG_SEGV",
+        ignore_var: "_TRAP_IGNORE_SIG_SEGV",
+        default_action: SignalDefaultAction::Terminate,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "USR2",
+        number: 12,
+        handler_var: "_TRAP_SIG_USR2",
+        ignore_var: "_TRAP_IGNORE_SIG_USR2",
+        default_action: SignalDefaultAction::Terminate,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "PIPE",
+        number: 13,
+        handler_var: "_TRAP_SIG_PIPE",
+        ignore_var: "_TRAP_IGNORE_SIG_PIPE",
+        default_action: SignalDefaultAction::Terminate,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "ALRM",
+        number: 14,
+        handler_var: "_TRAP_SIG_ALRM",
+        ignore_var: "_TRAP_IGNORE_SIG_ALRM",
+        default_action: SignalDefaultAction::Terminate,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "TERM",
+        number: 15,
+        handler_var: "_TRAP_SIG_TERM",
+        ignore_var: "_TRAP_IGNORE_SIG_TERM",
+        default_action: SignalDefaultAction::Terminate,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "CHLD",
+        number: 17,
+        handler_var: "_TRAP_SIG_CHLD",
+        ignore_var: "_TRAP_IGNORE_SIG_CHLD",
+        default_action: SignalDefaultAction::Ignore,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "CONT",
+        number: 18,
+        handler_var: "_TRAP_SIG_CONT",
+        ignore_var: "_TRAP_IGNORE_SIG_CONT",
+        default_action: SignalDefaultAction::ContinueLike,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "STOP",
+        number: 19,
+        handler_var: "_TRAP_SIG_STOP",
+        ignore_var: "_TRAP_IGNORE_SIG_STOP",
+        default_action: SignalDefaultAction::StopLike,
+        trappable: false,
+    },
+    RuntimeSignalSpec {
+        name: "TSTP",
+        number: 20,
+        handler_var: "_TRAP_SIG_TSTP",
+        ignore_var: "_TRAP_IGNORE_SIG_TSTP",
+        default_action: SignalDefaultAction::StopLike,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "TTIN",
+        number: 21,
+        handler_var: "_TRAP_SIG_TTIN",
+        ignore_var: "_TRAP_IGNORE_SIG_TTIN",
+        default_action: SignalDefaultAction::StopLike,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "TTOU",
+        number: 22,
+        handler_var: "_TRAP_SIG_TTOU",
+        ignore_var: "_TRAP_IGNORE_SIG_TTOU",
+        default_action: SignalDefaultAction::StopLike,
+        trappable: true,
+    },
+    RuntimeSignalSpec {
+        name: "WINCH",
+        number: 28,
+        handler_var: "_TRAP_SIG_WINCH",
+        ignore_var: "_TRAP_IGNORE_SIG_WINCH",
+        default_action: SignalDefaultAction::Ignore,
+        trappable: true,
+    },
+];
+
+fn find_runtime_signal_spec(name: &str) -> Option<&'static RuntimeSignalSpec> {
+    if let Ok(number) = name.parse::<i32>() {
+        return RUNTIME_SIGNAL_SPECS
+            .iter()
+            .find(|spec| spec.number == number);
+    }
+    let normalized = name
+        .strip_prefix("SIG")
+        .unwrap_or(name)
+        .to_ascii_uppercase();
+    RUNTIME_SIGNAL_SPECS
+        .iter()
+        .find(|spec| spec.name == normalized)
+}
 
 #[derive(Clone, Debug, Default)]
 struct OutputCapture {
@@ -3938,6 +4138,8 @@ pub struct WorkerRuntime {
     network: Option<Box<dyn wasmsh_utils::net_types::NetworkBackend>>,
     /// Active top-level execution, if a run has been started and not yet completed.
     active_run: Option<ActiveRun>,
+    /// Signals queued for the next progressive poll.
+    pending_signals: VecDeque<&'static RuntimeSignalSpec>,
 }
 
 /// Action to take for a character during array element parsing.
@@ -4138,6 +4340,7 @@ impl WorkerRuntime {
             external_handler: None,
             network: None,
             active_run: None,
+            pending_signals: VecDeque::new(),
         }
     }
 
@@ -4180,6 +4383,7 @@ impl WorkerRuntime {
                 self.exec.reset();
                 self.aliases = IndexMap::new();
                 self.active_run = None;
+                self.pending_signals.clear();
                 self.initialized = true;
                 // Set default shopt options (bash defaults)
                 self.vm.state.set_var("SHOPT_extglob".into(), "1".into());
@@ -4224,6 +4428,7 @@ impl WorkerRuntime {
                     "no active run".into(),
                 )],
             },
+            HostCommand::Signal { signal } => self.handle_signal_command(&signal),
             HostCommand::Cancel => {
                 self.cancel_active_execution();
                 vec![WorkerEvent::Diagnostic(
@@ -4335,6 +4540,7 @@ impl WorkerRuntime {
         self.vm.budget.recursion_depth = 0;
         self.vm.budget.clear_stop_reason();
         self.vm.cancellation_token().reset();
+        self.pending_signals.clear();
         self.active_run = Some(ActiveRun::new(input, hir));
         Ok(())
     }
@@ -4364,6 +4570,7 @@ impl WorkerRuntime {
         } else {
             self.config.step_budget as usize
         };
+        let pending_signal_events = self.drain_pending_signal_events();
         let mut finished = run.is_done();
 
         while !finished && remaining > 0 {
@@ -4387,7 +4594,7 @@ impl WorkerRuntime {
 
         if finished || self.exec.exit_requested.is_some() || self.exec.resource_exhausted {
             self.ensure_stop_reason();
-            let mut events = Vec::new();
+            let mut events = pending_signal_events;
             self.run_exit_trap_if_needed(&mut events);
             self.drain_io_events(&mut events);
             self.drain_diagnostic_events(&mut events);
@@ -4396,7 +4603,8 @@ impl WorkerRuntime {
             self.active_run = None;
             Some(ExecutionPoll::Done(events))
         } else {
-            let events = self.drain_partial_run_events();
+            let mut events = pending_signal_events;
+            events.extend(self.drain_partial_run_events());
             self.active_run = Some(run);
             Some(ExecutionPoll::Yield(events))
         }
@@ -4404,6 +4612,143 @@ impl WorkerRuntime {
 
     pub fn cancel_active_execution(&mut self) {
         self.vm.cancellation_token().cancel();
+    }
+
+    fn handle_signal_command(&mut self, signal: &str) -> Vec<WorkerEvent> {
+        if !self.initialized {
+            return vec![WorkerEvent::Diagnostic(
+                DiagnosticLevel::Error,
+                "runtime not initialized".into(),
+            )];
+        }
+
+        let Some(spec) = find_runtime_signal_spec(signal) else {
+            return vec![WorkerEvent::Diagnostic(
+                DiagnosticLevel::Error,
+                format!("unsupported signal: {signal}"),
+            )];
+        };
+
+        if self.active_run.is_some() {
+            self.pending_signals.push_back(spec);
+            if self.signal_trap_handler(spec).is_some()
+                || self.vm.state.get_var(spec.ignore_var).as_deref() == Some("1")
+            {
+                return Vec::new();
+            }
+            return match spec.default_action {
+                SignalDefaultAction::Terminate => vec![WorkerEvent::Diagnostic(
+                    DiagnosticLevel::Info,
+                    format!("signal {} received", spec.name),
+                )],
+                SignalDefaultAction::Ignore => Vec::new(),
+                SignalDefaultAction::StopLike => vec![WorkerEvent::Diagnostic(
+                    DiagnosticLevel::Warning,
+                    format!(
+                        "signal {} requires job-control stop semantics and is not modeled yet",
+                        spec.name
+                    ),
+                )],
+                SignalDefaultAction::ContinueLike => vec![WorkerEvent::Diagnostic(
+                    DiagnosticLevel::Info,
+                    format!(
+                        "signal {} has no effect without a stopped job in the current sandbox model",
+                        spec.name
+                    ),
+                )],
+            };
+        }
+
+        if let Some(handler) = self.signal_trap_handler(spec) {
+            let mut events = self.run_signal_trap(spec, &handler);
+            self.drain_diagnostic_events(&mut events);
+            if self.exec.exit_requested.is_some() {
+                events.extend(self.finish_idle_signal_exit());
+            }
+            return events;
+        }
+
+        if self.vm.state.get_var(spec.ignore_var).as_deref() == Some("1") {
+            return Vec::new();
+        }
+
+        match spec.default_action {
+            SignalDefaultAction::Terminate => {
+                self.exec.exit_requested = Some(128 + spec.number);
+                if self.active_run.is_some() {
+                    vec![WorkerEvent::Diagnostic(
+                        DiagnosticLevel::Info,
+                        format!("signal {} received", spec.name),
+                    )]
+                } else {
+                    self.finish_idle_signal_exit()
+                }
+            }
+            SignalDefaultAction::Ignore => Vec::new(),
+            SignalDefaultAction::StopLike => vec![WorkerEvent::Diagnostic(
+                DiagnosticLevel::Warning,
+                format!(
+                    "signal {} requires job-control stop semantics and is not modeled yet",
+                    spec.name
+                ),
+            )],
+            SignalDefaultAction::ContinueLike => vec![WorkerEvent::Diagnostic(
+                DiagnosticLevel::Info,
+                format!(
+                    "signal {} has no effect without a stopped job in the current sandbox model",
+                    spec.name
+                ),
+            )],
+        }
+    }
+
+    fn drain_pending_signal_events(&mut self) -> Vec<WorkerEvent> {
+        let mut events = Vec::new();
+        while let Some(spec) = self.pending_signals.pop_front() {
+            if let Some(handler) = self.signal_trap_handler(spec) {
+                events.extend(self.run_signal_trap(spec, &handler));
+                self.drain_diagnostic_events(&mut events);
+            } else if self.vm.state.get_var(spec.ignore_var).as_deref() == Some("1") {
+                continue;
+            } else {
+                match spec.default_action {
+                    SignalDefaultAction::Terminate => {
+                        self.exec.exit_requested = Some(128 + spec.number);
+                    }
+                    SignalDefaultAction::Ignore => {}
+                    SignalDefaultAction::StopLike => events.push(WorkerEvent::Diagnostic(
+                        DiagnosticLevel::Warning,
+                        format!(
+                            "signal {} requires job-control stop semantics and is not modeled yet",
+                            spec.name
+                        ),
+                    )),
+                    SignalDefaultAction::ContinueLike => events.push(WorkerEvent::Diagnostic(
+                        DiagnosticLevel::Info,
+                        format!(
+                            "signal {} has no effect without a stopped job in the current sandbox model",
+                            spec.name
+                        ),
+                    )),
+                }
+            }
+
+            if self.exec.exit_requested.is_some() || self.exec.resource_exhausted {
+                break;
+            }
+        }
+        events
+    }
+
+    fn finish_idle_signal_exit(&mut self) -> Vec<WorkerEvent> {
+        let mut events = Vec::new();
+        self.run_exit_trap_if_needed(&mut events);
+        self.drain_io_events(&mut events);
+        self.drain_diagnostic_events(&mut events);
+        let exit_status = self.current_run_exit_status();
+        events.push(WorkerEvent::Exit(exit_status));
+        self.exec.reset();
+        events
     }
 
     fn poll_active_run_to_completion(&mut self) -> Vec<WorkerEvent> {
@@ -4841,6 +5186,7 @@ impl WorkerRuntime {
 
     fn should_run_err_trap(&self, and_or: &HirAndOr) -> bool {
         !self.exec.errexit_suppressed
+            && (self.exec.nested_shell_depth == 0 || self.is_set_option_enabled('E'))
             && and_or.rest.is_empty()
             && !and_or.first.negated
             && self.vm.state.last_status != 0
@@ -4861,7 +5207,10 @@ impl WorkerRuntime {
     }
 
     fn run_debug_trap_if_needed(&mut self) {
-        if self.exec.trap_depth > 0 || self.exec.resource_exhausted {
+        if self.exec.trap_depth > 0
+            || self.exec.resource_exhausted
+            || (self.exec.nested_shell_depth > 0 && !self.is_set_option_enabled('T'))
+        {
             return;
         }
         self.run_trap_and_merge(
@@ -4873,7 +5222,10 @@ impl WorkerRuntime {
     }
 
     fn run_return_trap_if_needed(&mut self) {
-        if self.exec.trap_depth > 0 || self.exec.resource_exhausted {
+        if self.exec.trap_depth > 0
+            || self.exec.resource_exhausted
+            || (self.exec.nested_shell_depth > 0 && !self.is_set_option_enabled('T'))
+        {
             return;
         }
         self.run_trap_and_merge(
@@ -4918,6 +5270,37 @@ impl WorkerRuntime {
             return None;
         }
         Some(handler.to_string())
+    }
+
+    fn signal_trap_handler(&self, spec: &RuntimeSignalSpec) -> Option<String> {
+        if !spec.trappable {
+            return None;
+        }
+        self.trap_handler(spec.handler_var, spec.ignore_var)
+    }
+
+    fn run_signal_trap(&mut self, spec: &RuntimeSignalSpec, handler: &str) -> Vec<WorkerEvent> {
+        let saved_status = self.vm.state.last_status;
+        let saved_exit_requested = self.exec.exit_requested;
+        let saved_exec_io = self.current_exec_io.take();
+        let saved_output_captures = std::mem::take(&mut self.exec.output_captures);
+        self.exec.trap_depth += 1;
+        self.vm.state.last_status = 128 + spec.number;
+        let events = self.execute_input_inner(handler);
+        self.exec.trap_depth -= 1;
+        self.current_exec_io = saved_exec_io;
+        self.exec.output_captures = saved_output_captures;
+        if !self.exec.resource_exhausted && self.exec.exit_requested == saved_exit_requested {
+            self.vm.state.last_status = saved_status;
+        }
+        events
+    }
+
+    fn with_nested_shell_scope<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        self.exec.nested_shell_depth += 1;
+        let out = f(self);
+        self.exec.nested_shell_depth -= 1;
+        out
     }
 
     fn drain_io_events(&mut self, events: &mut Vec<WorkerEvent>) {
@@ -6637,8 +7020,9 @@ impl WorkerRuntime {
             exec_io.fds_mut().set_input(target);
             exec_io
         });
-        let (mut inner_events, captured) =
-            self.with_output_capture(true, true, |runtime| runtime.execute_input_inner(input));
+        let (mut inner_events, captured) = self.with_output_capture(true, true, |runtime| {
+            runtime.with_nested_shell_scope(|nested| nested.execute_input_inner(input))
+        });
         let inner_resource_exhausted = self.exec.resource_exhausted;
         let inner_diagnostics = self
             .vm
@@ -6747,11 +7131,13 @@ impl WorkerRuntime {
         }
 
         let ((), captured) = self.with_output_capture(true, true, |runtime| {
-            runtime.execute_scheduled_pipeline_with_source_reader(
-                &pipeline.commands,
-                pipeline,
-                Some(reader),
-            );
+            runtime.with_nested_shell_scope(|nested| {
+                nested.execute_scheduled_pipeline_with_source_reader(
+                    &pipeline.commands,
+                    pipeline,
+                    Some(reader),
+                );
+            });
         });
         self.exec.recursion_depth -= 1;
         self.vm.budget.exit_recursion();
@@ -6998,6 +7384,7 @@ impl WorkerRuntime {
             external_handler: None,
             network: None,
             active_run: None,
+            pending_signals: VecDeque::new(),
         })
     }
 
@@ -7949,9 +8336,11 @@ impl WorkerRuntime {
                     .source_stack
                     .push(smol_str::SmolStr::from(full.as_str()));
                 let code = String::from_utf8_lossy(&data).to_string();
-                let sub_events = self.execute_input_inner(&code);
-                self.merge_sub_events_with_diagnostics(sub_events);
-                self.run_return_trap_if_needed();
+                self.with_nested_shell_scope(|runtime| {
+                    let sub_events = runtime.execute_input_inner(&code);
+                    runtime.merge_sub_events_with_diagnostics(sub_events);
+                    runtime.run_return_trap_if_needed();
+                });
                 self.vm.state.source_stack.pop();
             }
             Err(e) => {
@@ -8013,8 +8402,10 @@ impl WorkerRuntime {
                     .iter()
                     .map(|s| smol_str::SmolStr::from(s.as_str()))
                     .collect();
-                let sub_events = self.execute_input_inner(script);
-                self.merge_sub_events_with_diagnostics(sub_events);
+                self.with_nested_shell_scope(|runtime| {
+                    let sub_events = runtime.execute_input_inner(script);
+                    runtime.merge_sub_events_with_diagnostics(sub_events);
+                });
                 self.vm.state.positional = old_positional;
                 self.vm.state.script_name = old_script_name;
             }
@@ -8050,7 +8441,8 @@ impl WorkerRuntime {
             .state
             .source_stack
             .push(smol_str::SmolStr::from(path.as_str()));
-        let sub_events = self.execute_input_inner(&content);
+        let sub_events =
+            self.with_nested_shell_scope(|runtime| runtime.execute_input_inner(&content));
         self.vm.state.source_stack.pop();
         self.merge_sub_events_with_diagnostics(sub_events);
 
@@ -8115,7 +8507,8 @@ impl WorkerRuntime {
             .state
             .source_stack
             .push(smol_str::SmolStr::from(path.as_str()));
-        let sub_events = self.execute_input_inner(&content);
+        let sub_events =
+            self.with_nested_shell_scope(|runtime| runtime.execute_input_inner(&content));
         self.vm.state.source_stack.pop();
         self.merge_sub_events_with_diagnostics(sub_events);
 
@@ -8168,8 +8561,10 @@ impl WorkerRuntime {
             .func_stack
             .push(smol_str::SmolStr::from(cmd_name));
         let locals_before = self.exec.local_save_stack.len();
-        self.execute_command(body);
-        self.run_return_trap_if_needed();
+        self.with_nested_shell_scope(|runtime| {
+            runtime.execute_command(body);
+            runtime.run_return_trap_if_needed();
+        });
         let new_locals: Vec<_> = self.exec.local_save_stack.drain(locals_before..).collect();
         for (name, old_val) in new_locals.into_iter().rev() {
             if let Some(val) = old_val {

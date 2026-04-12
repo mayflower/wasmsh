@@ -2,10 +2,11 @@
 name = "trap-return-function"
 tags = ["builtin", "P1"]
 tier = "P1"
-requires = ["trap", "trap-return", "function", "echo", "local"]
+requires = ["trap", "trap-return", "function", "echo", "local", "set"]
 
 [input]
 script = """
+set -T
 trap 'echo return:${FUNCNAME}' RETURN
 f() { local x=1; echo body; }
 f

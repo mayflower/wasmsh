@@ -59,7 +59,7 @@
 ### Not Yet Implemented
 
 - Coprocesses: `coproc`
-- Full POSIX signal delivery / job-linked signal semantics
+- Full job-linked stop/continue signal semantics
 
 ---
 
@@ -86,9 +86,9 @@
 | `type`       | Done   | Reports alias/function/builtin/utility classification |
 | `command`    | Done   | `-v` shows command type; bypasses functions |
 | `eval`       | Done   | Re-parses and executes concatenated arguments |
-| `set`        | Done   | `-a -C -e -E -f -n -p -T -u -v -x`; long names `allexport errexit errtrace functrace noclobber noglob noexec nounset pipefail privileged verbose xtrace`; `set -o` / `set +o` list known options; `set -- args` sets positionals |
+| `set`        | Done   | `-a -C -e -E -f -n -p -T -u -v -x`; long names `allexport errexit errtrace functrace noclobber noglob noexec nounset pipefail privileged verbose xtrace`; `set -o` / `set +o` list known options; `-E` inherits `ERR` into functions/source and `-T` inherits `DEBUG`/`RETURN`; `set -- args` sets positionals |
 | `getopts`    | Done   | Parses short options from positional parameters; updates OPTIND |
-| `trap`       | Done   | `EXIT`, `ERR`, `DEBUG`, `RETURN`, `trap -p`, `trap -l`, reset/ignore; regular signal names are accepted but not delivered in the sandbox |
+| `trap`       | Done   | `EXIT`, `ERR`, `DEBUG`, `RETURN`, `trap -p`, `trap -l`, reset/ignore; signal traps are host-deliverable via the worker protocol/browser wrapper; `KILL` and `STOP` are listed but rejected as non-trappable |
 | `declare` / `typeset` | Done | `-i` (integer), `-a` (indexed array), `-A` (assoc array), `-x` (export), `-r` (readonly), `-l` (lowercase), `-u` (uppercase), `-n` (nameref), `-p` (print); compound assignment `arr=(...)` |
 | `let`        | Done   | Evaluates arithmetic expressions; exit status is 0 if last result is non-zero |
 | `shopt`      | Done   | `-s` / `-u`; options: `extglob nullglob dotglob globstar nocasematch nocaseglob failglob lastpipe expand_aliases sourcepath` |
@@ -377,7 +377,7 @@ Arithmetic is available in `$(( ))`, `(( ))`, `let`, and `declare -i` contexts. 
 | Flag      | Long name    | Description |
 |-----------|--------------|-------------|
 | `-e`      | `errexit`    | Exit on any command failure |
-| `-E`      | `errtrace`   | Track ERR trap inheritance flag |
+| `-E`      | `errtrace`   | Inherit `ERR` traps into functions, `source`, and nested shell evaluations |
 | `-u`      | `nounset`    | Error on unset variable reference |
 | `-x`      | `xtrace`     | Print commands before executing (`PS4` prefix) |
 | `-f`      | `noglob`     | Disable glob expansion |
@@ -385,7 +385,7 @@ Arithmetic is available in `$(( ))`, `(( ))`, `let`, and `declare -i` contexts. 
 | `-C`      | `noclobber`  | Prevent `>` from overwriting existing files |
 | `-n`      | `noexec`     | Parse input but skip executing subsequently submitted commands |
 | `-p`      | `privileged` | Track privileged-mode flag for compatibility |
-| `-T`      | `functrace`  | Track DEBUG/RETURN inheritance flag |
+| `-T`      | `functrace`  | Inherit `DEBUG`/`RETURN` traps into functions, `source`, and nested shell evaluations |
 | `-v`      | `verbose`    | Echo subsequently submitted input before execution |
 | `-o pipefail` | `pipefail` | Pipeline exit status is rightmost non-zero stage |
 
@@ -481,6 +481,6 @@ The Pyodide build includes [micropip](https://micropip.pyodide.org/) for install
 - No kernel or network administration tools
 - No TTY/terminal emulation
 - No full job control (`fg`, `bg`, `jobs`); `&` parses but runs synchronously
-- No POSIX signal delivery; only shell-level traps such as `EXIT`, `ERR`, `DEBUG`, and `RETURN` are executed
+- No OS process model or job control; signals are modeled at shell-session level and can be injected by the host, but `fg`/`bg`/`jobs` semantics still do not exist
 - No coprocesses
 - GPL/AGPL/SSPL code is forbidden in the core

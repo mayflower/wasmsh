@@ -18,10 +18,11 @@ In particular:
   interpreter. Neither backend touches the host's real filesystem.
 - The script has **no network access** unless the host explicitly
   allowlists hostnames at `Init` time.
-- The script has **no process model**. There is no `fork`, no `exec`, no
-  POSIX signal delivery. `kill`, `wait`, `jobs` are not supported. Trap
-  handlers exist for `EXIT`, `ERR`, `DEBUG`, and `RETURN`, but they run
-  inside the shell runtime rather than via an OS process model.
+- The script has **no process model**. There is no `fork`, no `exec`, and
+  no job control. `kill`, `wait`, `jobs` are not supported. The host can
+  inject modeled POSIX-style signals into the current shell session, and
+  trap handlers run inside the shell runtime rather than via an OS process
+  tree. Stop/continue signals therefore do not suspend or resume real jobs.
 - The script **cannot run arbitrary native code**. Builtins, utilities,
   and external command handlers are the only ways to enter native code,
   and all of them are registered statically by the host.

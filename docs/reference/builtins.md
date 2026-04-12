@@ -267,10 +267,21 @@ Set or inspect trap handlers.
 - `trap -p` — print registered handlers
 - `trap -l` — list known pseudo-events and accepted signal names
 
-`EXIT`, `ERR`, `DEBUG`, and `RETURN` are executed by the runtime. Regular
-signal names such as `TERM` or `INT` are accepted and shown by `trap -p`,
-but the sandbox still has no POSIX signal delivery, so those handlers are
-currently informational/no-op.
+`EXIT`, `ERR`, `DEBUG`, and `RETURN` are executed by the runtime.
+
+- `ERR` inherits into functions, `source`, and nested shell evaluations only
+  when `set -E` / `set -o errtrace` is enabled.
+- `DEBUG` and `RETURN` inherit into functions, `source`, and nested shell
+  evaluations only when `set -T` / `set -o functrace` is enabled.
+- Regular signal names such as `TERM` or `INT` can also be delivered by the
+  embedding host via `HostCommand::Signal` (or the browser worker's
+  `signal(...)` wrapper), which runs the registered trap or applies the
+  modeled default action.
+- `KILL` and `STOP` are listed for completeness but cannot be trapped.
+
+The sandbox still has no OS process tree or job control, so stop/continue
+signals do not suspend background jobs; they only surface the modeled
+session-level behavior.
 
 ## `type` name...
 

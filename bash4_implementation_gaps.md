@@ -33,14 +33,17 @@ vorigen Bewertung sind für den aktuellen Stand weitgehend umgesetzt:
 - geschlossen: zusätzliche `test`-/`[[`-Operatoren wie `-L`, `-h`, `-p`, `-S`, `-t`, `-N`, `-O`, `-G`, `-ef`, `-nt`, `-ot`
 
 Offen aus der priorisierten Liste bleiben damit vor allem die teureren Blöcke
-`Job-Control`, echte POSIX-`Signalzustellung`, `coproc` sowie die weiterhin breiteren
-Lücken bei interaktiven Builtins und `set`-/`shopt`-Optionen.
+`Job-Control`, `coproc` sowie die weiterhin breiteren Lücken bei interaktiven
+Builtins und `set`-/`shopt`-Optionen.
 
 Zusätzlich reduziert am 2026-04-12:
 
 - `set`: `-E`, `-T`, `-n`, `-p`, `-v` sowie `set -o` / `set +o`
 - `shopt`: `sourcepath`
 - `source`: `PATH`-Suche jetzt dokumentiert und per `shopt sourcepath` schaltbar
+- `trap`/Signalmodell: hostgetriebene Signalzustellung, `ERR`-/`DEBUG`-/`RETURN`-
+  Vererbung gemäß `set -E`/`set -T`, sowie Ablehnung von `KILL`/`STOP` als
+  nicht trappbar
 
 ## Priorisierungslogik
 
@@ -83,23 +86,23 @@ Zusätzlich reduziert am 2026-04-12:
   nutzen `&` nicht für Komfort, sondern für tatsächliche Parallelität,
   `wait`-Synchronisation und PID-basierte Steuerung.
 
-#### 2. Reale POSIX-Signalzustellung und volle Trap-Feinheiten fehlen weiterhin
+#### 2. [erledigt] Trap-Randfälle und das sessionbasierte POSIX-Signalmodell
 
 - Bash-4-Spezifikation:
   Abschnitt 20 verlangt neben `EXIT` und `ERR` auch `DEBUG`, `RETURN`,
   `trap -l`, `trap -p`, Reset/Ignore-Semantik und reguläre Signalnamen.
 - Aktueller `wasmsh`-Stand:
   `trap` deckt inzwischen `EXIT`, `ERR`, `DEBUG`, `RETURN`, `trap -l`,
-  `trap -p`, Reset/Ignore-Semantik und reguläre Signalnamen ab. Offen
-  bleibt aber die eigentliche POSIX-Signalzustellung im Sandbox-Modell;
-  Namen wie `TERM` oder `INT` sind daher weiterhin nur registrierbar,
-  nicht auslösbar. Auch die feineren Bash-Randfälle bei `ERR` in
-  komplexeren `&&`/`||`-Ketten bleiben strategisch noch ausbaufähig.
-- Warum `P0`:
-  Der größte Restschaden liegt jetzt weniger in `trap` selbst als in der
-  fehlenden Prozess-/Signalschicht darunter. Das bleibt für Portabilität
-  relevant, ist aber deutlich teurer als der bereits geschlossene
-  Trap-Oberflächenblock.
+  `trap -p`, Reset/Ignore-Semantik und reguläre Signalnamen ab. Die
+  Runtime modelliert jetzt auch hostgetriebene Signalzustellung für die
+  Shell-Session, inklusive Default-Aktionen, Trap-Ausführung während
+  laufender `StartRun`/`PollRun`-Ausführungen, `ERR`-Vererbung via
+  `set -E` und `DEBUG`/`RETURN`-Vererbung via `set -T`. `KILL` und
+  `STOP` werden jetzt korrekt als nicht trappbar abgelehnt.
+- Restgrenze:
+  Was offen bleibt, ist nicht mehr der Trap-Block selbst, sondern die
+  an echtes Job-Control gebundene Stop/Continue-Semantik für reale
+  Hintergrundjobs. Dieser Rest ist im Job-Control-Block aufgehoben.
 
 #### 3. Wichtige Spezialparameter fehlen oder sind nur dokumentiert, nicht implementiert
 
@@ -288,7 +291,7 @@ markiert.
 | Nr. | Gap | Kompatibilität | Machbarkeit | Kombiniert | Kurzbegründung |
 | --- | --- | --- | --- | --- | --- |
 | 1 | Hintergrundausführung und Job-Control | `P0` | `M3` | `K2` | Sehr hoher Bash-Wert, aber im aktuellen Prozess-/Sandbox-Modell der teuerste Eingriff. |
-| 2 | POSIX-Signalzustellung und verbleibende Trap-Randfälle | `P0` | `M3` | `K2` | Die Trap-Oberfläche ist weitgehend da; offen bleibt die teure Prozess-/Signalschicht darunter. |
+| 2 | `[erledigt]` Trap-Randfälle und sessionbasiertes POSIX-Signalmodell | `erledigt` | `erledigt` | `-` | Am 2026-04-12 umgesetzt; verbleibende Stop/Continue-Reste hängen jetzt am Job-Control-Modell. |
 | 3 | `[erledigt]` Spezialparameter (`$$`, `$!`, `$-`, `$_`) | `erledigt` | `erledigt` | `-` | Am 2026-04-12 umgesetzt. |
 | 4 | `coproc` | `P1` | `M3` | `K3` | Echte Bash-4-Funktion, aber stark gekoppelt an parallele Prozess- und FD-Semantik. |
 | 5 | `[erledigt]` Redirection-Lücken (`&>>`, `>|`, FD-close) | `erledigt` | `erledigt` | `-` | Am 2026-04-12 umgesetzt. |
@@ -315,7 +318,6 @@ markiert.
 ### K2
 
 - `1`: Job-Control und echte Hintergrundausführung
-- `2`: POSIX-Signalzustellung und verbleibende Trap-Randfälle
 - `11`: verbleibende `set`-/`shopt`-Restmenge
 
 ### K3
@@ -326,8 +328,7 @@ markiert.
 
 ## Empfohlene Arbeitsreihenfolge auf Basis der kombinierten Bewertung
 
-1. verbleibende Trap-Randfälle und POSIX-Signalmodell architektonisch planen
-2. danach Job-/Prozessmodell für `&`, `wait`, Jobspecs und echte Signalzustellung angehen
-3. die verbleibende `set`-/`shopt`-Restmenge nur noch opportunistisch als kleinere Kompatibilitätsarbeit schneiden
-4. `coproc` erst auf Basis eines tragfähigen Prozess-/FD-Modells angehen
-5. interaktive Bash-Features zuletzt behandeln
+1. Job-/Prozessmodell für `&`, `wait`, Jobspecs und die noch daran hängende Stop/Continue-Semantik angehen
+2. die verbleibende `set`-/`shopt`-Restmenge opportunistisch als kleinere Kompatibilitätsarbeit schneiden
+3. `coproc` erst auf Basis eines tragfähigen Prozess-/FD-Modells angehen
+4. interaktive Bash-Features zuletzt behandeln

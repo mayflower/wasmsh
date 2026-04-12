@@ -375,6 +375,164 @@ fn cancel_returns_diagnostic() {
 }
 
 #[test]
+fn signal_runs_registered_trap_without_exiting_idle_shell() {
+    let mut rt = new_runtime(0);
+    let setup = rt.handle_command(HostCommand::Run {
+        input: "trap 'echo term' TERM".into(),
+    });
+    assert_eq!(get_exit(&setup), 0);
+
+    let events = rt.handle_command(HostCommand::Signal {
+        signal: "SIGTERM".into(),
+    });
+    assert_eq!(get_stdout(&events), "term\n");
+    assert_eq!(get_exit(&events), -1);
+
+    let recovered = rt.handle_command(HostCommand::Run {
+        input: "echo recovered".into(),
+    });
+    assert_eq!(get_stdout(&recovered), "recovered\n");
+    assert_eq!(get_exit(&recovered), 0);
+}
+
+#[test]
+fn terminating_signal_runs_exit_trap_and_reports_bash_status() {
+    let mut rt = new_runtime(0);
+    let setup = rt.handle_command(HostCommand::Run {
+        input: "trap 'echo cleanup' EXIT".into(),
+    });
+    assert_eq!(get_exit(&setup), 0);
+
+    let events = rt.handle_command(HostCommand::Signal {
+        signal: "15".into(),
+    });
+    assert_eq!(get_stdout(&events), "cleanup\n");
+    assert_eq!(get_exit(&events), 143);
+
+    let recovered = rt.handle_command(HostCommand::Run {
+        input: "echo recovered".into(),
+    });
+    assert_eq!(get_stdout(&recovered), "recovered\n");
+    assert_eq!(get_exit(&recovered), 0);
+}
+
+#[test]
+fn trapped_signal_can_interrupt_progressive_run_without_forcing_exit() {
+    let mut rt = new_runtime(1);
+    let setup = rt.handle_command(HostCommand::Run {
+        input: "trap 'seen=trapped' TERM".into(),
+    });
+    assert_eq!(get_exit(&setup), 0);
+
+    let start = rt.handle_command(HostCommand::StartRun {
+        input: "echo first; echo second".into(),
+    });
+    assert_eq!(start, vec![WorkerEvent::Yielded]);
+
+    let first = rt.handle_command(HostCommand::PollRun);
+    assert_eq!(get_stdout(&first), "first\n");
+    assert!(has_yielded(&first));
+
+    let signal = rt.handle_command(HostCommand::Signal {
+        signal: "TERM".into(),
+    });
+    assert_eq!(get_stdout(&signal), "");
+    assert_eq!(get_exit(&signal), -1);
+
+    let second = rt.handle_command(HostCommand::PollRun);
+    assert_eq!(get_stdout(&second), "second\n");
+    assert_eq!(get_exit(&second), 0);
+
+    let seen = rt.handle_command(HostCommand::Run {
+        input: "echo ${seen-unset}".into(),
+    });
+    assert_eq!(get_stdout(&seen), "trapped\n");
+}
+
+#[test]
+fn terminating_signal_stops_progressive_run_with_signal_exit_code() {
+    let mut rt = new_runtime(1);
+
+    let start = rt.handle_command(HostCommand::StartRun {
+        input: "echo first; echo second".into(),
+    });
+    assert_eq!(start, vec![WorkerEvent::Yielded]);
+
+    let first = rt.handle_command(HostCommand::PollRun);
+    assert_eq!(get_stdout(&first), "first\n");
+    assert!(has_yielded(&first));
+
+    let signal = rt.handle_command(HostCommand::Signal {
+        signal: "TERM".into(),
+    });
+    assert!(signal.iter().any(|event| {
+        matches!(
+            event,
+            WorkerEvent::Diagnostic(DiagnosticLevel::Info, message)
+                if message == "signal TERM received"
+        )
+    }));
+
+    let done = rt.handle_command(HostCommand::PollRun);
+    assert_eq!(get_stdout(&done), "");
+    assert_eq!(get_exit(&done), 143);
+}
+
+#[test]
+fn stop_like_signals_report_job_control_gap() {
+    let mut rt = new_runtime(0);
+    let events = rt.handle_command(HostCommand::Signal {
+        signal: "TSTP".into(),
+    });
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            WorkerEvent::Diagnostic(DiagnosticLevel::Warning, message)
+                if message.contains("job-control stop semantics")
+        )
+    }));
+}
+
+#[test]
+fn trap_inheritance_respects_errtrace_and_functrace_flags() {
+    let mut rt = new_runtime(0);
+    let debug_off = rt.handle_command(HostCommand::Run {
+        input: "trap 'echo debug' DEBUG\nf(){ echo body; }\nf".into(),
+    });
+    assert_eq!(get_stdout(&debug_off), "debug\nbody\n");
+
+    let mut rt = new_runtime(0);
+    let debug_on = rt.handle_command(HostCommand::Run {
+        input: "set -T\ntrap 'echo debug' DEBUG\nf(){ echo body; }\nf".into(),
+    });
+    assert_eq!(get_stdout(&debug_on), "debug\ndebug\ndebug\nbody\n");
+
+    let mut rt = new_runtime(0);
+    let return_off = rt.handle_command(HostCommand::Run {
+        input: "trap 'echo return' RETURN\nf(){ echo body; }\nf".into(),
+    });
+    assert_eq!(get_stdout(&return_off), "body\n");
+
+    let mut rt = new_runtime(0);
+    let return_on = rt.handle_command(HostCommand::Run {
+        input: "set -T\ntrap 'echo return' RETURN\nf(){ echo body; }\nf".into(),
+    });
+    assert_eq!(get_stdout(&return_on), "body\nreturn\n");
+
+    let mut rt = new_runtime(0);
+    let err_off = rt.handle_command(HostCommand::Run {
+        input: "trap 'echo err' ERR\nf(){ false; }\nf\necho status:$?".into(),
+    });
+    assert_eq!(get_stdout(&err_off), "err\nstatus:1\n");
+
+    let mut rt = new_runtime(0);
+    let err_on = rt.handle_command(HostCommand::Run {
+        input: "set -E\ntrap 'echo err' ERR\nf(){ false; }\nf\necho status:$?".into(),
+    });
+    assert_eq!(get_stdout(&err_on), "err\nerr\nstatus:1\n");
+}
+
+#[test]
 fn active_execution_yields_and_resumes_with_small_budget() {
     let mut rt = new_runtime(1);
 

@@ -1356,6 +1356,7 @@ struct TrapSpec {
     number: Option<u8>,
     handler_var: &'static str,
     ignore_var: &'static str,
+    trappable: bool,
 }
 
 const TRAP_EVENT_SPECS: &[TrapSpec] = &[
@@ -1364,24 +1365,28 @@ const TRAP_EVENT_SPECS: &[TrapSpec] = &[
         number: Some(0),
         handler_var: "_TRAP_EXIT",
         ignore_var: "_TRAP_IGNORE_EXIT",
+        trappable: true,
     },
     TrapSpec {
         name: "ERR",
         number: None,
         handler_var: "_TRAP_ERR",
         ignore_var: "_TRAP_IGNORE_ERR",
+        trappable: true,
     },
     TrapSpec {
         name: "DEBUG",
         number: None,
         handler_var: "_TRAP_DEBUG",
         ignore_var: "_TRAP_IGNORE_DEBUG",
+        trappable: true,
     },
     TrapSpec {
         name: "RETURN",
         number: None,
         handler_var: "_TRAP_RETURN",
         ignore_var: "_TRAP_IGNORE_RETURN",
+        trappable: true,
     },
 ];
 
@@ -1391,120 +1396,140 @@ const TRAP_SIGNAL_SPECS: &[TrapSpec] = &[
         number: Some(1),
         handler_var: "_TRAP_SIG_HUP",
         ignore_var: "_TRAP_IGNORE_SIG_HUP",
+        trappable: true,
     },
     TrapSpec {
         name: "INT",
         number: Some(2),
         handler_var: "_TRAP_SIG_INT",
         ignore_var: "_TRAP_IGNORE_SIG_INT",
+        trappable: true,
     },
     TrapSpec {
         name: "QUIT",
         number: Some(3),
         handler_var: "_TRAP_SIG_QUIT",
         ignore_var: "_TRAP_IGNORE_SIG_QUIT",
+        trappable: true,
     },
     TrapSpec {
         name: "ILL",
         number: Some(4),
         handler_var: "_TRAP_SIG_ILL",
         ignore_var: "_TRAP_IGNORE_SIG_ILL",
+        trappable: true,
     },
     TrapSpec {
         name: "ABRT",
         number: Some(6),
         handler_var: "_TRAP_SIG_ABRT",
         ignore_var: "_TRAP_IGNORE_SIG_ABRT",
+        trappable: true,
     },
     TrapSpec {
         name: "FPE",
         number: Some(8),
         handler_var: "_TRAP_SIG_FPE",
         ignore_var: "_TRAP_IGNORE_SIG_FPE",
+        trappable: true,
     },
     TrapSpec {
         name: "KILL",
         number: Some(9),
         handler_var: "_TRAP_SIG_KILL",
         ignore_var: "_TRAP_IGNORE_SIG_KILL",
+        trappable: false,
     },
     TrapSpec {
         name: "USR1",
         number: Some(10),
         handler_var: "_TRAP_SIG_USR1",
         ignore_var: "_TRAP_IGNORE_SIG_USR1",
+        trappable: true,
     },
     TrapSpec {
         name: "SEGV",
         number: Some(11),
         handler_var: "_TRAP_SIG_SEGV",
         ignore_var: "_TRAP_IGNORE_SIG_SEGV",
+        trappable: true,
     },
     TrapSpec {
         name: "USR2",
         number: Some(12),
         handler_var: "_TRAP_SIG_USR2",
         ignore_var: "_TRAP_IGNORE_SIG_USR2",
+        trappable: true,
     },
     TrapSpec {
         name: "PIPE",
         number: Some(13),
         handler_var: "_TRAP_SIG_PIPE",
         ignore_var: "_TRAP_IGNORE_SIG_PIPE",
+        trappable: true,
     },
     TrapSpec {
         name: "ALRM",
         number: Some(14),
         handler_var: "_TRAP_SIG_ALRM",
         ignore_var: "_TRAP_IGNORE_SIG_ALRM",
+        trappable: true,
     },
     TrapSpec {
         name: "TERM",
         number: Some(15),
         handler_var: "_TRAP_SIG_TERM",
         ignore_var: "_TRAP_IGNORE_SIG_TERM",
+        trappable: true,
     },
     TrapSpec {
         name: "CHLD",
         number: Some(17),
         handler_var: "_TRAP_SIG_CHLD",
         ignore_var: "_TRAP_IGNORE_SIG_CHLD",
+        trappable: true,
     },
     TrapSpec {
         name: "CONT",
         number: Some(18),
         handler_var: "_TRAP_SIG_CONT",
         ignore_var: "_TRAP_IGNORE_SIG_CONT",
+        trappable: true,
     },
     TrapSpec {
         name: "STOP",
         number: Some(19),
         handler_var: "_TRAP_SIG_STOP",
         ignore_var: "_TRAP_IGNORE_SIG_STOP",
+        trappable: false,
     },
     TrapSpec {
         name: "TSTP",
         number: Some(20),
         handler_var: "_TRAP_SIG_TSTP",
         ignore_var: "_TRAP_IGNORE_SIG_TSTP",
+        trappable: true,
     },
     TrapSpec {
         name: "TTIN",
         number: Some(21),
         handler_var: "_TRAP_SIG_TTIN",
         ignore_var: "_TRAP_IGNORE_SIG_TTIN",
+        trappable: true,
     },
     TrapSpec {
         name: "TTOU",
         number: Some(22),
         handler_var: "_TRAP_SIG_TTOU",
         ignore_var: "_TRAP_IGNORE_SIG_TTOU",
+        trappable: true,
     },
     TrapSpec {
         name: "WINCH",
         number: Some(28),
         handler_var: "_TRAP_SIG_WINCH",
         ignore_var: "_TRAP_IGNORE_SIG_WINCH",
+        trappable: true,
     },
 ];
 
@@ -1603,15 +1628,23 @@ fn builtin_trap(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     }
 
     let handler = args[0];
+    let mut status = 0;
     for signal in &args[1..] {
         let Some(spec) = find_trap_spec(signal) else {
             let msg = format!("trap: {signal}: signal not supported\n");
             ctx.output.stderr(msg.as_bytes());
+            status = 1;
             continue;
         };
+        if !spec.trappable {
+            let msg = format!("trap: {signal}: cannot trap this signal\n");
+            ctx.output.stderr(msg.as_bytes());
+            status = 1;
+            continue;
+        }
         set_trap_handler(ctx, spec, handler);
     }
-    0
+    status
 }
 
 #[cfg(test)]
@@ -2021,5 +2054,22 @@ mod tests {
         let (status, sink) = run_builtin("trap", &["trap", "echo hup", "SIGTERM", "INT"]);
         assert_eq!(status, 0);
         assert!(sink.stderr_str().is_empty());
+    }
+
+    #[test]
+    fn trap_rejects_untrappable_signals() {
+        let mut state = ShellState::new();
+        let (status, sink) = run_builtin_with_state(
+            "trap",
+            &["trap", "echo nope", "KILL", "SIGSTOP"],
+            &mut state,
+        );
+        assert_eq!(status, 1);
+        assert!(sink.stderr_str().contains("KILL: cannot trap this signal"));
+        assert!(sink
+            .stderr_str()
+            .contains("SIGSTOP: cannot trap this signal"));
+        assert_eq!(state.get_var(trap_handler_var("KILL")), None);
+        assert_eq!(state.get_var(trap_handler_var("STOP")), None);
     }
 }

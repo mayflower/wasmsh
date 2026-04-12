@@ -44,6 +44,11 @@ pub enum HostCommand {
     },
     /// Poll the active progressive execution.
     PollRun,
+    /// Deliver a POSIX signal name or number to the shell runtime.
+    Signal {
+        /// Signal name (`TERM`, `SIGINT`) or decimal number (`15`).
+        signal: String,
+    },
     /// Cancel the currently running execution.
     Cancel,
     /// Mount a virtual filesystem at the given path.
@@ -125,6 +130,11 @@ mod tests {
         };
         assert!(matches!(cmd, HostCommand::StartRun { .. }));
 
+        let cmd = HostCommand::Signal {
+            signal: "TERM".into(),
+        };
+        assert!(matches!(cmd, HostCommand::Signal { .. }));
+
         assert_eq!(HostCommand::PollRun, HostCommand::PollRun);
     }
 
@@ -156,6 +166,14 @@ mod tests {
         assert_eq!(encoded, r#""PollRun""#);
         let decoded: HostCommand = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, HostCommand::PollRun);
+
+        let signal = HostCommand::Signal {
+            signal: "TERM".into(),
+        };
+        let encoded = serde_json::to_string(&signal).unwrap();
+        assert_eq!(encoded, r#"{"Signal":{"signal":"TERM"}}"#);
+        let decoded: HostCommand = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, signal);
     }
 
     #[test]

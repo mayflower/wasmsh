@@ -2876,5 +2876,13 @@ mod wasm_bindings {
             let events = self.runtime.handle_command(HostCommand::Cancel);
             serde_json::to_string(&events).unwrap_or_default()
         }
+
+        /// Deliver a POSIX signal name or number.  Returns a JSON array of events.
+        pub fn signal(&mut self, signal: &str) -> String {
+            let events = self.runtime.handle_command(HostCommand::Signal {
+                signal: signal.to_string(),
+            });
+            serde_json::to_string(&events).unwrap_or_default()
+        }
     }
 }

@@ -51,6 +51,9 @@ interface worker {
   /// Poll the active progressive execution for the next event batch.
   poll-run: func() -> list<worker-event>;
 
+  /// Deliver a POSIX signal name or number to the shell runtime.
+  signal: func(signal: string) -> list<worker-event>;
+
   /// Request cancellation of the active execution.
   cancel: func() -> list<worker-event>;
 

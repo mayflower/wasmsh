@@ -93,6 +93,7 @@ fn experimental_wit_world_parses_and_exports_worker_interface() {
         "poll-run",
         "read-file",
         "run",
+        "signal",
         "start-run",
         "write-file",
     ]);
