@@ -181,7 +181,7 @@ Query and set shell options.
 | `nocaseglob` | off | Pathname expansion is case-insensitive |
 | `failglob` | off | Unmatched globs cause an error |
 | `lastpipe` | off | Last pipeline stage runs in current shell |
-| `expand_aliases` | off | Alias expansion in non-interactive mode |
+| `expand_aliases` | on | Alias expansion in command position |
 
 ## `mapfile` / `readarray` [-t] [array]
 

@@ -239,7 +239,6 @@ for the full list and the variables that hosts can configure.
 The following constructs are recognised parser-side but are not yet
 honoured by the runtime, or are not implemented at all:
 
-- Process substitution: `<(cmd)`, `>(cmd)`
 - Coprocesses: `coproc`
 - Background execution semantics: `cmd &` is parsed but the runtime
   executes synchronously (the sandbox has no process table)

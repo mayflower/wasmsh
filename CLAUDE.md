@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Thinking & Quality
+
+Always use maximum thinking effort. Never rush to completion. Read code thoroughly before modifying. When investigating bugs, verify assumptions by reading the actual code rather than guessing. Test locally before publishing or deploying. Never use `git add -A` — always stage specific files by name.
+
 ## Project Overview
 
 **wasmsh** is a shell runtime written in Rust that targets three WebAssembly platforms from a shared core:

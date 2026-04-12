@@ -24,11 +24,13 @@ const PACKAGE_ALLOWED_HOSTS = [
 const SANDBOX_SYSTEM_PROMPT = `You are working in a wasmsh sandbox — a WASM-based shell environment with Python 3.13 via Pyodide.
 
 Key facts:
-- Install Python packages with: pip install <package>  (works like normal pip)
-- Only pure-Python packages work (no numpy, pandas, scipy). Use: beautifulsoup4, pyyaml, jinja2, networkx, attrs, click, six, toml, tomli, markupsafe, chardet, pyparsing, more-itertools, etc.
+- Pre-installed Python packages (just import, no install needed): pyyaml (import yaml), beautifulsoup4 (from bs4 import BeautifulSoup), sqlite3, micropip
+- For other pure-Python packages: python -c "import micropip; await micropip.install('package_name')"
+- Only pure-Python packages work (no numpy, pandas, scipy)
 - Python stdlib is fully available (json, csv, re, os, pathlib, collections, itertools, sqlite3, xml, html, etc.)
 - 88 shell utilities are available (grep, sed, awk, jq, find, tar, curl, etc.)
-- No apt, npm, docker, git, ssh
+- tar uses standard flag syntax: tar -czf, tar -xzf, tar -tzf (always use dash before flags)
+- No apt, npm, docker, git, ssh, pip command — use micropip for package installs
 - All files should be under /workspace/`;
 
 /**

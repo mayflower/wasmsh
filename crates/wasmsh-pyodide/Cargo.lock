@@ -975,6 +975,7 @@ name = "wasmsh-runtime"
 version = "0.5.9"
 dependencies = [
  "indexmap",
+ "posix-regex",
  "smol_str",
  "wasmsh-ast",
  "wasmsh-builtins",

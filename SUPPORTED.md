@@ -50,6 +50,7 @@
 - Parameter expansion: `$var`, `${var}` and all operators (see section below)
 - Command substitution: `$(...)`
 - Arithmetic expansion: `$(( expr ))`
+- Process substitution: `<(cmd)`, `>(cmd)`
 - Brace expansion: `{a,b,c}`, `{1..10}`
 - Tilde expansion: `~`, `~/path`
 - Field splitting on `IFS`
@@ -57,8 +58,8 @@
 
 ### Not Yet Implemented
 
-- Process substitution: `<(cmd)`, `>(cmd)`
 - Coprocesses: `coproc`
+- Special parameters: `$$`, `$!`, `$-`, `$_`
 - Signal handling beyond EXIT and ERR traps
 
 ---
@@ -306,14 +307,10 @@ Network access requires an allowlist of permitted hosts configured at sandbox in
 | `${#arr[@]}` / `${#arr[*]}`    | Number of elements in array |
 | `${!arr[@]}` / `${!arr[*]}`    | All keys/indices of array |
 | `$?`                           | Exit status of last command |
-| `$$`                           | PID (fixed value in WASM) |
-| `$!`                           | PID of last background job |
 | `$#`                           | Number of positional parameters |
 | `$@` / `$*`                    | All positional parameters |
 | `$0`                           | Script/shell name |
 | `$1`–`$N`                      | Positional parameters |
-| `$-`                           | Current option flags |
-| `$_`                           | Last argument of previous command |
 
 ---
 
@@ -400,7 +397,7 @@ Arithmetic is available in `$(( ))`, `(( ))`, `let`, and `declare -i` contexts. 
 | `nocaseglob`     | off     | Case-insensitive glob matching |
 | `failglob`       | off     | Error when glob matches nothing |
 | `lastpipe`       | off     | Last pipeline stage runs in current shell |
-| `expand_aliases` | off     | Enable alias expansion (always active in runtime) |
+| `expand_aliases` | on      | Enable alias expansion |
 
 ---
 
@@ -409,8 +406,6 @@ Arithmetic is available in `$(( ))`, `(( ))`, `let`, and `declare -i` contexts. 
 | Variable       | Description |
 |----------------|-------------|
 | `?`            | Exit status of last command |
-| `$`            | Current shell PID |
-| `!`            | PID of last background job |
 | `#`            | Number of positional parameters |
 | `@` / `*`      | All positional parameters |
 | `0`            | Shell/script name |
