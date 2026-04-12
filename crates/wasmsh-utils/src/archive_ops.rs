@@ -328,6 +328,33 @@ fn parse_tar_flags<'a>(
     };
     let mut consumed = 1;
 
+    // Handle traditional tar syntax where the first arg is flags without a
+    // leading dash (e.g. `tar czf archive.tar.gz files...`).  We detect this
+    // when the first argument is not a known file and consists only of valid
+    // tar flag characters.
+    let mut first_arg_is_bare_flags = false;
+    if let Some(first) = args.first() {
+        if !first.starts_with('-')
+            && !first.is_empty()
+            && first.chars().all(|c| "cxtzvfC".contains(c))
+        {
+            first_arg_is_bare_flags = true;
+        }
+    }
+
+    if first_arg_is_bare_flags {
+        let bare = args[0];
+        let with_dash = format!("-{bare}");
+        let skip_next =
+            parse_tar_bundled_flags(ctx, &with_dash, args, &mut flags)?;
+        args = &args[1..];
+        consumed += 1;
+        if skip_next && !args.is_empty() {
+            args = &args[1..];
+            consumed += 1;
+        }
+    }
+
     while let Some(arg) = args.first() {
         if *arg == "-f" && args.len() > 1 {
             flags.archive = Some(args[1]);
