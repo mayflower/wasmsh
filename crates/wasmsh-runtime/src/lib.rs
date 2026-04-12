@@ -5550,6 +5550,7 @@ impl WorkerRuntime {
         }
     }
 
+    #[allow(clippy::let_unit_value)]
     fn execute_pipeline(&mut self, pipeline: &HirPipeline) {
         let started = pipeline_started_at();
         let cmds = &pipeline.commands;
