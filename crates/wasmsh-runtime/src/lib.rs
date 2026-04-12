@@ -2291,8 +2291,10 @@ fn streaming_sed_addr_matches(
             PosixRegexBuilder::new(pat.as_bytes())
                 .with_default_classes()
                 .compile()
-                .map(|re| !re.matches(line.as_bytes(), Some(1)).is_empty())
-                .unwrap_or_else(|_| streaming_simple_grep_match(line, pat))
+                .map_or_else(
+                    |_| streaming_simple_grep_match(line, pat),
+                    |re| !re.matches(line.as_bytes(), Some(1)).is_empty(),
+                )
         }
         StreamingSedAddr::Range(start, end) => {
             if *in_range {
@@ -4337,12 +4339,25 @@ impl WorkerRuntime {
         Ok(())
     }
 
+    /// Minimum per-poll step limit so that small batch sizes (e.g. `step_budget=1`
+    /// for progressive yield-per-command) still allow enough internal steps for
+    /// pipelines and compound commands to complete.
+    const MIN_POLL_STEPS: u64 = 100;
+
     pub fn poll_active_run(&mut self) -> Option<ExecutionPoll> {
         let mut run = self.active_run.take()?;
         let previous_step_limit = self.vm.limits.step_limit;
         self.vm.steps = 0;
         self.vm.budget.steps = 0;
-        self.vm.limits.step_limit = 0;
+        // Keep the VM step_limit active so that loops (while/for) can enforce
+        // the budget via `check_resource_limits()` on each iteration.  The
+        // outer `remaining` counter governs how many top-level commands we
+        // execute per poll; the VM limit catches runaway inner loops.
+        self.vm.limits.step_limit = if self.config.step_budget == 0 {
+            0
+        } else {
+            self.config.step_budget.max(Self::MIN_POLL_STEPS)
+        };
 
         let mut remaining = if self.config.step_budget == 0 {
             usize::MAX
@@ -4352,9 +4367,11 @@ impl WorkerRuntime {
         let mut finished = run.is_done();
 
         while !finished && remaining > 0 {
-            if self.check_resource_limits() {
-                finished = true;
-                break;
+            // Check cancellation without advancing the step counter — the
+            // step counter is advanced inside command/loop dispatch.
+            if self.vm.cancellation_token().is_cancelled() {
+                self.vm.budget.note_cancelled();
+                self.exec.resource_exhausted = true;
             }
             if self.exec.exit_requested.is_some() || self.exec.resource_exhausted {
                 finished = true;
@@ -8058,11 +8075,11 @@ impl WorkerRuntime {
         let end = data.iter().position(|&b| b == b'\n').unwrap_or(data.len());
         let line = String::from_utf8_lossy(&data[2..end]).trim().to_string();
         // Handle "#!/usr/bin/env bash" → "bash"
-        if line.starts_with("/usr/bin/env ") {
-            Some(line["/usr/bin/env ".len()..].trim().to_string())
+        if let Some(rest) = line.strip_prefix("/usr/bin/env ") {
+            Some(rest.trim().to_string())
         } else {
             // e.g. "/bin/bash" → extract basename for matching
-            Some(line.to_string())
+            Some(line.clone())
         }
     }
 
@@ -8900,8 +8917,8 @@ impl WorkerRuntime {
 
     fn execute_pushd(&mut self, argv: &[String]) {
         let target = if let Some(path) = argv.get(1) {
-            path.to_string()
-        } else if let Some(path) = self.vm.state.dir_stack.first().cloned() {
+            path.clone()
+        } else if let Some(path) = self.vm.state.dir_stack.first() {
             path.to_string()
         } else {
             self.write_stderr(b"pushd: no other directory\n");
@@ -8942,15 +8959,12 @@ impl WorkerRuntime {
 
         let value = argv[1].trim_start_matches('0');
         let value = if value.is_empty() { "0" } else { value };
-        match u32::from_str_radix(value, 8) {
-            Ok(value) => {
-                self.vm.state.umask = value;
-                self.vm.state.last_status = 0;
-            }
-            Err(_) => {
-                self.write_stderr(b"umask: invalid mode\n");
-                self.vm.state.last_status = 1;
-            }
+        if let Ok(value) = u32::from_str_radix(value, 8) {
+            self.vm.state.umask = value;
+            self.vm.state.last_status = 0;
+        } else {
+            self.write_stderr(b"umask: invalid mode\n");
+            self.vm.state.last_status = 1;
         }
     }
 
@@ -8978,9 +8992,7 @@ impl WorkerRuntime {
     }
 
     fn execute_ulimit(&mut self, argv: &[String]) {
-        if argv.get(1).is_some_and(|arg| arg == "-a") {
-            self.write_stdout(b"unlimited\n");
-        } else if argv.len() <= 1 {
+        if argv.len() <= 1 || argv.get(1).is_some_and(|arg| arg == "-a") {
             self.write_stdout(b"unlimited\n");
         }
         self.vm.state.last_status = 0;
@@ -9125,7 +9137,7 @@ impl WorkerRuntime {
         match self.fs.stat(&path) {
             Ok(meta) if meta.is_dir => {
                 let old_pwd = self.vm.state.cwd.clone();
-                self.vm.state.cwd = path.clone();
+                self.vm.state.cwd.clone_from(&path);
                 self.vm
                     .state
                     .set_var("OLDPWD".into(), smol_str::SmolStr::from(old_pwd.as_str()));
@@ -10785,11 +10797,9 @@ fn eval_file_test(flag: u8, path: &str, fs: &BackendFs) -> bool {
         Ok(meta) => match flag {
             b'f' => !meta.is_dir,
             b'd' => meta.is_dir,
-            b's' => meta.size > 0,
+            b's' | b'N' => meta.size > 0,
             // -e, -r, -w, -x: in the VFS all existing files are accessible
             b'e' | b'r' | b'w' | b'x' | b'O' | b'G' => true,
-            b'N' => meta.size > 0,
-            b'L' | b'h' | b'p' | b'S' => false,
             _ => false,
         },
         Err(_) => false,

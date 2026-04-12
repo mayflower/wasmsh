@@ -832,7 +832,6 @@ fn test_unary(op: &str, val: &str, ctx: &BuiltinContext<'_>) -> bool {
         "-s" => ctx
             .fs
             .is_some_and(|fs| fs.stat(val).is_ok_and(|m| m.size > 0)),
-        "-L" | "-h" | "-p" | "-S" => false,
         "-O" | "-G" => ctx.fs.is_some_and(|fs| fs.stat(val).is_ok()),
         "-N" => ctx
             .fs
@@ -845,9 +844,8 @@ fn test_unary(op: &str, val: &str, ctx: &BuiltinContext<'_>) -> bool {
 
 fn test_binary(left: &str, op: &str, right: &str) -> bool {
     match op {
-        "=" | "==" => left == right,
         "!=" => left != right,
-        "-ef" => left == right,
+        "=" | "==" | "-ef" => left == right,
         "-nt" => !left.is_empty() && right.is_empty(),
         "-ot" => left.is_empty() && !right.is_empty(),
         "-eq" => int(left) == int(right),
@@ -1129,8 +1127,7 @@ fn parse_read_opts<'a>(argv: &'a [&'a str]) -> ReadOpts<'a> {
             "-u" => {
                 opts.fd = take_read_opt_value(&mut args).and_then(|value| value.parse().ok());
             }
-            "-i" => drop(take_read_opt_value(&mut args)),
-            "-t" => drop(take_read_opt_value(&mut args)),
+            "-i" | "-t" => drop(take_read_opt_value(&mut args)),
             _ => break,
         }
     }

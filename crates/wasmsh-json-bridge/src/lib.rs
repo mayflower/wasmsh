@@ -12,7 +12,9 @@ use std::sync::OnceLock;
 
 use wasmsh_protocol::{DiagnosticLevel, HostCommand, WorkerEvent, PROTOCOL_VERSION};
 use wasmsh_runtime::{ExternalCommandHandler, WorkerRuntime};
-use wasmsh_utils::net_types::{HostAllowlist, HttpRequest, HttpResponse, NetworkBackend, NetworkError};
+use wasmsh_utils::net_types::{
+    HostAllowlist, HttpRequest, HttpResponse, NetworkBackend, NetworkError,
+};
 
 /// Create a network backend for the allowed-host configuration from `Init`.
 pub type NetworkBackendFactory = Box<dyn Fn(Vec<String>) -> Box<dyn NetworkBackend>>;
@@ -61,9 +63,9 @@ impl JsonRuntimeHandle {
         }
         Self {
             runtime,
-            network_backend_factory: config
-                .network_backend_factory
-                .unwrap_or_else(|| Box::new(|allowed_hosts| Box::new(DenyingNetworkBackend::new(allowed_hosts)))),
+            network_backend_factory: config.network_backend_factory.unwrap_or_else(|| {
+                Box::new(|allowed_hosts| Box::new(DenyingNetworkBackend::new(allowed_hosts)))
+            }),
         }
     }
 
@@ -137,7 +139,9 @@ pub fn probe_version() -> &'static str {
 pub fn probe_version_cstr() -> &'static CStr {
     static VERSION: OnceLock<CString> = OnceLock::new();
     VERSION
-        .get_or_init(|| CString::new(PROTOCOL_VERSION).expect("PROTOCOL_VERSION contains no null bytes"))
+        .get_or_init(|| {
+            CString::new(PROTOCOL_VERSION).expect("PROTOCOL_VERSION contains no null bytes")
+        })
         .as_c_str()
 }
 

@@ -345,8 +345,7 @@ fn parse_tar_flags<'a>(
     if first_arg_is_bare_flags {
         let bare = args[0];
         let with_dash = format!("-{bare}");
-        let skip_next =
-            parse_tar_bundled_flags(ctx, &with_dash, args, &mut flags)?;
+        let skip_next = parse_tar_bundled_flags(ctx, &with_dash, args, &mut flags)?;
         args = &args[1..];
         consumed += 1;
         if skip_next && !args.is_empty() {
