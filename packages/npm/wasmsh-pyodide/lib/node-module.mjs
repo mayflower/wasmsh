@@ -173,6 +173,41 @@ export async function createFullModule(distDir) {
     // and have no "sqlite3" lockfile entry; this is fine.
   }
 
+  // Pre-load pyyaml — agents frequently use `import yaml` for YAML
+  // processing.  The whl is in pyodide-lock.json.
+  try {
+    await pyodide.loadPackage("pyyaml");
+  } catch {
+    // pyyaml not available in this dist — not fatal
+  }
+
+  // Pre-load beautifulsoup4 — agents frequently use it for HTML parsing.
+  try {
+    await pyodide.loadPackage("beautifulsoup4");
+  } catch {
+    // not available — not fatal
+  }
+
+  // Pre-install packages needed for Gemini sandbox compatibility that are
+  // not bundled in the Pyodide distribution.  micropip fetches pure-Python
+  // wheels from PyPI and wasm32 wheels from the Pyodide CDN at runtime.
+  try {
+    const micropip = pyodide.pyimport("micropip");
+    await micropip.install([
+      "fpdf2",        // PDF generation (provides `from fpdf import FPDF`)
+      "openpyxl",     // Excel .xlsx read/write
+      "python-docx",  // Word .docx generation
+      "python-pptx",  // PowerPoint .pptx generation
+      "reportlab",    // PDF generation (wasm32 wheel via Pyodide CDN)
+      "seaborn",      // statistical visualization
+      "striprtf",     // RTF text extraction
+      "tabulate",     // table formatting
+    ]);
+  } catch {
+    // Network unavailable or package not found — not fatal.
+    // Agents can still `pip install` individually at runtime.
+  }
+
   // Attach the pyodide API to the module so the host can use it
   module._pyodide = pyodide;
   createRuntimeBridge(module);
