@@ -151,14 +151,26 @@ let x++ y="x*2"     # increment x, set y
 ## `set` [options] [-- args]
 
 - `set -- arg1 arg2` — set positional parameters
+- `set -o` — list the known long-form option names with `on`/`off` state
+- `set +o` — print recreatable `set +/-o name` commands for the known long-form options
 - `set -e` / `set +e` — enable/disable errexit (exit on error)
+- `set -E` / `set +E` — enable/disable errtrace compatibility flag
 - `set -u` / `set +u` — enable/disable nounset
 - `set -x` / `set +x` — enable/disable xtrace
 - `set -f` / `set +f` — enable/disable noglob
 - `set -a` / `set +a` — enable/disable allexport
 - `set -C` / `set +C` — enable/disable noclobber
+- `set -n` / `set +n` — enable/disable noexec
+- `set -p` / `set +p` — enable/disable privileged compatibility flag
+- `set -T` / `set +T` — enable/disable functrace compatibility flag
+- `set -v` / `set +v` — enable/disable verbose input echoing
 - `set -o pipefail` / `set +o pipefail` — enable/disable pipefail
-- `set -o errexit` — long-form option name (equivalent to `-e`)
+- `set -o allexport|errexit|errtrace|functrace|noclobber|noglob|noexec|nounset|pipefail|privileged|verbose|xtrace`
+  — long-form option names for the supported `set` flags
+
+In the buffered worker runtime, `noexec` and `verbose` are most visible on
+subsequently submitted input and nested input such as `source`/`eval`,
+rather than on commands that were already buffered before the flag changed.
 
 ## `shopt` [-s|-u] [optname...]
 
@@ -182,6 +194,7 @@ Query and set shell options.
 | `failglob` | off | Unmatched globs cause an error |
 | `lastpipe` | off | Last pipeline stage runs in current shell |
 | `expand_aliases` | on | Alias expansion in command position |
+| `sourcepath` | on | `source` searches `PATH` for bare names |
 
 ## `mapfile` / `readarray` [-t] [array]
 
@@ -238,6 +251,11 @@ the text is empty.
 ## `source` file / `.` file
 
 Read and execute commands from file in the current shell context.
+
+When `shopt sourcepath` is enabled (default), bare filenames are resolved
+via the current directory first and then via `PATH`. With `shopt -u sourcepath`,
+`source name` only resolves direct paths visible from the current working
+directory.
 
 ## `trap` command signal...
 

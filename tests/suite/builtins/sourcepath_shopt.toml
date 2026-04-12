@@ -1,0 +1,23 @@
+[test]
+name = "shopt-sourcepath-controls-source-path-search"
+tags = ["builtins", "P2"]
+tier = "P2"
+requires = ["shopt", "source", "echo", "parameter-expansion"]
+
+[setup]
+files = { "/lib/defs.sh" = "X=from-path\n" }
+
+[input]
+script = """
+PATH=/lib
+source defs.sh
+echo $X
+shopt -u sourcepath
+source defs.sh
+echo $?
+"""
+
+[expect]
+status = 0
+stdout = "from-path\n1\n"
+stderr_contains = ["source: defs.sh: not found"]

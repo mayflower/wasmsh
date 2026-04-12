@@ -1652,6 +1652,119 @@ mod tests {
         assert_eq!(get_stdout(&events), "1\n");
     }
 
+    #[test]
+    fn set_dash_o_lists_known_options() {
+        let (events, status) = run_shell("set -o errexit; set -o");
+        assert_eq!(status, 0);
+        let out = get_stdout(&events);
+        assert!(out.contains("errexit"));
+        assert!(out.contains("pipefail"));
+        assert!(out.contains("verbose"));
+        assert!(out
+            .lines()
+            .any(|line| line.starts_with("errexit") && line.ends_with("on")));
+    }
+
+    #[test]
+    fn set_plus_o_prints_recreatable_commands() {
+        let (events, status) = run_shell("set -o errexit; set +o");
+        assert_eq!(status, 0);
+        let out = get_stdout(&events);
+        assert!(out.contains("set -o errexit"));
+        assert!(out.contains("set +o nounset"));
+    }
+
+    #[test]
+    fn set_updates_special_dash_flags() {
+        let (events, status) = run_shell("set -E -T -p -v; echo $-");
+        assert_eq!(status, 0);
+        let out = get_stdout(&events);
+        assert!(out.contains('E'));
+        assert!(out.contains('T'));
+        assert!(out.contains('p'));
+        assert!(out.contains('v'));
+    }
+
+    #[test]
+    fn noexec_skips_subsequent_runs() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        let first = rt.handle_command(HostCommand::Run {
+            input: "set -n".into(),
+        });
+        let first_status = first
+            .iter()
+            .find_map(|e| {
+                if let WorkerEvent::Exit(s) = e {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(-1);
+        assert_eq!(first_status, 0);
+
+        let second = rt.handle_command(HostCommand::Run {
+            input: "echo skipped".into(),
+        });
+        let second_status = second
+            .iter()
+            .find_map(|e| {
+                if let WorkerEvent::Exit(s) = e {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(-1);
+        assert_eq!(second_status, 0);
+        assert_eq!(get_stdout(&second), "");
+    }
+
+    #[test]
+    fn verbose_echoes_subsequent_runs() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        let first = rt.handle_command(HostCommand::Run {
+            input: "set -v".into(),
+        });
+        let first_status = first
+            .iter()
+            .find_map(|e| {
+                if let WorkerEvent::Exit(s) = e {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(-1);
+        assert_eq!(first_status, 0);
+
+        let events = rt.handle_command(HostCommand::Run {
+            input: "echo hello".into(),
+        });
+        let status = events
+            .iter()
+            .find_map(|e| {
+                if let WorkerEvent::Exit(s) = e {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(-1);
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "hello\n");
+        let stderr = get_stderr(&events);
+        assert!(stderr.contains("echo hello"));
+    }
+
     // ---- shopt builtin tests ----
 
     #[test]
@@ -1663,6 +1776,7 @@ mod tests {
         assert!(out.contains("nullglob"));
         assert!(out.contains("dotglob"));
         assert!(out.contains("globstar"));
+        assert!(out.contains("sourcepath"));
         assert!(out.contains("off"));
     }
 
@@ -1696,6 +1810,76 @@ mod tests {
         assert_eq!(status, 0);
         let out = get_stdout(&events);
         assert!(out.contains("nullglob\toff"));
+    }
+
+    #[test]
+    fn shopt_sourcepath_defaults_on() {
+        let (events, status) = run_shell("shopt sourcepath");
+        assert_eq!(status, 0);
+        let out = get_stdout(&events);
+        assert!(out.contains("sourcepath\ton"));
+    }
+
+    #[test]
+    fn source_uses_path_when_sourcepath_is_on() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        rt.handle_command(HostCommand::Run {
+            input: "mkdir -p /lib".into(),
+        });
+        rt.handle_command(HostCommand::WriteFile {
+            path: "/lib/defs.sh".into(),
+            data: b"X=from-path\n".to_vec(),
+        });
+        let events = rt.handle_command(HostCommand::Run {
+            input: "PATH=/lib; source defs.sh; echo $X".into(),
+        });
+        let status = events
+            .iter()
+            .find_map(|e| {
+                if let WorkerEvent::Exit(s) = e {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(-1);
+        assert_eq!(status, 0);
+        assert_eq!(get_stdout(&events), "from-path\n");
+    }
+
+    #[test]
+    fn sourcepath_can_disable_path_lookup_for_source() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        rt.handle_command(HostCommand::Run {
+            input: "mkdir -p /lib".into(),
+        });
+        rt.handle_command(HostCommand::WriteFile {
+            path: "/lib/defs.sh".into(),
+            data: b"X=from-path\n".to_vec(),
+        });
+        let events = rt.handle_command(HostCommand::Run {
+            input: "PATH=/lib; shopt -u sourcepath; source defs.sh".into(),
+        });
+        let status = events
+            .iter()
+            .find_map(|e| {
+                if let WorkerEvent::Exit(s) = e {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(-1);
+        assert_eq!(status, 1);
+        assert!(get_stderr(&events).contains("source: defs.sh: not found"));
     }
 
     // ---- Dynamic variables ----

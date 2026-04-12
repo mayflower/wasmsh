@@ -86,15 +86,15 @@
 | `type`       | Done   | Reports alias/function/builtin/utility classification |
 | `command`    | Done   | `-v` shows command type; bypasses functions |
 | `eval`       | Done   | Re-parses and executes concatenated arguments |
-| `set`        | Done   | `-e` (errexit), `-u` (nounset), `-x` (xtrace), `-f` (noglob), `-a` (allexport), `-C` (noclobber), `-o pipefail`; `set -- args` sets positionals |
+| `set`        | Done   | `-a -C -e -E -f -n -p -T -u -v -x`; long names `allexport errexit errtrace functrace noclobber noglob noexec nounset pipefail privileged verbose xtrace`; `set -o` / `set +o` list known options; `set -- args` sets positionals |
 | `getopts`    | Done   | Parses short options from positional parameters; updates OPTIND |
 | `trap`       | Done   | `EXIT`, `ERR`, `DEBUG`, `RETURN`, `trap -p`, `trap -l`, reset/ignore; regular signal names are accepted but not delivered in the sandbox |
 | `declare` / `typeset` | Done | `-i` (integer), `-a` (indexed array), `-A` (assoc array), `-x` (export), `-r` (readonly), `-l` (lowercase), `-u` (uppercase), `-n` (nameref), `-p` (print); compound assignment `arr=(...)` |
 | `let`        | Done   | Evaluates arithmetic expressions; exit status is 0 if last result is non-zero |
-| `shopt`      | Done   | `-s` / `-u`; options: `extglob nullglob dotglob globstar nocasematch nocaseglob failglob lastpipe expand_aliases` |
+| `shopt`      | Done   | `-s` / `-u`; options: `extglob nullglob dotglob globstar nocasematch nocaseglob failglob lastpipe expand_aliases sourcepath` |
 | `alias`      | Done   | Define and list aliases; aliases expand recursively |
 | `unalias`    | Done   | `-a` removes all aliases |
-| `source` / `.` | Done | Reads and executes a file from VFS; searches PATH for bare names |
+| `source` / `.` | Done | Reads and executes a file from VFS; PATH lookup for bare names is controlled by `shopt sourcepath` |
 | `mapfile` / `readarray` | Done | `-t` (strip newline); default array MAPFILE |
 | `builtin`    | Done   | Bypasses aliases and functions; invokes named builtin directly |
 
@@ -377,11 +377,16 @@ Arithmetic is available in `$(( ))`, `(( ))`, `let`, and `declare -i` contexts. 
 | Flag      | Long name    | Description |
 |-----------|--------------|-------------|
 | `-e`      | `errexit`    | Exit on any command failure |
+| `-E`      | `errtrace`   | Track ERR trap inheritance flag |
 | `-u`      | `nounset`    | Error on unset variable reference |
 | `-x`      | `xtrace`     | Print commands before executing (`PS4` prefix) |
 | `-f`      | `noglob`     | Disable glob expansion |
 | `-a`      | `allexport`  | Auto-export all variable assignments |
 | `-C`      | `noclobber`  | Prevent `>` from overwriting existing files |
+| `-n`      | `noexec`     | Parse input but skip executing subsequently submitted commands |
+| `-p`      | `privileged` | Track privileged-mode flag for compatibility |
+| `-T`      | `functrace`  | Track DEBUG/RETURN inheritance flag |
+| `-v`      | `verbose`    | Echo subsequently submitted input before execution |
 | `-o pipefail` | `pipefail` | Pipeline exit status is rightmost non-zero stage |
 
 ### `shopt` options
@@ -397,6 +402,7 @@ Arithmetic is available in `$(( ))`, `(( ))`, `let`, and `declare -i` contexts. 
 | `failglob`       | off     | Error when glob matches nothing |
 | `lastpipe`       | off     | Last pipeline stage runs in current shell |
 | `expand_aliases` | on      | Enable alias expansion |
+| `sourcepath`     | on      | `source` searches `PATH` for bare names |
 
 ---
 
@@ -416,7 +422,7 @@ Arithmetic is available in `$(( ))`, `(( ))`, `let`, and `declare -i` contexts. 
 | `HOME`         | Home directory for tilde expansion and `cd` |
 | `PWD`          | Current working directory |
 | `OLDPWD`       | Previous working directory |
-| `PATH`         | Colon-separated search path for `source` |
+| `PATH`         | Colon-separated search path for `source` when `shopt sourcepath` is enabled |
 | `OPTIND`       | Current index for `getopts` |
 | `REPLY`        | Default variable for `read` |
 | `PIPESTATUS`   | Array of exit statuses for last pipeline stages |

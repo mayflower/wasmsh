@@ -4184,6 +4184,7 @@ impl WorkerRuntime {
                 self.vm
                     .state
                     .set_var("SHOPT_expand_aliases".into(), "1".into());
+                self.vm.state.set_var("SHOPT_sourcepath".into(), "1".into());
                 vec![WorkerEvent::Version(PROTOCOL_VERSION.to_string())]
             }
             HostCommand::Run { input } => {
@@ -4410,7 +4411,22 @@ impl WorkerRuntime {
         }
 
         let cc = &run.hir.items[run.complete_index];
-        self.vm.state.lineno = Self::line_number_for_offset(&run.input, cc.span.start as usize);
+        if run.and_or_index == 0 {
+            self.vm.state.lineno = Self::line_number_for_offset(&run.input, cc.span.start as usize);
+            self.maybe_write_verbose_input(&run.input, cc);
+        }
+        if self.is_set_option_enabled('n') {
+            run.complete_index += 1;
+            run.and_or_index = 0;
+            return if run.is_done()
+                || self.exec.exit_requested.is_some()
+                || self.exec.resource_exhausted
+            {
+                ActiveRunStep::Done
+            } else {
+                ActiveRunStep::Pending
+            };
+        }
         let and_or = &cc.list[run.and_or_index];
         self.execute_and_or(and_or);
         self.handle_post_and_or(and_or);
@@ -4761,16 +4777,11 @@ impl WorkerRuntime {
                 .count() as u32
                 + 1;
             self.vm.state.lineno = line;
-            for and_or in &cc.list {
-                self.execute_and_or(and_or);
-                if self.exec.exit_requested.is_some() {
-                    break;
-                }
-                self.handle_post_and_or(and_or);
-                if self.exec.exit_requested.is_some() {
-                    break;
-                }
+            self.maybe_write_verbose_input(input, cc);
+            if self.is_set_option_enabled('n') {
+                continue;
             }
+            self.execute_complete_command(cc);
         }
         // Drain stdout/stderr into events
         let mut events = Vec::new();
@@ -7895,8 +7906,10 @@ impl WorkerRuntime {
             let direct = self.resolve_cwd_path(path);
             if self.fs.stat(&direct).is_ok() {
                 Some(direct)
-            } else {
+            } else if self.get_shopt_value("sourcepath") {
                 self.search_path_for_file(path)
+            } else {
+                None
             }
         };
         let Some(full) = resolved else {
@@ -9190,6 +9203,7 @@ impl WorkerRuntime {
         "failglob",
         "lastpipe",
         "expand_aliases",
+        "sourcepath",
     ];
 
     /// Execute `shopt [-s|-u] [optname ...]`.
@@ -9281,6 +9295,29 @@ impl WorkerRuntime {
     fn get_shopt_value(&self, name: &str) -> bool {
         let var = Self::shopt_var_name(name);
         self.vm.state.get_var(&var).as_deref() == Some("1")
+    }
+
+    fn is_set_option_enabled(&self, flag: char) -> bool {
+        let var = format!("SHOPT_{flag}");
+        self.vm.state.get_var(&var).as_deref() == Some("1")
+    }
+
+    fn maybe_write_verbose_input(&mut self, input: &str, cc: &HirCompleteCommand) {
+        if !self.is_set_option_enabled('v') {
+            return;
+        }
+        let start = cc.span.start as usize;
+        let end = cc.span.end as usize;
+        let Some(snippet) = input.get(start..end) else {
+            return;
+        };
+        if snippet.is_empty() {
+            return;
+        }
+        self.write_stderr(snippet.as_bytes());
+        if !snippet.ends_with('\n') {
+            self.write_stderr(b"\n");
+        }
     }
 
     /// Execute `declare`/`typeset` with flag parsing.
@@ -9509,13 +9546,16 @@ impl WorkerRuntime {
             if self.should_stop_execution() || self.check_resource_limits() {
                 break;
             }
+            if self.is_set_option_enabled('n') {
+                continue;
+            }
             self.execute_complete_command(cc);
         }
     }
 
     fn execute_complete_command(&mut self, cc: &HirCompleteCommand) {
         for and_or in &cc.list {
-            if self.should_stop_execution() {
+            if self.should_stop_execution() || self.is_set_option_enabled('n') {
                 break;
             }
             self.execute_and_or(and_or);

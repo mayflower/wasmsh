@@ -954,18 +954,44 @@ fn builtin_eval(_ctx: &mut BuiltinContext<'_>, _argv: &[&str]) -> i32 {
 }
 
 /// `set` — set shell options or positional parameters.
+const SET_OPTIONS: &[(&str, &str)] = &[
+    ("allexport", "SHOPT_a"),
+    ("errexit", "SHOPT_e"),
+    ("errtrace", "SHOPT_E"),
+    ("functrace", "SHOPT_T"),
+    ("noclobber", "SHOPT_C"),
+    ("noglob", "SHOPT_f"),
+    ("noexec", "SHOPT_n"),
+    ("nounset", "SHOPT_u"),
+    ("pipefail", "SHOPT_o_pipefail"),
+    ("privileged", "SHOPT_p"),
+    ("verbose", "SHOPT_v"),
+    ("xtrace", "SHOPT_x"),
+];
+
 /// Map a long option name (used with `-o`/`+o`) to its short-flag equivalent.
 /// Returns the `SHOPT_*` variable name for the option.
 fn set_long_option_var(name: &str) -> Option<&'static str> {
-    match name {
-        "errexit" => Some("SHOPT_e"),
-        "nounset" => Some("SHOPT_u"),
-        "xtrace" => Some("SHOPT_x"),
-        "noglob" => Some("SHOPT_f"),
-        "allexport" => Some("SHOPT_a"),
-        "noclobber" => Some("SHOPT_C"),
-        "pipefail" => Some("SHOPT_o_pipefail"),
-        _ => None,
+    SET_OPTIONS
+        .iter()
+        .find_map(|(opt, var)| (*opt == name).then_some(*var))
+}
+
+fn print_set_option_table(ctx: &mut BuiltinContext<'_>) {
+    for (name, var) in SET_OPTIONS {
+        let enabled = ctx.state.get_var(var).as_deref() == Some("1");
+        let status = if enabled { "on" } else { "off" };
+        let line = format!("{name:<12} {status}\n");
+        ctx.output.stdout(line.as_bytes());
+    }
+}
+
+fn print_set_option_commands(ctx: &mut BuiltinContext<'_>) {
+    for (name, var) in SET_OPTIONS {
+        let enabled = ctx.state.get_var(var).as_deref() == Some("1");
+        let prefix = if enabled { "-" } else { "+" };
+        let line = format!("set {prefix}o {name}\n");
+        ctx.output.stdout(line.as_bytes());
     }
 }
 
@@ -995,14 +1021,18 @@ fn set_parse_option(ctx: &mut BuiltinContext<'_>, args: &[&str], i: &mut usize, 
     let flags = &args[*i][1..];
     let val = if enable { "1" } else { "0" };
     if flags == "o" {
-        *i += 1;
-        if *i < args.len() {
+        if *i + 1 < args.len() {
+            *i += 1;
             if let Some(var) = set_long_option_var(args[*i]) {
                 ctx.state.set_var(SmolStr::from(var), SmolStr::from(val));
             } else {
                 let msg = format!("set: unrecognized option: {}\n", args[*i]);
                 ctx.output.stderr(msg.as_bytes());
             }
+        } else if enable {
+            print_set_option_table(ctx);
+        } else {
+            print_set_option_commands(ctx);
         }
     } else {
         for c in flags.chars() {
@@ -1870,6 +1900,68 @@ mod tests {
         let mut state = ShellState::new();
         run_builtin_with_state("set", &["set", "-o", "noclobber"], &mut state);
         assert_eq!(state.get_var("SHOPT_C").unwrap(), "1");
+    }
+
+    #[test]
+    fn set_o_errtrace_aliases_capital_e() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("set", &["set", "-o", "errtrace"], &mut state);
+        assert_eq!(state.get_var("SHOPT_E").unwrap(), "1");
+    }
+
+    #[test]
+    fn set_o_functrace_aliases_capital_t() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("set", &["set", "-o", "functrace"], &mut state);
+        assert_eq!(state.get_var("SHOPT_T").unwrap(), "1");
+    }
+
+    #[test]
+    fn set_o_noexec_aliases_n() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("set", &["set", "-o", "noexec"], &mut state);
+        assert_eq!(state.get_var("SHOPT_n").unwrap(), "1");
+    }
+
+    #[test]
+    fn set_o_privileged_aliases_p() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("set", &["set", "-o", "privileged"], &mut state);
+        assert_eq!(state.get_var("SHOPT_p").unwrap(), "1");
+    }
+
+    #[test]
+    fn set_o_verbose_aliases_v() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("set", &["set", "-o", "verbose"], &mut state);
+        assert_eq!(state.get_var("SHOPT_v").unwrap(), "1");
+    }
+
+    #[test]
+    fn set_dash_o_prints_option_table() {
+        let mut state = ShellState::new();
+        state.set_var("SHOPT_e".into(), "1".into());
+        let (status, sink) = run_builtin_with_state("set", &["set", "-o"], &mut state);
+        assert_eq!(status, 0);
+        let stdout = sink.stdout_str();
+        assert!(stdout.contains("errexit"));
+        assert!(stdout.contains("nounset"));
+        assert!(stdout.contains("pipefail"));
+        assert!(stdout
+            .lines()
+            .any(|line| line.starts_with("errexit") && line.ends_with("on")));
+    }
+
+    #[test]
+    fn set_plus_o_prints_recreatable_commands() {
+        let mut state = ShellState::new();
+        state.set_var("SHOPT_e".into(), "1".into());
+        let (status, sink) = run_builtin_with_state("set", &["set", "+o"], &mut state);
+        assert_eq!(status, 0);
+        let stdout = sink.stdout_str();
+        assert!(stdout.contains("set -o errexit"));
+        assert!(stdout.contains("set +o nounset"));
+        assert!(stdout.contains("set +o pipefail"));
     }
 
     #[test]

@@ -36,6 +36,12 @@ Offen aus der priorisierten Liste bleiben damit vor allem die teureren Blöcke
 `Job-Control`, echte POSIX-`Signalzustellung`, `coproc` sowie die weiterhin breiteren
 Lücken bei interaktiven Builtins und `set`-/`shopt`-Optionen.
 
+Zusätzlich reduziert am 2026-04-12:
+
+- `set`: `-E`, `-T`, `-n`, `-p`, `-v` sowie `set -o` / `set +o`
+- `shopt`: `sourcepath`
+- `source`: `PATH`-Suche jetzt dokumentiert und per `shopt sourcepath` schaltbar
+
 ## Priorisierungslogik
 
 - `P0`: größter Bash-Kompatibilitätsbruch für nichttriviale Skripte
@@ -206,8 +212,11 @@ Lücken bei interaktiven Builtins und `set`-/`shopt`-Optionen.
   unter anderem `-b`, `-h`, `-k`, `-n`, `-p`, `-t`, `-v`, `-B`, `-E`,
   `-H`, `-P`, `-T`, `posix`, `vi`, `emacs` sowie viele weitere `shopt`-Flags.
 - Aktueller `wasmsh`-Stand:
-  Dokumentiert und getestet sind vor allem `errexit`, `nounset`, `xtrace`,
-  `noglob`, `allexport`, `noclobber`, `pipefail` und einige Glob-Optionen.
+  Dokumentiert und getestet sind jetzt zusätzlich `errtrace`, `functrace`,
+  `noexec`, `privileged`, `verbose`, `set -o` / `set +o` sowie
+  `shopt sourcepath`. Offen bleiben vor allem weitere `set`-Flags wie
+  `-b`, `-h`, `-k`, `-t`, `-B`, `-H`, `-P`, Editor-/POSIX-Modi und die
+  deutlich breitere `shopt`-Restmenge.
 - Warum `P2`:
   Für agentische/nicht-interaktive Nutzung reicht die aktuelle Auswahl oft,
   für Bash-4-Kompatibilität aber nicht.
@@ -288,7 +297,7 @@ markiert.
 | 8 | `[erledigt]` `read`-/`mapfile`-Flags | `erledigt` | `erledigt` | `-` | Am 2026-04-12 umgesetzt. |
 | 9 | `[erledigt]` Flag-Lücken bei `declare`/`export`/`readonly`/`type`/`command` | `erledigt` | `erledigt` | `-` | Am 2026-04-12 umgesetzt. |
 | 10 | `[erledigt]` zusätzliche Test-/`[[`-Operatoren | `erledigt` | `erledigt` | `-` | Am 2026-04-12 umgesetzt. |
-| 11 | `set`-/`shopt`-Optionen unvollständig | `P2` | `M2` | `K2` | Viele kleine Schalter, aber semantisch breit über Parser, State und Executor verteilt. |
+| 11 | `set`-/`shopt`-Optionen unvollständig | `P2` | `M1` | `K2` | Der günstige nicht-interaktive Block ist umgesetzt; offen bleibt vor allem der breitere Rest an Modi und Editor-/Interactive-Optionen. |
 | 12 | `[erledigt]` `time` und `times` | `erledigt` | `erledigt` | `-` | Am 2026-04-12 umgesetzt. |
 | 13 | History-/Completion-/interaktive Builtins | `P3` | `M3` | `K3` | Geringer Fit zum Kernmodell von `wasmsh`. |
 | 14 | Interaktive `shopt`-Features | `P3` | `M2` | `K3` | Ebenfalls niedriger ROI für die primären nicht-interaktiven Use Cases. |
@@ -307,7 +316,7 @@ markiert.
 
 - `1`: Job-Control und echte Hintergrundausführung
 - `2`: POSIX-Signalzustellung und verbleibende Trap-Randfälle
-- `11`: weitere `set`-/`shopt`-Optionen
+- `11`: verbleibende `set`-/`shopt`-Restmenge
 
 ### K3
 
@@ -317,8 +326,8 @@ markiert.
 
 ## Empfohlene Arbeitsreihenfolge auf Basis der kombinierten Bewertung
 
-1. `set`-/`shopt`-Abdeckung verbreitern, weil das der nächste noch sinnvoll schneidbare Runtime-Block ist
-2. verbleibende Trap-Randfälle und POSIX-Signalmodell architektonisch planen
-3. erst danach Job-/Prozessmodell für `&`, `wait`, Jobspecs und echte Signalzustellung angehen
+1. verbleibende Trap-Randfälle und POSIX-Signalmodell architektonisch planen
+2. danach Job-/Prozessmodell für `&`, `wait`, Jobspecs und echte Signalzustellung angehen
+3. die verbleibende `set`-/`shopt`-Restmenge nur noch opportunistisch als kleinere Kompatibilitätsarbeit schneiden
 4. `coproc` erst auf Basis eines tragfähigen Prozess-/FD-Modells angehen
-8. `coproc` und interaktive Bash-Features zuletzt behandeln
+5. interaktive Bash-Features zuletzt behandeln

@@ -268,9 +268,14 @@ impl ShellState {
         for (name, flag) in [
             ("SHOPT_a", 'a'),
             ("SHOPT_C", 'C'),
+            ("SHOPT_E", 'E'),
             ("SHOPT_e", 'e'),
             ("SHOPT_f", 'f'),
+            ("SHOPT_n", 'n'),
+            ("SHOPT_p", 'p'),
+            ("SHOPT_T", 'T'),
             ("SHOPT_u", 'u'),
+            ("SHOPT_v", 'v'),
             ("SHOPT_x", 'x'),
         ] {
             if self.get_env_var(name).as_deref() == Some("1") {

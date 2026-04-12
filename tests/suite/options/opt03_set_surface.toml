@@ -1,0 +1,16 @@
+[test]
+name = "set-surface-flags-and-listing"
+tags = ["options", "P2"]
+tier = "P2"
+requires = ["set", "parameter-expansion"]
+
+[input]
+script = """
+set -E -T -p
+echo flags=$-
+set +o
+"""
+
+[expect]
+status = 0
+stdout_contains = ["flags=", "E", "T", "p", "set -o errtrace", "set -o functrace", "set -o privileged"]
