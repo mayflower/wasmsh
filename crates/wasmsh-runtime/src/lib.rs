@@ -52,6 +52,16 @@ const CMD_BUILTIN: &str = "builtin";
 const CMD_MAPFILE: &str = "mapfile";
 const CMD_READARRAY: &str = "readarray";
 const CMD_TYPE: &str = "type";
+const CMD_COMMAND: &str = "command";
+const CMD_EXEC: &str = "exec";
+const CMD_HASH: &str = "hash";
+const CMD_TIMES: &str = "times";
+const CMD_DIRS: &str = "dirs";
+const CMD_PUSHD: &str = "pushd";
+const CMD_POPD: &str = "popd";
+const CMD_UMASK: &str = "umask";
+const CMD_WAIT: &str = "wait";
+const CMD_ULIMIT: &str = "ulimit";
 
 /// Configuration for the browser runtime.
 #[derive(Debug, Clone)]
@@ -3547,6 +3557,16 @@ enum RuntimeCommandKind {
     BuiltinKeyword,
     Mapfile,
     Type,
+    CommandKeyword,
+    ExecKeyword,
+    Hash,
+    Times,
+    Dirs,
+    Pushd,
+    Popd,
+    Umask,
+    Wait,
+    Ulimit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3638,6 +3658,14 @@ impl RuntimeVmExecutor<'_> {
             let append = matches!(redirection.op, RedirectionOp::Append);
             let target = wasmsh_expand::expand_word(&redirection.target, state);
             let path = resolve_path_from_cwd(&state.cwd, &target);
+            if matches!(redirection.op, RedirectionOp::Output)
+                && state.get_var("SHOPT_C").as_deref() == Some("1")
+                && self.fs.stat(&path).is_ok()
+            {
+                return Err(format!(
+                    "wasmsh: {target}: cannot overwrite existing file\n"
+                ));
+            }
             let sink = match self.fs.open_write_sink(&path, append) {
                 Ok(sink) => sink,
                 Err(err) => {
@@ -3835,7 +3863,7 @@ impl VmExecutor for RuntimeVmExecutor<'_> {
         };
 
         let fs = &*self.fs;
-        Self::with_exec_io_scope(
+        let status = Self::with_exec_io_scope(
             &mut *self.current_exec_io,
             &mut *self.proc_subst_out_scopes,
             &mut *self.exec,
@@ -3854,7 +3882,7 @@ impl VmExecutor for RuntimeVmExecutor<'_> {
                 let mut sink = RuntimeBuiltinSink {
                     router: &mut router,
                 };
-                let status = {
+                {
                     let mut ctx = wasmsh_builtins::BuiltinContext {
                         state: &mut vm.state,
                         output: &mut sink,
@@ -3862,11 +3890,14 @@ impl VmExecutor for RuntimeVmExecutor<'_> {
                         stdin,
                     };
                     builtin_fn(&mut ctx, &argv_refs)
-                };
-                vm.state.last_status = status;
-                status
+                }
             },
-        )
+        );
+        if let Some(last) = expanded.last() {
+            vm.state.set_last_argument(last.as_str());
+        }
+        vm.state.last_status = status;
+        status
     }
 }
 
@@ -4003,6 +4034,35 @@ struct DeclareFlags {
     is_upper: bool,
     is_print: bool,
     is_nameref: bool,
+    is_functions: bool,
+    is_function_names: bool,
+    is_trace: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CommandLookupKind {
+    Alias,
+    Function,
+    Builtin,
+    File,
+}
+
+#[derive(Clone, Debug)]
+struct CommandLookup {
+    kind: CommandLookupKind,
+    name: String,
+    detail: String,
+}
+
+#[derive(Clone, Debug)]
+struct MapfileOptions {
+    strip_delimiter: bool,
+    delimiter: u8,
+    count: Option<usize>,
+    origin: usize,
+    skip: usize,
+    fd: u32,
+    array_name: String,
 }
 
 /// Parse declare/typeset flags from argv, returning (flags, `name_indices`).
@@ -4017,6 +4077,9 @@ fn parse_declare_flags(argv: &[String]) -> (DeclareFlags, Vec<usize>) {
         is_upper: false,
         is_print: false,
         is_nameref: false,
+        is_functions: false,
+        is_function_names: false,
+        is_trace: false,
     };
     let mut names = Vec::new();
 
@@ -4033,6 +4096,9 @@ fn parse_declare_flags(argv: &[String]) -> (DeclareFlags, Vec<usize>) {
                     'u' => flags.is_upper = true,
                     'p' => flags.is_print = true,
                     'n' => flags.is_nameref = true,
+                    'f' => flags.is_functions = true,
+                    'F' => flags.is_function_names = true,
+                    't' => flags.is_trace = true,
                     _ => {}
                 }
             }
@@ -4484,7 +4550,7 @@ impl WorkerRuntime {
         &self,
         pipeline: &HirPipeline,
     ) -> Result<(), VmSubsetFallbackReason> {
-        if pipeline.negated || pipeline.commands.len() != 1 {
+        if pipeline.timed || pipeline.time_posix || pipeline.negated || pipeline.commands.len() != 1 {
             return Err(VmSubsetFallbackReason::Lowering(
                 LoweringError::Unsupported("pipeline shape is outside the VM subset"),
             ));
@@ -4982,10 +5048,14 @@ impl WorkerRuntime {
     }
 
     fn execute_pipeline(&mut self, pipeline: &HirPipeline) {
+        let started = pipeline_started_at();
         let cmds = &pipeline.commands;
         self.execute_scheduled_pipeline(cmds, pipeline);
         if pipeline.negated {
             self.vm.state.last_status = i32::from(self.vm.state.last_status == 0);
+        }
+        if pipeline.timed {
+            self.emit_pipeline_timing(pipeline.time_posix, started_elapsed_seconds(started));
         }
     }
 
@@ -5000,11 +5070,17 @@ impl WorkerRuntime {
         source_reader: Option<Box<dyn Read>>,
     ) {
         let pipefail = self.vm.state.get_var("SHOPT_o_pipefail").as_deref() == Some("1");
-        let stages: Vec<StreamingPipelineStage> = cmds
+        let stage_results: Vec<(StreamingPipelineStage, Option<String>)> = cmds
             .iter()
             .enumerate()
-            .map(|(idx, cmd)| self.compile_pipeline_stage(cmd, idx == 0 && source_reader.is_none()))
+            .map(|(idx, cmd)| {
+                self.compile_pipeline_stage_with_last_argument(
+                    cmd,
+                    idx == 0 && source_reader.is_none(),
+                )
+            })
             .collect();
+        let (stages, stage_last_args): (Vec<_>, Vec<_>) = stage_results.into_iter().unzip();
         if source_reader.is_none() && stages.len() == 1 {
             if self.command_needs_full_single_stage_execution(&cmds[0]) {
                 self.execute_command(&cmds[0]);
@@ -5020,6 +5096,9 @@ impl WorkerRuntime {
                 }
             }
             let status = self.execute_scheduled_single_stage(&stages[0]);
+            if let Some(last_arg) = stage_last_args[0].as_deref() {
+                self.vm.state.set_last_argument(last_arg);
+            }
             self.set_pipestatus(&[status]);
             if !self.exec.resource_exhausted {
                 self.vm.state.last_status = status;
@@ -5055,6 +5134,9 @@ impl WorkerRuntime {
             .iter()
             .map(|status| *status.borrow())
             .collect();
+        if let Some(last_arg) = stage_last_args.iter().rev().flatten().next() {
+            self.vm.state.set_last_argument(last_arg.as_str());
+        }
         self.set_pipestatus(&statuses);
         if !self.exec.resource_exhausted {
             if pipefail {
@@ -5132,7 +5214,32 @@ impl WorkerRuntime {
         cmd: &HirCommand,
         is_first: bool,
     ) -> StreamingPipelineStage {
-        if let Some(argv) = self.resolve_streaming_pipeline_argv(cmd) {
+        let resolved_argv = self.resolve_streaming_pipeline_argv(cmd);
+        self.compile_pipeline_stage_from_argv(cmd, is_first, resolved_argv)
+    }
+
+    fn compile_pipeline_stage_with_last_argument(
+        &mut self,
+        cmd: &HirCommand,
+        is_first: bool,
+    ) -> (StreamingPipelineStage, Option<String>) {
+        let resolved_argv = self.resolve_streaming_pipeline_argv(cmd);
+        let last_arg = resolved_argv
+            .as_ref()
+            .and_then(|argv| argv.last().cloned());
+        (
+            self.compile_pipeline_stage_from_argv(cmd, is_first, resolved_argv),
+            last_arg,
+        )
+    }
+
+    fn compile_pipeline_stage_from_argv(
+        &mut self,
+        cmd: &HirCommand,
+        is_first: bool,
+        resolved_argv: Option<Vec<String>>,
+    ) -> StreamingPipelineStage {
+        if let Some(argv) = resolved_argv {
             if self.get_shopt_value("expand_aliases")
                 && argv
                     .first()
@@ -7397,12 +7504,6 @@ impl WorkerRuntime {
         false
     }
 
-    fn pending_input_first_line(&mut self, cmd_name: &str) -> Result<String, ()> {
-        let data = self.read_pending_input_bytes(cmd_name)?.unwrap_or_default();
-        let input = String::from_utf8_lossy(&data);
-        Ok(input.lines().next().unwrap_or("").to_string())
-    }
-
     fn read_pending_input_bytes(&mut self, cmd_name: &str) -> Result<Option<Vec<u8>>, ()> {
         let Some(mut reader) = self.take_pending_input_reader(cmd_name)? else {
             return Ok(None);
@@ -7467,6 +7568,16 @@ impl WorkerRuntime {
             CMD_BUILTIN => Some(RuntimeCommandKind::BuiltinKeyword),
             CMD_MAPFILE | CMD_READARRAY => Some(RuntimeCommandKind::Mapfile),
             CMD_TYPE => Some(RuntimeCommandKind::Type),
+            CMD_COMMAND => Some(RuntimeCommandKind::CommandKeyword),
+            CMD_EXEC => Some(RuntimeCommandKind::ExecKeyword),
+            CMD_HASH => Some(RuntimeCommandKind::Hash),
+            CMD_TIMES => Some(RuntimeCommandKind::Times),
+            CMD_DIRS => Some(RuntimeCommandKind::Dirs),
+            CMD_PUSHD => Some(RuntimeCommandKind::Pushd),
+            CMD_POPD => Some(RuntimeCommandKind::Popd),
+            CMD_UMASK => Some(RuntimeCommandKind::Umask),
+            CMD_WAIT => Some(RuntimeCommandKind::Wait),
+            CMD_ULIMIT => Some(RuntimeCommandKind::Ulimit),
             _ => None,
         }
     }
@@ -7497,9 +7608,82 @@ impl WorkerRuntime {
         ResolvedCommand::External
     }
 
+    fn resolve_command_without_functions(&self, cmd_name: &str, argv: &[String]) -> ResolvedCommand {
+        if let Some(kind) = Self::resolve_runtime_command(cmd_name) {
+            return ResolvedCommand::Runtime(kind);
+        }
+        if cmd_name == "bash" || cmd_name == "sh" {
+            return ResolvedCommand::ShellScript;
+        }
+        if self.builtins.is_builtin(cmd_name) {
+            return ResolvedCommand::Builtin;
+        }
+        if self.utils.is_utility(cmd_name) {
+            let kind = if cmd_name == "find" && argv.iter().any(|arg| arg == "-exec") {
+                UtilityCommandKind::FindWithExec
+            } else if cmd_name == "xargs" {
+                UtilityCommandKind::Xargs
+            } else {
+                UtilityCommandKind::Plain
+            };
+            return ResolvedCommand::Utility(kind);
+        }
+        ResolvedCommand::External
+    }
+
+    fn find_command_path(&self, name: &str) -> Option<String> {
+        if name.contains('/') {
+            let path = self.resolve_cwd_path(name);
+            self.fs.stat(&path).ok().map(|_| path)
+        } else {
+            self.search_path_for_file(name)
+        }
+    }
+
+    fn command_lookups(&self, name: &str, skip_functions: bool, force_path: bool) -> Vec<CommandLookup> {
+        let mut lookups = Vec::new();
+
+        if !force_path {
+            if let Some(value) = self.aliases.get(name) {
+                lookups.push(CommandLookup {
+                    kind: CommandLookupKind::Alias,
+                    name: name.to_string(),
+                    detail: value.clone(),
+                });
+            }
+            if !skip_functions && self.functions.contains_key(name) {
+                lookups.push(CommandLookup {
+                    kind: CommandLookupKind::Function,
+                    name: name.to_string(),
+                    detail: name.to_string(),
+                });
+            }
+            if self.builtins.is_builtin(name) {
+                lookups.push(CommandLookup {
+                    kind: CommandLookupKind::Builtin,
+                    name: name.to_string(),
+                    detail: name.to_string(),
+                });
+            }
+        }
+
+        if let Some(path) = self.find_command_path(name) {
+            lookups.push(CommandLookup {
+                kind: CommandLookupKind::File,
+                name: name.to_string(),
+                detail: path,
+            });
+        }
+
+        lookups
+    }
+
     fn execute_argv_command(&mut self, argv: &[String]) {
         if self.check_resource_limits() || argv.is_empty() {
             return;
+        }
+        if let Some(last) = argv.last() {
+            self.vm.state.set_last_argument(last.as_str());
         }
         let mut resolved = self.resolve_command(&argv[0], argv);
         // If the command would be dispatched externally and the path
@@ -7571,6 +7755,16 @@ impl WorkerRuntime {
             RuntimeCommandKind::BuiltinKeyword => self.execute_builtin_keyword(argv),
             RuntimeCommandKind::Mapfile => self.execute_mapfile(argv),
             RuntimeCommandKind::Type => self.execute_type(argv),
+            RuntimeCommandKind::CommandKeyword => self.execute_command_keyword(argv),
+            RuntimeCommandKind::ExecKeyword => self.execute_exec_keyword(argv),
+            RuntimeCommandKind::Hash => self.execute_hash(argv),
+            RuntimeCommandKind::Times => self.execute_times(),
+            RuntimeCommandKind::Dirs => self.execute_dirs(),
+            RuntimeCommandKind::Pushd => self.execute_pushd(argv),
+            RuntimeCommandKind::Popd => self.execute_popd(),
+            RuntimeCommandKind::Umask => self.execute_umask(argv),
+            RuntimeCommandKind::Wait => self.execute_wait(argv),
+            RuntimeCommandKind::Ulimit => self.execute_ulimit(argv),
         }
     }
 
@@ -8236,61 +8430,63 @@ impl WorkerRuntime {
 
     /// Execute a `select` command.
     fn execute_select(&mut self, sel: &wasmsh_hir::HirSelect) {
-        self.collect_stdin_from_redirections(&sel.redirections);
+        if self.collect_stdin_from_redirections(&sel.redirections) {
+            return;
+        }
 
-        let words: Vec<String> = if let Some(ws) = &sel.words {
-            let resolved = self.resolve_command_subst(ws);
-            let mut result = Vec::new();
-            for w in &resolved {
-                let expanded = wasmsh_expand::expand_word_split(w, &mut self.vm.state);
-                result.extend(expanded.fields);
-            }
-            result
-        } else {
-            self.vm
-                .state
-                .positional
-                .iter()
-                .map(ToString::to_string)
-                .collect()
-        };
-
+        let words = self.expand_for_words(sel.words.as_deref());
         if words.is_empty() {
             return;
         }
-        for (idx, w) in words.iter().enumerate() {
-            let line = format!("{}) {}\n", idx + 1, w);
-            self.write_stderr(line.as_bytes());
-        }
 
-        let Ok(first_line) = self.pending_input_first_line("select") else {
+        self.print_select_menu(&words);
+
+        let Ok(input) = self.read_pending_input_bytes("select") else {
             return;
         };
+        let input = String::from_utf8_lossy(&input.unwrap_or_default()).into_owned();
 
-        self.vm.state.set_var(
-            smol_str::SmolStr::from("REPLY"),
-            smol_str::SmolStr::from(first_line.trim()),
-        );
+        for line in input.lines() {
+            let reply = line.trim();
+            self.vm
+                .state
+                .set_var(smol_str::SmolStr::from("REPLY"), reply.into());
 
-        let selected = first_line.trim().parse::<usize>().ok().and_then(|n| {
-            if n >= 1 && n <= words.len() {
-                Some(&words[n - 1])
-            } else {
-                None
+            let selected = reply.parse::<usize>().ok().and_then(|n| {
+                if n >= 1 && n <= words.len() {
+                    Some(words[n - 1].clone())
+                } else {
+                    None
+                }
+            });
+
+            self.vm.state.set_var(
+                sel.var_name.clone(),
+                selected.unwrap_or_default().into(),
+            );
+
+            self.execute_body(&sel.body);
+            if self.exec.break_depth > 0 {
+                self.exec.break_depth -= 1;
+                break;
             }
-        });
-
-        if let Some(word) = selected {
-            self.vm
-                .state
-                .set_var(sel.var_name.clone(), smol_str::SmolStr::from(word.as_str()));
-        } else {
-            self.vm
-                .state
-                .set_var(sel.var_name.clone(), smol_str::SmolStr::default());
+            if self.exec.loop_continue {
+                self.exec.loop_continue = false;
+            }
+            if self.exec.exit_requested.is_some() {
+                break;
+            }
+            if reply.is_empty() {
+                self.print_select_menu(&words);
+            }
         }
+    }
 
-        self.execute_body(&sel.body);
+    fn print_select_menu(&mut self, words: &[String]) {
+        for (idx, word) in words.iter().enumerate() {
+            let line = format!("{}) {word}\n", idx + 1);
+            self.write_stderr(line.as_bytes());
+        }
     }
 
     // ---- [[ ]] extended test evaluation ----
@@ -8378,25 +8574,69 @@ impl WorkerRuntime {
     /// Execute `type name ...` — report how each name would be interpreted.
     /// Checks aliases, functions, builtins, and utilities in that order.
     fn execute_type(&mut self, argv: &[String]) {
-        let mut status = 0;
-        for name in &argv[1..] {
-            if self.aliases.contains_key(name.as_str()) {
-                let val = self.aliases.get(name.as_str()).unwrap();
-                let msg = format!("{name} is aliased to `{val}'\n");
-                self.write_stdout(msg.as_bytes());
-            } else if self.functions.contains_key(name.as_str()) {
-                let msg = format!("{name} is a function\n");
-                self.write_stdout(msg.as_bytes());
-            } else if self.builtins.is_builtin(name) {
-                let msg = format!("{name} is a shell builtin\n");
-                self.write_stdout(msg.as_bytes());
-            } else if self.utils.is_utility(name) {
-                let msg = format!("{name} is a shell utility\n");
-                self.write_stdout(msg.as_bytes());
+        let mut all = false;
+        let mut skip_functions = false;
+        let mut path_only = false;
+        let mut force_path = false;
+        let mut type_only = false;
+        let mut names = Vec::new();
+
+        for arg in &argv[1..] {
+            if arg.starts_with('-') && arg.len() > 1 {
+                for ch in arg[1..].chars() {
+                    match ch {
+                        'a' => all = true,
+                        'f' => skip_functions = true,
+                        'p' => path_only = true,
+                        'P' => {
+                            path_only = true;
+                            force_path = true;
+                        }
+                        't' => type_only = true,
+                        _ => {}
+                    }
+                }
             } else {
+                names.push(arg.as_str());
+            }
+        }
+
+        let mut status = 0;
+        for name in names {
+            let mut lookups = self.command_lookups(name, skip_functions, force_path);
+            if path_only {
+                lookups.retain(|lookup| matches!(lookup.kind, CommandLookupKind::File));
+            }
+            if lookups.is_empty() {
                 let msg = format!("wasmsh: type: {name}: not found\n");
                 self.write_stderr(msg.as_bytes());
                 status = 1;
+                continue;
+            }
+
+            for lookup in lookups.into_iter().take(if all { usize::MAX } else { 1 }) {
+                let line = if type_only {
+                    match lookup.kind {
+                        CommandLookupKind::Alias => "alias".to_string(),
+                        CommandLookupKind::Function => "function".to_string(),
+                        CommandLookupKind::Builtin => "builtin".to_string(),
+                        CommandLookupKind::File => "file".to_string(),
+                    }
+                } else if path_only {
+                    lookup.detail
+                } else {
+                    match lookup.kind {
+                        CommandLookupKind::Alias => {
+                            format!("{} is aliased to `{}`", lookup.name, lookup.detail)
+                        }
+                        CommandLookupKind::Function => format!("{} is a function", lookup.name),
+                        CommandLookupKind::Builtin => {
+                            format!("{} is a shell builtin", lookup.name)
+                        }
+                        CommandLookupKind::File => format!("{} is {}", lookup.name, lookup.detail),
+                    }
+                };
+                self.write_stdout(format!("{line}\n").as_bytes());
             }
         }
         self.vm.state.last_status = status;
@@ -8420,131 +8660,373 @@ impl WorkerRuntime {
         }
     }
 
-    /// Execute `mapfile`/`readarray` — read stdin lines into an indexed array.
-    /// Supports `-t` (strip trailing newline). Default array: MAPFILE.
-    fn execute_mapfile(&mut self, argv: &[String]) {
-        let (strip_newline, array_name) = Self::parse_mapfile_args(&argv[1..]);
-        let name_key = smol_str::SmolStr::from(array_name.as_str());
-        self.vm.state.init_indexed_array(name_key.clone());
-        let Ok(reader) = self.take_pending_input_reader("mapfile") else {
+    fn execute_command_keyword(&mut self, argv: &[String]) {
+        let mut use_default_path = false;
+        let mut verbose = false;
+        let mut describe = false;
+        let mut index = 1usize;
+
+        while let Some(arg) = argv.get(index) {
+            match arg.as_str() {
+                "-p" => use_default_path = true,
+                "-v" => verbose = true,
+                "-V" => describe = true,
+                _ if arg.starts_with('-') && arg.len() > 1 => {}
+                _ => break,
+            }
+            index += 1;
+        }
+
+        let args = &argv[index..];
+        if verbose || describe {
+            let mut status = 0;
+            for name in args {
+                let lookups = self.command_lookups(name, true, use_default_path);
+                let Some(lookup) = lookups.first() else {
+                    status = 1;
+                    continue;
+                };
+                let line = if verbose {
+                    match lookup.kind {
+                        CommandLookupKind::Alias => {
+                            format!("alias {}='{}'", lookup.name, lookup.detail)
+                        }
+                        CommandLookupKind::Function | CommandLookupKind::Builtin => {
+                            lookup.name.clone()
+                        }
+                        CommandLookupKind::File => lookup.detail.clone(),
+                    }
+                } else {
+                    match lookup.kind {
+                        CommandLookupKind::Alias => {
+                            format!("{} is aliased to `{}`", lookup.name, lookup.detail)
+                        }
+                        CommandLookupKind::Function => format!("{} is a function", lookup.name),
+                        CommandLookupKind::Builtin => {
+                            format!("{} is a shell builtin", lookup.name)
+                        }
+                        CommandLookupKind::File => format!("{} is {}", lookup.name, lookup.detail),
+                    }
+                };
+                self.write_stdout(format!("{line}\n").as_bytes());
+            }
+            self.vm.state.last_status = status;
+            return;
+        }
+
+        if args.is_empty() {
+            self.vm.state.last_status = 0;
+            return;
+        }
+
+        let resolved = self.resolve_command_without_functions(&args[0], args);
+        self.execute_resolved_command(resolved, args);
+    }
+
+    fn execute_exec_keyword(&mut self, argv: &[String]) {
+        if argv.len() <= 1 {
+            self.vm.state.last_status = 0;
+            return;
+        }
+        let args = &argv[1..];
+        let resolved = self.resolve_command_without_functions(&args[0], args);
+        self.execute_resolved_command(resolved, args);
+    }
+
+    fn execute_hash(&mut self, argv: &[String]) {
+        let mut print_paths = false;
+        let mut status = 0;
+
+        for arg in &argv[1..] {
+            match arg.as_str() {
+                "-r" => {}
+                "-t" => print_paths = true,
+                name => {
+                    let lookups = self.command_lookups(name, true, true);
+                    let Some(lookup) = lookups
+                        .iter()
+                        .find(|lookup| matches!(lookup.kind, CommandLookupKind::File))
+                    else {
+                        status = 1;
+                        continue;
+                    };
+                    if print_paths {
+                        self.write_stdout(format!("{}\n", lookup.detail).as_bytes());
+                    }
+                }
+            }
+        }
+
+        self.vm.state.last_status = status;
+    }
+
+    fn execute_times(&mut self) {
+        self.write_stdout(b"0m0.000s 0m0.000s\n0m0.000s 0m0.000s\n");
+        self.vm.state.last_status = 0;
+    }
+
+    fn emit_pipeline_timing(&mut self, posix_format: bool, elapsed_seconds: f64) {
+        let output = if posix_format {
+            format!("real {elapsed_seconds:.3}\nuser 0.000\nsys 0.000\n")
+        } else {
+            let minutes = (elapsed_seconds / 60.0).floor() as u64;
+            let seconds = elapsed_seconds - (minutes as f64 * 60.0);
+            format!("real\t{minutes}m{seconds:.3}s\nuser\t0m0.000s\nsys\t0m0.000s\n")
+        };
+        self.write_stderr(output.as_bytes());
+    }
+
+    fn execute_dirs(&mut self) {
+        let mut dirs = vec![self.vm.state.cwd.clone()];
+        dirs.extend(self.vm.state.dir_stack.iter().map(ToString::to_string));
+        self.write_stdout(format!("{}\n", dirs.join(" ")).as_bytes());
+        self.vm.state.last_status = 0;
+    }
+
+    fn execute_pushd(&mut self, argv: &[String]) {
+        let target = if let Some(path) = argv.get(1) {
+            path.to_string()
+        } else if let Some(path) = self.vm.state.dir_stack.first().cloned() {
+            path.to_string()
+        } else {
+            self.write_stderr(b"pushd: no other directory\n");
+            self.vm.state.last_status = 1;
             return;
         };
-        if let Some(mut reader) = reader {
-            if self
-                .populate_mapfile_array_from_reader(&name_key, &mut reader, strip_newline)
-                .is_err()
-            {
-                return;
+
+        let old_cwd = self.vm.state.cwd.clone();
+        if !self.change_directory(&target) {
+            return;
+        }
+        self.vm
+            .state
+            .dir_stack
+            .insert(0, smol_str::SmolStr::from(old_cwd.as_str()));
+        self.execute_dirs();
+    }
+
+    fn execute_popd(&mut self) {
+        let Some(target) = self.vm.state.dir_stack.first().cloned() else {
+            self.write_stderr(b"popd: directory stack empty\n");
+            self.vm.state.last_status = 1;
+            return;
+        };
+        self.vm.state.dir_stack.remove(0);
+        if !self.change_directory(&target) {
+            return;
+        }
+        self.execute_dirs();
+    }
+
+    fn execute_umask(&mut self, argv: &[String]) {
+        if argv.len() <= 1 {
+            self.write_stdout(format!("{:03o}\n", self.vm.state.umask).as_bytes());
+            self.vm.state.last_status = 0;
+            return;
+        }
+
+        let value = argv[1].trim_start_matches('0');
+        let value = if value.is_empty() { "0" } else { value };
+        match u32::from_str_radix(value, 8) {
+            Ok(value) => {
+                self.vm.state.umask = value;
+                self.vm.state.last_status = 0;
             }
-        } else {
-            self.populate_mapfile_array(&name_key, "", strip_newline);
+            Err(_) => {
+                self.write_stderr(b"umask: invalid mode\n");
+                self.vm.state.last_status = 1;
+            }
+        }
+    }
+
+    fn execute_wait(&mut self, argv: &[String]) {
+        if argv.len() <= 1 {
+            self.vm.state.last_status = 0;
+            return;
+        }
+
+        let mut status = 0;
+        for arg in &argv[1..] {
+            let Ok(pid) = arg.parse::<u32>() else {
+                self.write_stderr(format!("wait: {arg}: not a pid or valid job spec\n").as_bytes());
+                status = 1;
+                continue;
+            };
+            if self.vm.state.last_background_pid != Some(pid) {
+                self.write_stderr(format!("wait: pid {pid} is not a child of this shell\n").as_bytes());
+                status = 127;
+            }
+        }
+        self.vm.state.last_status = status;
+    }
+
+    fn execute_ulimit(&mut self, argv: &[String]) {
+        if argv.get(1).is_some_and(|arg| arg == "-a") {
+            self.write_stdout(b"unlimited\n");
+        } else if argv.len() <= 1 {
+            self.write_stdout(b"unlimited\n");
         }
         self.vm.state.last_status = 0;
     }
 
-    fn parse_mapfile_args(args: &[String]) -> (bool, String) {
-        let mut strip_newline = false;
-        let mut positional: Vec<&str> = Vec::new();
-        for arg in args {
-            match arg.as_str() {
-                "-t" => strip_newline = true,
-                _ => positional.push(arg),
-            }
+    /// Execute `mapfile`/`readarray` — read stdin lines into an indexed array.
+    /// Supports the common Bash flags needed by scripts in the sandbox model.
+    fn execute_mapfile(&mut self, argv: &[String]) {
+        let Ok(opts) = Self::parse_mapfile_args(&argv[1..]) else {
+            self.vm.state.last_status = 1;
+            return;
+        };
+        if opts.fd != 0 {
+            self.write_stderr(b"wasmsh: mapfile: only file descriptor 0 is supported\n");
+            self.vm.state.last_status = 1;
+            return;
         }
-        let array_name = positional
-            .last()
-            .map_or("MAPFILE".to_string(), ToString::to_string);
-        (strip_newline, array_name)
+
+        let name_key = smol_str::SmolStr::from(opts.array_name.as_str());
+        if opts.origin == 0
+            || !matches!(
+                self.vm.state.env.get(name_key.as_str()).map(|var| &var.value),
+                Some(wasmsh_state::VarValue::IndexedArray(_))
+            )
+        {
+            self.vm.state.init_indexed_array(name_key.clone());
+        }
+
+        let Ok(bytes) = self.read_pending_input_bytes("mapfile") else {
+            return;
+        };
+        self.populate_mapfile_array(&name_key, &bytes.unwrap_or_default(), &opts);
+        self.vm.state.last_status = 0;
+    }
+
+    fn parse_mapfile_args(args: &[String]) -> Result<MapfileOptions, ()> {
+        let mut opts = MapfileOptions {
+            strip_delimiter: false,
+            delimiter: b'\n',
+            count: None,
+            origin: 0,
+            skip: 0,
+            fd: 0,
+            array_name: "MAPFILE".to_string(),
+        };
+        let mut i = 0usize;
+        while i < args.len() {
+            match args[i].as_str() {
+                "-t" => opts.strip_delimiter = true,
+                "-d" => {
+                    i += 1;
+                    let Some(value) = args.get(i) else {
+                        return Err(());
+                    };
+                    opts.delimiter = value.as_bytes().first().copied().unwrap_or(0);
+                }
+                "-n" => {
+                    i += 1;
+                    let Some(value) = args.get(i).and_then(|arg| arg.parse::<usize>().ok()) else {
+                        return Err(());
+                    };
+                    opts.count = Some(value);
+                }
+                "-O" => {
+                    i += 1;
+                    let Some(value) = args.get(i).and_then(|arg| arg.parse::<usize>().ok()) else {
+                        return Err(());
+                    };
+                    opts.origin = value;
+                }
+                "-s" => {
+                    i += 1;
+                    let Some(value) = args.get(i).and_then(|arg| arg.parse::<usize>().ok()) else {
+                        return Err(());
+                    };
+                    opts.skip = value;
+                }
+                "-u" => {
+                    i += 1;
+                    let Some(value) = args.get(i).and_then(|arg| arg.parse::<u32>().ok()) else {
+                        return Err(());
+                    };
+                    opts.fd = value;
+                }
+                "-C" | "-c" => {
+                    i += 1;
+                    if args.get(i).is_none() {
+                        return Err(());
+                    }
+                }
+                value if value.starts_with('-') && value.len() > 1 => {}
+                value => opts.array_name = value.to_string(),
+            }
+            i += 1;
+        }
+        Ok(opts)
     }
 
     fn populate_mapfile_array(
         &mut self,
         name_key: &smol_str::SmolStr,
-        text: &str,
-        strip_newline: bool,
+        text: &[u8],
+        opts: &MapfileOptions,
     ) {
-        let mut idx = 0;
-        for line in text.split('\n') {
-            if line.is_empty() && idx > 0 {
-                continue;
-            }
-            let value = if strip_newline {
-                line.to_string()
+        let mut records = Vec::new();
+        let mut current = Vec::new();
+        for &byte in text {
+            if byte == opts.delimiter {
+                if !opts.strip_delimiter {
+                    current.push(byte);
+                }
+                records.push(std::mem::take(&mut current));
             } else {
-                format!("{line}\n")
-            };
+                current.push(byte);
+            }
+        }
+        if !current.is_empty() {
+            records.push(current);
+        }
+
+        for (offset, record) in records
+            .into_iter()
+            .skip(opts.skip)
+            .take(opts.count.unwrap_or(usize::MAX))
+            .enumerate()
+        {
+            let value = String::from_utf8_lossy(&record).to_string();
             self.vm.state.set_array_element(
                 name_key.clone(),
-                &idx.to_string(),
+                &(opts.origin + offset).to_string(),
                 smol_str::SmolStr::from(value.as_str()),
             );
-            idx += 1;
         }
     }
 
-    fn populate_mapfile_array_from_reader(
-        &mut self,
-        name_key: &smol_str::SmolStr,
-        reader: &mut dyn Read,
-        strip_newline: bool,
-    ) -> Result<(), ()> {
-        let mut buffer = [0u8; 4096];
-        let mut current = Vec::new();
-        let mut idx = 0usize;
-        let mut saw_any = false;
-
-        loop {
-            let read = match reader.read(&mut buffer) {
-                Ok(read) => read,
-                Err(err) => {
-                    let msg = format!("wasmsh: mapfile: stdin read error: {err}\n");
-                    self.write_stderr(msg.as_bytes());
-                    self.vm.state.last_status = 1;
-                    return Err(());
-                }
-            };
-            if read == 0 {
-                break;
+    fn change_directory(&mut self, target: &str) -> bool {
+        let path = self.resolve_cwd_path(target);
+        match self.fs.stat(&path) {
+            Ok(meta) if meta.is_dir => {
+                let old_pwd = self.vm.state.cwd.clone();
+                self.vm.state.cwd = path.clone();
+                self.vm
+                    .state
+                    .set_var("OLDPWD".into(), smol_str::SmolStr::from(old_pwd.as_str()));
+                self.vm
+                    .state
+                    .set_var("PWD".into(), smol_str::SmolStr::from(path.as_str()));
+                self.vm.state.last_status = 0;
+                true
             }
-            saw_any = true;
-            for &byte in &buffer[..read] {
-                if byte == b'\n' {
-                    let value = if strip_newline {
-                        String::from_utf8_lossy(&current).to_string()
-                    } else {
-                        let mut line = current.clone();
-                        line.push(b'\n');
-                        String::from_utf8_lossy(&line).to_string()
-                    };
-                    self.vm.state.set_array_element(
-                        name_key.clone(),
-                        &idx.to_string(),
-                        smol_str::SmolStr::from(value.as_str()),
-                    );
-                    idx += 1;
-                    current.clear();
-                } else {
-                    current.push(byte);
-                }
+            Ok(_) => {
+                self.write_stderr(format!("wasmsh: {target}: Not a directory\n").as_bytes());
+                self.vm.state.last_status = 1;
+                false
+            }
+            Err(_) => {
+                self.write_stderr(
+                    format!("wasmsh: {target}: No such file or directory\n").as_bytes(),
+                );
+                self.vm.state.last_status = 1;
+                false
             }
         }
-
-        if !current.is_empty() || !saw_any {
-            let value = if strip_newline {
-                String::from_utf8_lossy(&current).to_string()
-            } else {
-                let mut line = current;
-                line.push(b'\n');
-                String::from_utf8_lossy(&line).to_string()
-            };
-            self.vm.state.set_array_element(
-                name_key.clone(),
-                &idx.to_string(),
-                smol_str::SmolStr::from(value.as_str()),
-            );
-        }
-
-        Ok(())
     }
 
     /// Search `$PATH` directories in the VFS for a file. Returns the first match.
@@ -8698,7 +9180,7 @@ impl WorkerRuntime {
     fn execute_declare(&mut self, argv: &[String]) {
         let (flags, names) = parse_declare_flags(argv);
 
-        if flags.is_print {
+        if flags.is_print || flags.is_functions || flags.is_function_names {
             self.declare_print(argv, &names);
             return;
         }
@@ -8711,6 +9193,31 @@ impl WorkerRuntime {
 
     /// Handle `declare -p` printing.
     fn declare_print(&mut self, argv: &[String], names: &[usize]) {
+        let (flags, _) = parse_declare_flags(argv);
+        if flags.is_functions || flags.is_function_names {
+            let function_names: Vec<String> = if names.is_empty() {
+                self.functions.keys().cloned().collect()
+            } else {
+                names
+                    .iter()
+                    .map(|&idx| argv[idx].clone())
+                    .collect()
+            };
+            for name in function_names {
+                if !self.functions.contains_key(name.as_str()) {
+                    continue;
+                }
+                let line = if flags.is_function_names {
+                    format!("declare -f {name}\n")
+                } else {
+                    format!("{name} () {{ :; }}\n")
+                };
+                self.write_stdout(line.as_bytes());
+            }
+            self.vm.state.last_status = 0;
+            return;
+        }
+
         if names.is_empty() {
             let vars: Vec<(String, String)> = self
                 .vm
@@ -9632,27 +10139,36 @@ impl WorkerRuntime {
                         }
                     }
                 }
-                RedirectionOp::Output | RedirectionOp::Append => {
+                RedirectionOp::Output
+                | RedirectionOp::Append
+                | RedirectionOp::Clobber
+                | RedirectionOp::AppendBoth => {
                     handled_any = true;
                     let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
                     let resolved_target = resolved.first().unwrap_or(&redir.target);
                     let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
                     let path = self.resolve_cwd_path(&target);
+                    let append = matches!(redir.op, RedirectionOp::Append | RedirectionOp::AppendBoth);
+                    let clear_before = matches!(redir.op, RedirectionOp::Output | RedirectionOp::Clobber);
+
+                    if matches!(redir.op, RedirectionOp::Output)
+                        && self.noclobber_rejects(&path, &target)
+                    {
+                        return Err(());
+                    }
+
                     let destination = if self.process_subst_out_sink_mut(&path).is_some() {
-                        if matches!(redir.op, RedirectionOp::Output) {
+                        if clear_before {
                             if let Some(sink) = self.process_subst_out_sink_mut(&path) {
                                 sink.clear();
                             }
                         }
                         OutputTarget::ProcessSubst { path }
                     } else {
-                        match self
-                            .fs
-                            .open_write_sink(&path, matches!(redir.op, RedirectionOp::Append))
-                        {
+                        match self.fs.open_write_sink(&path, append) {
                             Ok(sink) => OutputTarget::File {
                                 path,
-                                append: matches!(redir.op, RedirectionOp::Append),
+                                append,
                                 sink: Rc::new(RefCell::new(sink)),
                             },
                             Err(err) => {
@@ -9663,7 +10179,11 @@ impl WorkerRuntime {
                             }
                         }
                     };
-                    match redir.fd.unwrap_or(1) {
+                    match redir.fd.unwrap_or(if matches!(redir.op, RedirectionOp::AppendBoth) {
+                        FD_BOTH
+                    } else {
+                        1
+                    }) {
                         FD_BOTH => {
                             exec_io.fds_mut().open_output(1, destination.clone());
                             exec_io.fds_mut().open_output(2, destination);
@@ -9677,9 +10197,24 @@ impl WorkerRuntime {
                     let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
                     let resolved_target = resolved.first().unwrap_or(&redir.target);
                     let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
-                    let target_fd = target.parse().unwrap_or(1);
                     let source_fd = redir.fd.unwrap_or(1);
-                    exec_io.fds_mut().dup_output(source_fd, target_fd);
+                    if target == "-" {
+                        exec_io.fds_mut().close(source_fd);
+                    } else if let Ok(target_fd) = target.parse() {
+                        exec_io.fds_mut().dup_output(source_fd, target_fd);
+                    }
+                }
+                RedirectionOp::DupInput => {
+                    handled_any = true;
+                    let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
+                    let resolved_target = resolved.first().unwrap_or(&redir.target);
+                    let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
+                    let source_fd = redir.fd.unwrap_or(0);
+                    if target == "-" {
+                        exec_io.fds_mut().close(source_fd);
+                    } else if let Ok(target_fd) = target.parse() {
+                        exec_io.fds_mut().dup_input(source_fd, target_fd);
+                    }
                 }
                 _ => {}
             }
@@ -9702,18 +10237,32 @@ impl WorkerRuntime {
 
             match redir.op {
                 RedirectionOp::Output => {
+                    if self.noclobber_rejects(&path, &target) {
+                        return;
+                    }
+                    self.apply_output_redir(&path, &target, fd, stdout_before);
+                }
+                RedirectionOp::Clobber => {
                     self.apply_output_redir(&path, &target, fd, stdout_before);
                 }
                 RedirectionOp::Append => {
                     self.apply_append_redir(&path, &target, fd, stdout_before);
                 }
+                RedirectionOp::AppendBoth => {
+                    self.apply_append_redir(&path, &target, FD_BOTH, stdout_before);
+                }
                 RedirectionOp::DupOutput => {
-                    let target_fd: u32 = target.parse().unwrap_or(1);
                     let source_fd = redir.fd.unwrap_or(1);
-                    if source_fd == 2 && target_fd == 1 {
+                    if target == "-" {
+                        if source_fd == 2 {
+                            self.take_stderr();
+                        } else {
+                            self.capture_stdout(stdout_before);
+                        }
+                    } else if target.parse::<u32>().ok() == Some(1) && source_fd == 2 {
                         let stderr_data = self.take_stderr();
                         self.write_stdout(&stderr_data);
-                    } else if source_fd == 1 && target_fd == 2 {
+                    } else if target.parse::<u32>().ok() == Some(2) && source_fd == 1 {
                         let stdout_data = self.capture_stdout(stdout_before);
                         self.write_stderr(&stdout_data);
                     }
@@ -9743,7 +10292,11 @@ impl WorkerRuntime {
 
     /// Apply `>>` append redirection for a specific fd.
     fn apply_append_redir(&mut self, path: &str, target: &str, fd: u32, stdout_before: usize) {
-        let data = if fd == 2 {
+        let data = if fd == FD_BOTH {
+            let mut combined = self.capture_stdout(stdout_before);
+            combined.extend_from_slice(&self.take_stderr());
+            combined
+        } else if fd == 2 {
             self.take_stderr()
         } else {
             self.capture_stdout(stdout_before)
@@ -9753,6 +10306,41 @@ impl WorkerRuntime {
         }
         self.write_to_file(path, target, &data, OpenOptions::append());
     }
+
+    fn noclobber_rejects(&mut self, path: &str, target: &str) -> bool {
+        if self.vm.state.get_var("SHOPT_C").as_deref() != Some("1") {
+            return false;
+        }
+        if self.fs.stat(path).is_err() {
+            return false;
+        }
+        self.write_stderr(format!("wasmsh: {target}: cannot overwrite existing file\n").as_bytes());
+        self.vm.state.last_status = 1;
+        true
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type PipelineStartedAt = std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+type PipelineStartedAt = ();
+
+#[cfg(not(target_arch = "wasm32"))]
+fn pipeline_started_at() -> PipelineStartedAt {
+    std::time::Instant::now()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn pipeline_started_at() -> PipelineStartedAt {}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn started_elapsed_seconds(started: PipelineStartedAt) -> f64 {
+    started.elapsed().as_secs_f64()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn started_elapsed_seconds(_: PipelineStartedAt) -> f64 {
+    0.0
 }
 
 /// Convert a protocol diagnostic level to a VM diagnostic level.
@@ -9832,7 +10420,7 @@ fn dbl_bracket_eval_primary(
     if *pos + 1 == tokens.len() {
         return dbl_bracket_take_truthy_token(tokens, pos);
     }
-    if let Some(result) = dbl_bracket_try_binary(tokens, pos, state) {
+    if let Some(result) = dbl_bracket_try_binary(tokens, pos, fs, state) {
         return result;
     }
     dbl_bracket_take_truthy_token(tokens, pos)
@@ -9872,7 +10460,8 @@ fn dbl_bracket_try_unary(tokens: &[String], pos: &mut usize, fs: &BackendFs) -> 
     let flag = dbl_bracket_parse_unary_flag(&tokens[*pos])?;
     match flag {
         b'z' | b'n' => Some(dbl_bracket_eval_string_test(tokens, pos, flag)),
-        b'f' | b'd' | b'e' | b's' | b'r' | b'w' | b'x' => {
+        b'f' | b'd' | b'e' | b's' | b'r' | b'w' | b'x' | b'L' | b'h' | b'p' | b'S' | b't'
+        | b'N' | b'O' | b'G' => {
             dbl_bracket_eval_file_test(tokens, pos, flag, fs)
         }
         _ => None,
@@ -9916,6 +10505,7 @@ fn dbl_bracket_eval_file_test(
 fn dbl_bracket_try_binary(
     tokens: &[String],
     pos: &mut usize,
+    fs: &BackendFs,
     state: &mut ShellState,
 ) -> Option<bool> {
     if *pos + 2 > tokens.len() {
@@ -9931,7 +10521,7 @@ fn dbl_bracket_try_binary(
     *pos += 1;
 
     let rhs = dbl_bracket_collect_rhs(tokens, pos, &op);
-    Some(eval_binary_op(&lhs, &op, &rhs, state))
+    Some(eval_binary_op(&lhs, &op, &rhs, fs, state))
 }
 
 /// Collect the right-hand side for a binary operator. For `=~`, the RHS extends
@@ -9961,18 +10551,35 @@ fn dbl_bracket_collect_regex_rhs(tokens: &[String], pos: &mut usize) -> String {
 fn is_binary_op(s: &str) -> bool {
     matches!(
         s,
-        "==" | "!=" | "=~" | "=" | "<" | ">" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge"
+        "=="
+            | "!="
+            | "=~"
+            | "="
+            | "<"
+            | ">"
+            | "-eq"
+            | "-ne"
+            | "-lt"
+            | "-le"
+            | "-gt"
+            | "-ge"
+            | "-ef"
+            | "-nt"
+            | "-ot"
     )
 }
 
 /// Evaluate a binary operation.
-fn eval_binary_op(lhs: &str, op: &str, rhs: &str, state: &mut ShellState) -> bool {
+fn eval_binary_op(lhs: &str, op: &str, rhs: &str, fs: &BackendFs, state: &mut ShellState) -> bool {
     match op {
         "==" | "=" => glob_cmp(lhs, rhs, state, false),
         "!=" => !glob_cmp(lhs, rhs, state, false),
         "=~" => eval_regex_match(lhs, rhs, state),
         "<" => lhs < rhs,
         ">" => lhs > rhs,
+        "-ef" => lhs == rhs,
+        "-nt" => eval_file_test(b'e', lhs, fs) && !eval_file_test(b'e', rhs, fs),
+        "-ot" => !eval_file_test(b'e', lhs, fs) && eval_file_test(b'e', rhs, fs),
         _ => eval_int_cmp(lhs, op, rhs),
     }
 }
@@ -10024,13 +10631,18 @@ fn eval_int_cmp(lhs: &str, op: &str, rhs: &str) -> bool {
 /// Evaluate a unary file test.
 fn eval_file_test(flag: u8, path: &str, fs: &BackendFs) -> bool {
     use wasmsh_fs::Vfs;
+    if flag == b't' {
+        return path == "0";
+    }
     match fs.stat(path) {
         Ok(meta) => match flag {
             b'f' => !meta.is_dir,
             b'd' => meta.is_dir,
             b's' => meta.size > 0,
             // -e, -r, -w, -x: in the VFS all existing files are accessible
-            b'e' | b'r' | b'w' | b'x' => true,
+            b'e' | b'r' | b'w' | b'x' | b'O' | b'G' => true,
+            b'N' => meta.size > 0,
+            b'L' | b'h' | b'p' | b'S' => false,
             _ => false,
         },
         Err(_) => false,
@@ -12119,5 +12731,71 @@ mod tests {
             path: "/utility.txt".into(),
         });
         assert_eq!(get_stdout(&utility), "hi");
+    }
+
+    #[test]
+    fn special_param_underscore_uses_previous_command_last_argument() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let first = runtime.handle_command(HostCommand::Run {
+            input: "echo alpha beta".into(),
+        });
+        assert_eq!(get_stdout(&first), "alpha beta\n");
+        assert_eq!(runtime.vm.state.get_var("_").as_deref(), Some("beta"));
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "echo \"last=$_\"".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "last=beta\n");
+        assert_eq!(runtime.vm.state.get_var("_").as_deref(), Some("last=beta"));
+    }
+
+    #[test]
+    fn amp_append_redirection_appends_stdout_and_stderr_for_simple_command() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let setup = runtime.handle_command(HostCommand::WriteFile {
+            path: "/log.txt".into(),
+            data: b"old\n".to_vec(),
+        });
+        assert_eq!(get_stderr(&setup), "");
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "f(){ printf 'out\\n'; printf 'err\\n' >&2; }\nf &>> /log.txt\ncat /log.txt".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "old\nout\nerr\n");
+        assert_eq!(get_stderr(&events), "");
+    }
+
+    #[test]
+    fn clobber_redirection_overrides_noclobber() {
+        let mut runtime = WorkerRuntime::new();
+        runtime.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+
+        let setup = runtime.handle_command(HostCommand::WriteFile {
+            path: "/existing.txt".into(),
+            data: b"old\n".to_vec(),
+        });
+        assert_eq!(get_stderr(&setup), "");
+
+        let events = runtime.handle_command(HostCommand::Run {
+            input: "set -o noclobber\necho blocked > /existing.txt\ncat /existing.txt\necho force >| /existing.txt\ncat /existing.txt".into(),
+        });
+
+        assert_eq!(get_stdout(&events), "old\nforce\n");
+        assert!(get_stderr(&events).contains("cannot overwrite existing file"));
     }
 }

@@ -1,0 +1,22 @@
+[test]
+name = "clobber-bypasses-noclobber"
+tags = ["redirection", "noclobber", "P1"]
+tier = "P1"
+requires = ["redirection", "set", "echo", "cat"]
+
+[setup.files]
+"/tmp/existing.txt" = "old\n"
+
+[input]
+script = """
+set -o noclobber
+echo blocked >/tmp/existing.txt
+cat /tmp/existing.txt
+echo force >| /tmp/existing.txt
+cat /tmp/existing.txt
+"""
+
+[expect]
+status = 0
+stdout = "old\nforce\n"
+stderr_contains = ["cannot overwrite existing file"]

@@ -1,0 +1,17 @@
+[test]
+name = "mapfile-option-subset"
+tags = ["builtins", "mapfile", "P2"]
+tier = "P2"
+requires = ["mapfile", "indexed-array"]
+
+[input]
+script = """
+printf "a\nb\nc\nd\n" | mapfile -t -s 1 -n 2 -O 1 lines
+echo ${#lines[@]}
+echo ${lines[1]}
+echo ${lines[2]}
+"""
+
+[expect]
+status = 0
+stdout = "2\nb\nc\n"

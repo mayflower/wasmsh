@@ -1,0 +1,18 @@
+[test]
+name = "special-params-extended"
+tags = ["variables", "special-params", "P1"]
+tier = "P1"
+requires = ["echo", "set"]
+
+[input]
+script = """
+echo "pid=$$"
+echo alpha beta
+echo "last=$_"
+set -eu
+echo "flags=$-"
+"""
+
+[expect]
+status = 0
+stdout_contains = ["pid=", "last=beta", "flags=eu"]

@@ -1,0 +1,21 @@
+[test]
+name = "select-multiple-inputs"
+tags = ["select", "P1"]
+tier = "P1"
+requires = ["select", "test", "echo"]
+
+[input]
+script = """
+select item in apple banana; do
+  echo "$REPLY:$item"
+  if [ "$item" = banana ]; then
+    break
+  fi
+done <<< "3
+2
+"
+"""
+
+[expect]
+status = 0
+stdout_contains = ["3:", "2:banana"]

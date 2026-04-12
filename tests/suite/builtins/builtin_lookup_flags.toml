@@ -1,0 +1,20 @@
+[test]
+name = "lookup-builtins-flags"
+tags = ["builtin", "type", "command", "P1"]
+tier = "P1"
+requires = ["type", "command-builtin", "alias"]
+
+[input]
+script = """
+alias ll='echo hi'
+f(){ :; }
+type -t ll
+type -t f
+type -t echo
+command -V echo
+command -v echo
+"""
+
+[expect]
+status = 0
+stdout_contains = ["alias", "function", "builtin", "echo is a shell builtin", "echo\n"]

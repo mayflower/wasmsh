@@ -1,0 +1,12 @@
+[test]
+name = "times-builtin"
+tags = ["builtin", "times", "P2"]
+tier = "P2"
+requires = ["times"]
+
+[input]
+script = "times"
+
+[expect]
+status = 0
+stdout_contains = ["0m0.000s"]

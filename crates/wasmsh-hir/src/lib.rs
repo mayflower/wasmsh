@@ -48,6 +48,8 @@ pub enum HirAndOrOp {
 /// A pipeline of commands connected by `|`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HirPipeline {
+    pub timed: bool,
+    pub time_posix: bool,
     pub negated: bool,
     pub commands: Vec<HirCommand>,
     /// Per-stage flags: `pipe_stderr[i]` is true when stage `i` uses `|&`.

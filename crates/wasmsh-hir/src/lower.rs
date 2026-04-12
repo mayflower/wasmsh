@@ -49,6 +49,8 @@ fn lower_and_or_op(op: ast::AndOrOp) -> HirAndOrOp {
 
 fn lower_pipeline(pipeline: &ast::Pipeline) -> HirPipeline {
     HirPipeline {
+        timed: pipeline.timed,
+        time_posix: pipeline.time_posix,
         negated: pipeline.negated,
         commands: pipeline.commands.iter().map(lower_command).collect(),
         pipe_stderr: pipeline.pipe_stderr.clone(),

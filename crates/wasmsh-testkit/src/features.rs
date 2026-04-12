@@ -106,6 +106,14 @@ pub fn implemented_features() -> HashSet<&'static str> {
     f.insert("set");
     f.insert("type");
     f.insert("command-builtin");
+    f.insert("times");
+    f.insert("dirs");
+    f.insert("pushd");
+    f.insert("popd");
+    f.insert("umask");
+    f.insert("wait");
+    f.insert("ulimit");
+    f.insert("exec-builtin");
     f.insert("eval");
     f.insert("source");
     f.insert("getopts");
@@ -135,6 +143,7 @@ pub fn implemented_features() -> HashSet<&'static str> {
     f.insert("locale-quoting");
     f.insert("dynamic-fd");
     f.insert("move-fd");
+    f.insert("time-keyword");
 
     // Arrays
     f.insert("indexed-array");

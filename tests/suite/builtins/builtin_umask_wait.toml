@@ -1,0 +1,16 @@
+[test]
+name = "umask-and-wait-builtins"
+tags = ["builtin", "umask", "wait", "P2"]
+tier = "P2"
+requires = ["umask", "wait"]
+
+[input]
+script = """
+umask 077
+umask
+wait
+"""
+
+[expect]
+status = 0
+stdout = "077\n"

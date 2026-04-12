@@ -55,6 +55,10 @@ pub enum AndOrOp {
 /// A pipeline of one or more commands connected by `|`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pipeline {
+    /// True when the pipeline is prefixed with `time`.
+    pub timed: bool,
+    /// True when `time -p` was used.
+    pub time_posix: bool,
     /// True when the pipeline is prefixed with `!` (logical negation).
     pub negated: bool,
     /// The commands in the pipeline.
@@ -347,6 +351,10 @@ pub enum RedirectionOp {
     Output,
     /// `>>`
     Append,
+    /// `>|`
+    Clobber,
+    /// `&>>`
+    AppendBoth,
     /// `<>`
     ReadWrite,
     /// `<<` (here-doc)

@@ -156,11 +156,13 @@ impl<'src> Parser<'src> {
             TokenKind::Less
                 | TokenKind::Greater
                 | TokenKind::GreaterGreater
+                | TokenKind::GreaterPipe
                 | TokenKind::LessLess
                 | TokenKind::LessLessDash
                 | TokenKind::LessLessLess
                 | TokenKind::LessGreater
                 | TokenKind::AmpGreater
+                | TokenKind::AmpGreaterGreater
         )
     }
 
@@ -180,6 +182,7 @@ impl<'src> Parser<'src> {
                 TokenKind::Less
                     | TokenKind::Greater
                     | TokenKind::GreaterGreater
+                    | TokenKind::GreaterPipe
                     | TokenKind::LessLess
                     | TokenKind::LessLessDash
                     | TokenKind::LessLessLess
@@ -383,6 +386,18 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_pipeline(&mut self) -> Result<Pipeline, ParseError> {
+        let timed = if self.at_word_eq("time") {
+            self.advance()?;
+            true
+        } else {
+            false
+        };
+        let time_posix = if timed && self.at_word_eq("-p") {
+            self.advance()?;
+            true
+        } else {
+            false
+        };
         let negated = if self.at_word_eq("!") {
             self.advance()?;
             true
@@ -411,6 +426,8 @@ impl<'src> Parser<'src> {
         }
 
         Ok(Pipeline {
+            timed,
+            time_posix,
             negated,
             commands,
             pipe_stderr,
@@ -1141,6 +1158,8 @@ impl<'src> Parser<'src> {
             TokenKind::Less => (RedirectionOp::Input, false),
             TokenKind::Greater | TokenKind::AmpGreater => (RedirectionOp::Output, false),
             TokenKind::GreaterGreater => (RedirectionOp::Append, false),
+            TokenKind::GreaterPipe => (RedirectionOp::Clobber, false),
+            TokenKind::AmpGreaterGreater => (RedirectionOp::AppendBoth, false),
             TokenKind::LessGreater => (RedirectionOp::ReadWrite, false),
             TokenKind::LessLess => (RedirectionOp::HereDoc, true),
             TokenKind::LessLessDash => (RedirectionOp::HereDocStrip, true),
@@ -1154,7 +1173,10 @@ impl<'src> Parser<'src> {
         };
 
         // For &>, we treat it as both stdout and stderr to file
-        let is_amp_greater = op_tok.kind == TokenKind::AmpGreater;
+        let is_amp_greater = matches!(
+            op_tok.kind,
+            TokenKind::AmpGreater | TokenKind::AmpGreaterGreater
+        );
 
         // Check for >&N or <&N (fd duplication): > followed by & followed by digit word
         if self.at(&TokenKind::Amp) && matches!(op_tok.kind, TokenKind::Greater | TokenKind::Less) {
@@ -1205,8 +1227,8 @@ impl<'src> Parser<'src> {
             });
         }
 
-        // For &>, produce a fd=None redirection (handled specially in runtime)
-        // We encode this by using fd = Some(u32::MAX) as a sentinel for &>
+        // For &> / &>>, produce a fd=None redirection (handled specially in runtime)
+        // We encode this by using fd = Some(u32::MAX) as a sentinel for both streams.
         let fd = if is_amp_greater {
             Some(u32::MAX) // sentinel: redirect both stdout and stderr
         } else {
@@ -1442,6 +1464,13 @@ mod tests {
             .collect()
     }
 
+    fn word_text(word: &Word) -> &str {
+        match &word.parts[0] {
+            WordPart::Literal(text) => text.as_str(),
+            other => panic!("expected literal word part, got {other:?}"),
+        }
+    }
+
     // ---- Simple commands (from prompt 02) ----
 
     #[test]
@@ -1474,6 +1503,15 @@ mod tests {
     fn parse_pipeline() {
         let prog = parse_ok("a | b | c");
         assert_eq!(prog.commands[0].list[0].first.commands.len(), 3);
+        assert!(!prog.commands[0].list[0].first.timed);
+    }
+
+    #[test]
+    fn parse_timed_pipeline() {
+        let prog = parse_ok("time -p a | b");
+        let pipeline = &prog.commands[0].list[0].first;
+        assert!(pipeline.timed);
+        assert!(pipeline.time_posix);
     }
 
     #[test]
@@ -1801,6 +1839,27 @@ mod tests {
         // &> is encoded as fd=MAX, op=Output
         assert_eq!(sc.redirections[0].fd, Some(u32::MAX));
         assert_eq!(sc.redirections[0].op, RedirectionOp::Output);
+    }
+
+    #[test]
+    fn parse_clobber_redirection() {
+        let sc = first_simple("cmd >| file");
+        assert_eq!(sc.redirections[0].op, RedirectionOp::Clobber);
+    }
+
+    #[test]
+    fn parse_amp_append_redirection() {
+        let sc = first_simple("cmd &>> file");
+        assert_eq!(sc.redirections[0].fd, Some(u32::MAX));
+        assert_eq!(sc.redirections[0].op, RedirectionOp::AppendBoth);
+    }
+
+    #[test]
+    fn parse_fd_close_redirection() {
+        let sc = first_simple("cmd 1>&-");
+        assert_eq!(sc.redirections[0].fd, Some(1));
+        assert_eq!(sc.redirections[0].op, RedirectionOp::DupOutput);
+        assert_eq!(word_text(&sc.redirections[0].target), "-");
     }
 
     // ---- Double bracket ----

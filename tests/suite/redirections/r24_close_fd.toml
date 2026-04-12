@@ -1,0 +1,15 @@
+[test]
+name = "close-stdout-fd"
+tags = ["redirection", "fd-close", "P1"]
+tier = "P1"
+requires = ["redirection", "echo"]
+
+[input]
+script = """
+echo hidden 1>&-
+echo visible
+"""
+
+[expect]
+status = 0
+stdout = "visible\n"

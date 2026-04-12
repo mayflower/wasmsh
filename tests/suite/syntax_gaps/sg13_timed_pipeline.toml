@@ -1,0 +1,13 @@
+[test]
+name = "timed-pipeline"
+tags = ["syntax", "time", "P2"]
+tier = "P2"
+requires = ["time-keyword", "echo"]
+
+[input]
+script = "time -p echo hi"
+
+[expect]
+status = 0
+stdout = "hi\n"
+stderr_contains = ["real ", "user ", "sys "]

@@ -179,6 +179,16 @@ pub struct ShellState {
     /// Override for `$0` when executing a script (e.g. `bash script.sh`).
     /// When `None`, `$0` returns the default `"wasmsh"`.
     pub script_name: Option<SmolStr>,
+    /// Pseudo shell pid used for `$$`.
+    pub shell_pid: u32,
+    /// Last background pid used for `$!`.
+    pub last_background_pid: Option<u32>,
+    /// Last argument of the previously executed command (`$_`).
+    pub last_argument: SmolStr,
+    /// Directory stack used by `dirs`/`pushd`/`popd`.
+    pub dir_stack: Vec<SmolStr>,
+    /// Shell umask used by the `umask` builtin.
+    pub umask: u32,
 }
 
 impl ShellState {
@@ -196,6 +206,11 @@ impl ShellState {
             func_stack: Vec::new(),
             source_stack: Vec::new(),
             script_name: None,
+            shell_pid: shell_pid(),
+            last_background_pid: None,
+            last_argument: SmolStr::default(),
+            dir_stack: Vec::new(),
+            umask: 0o022,
         }
     }
 
@@ -217,8 +232,15 @@ impl ShellState {
     pub fn get_var(&self, name: &str) -> Option<SmolStr> {
         match name {
             "?" => Some(self.last_status.to_string().into()),
+            "$$" => Some(self.shell_pid.to_string().into()),
+            "!" => Some(
+                self.last_background_pid
+                    .map_or_else(SmolStr::default, |pid| pid.to_string().into()),
+            ),
             "#" => Some(self.positional.len().to_string().into()),
+            "-" => Some(self.option_flags()),
             "0" => Some(self.script_name.clone().unwrap_or_else(|| "wasmsh".into())),
+            "_" => Some(self.last_argument.clone()),
             "@" | "*" => Some(self.positional.join(" ").into()),
             "RANDOM" => Some(SmolStr::from(self.next_random().to_string())),
             "LINENO" => Some(SmolStr::from(self.lineno.to_string())),
@@ -241,6 +263,23 @@ impl ShellState {
         }
     }
 
+    fn option_flags(&self) -> SmolStr {
+        let mut flags = String::new();
+        for (name, flag) in [
+            ("SHOPT_a", 'a'),
+            ("SHOPT_C", 'C'),
+            ("SHOPT_e", 'e'),
+            ("SHOPT_f", 'f'),
+            ("SHOPT_u", 'u'),
+            ("SHOPT_x", 'x'),
+        ] {
+            if self.get_env_var(name).as_deref() == Some("1") {
+                flags.push(flag);
+            }
+        }
+        flags.into()
+    }
+
     fn get_named_or_positional_var(&self, name: &str) -> Option<SmolStr> {
         if let Some(index) = positional_param_index(name) {
             return self.positional.get(index).cloned();
@@ -254,6 +293,16 @@ impl ShellState {
             return self.env.get(&target).map(|v| v.value.as_scalar());
         }
         Some(var.value.as_scalar())
+    }
+
+    /// Record the last argument for `$_`.
+    pub fn set_last_argument(&mut self, arg: impl Into<SmolStr>) {
+        self.last_argument = arg.into();
+    }
+
+    /// Update the tracked background pid used by `$!`.
+    pub fn set_last_background_pid(&mut self, pid: Option<u32>) {
+        self.last_background_pid = pid;
     }
 
     /// Set a named variable (not a special parameter).
@@ -621,6 +670,17 @@ fn stack_last_or_default(stack: &[SmolStr]) -> SmolStr {
     stack.last().cloned().unwrap_or_default()
 }
 
+fn shell_pid() -> u32 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::process::id()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        1
+    }
+}
+
 fn positional_param_index(name: &str) -> Option<usize> {
     let n = name.parse::<usize>().ok()?;
     (n >= 1).then_some(n - 1)
@@ -684,6 +744,27 @@ mod tests {
         assert_eq!(state.get_var("?").unwrap(), "42");
         assert_eq!(state.get_var("#").unwrap(), "0");
         assert_eq!(state.get_var("0").unwrap(), "wasmsh");
+        assert_eq!(state.get_var("$$").unwrap(), state.shell_pid.to_string());
+        assert_eq!(state.get_var("!").unwrap(), "");
+        assert_eq!(state.get_var("-").unwrap(), "");
+        assert_eq!(state.get_var("_").unwrap(), "");
+    }
+
+    #[test]
+    fn special_params_track_last_argument_and_options() {
+        let mut state = ShellState::new();
+        state.set_last_argument("world");
+        state.set_var("SHOPT_e".into(), "1".into());
+        state.set_var("SHOPT_u".into(), "1".into());
+        assert_eq!(state.get_var("_").unwrap(), "world");
+        assert_eq!(state.get_var("-").unwrap(), "eu");
+    }
+
+    #[test]
+    fn special_params_track_background_pid() {
+        let mut state = ShellState::new();
+        state.set_last_background_pid(Some(1234));
+        assert_eq!(state.get_var("!").unwrap(), "1234");
     }
 
     #[test]

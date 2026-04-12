@@ -617,14 +617,60 @@ fn builtin_cd(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 /// - `export NAME=VALUE`: set and export
 /// - `export NAME`: export existing variable
 fn builtin_export(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
+    let mut status = 0;
+    let mut print = false;
+    let mut unexport = false;
+    let mut args = Vec::new();
+
     for arg in &argv[1..] {
-        if let Some(eq_pos) = arg.find('=') {
+        match *arg {
+            "-p" => print = true,
+            "-n" => unexport = true,
+            flag if flag.starts_with('-') && flag.len() > 1 => {}
+            _ => args.push(*arg),
+        }
+    }
+
+    if print || args.is_empty() {
+        print_exported_vars(ctx);
+        if args.is_empty() {
+            return 0;
+        }
+    }
+
+    for arg in args {
+        if unexport {
+            status |= i32::from(!export_clear(ctx, arg));
+        } else if let Some(eq_pos) = arg.find('=') {
             export_with_value(ctx, &arg[..eq_pos], &arg[eq_pos + 1..]);
         } else {
             export_name_only(ctx, arg);
         }
     }
-    0
+    status
+}
+
+fn print_exported_vars(ctx: &mut BuiltinContext<'_>) {
+    let mut entries = IndexMap::<SmolStr, SmolStr>::new();
+    for scope in &ctx.state.env.scopes {
+        for (name, var) in scope {
+            if var.exported {
+                entries.insert(name.clone(), var.value.as_scalar());
+            }
+        }
+    }
+    for (name, value) in entries {
+        let line = format!("declare -x {name}=\"{value}\"\n");
+        ctx.output.stdout(line.as_bytes());
+    }
+}
+
+fn export_clear(ctx: &mut BuiltinContext<'_>, name: &str) -> bool {
+    let Some(var) = ctx.state.env.get_mut(name) else {
+        return false;
+    };
+    var.exported = false;
+    true
 }
 
 fn export_with_value(ctx: &mut BuiltinContext<'_>, name: &str, value: &str) {
@@ -693,7 +739,24 @@ fn builtin_unset(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 /// - `readonly NAME=VALUE`: set and mark readonly
 /// - `readonly NAME`: mark existing variable readonly
 fn builtin_readonly(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
+    let mut print = false;
+    let mut args = Vec::new();
     for arg in &argv[1..] {
+        match *arg {
+            "-p" => print = true,
+            flag if flag.starts_with('-') && flag.len() > 1 => {}
+            _ => args.push(*arg),
+        }
+    }
+
+    if print || args.is_empty() {
+        print_readonly_vars(ctx);
+        if args.is_empty() {
+            return 0;
+        }
+    }
+
+    for arg in args {
         if let Some(eq_pos) = arg.find('=') {
             let name = &arg[..eq_pos];
             let value = &arg[eq_pos + 1..];
@@ -702,10 +765,25 @@ fn builtin_readonly(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
         } else {
             // Mark existing variable readonly
             let value = ctx.state.get_var(arg).unwrap_or_default();
-            ctx.state.set_readonly(SmolStr::from(*arg), value);
+            ctx.state.set_readonly(SmolStr::from(arg), value);
         }
     }
     0
+}
+
+fn print_readonly_vars(ctx: &mut BuiltinContext<'_>) {
+    let mut entries = IndexMap::<SmolStr, SmolStr>::new();
+    for scope in &ctx.state.env.scopes {
+        for (name, var) in scope {
+            if var.readonly {
+                entries.insert(name.clone(), var.value.as_scalar());
+            }
+        }
+    }
+    for (name, value) in entries {
+        let line = format!("declare -r {name}=\"{value}\"\n");
+        ctx.output.stdout(line.as_bytes());
+    }
 }
 
 /// `test` / `[` — conditional expression evaluation.
@@ -754,6 +832,12 @@ fn test_unary(op: &str, val: &str, ctx: &BuiltinContext<'_>) -> bool {
         "-s" => ctx
             .fs
             .is_some_and(|fs| fs.stat(val).is_ok_and(|m| m.size > 0)),
+        "-L" | "-h" | "-p" | "-S" => false,
+        "-O" | "-G" => ctx.fs.is_some_and(|fs| fs.stat(val).is_ok()),
+        "-N" => ctx
+            .fs
+            .is_some_and(|fs| fs.stat(val).is_ok_and(|m| m.size > 0)),
+        "-t" => val == "0" && ctx.stdin.is_some(),
         "-r" | "-w" | "-x" => ctx.fs.is_some_and(|fs| fs.stat(val).is_ok()),
         _ => false,
     }
@@ -763,6 +847,9 @@ fn test_binary(left: &str, op: &str, right: &str) -> bool {
     match op {
         "=" | "==" => left == right,
         "!=" => left != right,
+        "-ef" => left == right,
+        "-nt" => !left.is_empty() && right.is_empty(),
+        "-ot" => left.is_empty() && !right.is_empty(),
         "-eq" => int(left) == int(right),
         "-ne" => int(left) != int(right),
         "-lt" => int(left) < int(right),
@@ -972,6 +1059,7 @@ struct ReadOpts<'a> {
     nchars: Option<usize>,
     exact_nchars: Option<usize>,
     array_name: Option<&'a str>,
+    fd: Option<u32>,
     remaining_args: &'a [&'a str],
 }
 
@@ -984,11 +1072,12 @@ fn parse_read_opts<'a>(argv: &'a [&'a str]) -> ReadOpts<'a> {
         nchars: None,
         exact_nchars: None,
         array_name: None,
+        fd: None,
         remaining_args: &[],
     };
     while let Some(arg) = args.first() {
         match *arg {
-            "-r" | "-s" => args = &args[1..],
+            "-r" | "-s" | "-e" => args = &args[1..],
             "-p" => {
                 opts.prompt = take_read_opt_value(&mut args);
             }
@@ -1007,6 +1096,10 @@ fn parse_read_opts<'a>(argv: &'a [&'a str]) -> ReadOpts<'a> {
             "-a" => {
                 opts.array_name = take_read_opt_value(&mut args);
             }
+            "-u" => {
+                opts.fd = take_read_opt_value(&mut args).and_then(|value| value.parse().ok());
+            }
+            "-i" => drop(take_read_opt_value(&mut args)),
             "-t" => drop(take_read_opt_value(&mut args)),
             _ => break,
         }
@@ -1031,6 +1124,11 @@ fn take_read_opt_value<'a>(args: &mut &'a [&'a str]) -> Option<&'a str> {
 /// `-n nchars`, `-N nchars`, `-a array`, `-t timeout`, `-s` (silent).
 fn builtin_read(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     let opts = parse_read_opts(argv);
+    if opts.fd.is_some_and(|fd| fd != 0) {
+        ctx.output
+            .stderr(b"read: only file descriptor 0 is supported\n");
+        return 1;
+    }
     emit_read_prompt(ctx, opts.prompt);
     let var_names = read_var_names(&opts);
     let Some((line, remaining)) = read_input(ctx, &opts) else {

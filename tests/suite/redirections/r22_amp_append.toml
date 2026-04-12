@@ -1,0 +1,19 @@
+[test]
+name = "amp-append-redirection"
+tags = ["redirection", "P1"]
+tier = "P1"
+requires = ["redirection", "printf", "cat"]
+
+[setup.files]
+"/tmp/log.txt" = "old\n"
+
+[input]
+script = """
+f(){ printf "out\n"; printf "err\n" >&2; }
+f &>> /tmp/log.txt
+cat /tmp/log.txt
+"""
+
+[expect]
+status = 0
+stdout = "old\nout\nerr\n"

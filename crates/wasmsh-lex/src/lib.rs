@@ -31,11 +31,13 @@ pub enum TokenKind {
     Less,
     Greater,
     GreaterGreater,
+    GreaterPipe,
     LessLess,
     LessLessDash,
     LessLessLess,
     LessGreater,
     AmpGreater,
+    AmpGreaterGreater,
     LParen,
     RParen,
     DblLBracket,
@@ -544,6 +546,8 @@ impl<'src> Lexer<'src> {
     fn amp_token(&mut self) -> Token {
         if self.peek_ahead(1) == Some(b'&') {
             self.double_op(TokenKind::AndAnd)
+        } else if self.peek_ahead(1) == Some(b'>') && self.peek_ahead(2) == Some(b'>') {
+            self.triple_op(TokenKind::AmpGreaterGreater)
         } else if self.peek_ahead(1) == Some(b'>') {
             self.double_op(TokenKind::AmpGreater)
         } else {
@@ -567,6 +571,8 @@ impl<'src> Lexer<'src> {
         }
         if self.peek_ahead(1) == Some(b'>') {
             Ok(self.double_op(TokenKind::GreaterGreater))
+        } else if self.peek_ahead(1) == Some(b'|') {
+            Ok(self.double_op(TokenKind::GreaterPipe))
         } else {
             Ok(self.single_op(TokenKind::Greater))
         }
@@ -726,14 +732,16 @@ mod tests {
     #[test]
     fn redirections() {
         assert_eq!(
-            kinds("< > >> << <<- <>"),
+            kinds("< > >> >| << <<- <> &>>"),
             vec![
                 TokenKind::Less,
                 TokenKind::Greater,
                 TokenKind::GreaterGreater,
+                TokenKind::GreaterPipe,
                 TokenKind::LessLess,
                 TokenKind::LessLessDash,
                 TokenKind::LessGreater,
+                TokenKind::AmpGreaterGreater,
             ]
         );
     }
@@ -913,6 +921,11 @@ mod tests {
             kinds("echo &> file"),
             vec![word(false), TokenKind::AmpGreater, word(false)]
         );
+    }
+
+    #[test]
+    fn amp_greater_greater_token() {
+        assert_eq!(kinds("&>>"), vec![TokenKind::AmpGreaterGreater]);
     }
 
     // --- ANSI-C quoting ($'...') ---
