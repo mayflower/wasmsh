@@ -1,0 +1,19 @@
+[test]
+name = "export-p-n-readonly-p"
+tags = ["builtin", "export", "readonly", "P2"]
+tier = "P2"
+requires = ["export", "readonly"]
+
+[input]
+script = """
+export FOO=bar
+export -p | grep FOO
+export -n FOO
+export -p | grep FOO || echo unexported
+readonly RO=frozen
+readonly -p | grep RO
+"""
+
+[expect]
+status = 0
+stdout = "declare -x FOO=\"bar\"\nunexported\ndeclare -r RO=\"frozen\"\n"

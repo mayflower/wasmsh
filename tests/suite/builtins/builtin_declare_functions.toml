@@ -1,0 +1,16 @@
+[test]
+name = "declare-f-F-functions"
+tags = ["builtin", "declare", "P2"]
+tier = "P2"
+requires = ["declare", "function"]
+
+[input]
+script = """
+myfn() { echo hello; }
+other() { echo world; }
+declare -F | sort
+"""
+
+[expect]
+status = 0
+stdout = "declare -f myfn\ndeclare -f other\n"

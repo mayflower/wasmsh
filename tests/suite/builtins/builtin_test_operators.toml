@@ -1,0 +1,28 @@
+[test]
+name = "test-file-operators-extended"
+tags = ["builtin", "test", "P2"]
+tier = "P2"
+requires = ["test"]
+
+[setup.files]
+"/tmp/existing" = "data"
+"/tmp/empty" = ""
+
+[input]
+script = """
+[ -e /tmp/existing ] && echo e_ok
+[ -s /tmp/existing ] && echo s_ok
+[ -s /tmp/empty ] || echo s_empty_ok
+[ -f /tmp/existing ] && echo f_ok
+[ -d /tmp ] && echo d_ok
+[ -r /tmp/existing ] && echo r_ok
+[ -w /tmp/existing ] && echo w_ok
+[ -L /tmp/existing ] || echo L_ok
+[ /tmp/existing -ef /tmp/existing ] && echo ef_ok
+[ /tmp/existing -nt "" ] && echo nt_ok
+[ "" -ot /tmp/existing ] && echo ot_ok
+"""
+
+[expect]
+status = 0
+stdout = "e_ok\ns_ok\ns_empty_ok\nf_ok\nd_ok\nr_ok\nw_ok\nL_ok\nef_ok\nnt_ok\not_ok\n"

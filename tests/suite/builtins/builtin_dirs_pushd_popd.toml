@@ -1,0 +1,21 @@
+[test]
+name = "dirs-pushd-popd"
+tags = ["builtin", "dirs", "pushd", "popd", "P1"]
+tier = "P1"
+requires = ["dirs", "pushd", "popd", "cd"]
+
+[setup.files]
+"/a/marker" = ""
+"/b/marker" = ""
+
+[input]
+script = """
+cd /a
+pushd /b
+popd
+dirs
+"""
+
+[expect]
+status = 0
+stdout = "/b /a\n/a\n/a\n"

@@ -2710,6 +2710,163 @@ mod tests {
         });
         assert_eq!(get_stdout(&utility), "hi");
     }
+
+    // ── Coverage gap tests ─────────────────────────────────────────────
+
+    #[test]
+    fn pushd_popd_dirs_manage_directory_stack() {
+        let (events, _) = run_shell("mkdir -p /a /b; cd /a; pushd /b; popd; pwd");
+        // pushd prints "/b /a", popd prints "/a", pwd prints "/a"
+        assert_eq!(get_stdout(&events), "/b /a\n/a\n/a\n");
+    }
+
+    #[test]
+    fn pushd_no_arg_swaps_top_two_dirs() {
+        let (events, _) = run_shell("mkdir -p /a /b; cd /a; pushd /b; pushd; pwd");
+        // pushd /b → cwd=/b, stack=[/a] → prints "/b /a"
+        // pushd (no arg) → swaps to /a (top of stack), pushes /b → prints "/a /b /a"
+        // pwd → "/a"
+        assert_eq!(get_stdout(&events), "/b /a\n/a /b /a\n/a\n");
+    }
+
+    #[test]
+    fn popd_empty_stack_errors() {
+        let (events, _) = run_shell("popd");
+        assert!(get_stderr(&events).contains("directory stack empty"));
+    }
+
+    #[test]
+    fn test_unary_file_operators_extended() {
+        let (events, _) = run_shell(
+            "echo data > /tmp/f; [ -O /tmp/f ] && echo O_ok; [ -G /tmp/f ] && echo G_ok; [ -N /tmp/f ] && echo N_ok",
+        );
+        assert_eq!(get_stdout(&events), "O_ok\nG_ok\nN_ok\n");
+    }
+
+    #[test]
+    fn test_binary_ef_operator() {
+        let (events, _) =
+            run_shell("echo x > /tmp/same; [ /tmp/same -ef /tmp/same ] && echo ef_ok");
+        assert_eq!(get_stdout(&events), "ef_ok\n");
+    }
+
+    #[test]
+    fn test_symlink_operators_return_false() {
+        let (events, _) = run_shell(
+            "echo x > /tmp/f; [ -L /tmp/f ] || echo L_ok; [ -S /tmp/f ] || echo S_ok; [ -p /tmp/f ] || echo p_ok",
+        );
+        assert_eq!(get_stdout(&events), "L_ok\nS_ok\np_ok\n");
+    }
+
+    #[test]
+    fn export_dash_p_lists_exported_vars() {
+        let (events, _) = run_shell("export MY_VAR=hello; export -p | grep MY_VAR");
+        assert_eq!(get_stdout(&events), "declare -x MY_VAR=\"hello\"\n");
+    }
+
+    #[test]
+    fn export_dash_n_unexports_variable() {
+        let (events, _) =
+            run_shell("export FOO=bar; export -n FOO; export -p | grep FOO; echo done");
+        // After unexport, grep finds nothing, so only "done" shows
+        assert_eq!(get_stdout(&events), "done\n");
+    }
+
+    #[test]
+    fn readonly_dash_p_lists_readonly_vars() {
+        let (events, _) = run_shell("readonly CONST=42; readonly -p | grep CONST");
+        assert_eq!(get_stdout(&events), "declare -r CONST=\"42\"\n");
+    }
+
+    #[test]
+    fn declare_dash_f_lists_function_bodies() {
+        let (events, _) = run_shell("myfn() { echo hello; }; declare -f myfn");
+        assert!(get_stdout(&events).contains("myfn"));
+    }
+
+    #[test]
+    fn declare_dash_cap_f_lists_function_names() {
+        let (events, _) = run_shell("aaa() { :; }; bbb() { :; }; declare -F | sort");
+        assert_eq!(get_stdout(&events), "declare -f aaa\ndeclare -f bbb\n");
+    }
+
+    #[test]
+    fn trap_reentry_does_not_recurse() {
+        // DEBUG trap should not trigger recursively inside itself
+        let (events, status) = run_shell("trap 'echo trapped' DEBUG; echo one; echo two");
+        let stdout = get_stdout(&events);
+        // Each command triggers DEBUG once; no infinite recursion
+        assert!(stdout.contains("trapped"));
+        assert!(stdout.contains("one"));
+        assert!(stdout.contains("two"));
+        assert_eq!(status, 0);
+    }
+
+    #[test]
+    fn signal_with_sig_prefix_is_accepted() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        rt.handle_command(HostCommand::Run {
+            input: "trap 'echo caught' TERM".into(),
+        });
+        let events = rt.handle_command(HostCommand::Signal {
+            signal: "SIGTERM".into(),
+        });
+        assert_eq!(get_stdout(&events), "caught\n");
+    }
+
+    #[test]
+    fn signal_by_number_is_accepted() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        rt.handle_command(HostCommand::Run {
+            input: "trap 'echo got15' TERM".into(),
+        });
+        let events = rt.handle_command(HostCommand::Signal {
+            signal: "15".into(),
+        });
+        assert_eq!(get_stdout(&events), "got15\n");
+    }
+
+    #[test]
+    fn signal_case_insensitive() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        rt.handle_command(HostCommand::Run {
+            input: "trap 'echo ok' TERM".into(),
+        });
+        let events = rt.handle_command(HostCommand::Signal {
+            signal: "term".into(),
+        });
+        assert_eq!(get_stdout(&events), "ok\n");
+    }
+
+    #[test]
+    fn ignored_signal_produces_no_output() {
+        let mut rt = WorkerRuntime::new();
+        rt.handle_command(HostCommand::Init {
+            step_budget: 0,
+            allowed_hosts: vec![],
+        });
+        rt.handle_command(HostCommand::Run {
+            input: "trap '' TERM".into(),
+        });
+        let events = rt.handle_command(HostCommand::Signal {
+            signal: "TERM".into(),
+        });
+        assert_eq!(get_stdout(&events), "");
+        // Should not exit
+        assert!(!events.iter().any(|e| matches!(e, WorkerEvent::Exit(_))));
+    }
 }
 // ── wasm-bindgen entry points (wasm32 only) ────────────────────────
 
