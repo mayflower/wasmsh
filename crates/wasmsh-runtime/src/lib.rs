@@ -2272,7 +2272,14 @@ fn streaming_sed_addr_matches(
         StreamingSedAddr::None => true,
         StreamingSedAddr::Line(n) => line_num == *n,
         StreamingSedAddr::Last => is_last,
-        StreamingSedAddr::Regex(pat) => streaming_simple_grep_match(line, pat),
+        StreamingSedAddr::Regex(pat) => {
+            use posix_regex::compile::PosixRegexBuilder;
+            PosixRegexBuilder::new(pat.as_bytes())
+                .with_default_classes()
+                .compile()
+                .map(|re| !re.matches(line.as_bytes(), Some(1)).is_empty())
+                .unwrap_or_else(|_| streaming_simple_grep_match(line, pat))
+        }
         StreamingSedAddr::Range(start, end) => {
             if *in_range {
                 if streaming_sed_addr_matches(end, line_num, is_last, line, &mut false) {
@@ -2285,6 +2292,108 @@ fn streaming_sed_addr_matches(
             } else {
                 false
             }
+        }
+    }
+}
+
+/// Perform a sed `s///` substitution with POSIX BRE regex support.
+/// Falls back to literal replacement if the pattern fails to compile.
+///
+/// For global (`g`) replacements we iterate one match at a time because
+/// `posix-regex`'s `matches()` may return fewer results than expected
+/// for simple patterns — the safe approach is to find-then-advance in
+/// a loop.
+fn streaming_sed_substitute(text: &str, pattern: &str, replacement: &str, global: bool) -> String {
+    use posix_regex::compile::PosixRegexBuilder;
+
+    let compiled = PosixRegexBuilder::new(pattern.as_bytes())
+        .with_default_classes()
+        .compile();
+
+    let Ok(re) = compiled else {
+        // Fall back to literal replacement.
+        return if global {
+            text.replace(pattern, replacement)
+        } else {
+            text.replacen(pattern, replacement, 1)
+        };
+    };
+
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+
+    loop {
+        if cursor > text.len() {
+            break;
+        }
+        let remaining = &text.as_bytes()[cursor..];
+        let matches = re.matches(remaining, Some(1));
+        let Some(caps) = matches.into_iter().next() else {
+            break;
+        };
+        let Some(Some((rel_start, rel_end))) = caps.first().copied() else {
+            break;
+        };
+        let abs_start = cursor + rel_start;
+        let abs_end = cursor + rel_end;
+
+        out.push_str(&text[cursor..abs_start]);
+        // Expand replacement template with captures relative to `remaining`.
+        streaming_sed_expand_replacement(&mut out, replacement, &text[cursor..], &caps);
+        cursor = if abs_end == abs_start {
+            abs_end + 1
+        } else {
+            abs_end
+        };
+
+        if !global {
+            break;
+        }
+    }
+
+    if cursor <= text.len() {
+        out.push_str(&text[cursor..]);
+    }
+    out
+}
+
+fn streaming_sed_expand_replacement(
+    out: &mut String,
+    template: &str,
+    subject: &str,
+    caps: &[Option<(usize, usize)>],
+) {
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                let Some(&next) = chars.peek() else {
+                    out.push('\\');
+                    continue;
+                };
+                if let Some(digit) = next.to_digit(10) {
+                    chars.next();
+                    let idx = digit as usize;
+                    if let Some(Some((s, e))) = caps.get(idx).copied() {
+                        out.push_str(&subject[s..e]);
+                    }
+                    continue;
+                }
+                chars.next();
+                match next {
+                    '\\' => out.push('\\'),
+                    '&' => out.push('&'),
+                    'n' => out.push('\n'),
+                    't' => out.push('\t'),
+                    other => out.push(other),
+                }
+            }
+            '&' => {
+                if let Some(Some((s, e))) = caps.first().copied() {
+                    out.push_str(&subject[s..e]);
+                }
+            }
+            other => out.push(other),
         }
     }
 }
@@ -2382,11 +2491,8 @@ impl<R: Read> Read for SedStreamReader<R> {
                 }
                 match &instr.cmd {
                     StreamingSedCmd::Substitute(sub) => {
-                        current_text = if sub.global {
-                            current_text.replace(&sub.pattern, &sub.replacement)
-                        } else {
-                            current_text.replacen(&sub.pattern, &sub.replacement, 1)
-                        };
+                        current_text =
+                            streaming_sed_substitute(&current_text, &sub.pattern, &sub.replacement, sub.global);
                     }
                     StreamingSedCmd::Delete => {
                         deleted = true;

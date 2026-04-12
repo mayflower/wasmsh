@@ -106,23 +106,29 @@ impl Regex {
     /// Zero-width matches are skipped forward by one byte to avoid
     /// infinite loops.
     pub(crate) fn find_iter_offsets(&self, subject: &str) -> Vec<(usize, usize)> {
-        let bytes = subject.as_bytes();
-        let all = self.inner.matches(bytes, None);
-        let mut out = Vec::with_capacity(all.len());
-        let mut last_end: Option<usize> = None;
-        for caps in all {
-            if let Some(Some((start, end))) = caps.first().copied() {
-                // Skip overlapping matches — `posix-regex` may report
-                // overlapping results for some patterns; we want
-                // sed/grep-style non-overlapping iteration.
-                if let Some(prev) = last_end {
-                    if start < prev {
-                        continue;
-                    }
-                }
-                out.push((start, end));
-                last_end = Some(end.max(start + 1));
+        if self.empty {
+            return vec![(0, 0)];
+        }
+        let mut out = Vec::new();
+        let mut cursor = 0usize;
+        loop {
+            if cursor > subject.len() {
+                break;
             }
+            let remaining = &subject.as_bytes()[cursor..];
+            let matches = self.inner.matches(remaining, Some(1));
+            let Some(caps) = matches.into_iter().next() else {
+                break;
+            };
+            let Some(Some((rel_start, rel_end))) = caps.first().copied() else {
+                break;
+            };
+            out.push((cursor + rel_start, cursor + rel_end));
+            cursor += if rel_end == rel_start {
+                rel_end + 1
+            } else {
+                rel_end
+            };
         }
         out
     }
@@ -157,50 +163,68 @@ impl Regex {
         self.replace_impl(subject, replacement, ReplaceMode::Nth(nth))
     }
 
+    /// Internal replace loop.
+    ///
+    /// We iterate one match at a time (calling `matches(remaining, 1)`)
+    /// instead of `matches(all, None)` because `posix-regex` may return
+    /// fewer results than expected for simple patterns when asked for
+    /// all matches at once.  The find-then-advance loop is safe for all
+    /// pattern types and handles zero-width matches correctly.
     fn replace_impl(&self, subject: &str, replacement: &str, mode: ReplaceMode) -> String {
-        let bytes = subject.as_bytes();
-        let all = self.inner.matches(bytes, None);
-        if all.is_empty() {
+        if self.empty {
             return subject.to_string();
         }
 
         let mut out = String::with_capacity(subject.len());
         let mut cursor = 0usize;
         let mut applied = 0usize;
-        let mut non_overlapping_count = 0usize;
+        let mut match_count = 0usize;
 
-        for caps in &all {
-            let Some(Some((start, end))) = caps.first().copied() else {
-                continue;
-            };
-            if start < cursor {
-                // Overlapping match — skip.
-                continue;
+        loop {
+            if cursor > subject.len() {
+                break;
             }
-            non_overlapping_count += 1;
+            let remaining = &subject.as_bytes()[cursor..];
+            let matches = self.inner.matches(remaining, Some(1));
+            let Some(caps) = matches.into_iter().next() else {
+                break;
+            };
+            let Some(Some((rel_start, rel_end))) = caps.first().copied() else {
+                break;
+            };
+
+            match_count += 1;
             let should_apply = match mode {
                 ReplaceMode::First => applied == 0,
                 ReplaceMode::All => true,
-                ReplaceMode::Nth(n) => non_overlapping_count == n,
+                ReplaceMode::Nth(n) => match_count == n,
             };
-            if !should_apply {
-                continue;
-            }
 
-            // Append preceding untouched bytes.
-            out.push_str(&subject[cursor..start]);
-            // Append the expanded replacement for this match.
-            append_replacement(&mut out, replacement, subject, caps);
-            // Advance the cursor past the match.  For zero-width
-            // matches we step forward one byte so the next iteration
-            // can make progress.
-            cursor = if end == start { end + 1 } else { end };
-            applied += 1;
-            if let ReplaceMode::First = mode {
-                break;
-            }
-            if let ReplaceMode::Nth(_) = mode {
-                break;
+            if should_apply {
+                out.push_str(&subject[cursor..cursor + rel_start]);
+                // Replacement backrefs (\1, &, etc.) reference into
+                // the remaining slice, not the full subject, because
+                // capture offsets are relative to `remaining`.
+                let remaining_str = &subject[cursor..];
+                append_replacement(&mut out, replacement, remaining_str, &caps);
+                cursor += if rel_end == rel_start {
+                    rel_end + 1
+                } else {
+                    rel_end
+                };
+                applied += 1;
+                if matches!(mode, ReplaceMode::First | ReplaceMode::Nth(_)) {
+                    break;
+                }
+            } else {
+                // Skip this match — emit it unchanged and advance.
+                let skip_end = if rel_end == rel_start {
+                    rel_end + 1
+                } else {
+                    rel_end
+                };
+                out.push_str(&subject[cursor..cursor + skip_end]);
+                cursor += skip_end;
             }
         }
 

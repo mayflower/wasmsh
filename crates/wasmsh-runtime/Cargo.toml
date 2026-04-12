@@ -25,6 +25,7 @@ wasmsh-utils = { workspace = true }
 wasmsh-builtins = { workspace = true }
 smol_str = { workspace = true }
 indexmap = { workspace = true }
+posix-regex = { workspace = true }
 
 [lints]
 workspace = true
