@@ -43,6 +43,7 @@ Rules:
 - For "shell-advanced": use heredocs (<<EOF), here-strings (<<<), nested command substitution, process substitution <(cmd), arithmetic (( )), arrays, declare -A, case statements, trap, while read loops, brace expansion, parameter expansion with defaults and substitution
 - For "combined": mix shell + Python in pipelines. May use micropip packages if the category is also "combined".
 - IMPORTANT: Avoid repeating the same patterns — each task should stress a DIFFERENT utility, shell feature, or Python package
+- IMPORTANT: seed_files content must be SHORT plain text (< 500 chars each). NEVER embed base64-encoded binary data, tar/gz archives, or zip files in seed_files — the agent can create those at runtime. If a task needs an archive, describe it in the task description and let the agent build it.
 
 Output ONLY the raw JSON array. No markdown fences, no explanation.`;
 
