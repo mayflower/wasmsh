@@ -3560,6 +3560,8 @@ enum UtilityCommandKind {
 enum ResolvedCommand {
     Runtime(RuntimeCommandKind),
     ShellScript,
+    /// A file with `#!/bin/bash` or similar shebang, executed directly by path.
+    ShebangScript,
     Function(HirCommand),
     Builtin,
     Utility(UtilityCommandKind),
@@ -7499,7 +7501,24 @@ impl WorkerRuntime {
         if self.check_resource_limits() || argv.is_empty() {
             return;
         }
-        let resolved = self.resolve_command(&argv[0], argv);
+        let mut resolved = self.resolve_command(&argv[0], argv);
+        // If the command would be dispatched externally and the path
+        // contains a `/`, check whether the file has a shell shebang
+        // so we can execute it natively instead of forwarding to the
+        // external handler (which may not exist).
+        if matches!(resolved, ResolvedCommand::External) && argv[0].contains('/') {
+            if let Some(interp) = self.detect_shell_shebang(&argv[0]) {
+                if interp == "bash"
+                    || interp == "sh"
+                    || interp == "/bin/bash"
+                    || interp == "/bin/sh"
+                    || interp.ends_with("/bash")
+                    || interp.ends_with("/sh")
+                {
+                    resolved = ResolvedCommand::ShebangScript;
+                }
+            }
+        }
         self.execute_resolved_command(resolved, argv);
     }
 
@@ -7507,6 +7526,7 @@ impl WorkerRuntime {
         match resolved {
             ResolvedCommand::Runtime(kind) => self.execute_runtime_command(kind, argv),
             ResolvedCommand::ShellScript => self.call_shell_script(argv),
+            ResolvedCommand::ShebangScript => self.call_shebang_script(argv),
             ResolvedCommand::Function(body) => self.call_shell_function(&argv[0], argv, &body),
             ResolvedCommand::Builtin => self.call_builtin(&argv[0], argv),
             ResolvedCommand::Utility(kind) => match kind {
@@ -7653,10 +7673,24 @@ impl WorkerRuntime {
         }
 
         // Check for -c flag (inline script)
+        // bash -c 'script' [name [args...]]
+        // $0 = name (argv[3]), $1.. = args (argv[4..])
         if argv[1] == "-c" {
             if let Some(script) = argv.get(2) {
+                let old_positional = std::mem::take(&mut self.vm.state.positional);
+                let old_script_name = self.vm.state.script_name.take();
+                if let Some(name) = argv.get(3) {
+                    self.vm.state.script_name =
+                        Some(smol_str::SmolStr::from(name.as_str()));
+                }
+                self.vm.state.positional = argv.get(4..).unwrap_or_default()
+                    .iter()
+                    .map(|s| smol_str::SmolStr::from(s.as_str()))
+                    .collect();
                 let sub_events = self.execute_input_inner(script);
                 self.merge_sub_events_with_diagnostics(sub_events);
+                self.vm.state.positional = old_positional;
+                self.vm.state.script_name = old_script_name;
             }
             return;
         }
@@ -7677,17 +7711,90 @@ impl WorkerRuntime {
         self.fs.close(h);
         let content = String::from_utf8_lossy(&data).to_string();
 
-        // Set positional parameters from remaining argv
+        // Set $0 to the script path, positional parameters from argv[2..]
         let old_positional = std::mem::take(&mut self.vm.state.positional);
+        let old_script_name = self.vm.state.script_name.take();
+        self.vm.state.script_name = Some(smol_str::SmolStr::from(argv[1].as_str()));
+        self.vm.state.positional = argv[2..]
+            .iter()
+            .map(|s| smol_str::SmolStr::from(s.as_str()))
+            .collect();
+
+        self.vm
+            .state
+            .source_stack
+            .push(smol_str::SmolStr::from(path.as_str()));
+        let sub_events = self.execute_input_inner(&content);
+        self.vm.state.source_stack.pop();
+        self.merge_sub_events_with_diagnostics(sub_events);
+
+        self.vm.state.positional = old_positional;
+        self.vm.state.script_name = old_script_name;
+    }
+
+    /// Detect a shell shebang at the start of a file.
+    /// Returns the interpreter command (e.g. "bash", "/bin/sh") if found.
+    fn detect_shell_shebang(&mut self, cmd_name: &str) -> Option<String> {
+        let path = if cmd_name.starts_with('/') {
+            cmd_name.to_string()
+        } else {
+            format!("{}/{cmd_name}", self.vm.state.cwd)
+        };
+        let h = self.fs.open(&path, OpenOptions::read()).ok()?;
+        let data = self.fs.read_file(h).unwrap_or_default();
+        self.fs.close(h);
+        if data.len() < 3 || data[0] != b'#' || data[1] != b'!' {
+            return None;
+        }
+        let end = data.iter().position(|&b| b == b'\n').unwrap_or(data.len());
+        let line = String::from_utf8_lossy(&data[2..end]).trim().to_string();
+        // Handle "#!/usr/bin/env bash" → "bash"
+        if line.starts_with("/usr/bin/env ") {
+            Some(line["/usr/bin/env ".len()..].trim().to_string())
+        } else {
+            // e.g. "/bin/bash" → extract basename for matching
+            Some(line.to_string())
+        }
+    }
+
+    /// Execute a script file that was invoked directly by path (e.g. `/workspace/script.sh`).
+    /// The shebang has already been validated as a shell interpreter.
+    fn call_shebang_script(&mut self, argv: &[String]) {
+        let cmd_name = &argv[0];
+        let path = if cmd_name.starts_with('/') {
+            cmd_name.clone()
+        } else {
+            format!("{}/{cmd_name}", self.vm.state.cwd)
+        };
+        let Ok(h) = self.fs.open(&path, OpenOptions::read()) else {
+            let msg = format!("wasmsh: {cmd_name}: No such file or directory\n");
+            self.write_stderr(msg.as_bytes());
+            self.vm.state.last_status = 127;
+            return;
+        };
+        let data = self.fs.read_file(h).unwrap_or_default();
+        self.fs.close(h);
+        let content = String::from_utf8_lossy(&data).to_string();
+
+        // Set $0 to the script path, positional parameters from argv[1..]
+        let old_positional = std::mem::take(&mut self.vm.state.positional);
+        let old_script_name = self.vm.state.script_name.take();
+        self.vm.state.script_name = Some(smol_str::SmolStr::from(cmd_name.as_str()));
         self.vm.state.positional = argv[1..]
             .iter()
             .map(|s| smol_str::SmolStr::from(s.as_str()))
             .collect();
 
+        self.vm
+            .state
+            .source_stack
+            .push(smol_str::SmolStr::from(path.as_str()));
         let sub_events = self.execute_input_inner(&content);
+        self.vm.state.source_stack.pop();
         self.merge_sub_events_with_diagnostics(sub_events);
 
         self.vm.state.positional = old_positional;
+        self.vm.state.script_name = old_script_name;
     }
 
     fn call_external(&mut self, argv: &[String]) {

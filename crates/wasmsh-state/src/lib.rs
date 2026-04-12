@@ -176,6 +176,9 @@ pub struct ShellState {
     pub func_stack: Vec<SmolStr>,
     /// Source file stack for `$BASH_SOURCE`.
     pub source_stack: Vec<SmolStr>,
+    /// Override for `$0` when executing a script (e.g. `bash script.sh`).
+    /// When `None`, `$0` returns the default `"wasmsh"`.
+    pub script_name: Option<SmolStr>,
 }
 
 impl ShellState {
@@ -192,6 +195,7 @@ impl ShellState {
             start_time: std::time::Instant::now(),
             func_stack: Vec::new(),
             source_stack: Vec::new(),
+            script_name: None,
         }
     }
 
@@ -214,7 +218,7 @@ impl ShellState {
         match name {
             "?" => Some(self.last_status.to_string().into()),
             "#" => Some(self.positional.len().to_string().into()),
-            "0" => Some("wasmsh".into()),
+            "0" => Some(self.script_name.clone().unwrap_or_else(|| "wasmsh".into())),
             "@" | "*" => Some(self.positional.join(" ").into()),
             "RANDOM" => Some(SmolStr::from(self.next_random().to_string())),
             "LINENO" => Some(SmolStr::from(self.lineno.to_string())),
