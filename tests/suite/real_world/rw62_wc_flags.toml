@@ -13,5 +13,5 @@ printf 'a\nb\nc\n' | wc -lw
 """
 
 [expect]
-stdout = "      3\n      2\n      6\n      3      3\n"
+stdout = "3\n2\n6\n3 3\n"
 status = 0

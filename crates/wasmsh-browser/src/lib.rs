@@ -482,7 +482,7 @@ mod tests {
     fn streaming_yes_head_wc_counts_lines() {
         let (events, status) = run_shell("yes | head -n 5 | wc -l");
         assert_eq!(status, 0);
-        assert_eq!(get_stdout(&events), "      5\n");
+        assert_eq!(get_stdout(&events), "5\n");
     }
 
     #[test]

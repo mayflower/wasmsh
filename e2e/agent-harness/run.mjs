@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /** Max tasks per generation call (avoids token-limit truncation). */
-const GENERATION_BATCH_SIZE = 10;
+const GENERATION_BATCH_SIZE = 5;
 
 function parseArgs() {
   const args = process.argv.slice(2);

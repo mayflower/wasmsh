@@ -497,19 +497,37 @@ fn wc_emit_reader(
     }
 
     let mut parts = Vec::new();
+    let padded = path.is_some();
     if flags.lines {
-        parts.push(format!("{lines:>7}"));
+        parts.push(if padded {
+            format!("{lines:>7}")
+        } else {
+            lines.to_string()
+        });
     }
     if flags.words {
-        parts.push(format!("{words:>7}"));
+        parts.push(if padded {
+            format!("{words:>7}")
+        } else {
+            words.to_string()
+        });
     }
     if flags.bytes {
-        parts.push(format!("{bytes:>7}"));
+        parts.push(if padded {
+            format!("{bytes:>7}")
+        } else {
+            bytes.to_string()
+        });
     }
     if flags.max_line_length {
-        parts.push(format!("{max_line_length:>7}"));
+        parts.push(if padded {
+            format!("{max_line_length:>7}")
+        } else {
+            max_line_length.to_string()
+        });
     }
-    let mut out = parts.join("");
+    let sep = if padded { "" } else { " " };
+    let mut out = parts.join(sep);
     if let Some(path) = path {
         out.push(' ');
         out.push_str(path);
@@ -3505,7 +3523,7 @@ mod tests {
             &mut fs,
         );
         assert_eq!(status, 0, "{err}");
-        assert_eq!(out, "      3\n");
+        assert_eq!(out, "3\n");
     }
 
     #[test]

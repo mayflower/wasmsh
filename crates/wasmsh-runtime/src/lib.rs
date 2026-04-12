@@ -1984,18 +1984,18 @@ impl<R> WcStreamReader<R> {
 
         let mut parts = Vec::new();
         if self.flags.lines {
-            parts.push(format!("{:>7}", self.lines));
+            parts.push(self.lines.to_string());
         }
         if self.flags.words {
-            parts.push(format!("{:>7}", self.words));
+            parts.push(self.words.to_string());
         }
         if self.flags.bytes {
-            parts.push(format!("{:>7}", self.bytes));
+            parts.push(self.bytes.to_string());
         }
         if self.flags.max_line_length {
-            parts.push(format!("{:>7}", self.max_line_length));
+            parts.push(self.max_line_length.to_string());
         }
-        let mut output = parts.join("");
+        let mut output = parts.join(" ");
         output.push('\n');
         self.summary = output.into_bytes();
     }
@@ -3084,16 +3084,24 @@ impl<R: Read> Read for CutStreamReader<R> {
 }
 
 fn streaming_grep_match_single(line: &str, pattern: &str, flags: &StreamingGrepFlags) -> bool {
+    use posix_regex::compile::PosixRegexBuilder;
+
     if flags.word_match {
         return line
             .split(|c: char| !c.is_alphanumeric() && c != '_')
             .any(|word| word == pattern);
     }
-    // TODO: the streaming grep path only implements literal substring
-    // matching. `flags.fixed` (`-F`) is parsed and accepted but has no effect
-    // because the non-fixed branch never had a regex engine wired in. When we
-    // add regex support, this branch will need to split on `flags.fixed`.
-    line.contains(pattern)
+    if flags.fixed {
+        return line.contains(pattern);
+    }
+    // Try POSIX regex first; fall back to literal substring on compile error.
+    match PosixRegexBuilder::new(pattern.as_bytes())
+        .with_default_classes()
+        .compile()
+    {
+        Ok(re) => !re.matches(line.as_bytes(), Some(1)).is_empty(),
+        Err(_) => line.contains(pattern),
+    }
 }
 
 fn streaming_grep_match_pattern(line: &str, pattern: &str, flags: &StreamingGrepFlags) -> bool {
@@ -12541,7 +12549,7 @@ mod tests {
             input: "yes | head -n 5 | wc -l".into(),
         });
 
-        assert_eq!(get_stdout(&events), "      5\n");
+        assert_eq!(get_stdout(&events), "5\n");
         assert!(!has_output_limit_diagnostic(&events));
     }
 
@@ -12911,7 +12919,7 @@ mod tests {
             input: "echo -e 'a\\nb' | grep b >/filtered.txt | wc -l".into(),
         });
 
-        assert_eq!(get_stdout(&events), "      0\n");
+        assert_eq!(get_stdout(&events), "0\n");
 
         let file_events = runtime.handle_command(HostCommand::ReadFile {
             path: "/filtered.txt".into(),

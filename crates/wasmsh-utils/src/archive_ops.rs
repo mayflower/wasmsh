@@ -1050,21 +1050,9 @@ fn unzip_extract_dir(ctx: &mut UtilContext<'_>, full: &str, name: &str, quiet: b
 }
 
 fn tar_list(ctx: &mut UtilContext<'_>, archive_path: &str, gzipped: bool) -> i32 {
-    let archive_data = match read_file_bytes(ctx, archive_path, "tar") {
+    let tar_data = match tar_load_data(ctx, archive_path, gzipped) {
         Ok(d) => d,
         Err(status) => return status,
-    };
-
-    let tar_data = if gzipped {
-        match gzip_decompress(&archive_data) {
-            Ok(d) => d,
-            Err(e) => {
-                emit_error(ctx.output, "tar", archive_path, &e);
-                return 1;
-            }
-        }
-    } else {
-        archive_data
     };
 
     let mut pos = 0;
