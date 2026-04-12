@@ -79,10 +79,14 @@ impl Read for EmscriptenFileReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let read = unsafe { libc::fread(buf.as_mut_ptr().cast(), 1, buf.len(), self.fp) };
         if read == 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error().is_some() {
-                return Err(err);
+            // fread returns 0 on both EOF and error.  We must use ferror()
+            // to distinguish — checking errno/last_os_error() is incorrect
+            // because errno may be stale from a completely unrelated libc
+            // call (e.g. a failed fopen during command resolution).
+            if unsafe { libc::ferror(self.fp) } != 0 {
+                return Err(std::io::Error::last_os_error());
             }
+            return Ok(0);
         }
         if read > buf.len() {
             Err(std::io::Error::last_os_error())
