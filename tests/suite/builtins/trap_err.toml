@@ -1,0 +1,12 @@
+[test]
+name = "trap-err-handler"
+tags = ["builtin", "P1"]
+tier = "P1"
+requires = ["trap", "trap-err", "echo", "false"]
+
+[input]
+script = "trap 'echo err:$?' ERR; false"
+
+[expect]
+status = 1
+stdout = "err:1\n"

@@ -1,0 +1,18 @@
+[test]
+name = "trap-return-source"
+tags = ["builtin", "P1", "vfs"]
+tier = "P1"
+requires = ["trap", "trap-return", "source", "echo"]
+
+[setup]
+files = { "/lib.sh" = "echo sourced\n" }
+
+[input]
+script = """
+trap 'echo return:${BASH_SOURCE}' RETURN
+source /lib.sh
+"""
+
+[expect]
+status = 0
+stdout = "sourced\nreturn:/lib.sh\n"

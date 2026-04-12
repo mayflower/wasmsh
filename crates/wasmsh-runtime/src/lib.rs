@@ -106,6 +106,8 @@ struct ExecState {
     stop_reason: Option<StopReason>,
     /// Set when word expansion reports a hard semantic error.
     expansion_failed: bool,
+    /// Trap handlers suppress nested trap reentry while they run.
+    trap_depth: u32,
     /// Nested output capture scopes for pipelines and substitutions.
     output_captures: Vec<OutputCapture>,
 }
@@ -122,6 +124,7 @@ impl ExecState {
             resource_exhausted: false,
             stop_reason: None,
             expansion_failed: false,
+            trap_depth: 0,
             output_captures: Vec::new(),
         }
     }
@@ -134,6 +137,7 @@ impl ExecState {
         self.resource_exhausted = false;
         self.stop_reason = None;
         self.expansion_failed = false;
+        self.trap_depth = 0;
         self.output_captures.clear();
     }
 }
@@ -2501,8 +2505,12 @@ impl<R: Read> Read for SedStreamReader<R> {
                 }
                 match &instr.cmd {
                     StreamingSedCmd::Substitute(sub) => {
-                        current_text =
-                            streaming_sed_substitute(&current_text, &sub.pattern, &sub.replacement, sub.global);
+                        current_text = streaming_sed_substitute(
+                            &current_text,
+                            &sub.pattern,
+                            &sub.replacement,
+                            sub.global,
+                        );
                     }
                     StreamingSedCmd::Delete => {
                         deleted = true;
@@ -4405,9 +4413,7 @@ impl WorkerRuntime {
         self.vm.state.lineno = Self::line_number_for_offset(&run.input, cc.span.start as usize);
         let and_or = &cc.list[run.and_or_index];
         self.execute_and_or(and_or);
-        if self.exec.exit_requested.is_none() && self.should_errexit(and_or) {
-            self.exec.exit_requested = Some(self.vm.state.last_status);
-        }
+        self.handle_post_and_or(and_or);
 
         run.and_or_index += 1;
         if run.and_or_index >= cc.list.len() {
@@ -4509,6 +4515,7 @@ impl WorkerRuntime {
 
     fn execute_and_or(&mut self, and_or: &HirAndOr) {
         if let Ok(program) = self.lower_vm_subset_and_or(and_or) {
+            self.run_debug_trap_if_needed();
             self.execute_ir_program(&program);
             return;
         }
@@ -4550,7 +4557,8 @@ impl WorkerRuntime {
         &self,
         pipeline: &HirPipeline,
     ) -> Result<(), VmSubsetFallbackReason> {
-        if pipeline.timed || pipeline.time_posix || pipeline.negated || pipeline.commands.len() != 1 {
+        if pipeline.timed || pipeline.time_posix || pipeline.negated || pipeline.commands.len() != 1
+        {
             return Err(VmSubsetFallbackReason::Lowering(
                 LoweringError::Unsupported("pipeline shape is outside the VM subset"),
             ));
@@ -4758,8 +4766,8 @@ impl WorkerRuntime {
                 if self.exec.exit_requested.is_some() {
                     break;
                 }
-                if self.should_errexit(and_or) {
-                    self.exec.exit_requested = Some(self.vm.state.last_status);
+                self.handle_post_and_or(and_or);
+                if self.exec.exit_requested.is_some() {
                     break;
                 }
             }
@@ -4779,25 +4787,109 @@ impl WorkerRuntime {
         let Some(exit_code) = self.exec.exit_requested else {
             return;
         };
-        let Some(handler_str) = self.take_exit_trap_handler() else {
+        let Some(handler_str) = self.trap_handler("_TRAP_EXIT", "_TRAP_IGNORE_EXIT") else {
             return;
         };
+        if self.exec.trap_depth > 0 {
+            return;
+        }
+        self.exec.trap_depth += 1;
         self.exec.exit_requested = None;
+        self.vm.state.last_status = exit_code;
         events.extend(self.execute_input_inner(&handler_str));
-        self.exec.exit_requested = Some(exit_code);
+        self.exec.trap_depth -= 1;
+        if self.exec.exit_requested.is_none() {
+            self.exec.exit_requested = Some(exit_code);
+        }
+        self.vm.state.last_status = self.exec.exit_requested.unwrap_or(exit_code);
     }
 
-    fn take_exit_trap_handler(&mut self) -> Option<String> {
-        let handler = self.vm.state.get_var("_TRAP_EXIT")?;
+    fn handle_post_and_or(&mut self, and_or: &HirAndOr) {
+        self.run_err_trap_if_needed(and_or);
+        if self.should_errexit(and_or) {
+            self.exec.exit_requested = Some(self.vm.state.last_status);
+        }
+    }
+
+    fn should_run_err_trap(&self, and_or: &HirAndOr) -> bool {
+        !self.exec.errexit_suppressed
+            && and_or.rest.is_empty()
+            && !and_or.first.negated
+            && self.vm.state.last_status != 0
+            && self.exec.exit_requested.is_none()
+            && self.exec.trap_depth == 0
+    }
+
+    fn run_err_trap_if_needed(&mut self, and_or: &HirAndOr) {
+        if !self.should_run_err_trap(and_or) {
+            return;
+        }
+        self.run_trap_and_merge(
+            "_TRAP_ERR",
+            "_TRAP_IGNORE_ERR",
+            self.vm.state.last_status,
+            true,
+        );
+    }
+
+    fn run_debug_trap_if_needed(&mut self) {
+        if self.exec.trap_depth > 0 || self.exec.resource_exhausted {
+            return;
+        }
+        self.run_trap_and_merge(
+            "_TRAP_DEBUG",
+            "_TRAP_IGNORE_DEBUG",
+            self.vm.state.last_status,
+            true,
+        );
+    }
+
+    fn run_return_trap_if_needed(&mut self) {
+        if self.exec.trap_depth > 0 || self.exec.resource_exhausted {
+            return;
+        }
+        self.run_trap_and_merge(
+            "_TRAP_RETURN",
+            "_TRAP_IGNORE_RETURN",
+            self.vm.state.last_status,
+            true,
+        );
+    }
+
+    fn run_trap_and_merge(
+        &mut self,
+        handler_var: &str,
+        ignore_var: &str,
+        trigger_status: i32,
+        restore_status: bool,
+    ) {
+        let Some(handler) = self.trap_handler(handler_var, ignore_var) else {
+            return;
+        };
+        let saved_status = self.vm.state.last_status;
+        let saved_exit_requested = self.exec.exit_requested;
+        self.exec.trap_depth += 1;
+        self.vm.state.last_status = trigger_status;
+        let events = self.execute_input_inner(&handler);
+        self.exec.trap_depth -= 1;
+        self.merge_sub_events_with_diagnostics(events);
+        if restore_status
+            && !self.exec.resource_exhausted
+            && self.exec.exit_requested == saved_exit_requested
+        {
+            self.vm.state.last_status = saved_status;
+        }
+    }
+
+    fn trap_handler(&self, handler_var: &str, ignore_var: &str) -> Option<String> {
+        if self.exec.trap_depth > 0 || self.vm.state.get_var(ignore_var).as_deref() == Some("1") {
+            return None;
+        }
+        let handler = self.vm.state.get_var(handler_var)?;
         if handler.is_empty() {
             return None;
         }
-        let handler_str = handler.to_string();
-        self.vm.state.set_var(
-            smol_str::SmolStr::from("_TRAP_EXIT"),
-            smol_str::SmolStr::default(),
-        );
-        Some(handler_str)
+        Some(handler.to_string())
     }
 
     fn drain_io_events(&mut self, events: &mut Vec<WorkerEvent>) {
@@ -5224,9 +5316,7 @@ impl WorkerRuntime {
         is_first: bool,
     ) -> (StreamingPipelineStage, Option<String>) {
         let resolved_argv = self.resolve_streaming_pipeline_argv(cmd);
-        let last_arg = resolved_argv
-            .as_ref()
-            .and_then(|argv| argv.last().cloned());
+        let last_arg = resolved_argv.as_ref().and_then(|argv| argv.last().cloned());
         (
             self.compile_pipeline_stage_from_argv(cmd, is_first, resolved_argv),
             last_arg,
@@ -7334,6 +7424,7 @@ impl WorkerRuntime {
     }
 
     fn execute_command(&mut self, cmd: &HirCommand) {
+        self.run_debug_trap_if_needed();
         self.proc_subst_out_scopes.push(Vec::new());
         self.proc_subst_in_scopes.push(Vec::new());
         self.execute_command_body(cmd);
@@ -7608,7 +7699,11 @@ impl WorkerRuntime {
         ResolvedCommand::External
     }
 
-    fn resolve_command_without_functions(&self, cmd_name: &str, argv: &[String]) -> ResolvedCommand {
+    fn resolve_command_without_functions(
+        &self,
+        cmd_name: &str,
+        argv: &[String],
+    ) -> ResolvedCommand {
         if let Some(kind) = Self::resolve_runtime_command(cmd_name) {
             return ResolvedCommand::Runtime(kind);
         }
@@ -7640,7 +7735,12 @@ impl WorkerRuntime {
         }
     }
 
-    fn command_lookups(&self, name: &str, skip_functions: bool, force_path: bool) -> Vec<CommandLookup> {
+    fn command_lookups(
+        &self,
+        name: &str,
+        skip_functions: bool,
+        force_path: bool,
+    ) -> Vec<CommandLookup> {
         let mut lookups = Vec::new();
 
         if !force_path {
@@ -7820,8 +7920,9 @@ impl WorkerRuntime {
                     .push(smol_str::SmolStr::from(full.as_str()));
                 let code = String::from_utf8_lossy(&data).to_string();
                 let sub_events = self.execute_input_inner(&code);
-                self.vm.state.source_stack.pop();
                 self.merge_sub_events_with_diagnostics(sub_events);
+                self.run_return_trap_if_needed();
+                self.vm.state.source_stack.pop();
             }
             Err(e) => {
                 self.fs.close(h);
@@ -7874,10 +7975,11 @@ impl WorkerRuntime {
                 let old_positional = std::mem::take(&mut self.vm.state.positional);
                 let old_script_name = self.vm.state.script_name.take();
                 if let Some(name) = argv.get(3) {
-                    self.vm.state.script_name =
-                        Some(smol_str::SmolStr::from(name.as_str()));
+                    self.vm.state.script_name = Some(smol_str::SmolStr::from(name.as_str()));
                 }
-                self.vm.state.positional = argv.get(4..).unwrap_or_default()
+                self.vm.state.positional = argv
+                    .get(4..)
+                    .unwrap_or_default()
                     .iter()
                     .map(|s| smol_str::SmolStr::from(s.as_str()))
                     .collect();
@@ -8037,6 +8139,7 @@ impl WorkerRuntime {
             .push(smol_str::SmolStr::from(cmd_name));
         let locals_before = self.exec.local_save_stack.len();
         self.execute_command(body);
+        self.run_return_trap_if_needed();
         let new_locals: Vec<_> = self.exec.local_save_stack.drain(locals_before..).collect();
         for (name, old_val) in new_locals.into_iter().rev() {
             if let Some(val) = old_val {
@@ -8460,10 +8563,9 @@ impl WorkerRuntime {
                 }
             });
 
-            self.vm.state.set_var(
-                sel.var_name.clone(),
-                selected.unwrap_or_default().into(),
-            );
+            self.vm
+                .state
+                .set_var(sel.var_name.clone(), selected.unwrap_or_default().into());
 
             self.execute_body(&sel.body);
             if self.exec.break_depth > 0 {
@@ -8853,7 +8955,9 @@ impl WorkerRuntime {
                 continue;
             };
             if self.vm.state.last_background_pid != Some(pid) {
-                self.write_stderr(format!("wait: pid {pid} is not a child of this shell\n").as_bytes());
+                self.write_stderr(
+                    format!("wait: pid {pid} is not a child of this shell\n").as_bytes(),
+                );
                 status = 127;
             }
         }
@@ -8885,7 +8989,11 @@ impl WorkerRuntime {
         let name_key = smol_str::SmolStr::from(opts.array_name.as_str());
         if opts.origin == 0
             || !matches!(
-                self.vm.state.env.get(name_key.as_str()).map(|var| &var.value),
+                self.vm
+                    .state
+                    .env
+                    .get(name_key.as_str())
+                    .map(|var| &var.value),
                 Some(wasmsh_state::VarValue::IndexedArray(_))
             )
         {
@@ -9198,10 +9306,7 @@ impl WorkerRuntime {
             let function_names: Vec<String> = if names.is_empty() {
                 self.functions.keys().cloned().collect()
             } else {
-                names
-                    .iter()
-                    .map(|&idx| argv[idx].clone())
-                    .collect()
+                names.iter().map(|&idx| argv[idx].clone()).collect()
             };
             for name in function_names {
                 if !self.functions.contains_key(name.as_str()) {
@@ -9414,9 +9519,10 @@ impl WorkerRuntime {
                 break;
             }
             self.execute_and_or(and_or);
-            if self.should_errexit(and_or) {
-                self.exec.exit_requested = Some(self.vm.state.last_status);
+            if self.exec.exit_requested.is_some() {
+                break;
             }
+            self.handle_post_and_or(and_or);
         }
     }
 
@@ -10148,8 +10254,10 @@ impl WorkerRuntime {
                     let resolved_target = resolved.first().unwrap_or(&redir.target);
                     let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
                     let path = self.resolve_cwd_path(&target);
-                    let append = matches!(redir.op, RedirectionOp::Append | RedirectionOp::AppendBoth);
-                    let clear_before = matches!(redir.op, RedirectionOp::Output | RedirectionOp::Clobber);
+                    let append =
+                        matches!(redir.op, RedirectionOp::Append | RedirectionOp::AppendBoth);
+                    let clear_before =
+                        matches!(redir.op, RedirectionOp::Output | RedirectionOp::Clobber);
 
                     if matches!(redir.op, RedirectionOp::Output)
                         && self.noclobber_rejects(&path, &target)
@@ -10179,11 +10287,13 @@ impl WorkerRuntime {
                             }
                         }
                     };
-                    match redir.fd.unwrap_or(if matches!(redir.op, RedirectionOp::AppendBoth) {
-                        FD_BOTH
-                    } else {
-                        1
-                    }) {
+                    match redir
+                        .fd
+                        .unwrap_or(if matches!(redir.op, RedirectionOp::AppendBoth) {
+                            FD_BOTH
+                        } else {
+                            1
+                        }) {
                         FD_BOTH => {
                             exec_io.fds_mut().open_output(1, destination.clone());
                             exec_io.fds_mut().open_output(2, destination);
@@ -10461,9 +10571,7 @@ fn dbl_bracket_try_unary(tokens: &[String], pos: &mut usize, fs: &BackendFs) -> 
     match flag {
         b'z' | b'n' => Some(dbl_bracket_eval_string_test(tokens, pos, flag)),
         b'f' | b'd' | b'e' | b's' | b'r' | b'w' | b'x' | b'L' | b'h' | b'p' | b'S' | b't'
-        | b'N' | b'O' | b'G' => {
-            dbl_bracket_eval_file_test(tokens, pos, flag, fs)
-        }
+        | b'N' | b'O' | b'G' => dbl_bracket_eval_file_test(tokens, pos, flag, fs),
         _ => None,
     }
 }
@@ -10551,8 +10659,7 @@ fn dbl_bracket_collect_regex_rhs(tokens: &[String], pos: &mut usize) -> String {
 fn is_binary_op(s: &str) -> bool {
     matches!(
         s,
-        "=="
-            | "!="
+        "==" | "!="
             | "=~"
             | "="
             | "<"
@@ -12770,7 +12877,8 @@ mod tests {
         assert_eq!(get_stderr(&setup), "");
 
         let events = runtime.handle_command(HostCommand::Run {
-            input: "f(){ printf 'out\\n'; printf 'err\\n' >&2; }\nf &>> /log.txt\ncat /log.txt".into(),
+            input: "f(){ printf 'out\\n'; printf 'err\\n' >&2; }\nf &>> /log.txt\ncat /log.txt"
+                .into(),
         });
 
         assert_eq!(get_stdout(&events), "old\nout\nerr\n");

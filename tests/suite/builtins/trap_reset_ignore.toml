@@ -1,0 +1,17 @@
+[test]
+name = "trap-reset-and-ignore"
+tags = ["builtin", "P2"]
+tier = "P2"
+requires = ["trap"]
+
+[input]
+script = """
+trap 'echo cleanup' EXIT
+trap - EXIT
+trap '' ERR
+trap -p
+"""
+
+[expect]
+status = 0
+stdout = "trap -- '' ERR\n"

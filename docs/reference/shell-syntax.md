@@ -242,9 +242,8 @@ honoured by the runtime, or are not implemented at all:
 - Coprocesses: `coproc`
 - Background execution semantics: `cmd &` is parsed but the runtime
   executes synchronously (the sandbox has no process table)
-- Signal handling beyond `EXIT` and `ERR` traps
-- The `time` keyword
-- `$$`, `$!`, `$_`, `$-`, `$BASHPID` special parameters
+- Full POSIX signal delivery / job-linked signal semantics
+- `$BASHPID` special parameter
 
 For an authoritative list see the "Not Yet Implemented" section of
 [`SUPPORTED.md`](../../SUPPORTED.md).

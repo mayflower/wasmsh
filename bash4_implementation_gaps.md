@@ -33,7 +33,7 @@ vorigen Bewertung sind für den aktuellen Stand weitgehend umgesetzt:
 - geschlossen: zusätzliche `test`-/`[[`-Operatoren wie `-L`, `-h`, `-p`, `-S`, `-t`, `-N`, `-O`, `-G`, `-ef`, `-nt`, `-ot`
 
 Offen aus der priorisierten Liste bleiben damit vor allem die teureren Blöcke
-`Job-Control`, `Trap-/Signalmodell`, `coproc` sowie die weiterhin breiteren
+`Job-Control`, echte POSIX-`Signalzustellung`, `coproc` sowie die weiterhin breiteren
 Lücken bei interaktiven Builtins und `set`-/`shopt`-Optionen.
 
 ## Priorisierungslogik
@@ -77,18 +77,23 @@ Lücken bei interaktiven Builtins und `set`-/`shopt`-Optionen.
   nutzen `&` nicht für Komfort, sondern für tatsächliche Parallelität,
   `wait`-Synchronisation und PID-basierte Steuerung.
 
-#### 2. Trap- und Signalmodell ist nur als Minimalvariante vorhanden
+#### 2. Reale POSIX-Signalzustellung und volle Trap-Feinheiten fehlen weiterhin
 
 - Bash-4-Spezifikation:
   Abschnitt 20 verlangt neben `EXIT` und `ERR` auch `DEBUG`, `RETURN`,
   `trap -l`, `trap -p`, Reset/Ignore-Semantik und reguläre Signalnamen.
 - Aktueller `wasmsh`-Stand:
-  `trap` ist implementiert, aber laut `SUPPORTED.md` und
-  `crates/wasmsh-builtins/src/lib.rs` nur für `EXIT` und `ERR`; andere
-  Signale sind Warnung oder No-op.
+  `trap` deckt inzwischen `EXIT`, `ERR`, `DEBUG`, `RETURN`, `trap -l`,
+  `trap -p`, Reset/Ignore-Semantik und reguläre Signalnamen ab. Offen
+  bleibt aber die eigentliche POSIX-Signalzustellung im Sandbox-Modell;
+  Namen wie `TERM` oder `INT` sind daher weiterhin nur registrierbar,
+  nicht auslösbar. Auch die feineren Bash-Randfälle bei `ERR` in
+  komplexeren `&&`/`||`-Ketten bleiben strategisch noch ausbaufähig.
 - Warum `P0`:
-  Cleanup-, Debug- und Fehlerbehandlungslogik in Bash hängt stark an `trap`.
-  Ohne konsistente Trap-Semantik bleiben auch robustere Skripte unportabel.
+  Der größte Restschaden liegt jetzt weniger in `trap` selbst als in der
+  fehlenden Prozess-/Signalschicht darunter. Das bleibt für Portabilität
+  relevant, ist aber deutlich teurer als der bereits geschlossene
+  Trap-Oberflächenblock.
 
 #### 3. Wichtige Spezialparameter fehlen oder sind nur dokumentiert, nicht implementiert
 
@@ -263,24 +268,28 @@ Nicht mehr in der Gap-Liste, weil im Repo klar vorhanden:
 - Indexed und associative arrays
 - viele Parameter-Expansionen inklusive indirekter und transformierender Formen
 - `extglob`, `globstar`, `pipefail`, `nounset`, `xtrace`
-- `select` als Basiskonstrukt, wenn auch noch nicht mit voller Semantik
+- `select` mit wiederholter Menüschleife bis `break` oder EOF
 
 ## Machbarkeitsbewertung und kombinierte Priorisierung
+
+Historische Einträge, die seit der ersten Bewertung geschlossen wurden,
+bleiben hier zur Nachvollziehbarkeit stehen und sind als `erledigt`
+markiert.
 
 | Nr. | Gap | Kompatibilität | Machbarkeit | Kombiniert | Kurzbegründung |
 | --- | --- | --- | --- | --- | --- |
 | 1 | Hintergrundausführung und Job-Control | `P0` | `M3` | `K2` | Sehr hoher Bash-Wert, aber im aktuellen Prozess-/Sandbox-Modell der teuerste Eingriff. |
-| 2 | Trap- und Signalmodell | `P0` | `M2` | `K1` | Wichtig für robuste Skripte; machbar, aber mit Runtime- und Fehlerpfad-Folgen. |
-| 3 | Spezialparameter (`$$`, `$!`, `$-`, `$_`) | `P0` | `M0` | `K0` | Sehr hoher Nutzen bei vermutlich lokalem State-/Expansion-Fix. |
+| 2 | POSIX-Signalzustellung und verbleibende Trap-Randfälle | `P0` | `M3` | `K2` | Die Trap-Oberfläche ist weitgehend da; offen bleibt die teure Prozess-/Signalschicht darunter. |
+| 3 | `[erledigt]` Spezialparameter (`$$`, `$!`, `$-`, `$_`) | `erledigt` | `erledigt` | `-` | Am 2026-04-12 umgesetzt. |
 | 4 | `coproc` | `P1` | `M3` | `K3` | Echte Bash-4-Funktion, aber stark gekoppelt an parallele Prozess- und FD-Semantik. |
-| 5 | Redirection-Lücken (`&>>`, `>|`, FD-close) | `P1` | `M1` | `K0` | Gute Chance auf klare Parser-/Executor-Arbeit mit hohem Skript-Nutzen. |
-| 6 | `select` nur teilimplementiert | `P1` | `M1` | `K1` | Semantisch wichtig, aber vermutlich ohne grundlegenden Architekturumbau zu schließen. |
-| 7 | Fehlende nicht-interaktive Builtins | `P1` | `M1` | `K1` | Ein Teil ist direkt ergänzbar; einzelne Builtins wie `wait` bleiben an Job-Control gekoppelt. |
-| 8 | `read`-/`mapfile`-Flags unvollständig | `P2` | `M1` | `K1` | Gute inkrementelle Kompatibilitätsarbeit mit überschaubarem Risiko. |
-| 9 | Flag-Lücken bei `declare`/`export`/`readonly`/`type`/`command` | `P2` | `M0` | `K1` | Eher lokale Builtin-Erweiterungen, aber mit geringerem Hebel als Spezialparameter/Redirections. |
-| 10 | Lücken bei Test-/`[[`-Operatoren | `P2` | `M1` | `K2` | Meist gut implementierbar, aber im Sandbox-VFS nicht jeder Operator gleich wertvoll. |
+| 5 | `[erledigt]` Redirection-Lücken (`&>>`, `>|`, FD-close) | `erledigt` | `erledigt` | `-` | Am 2026-04-12 umgesetzt. |
+| 6 | `[erledigt]` `select`-Semantik | `erledigt` | `erledigt` | `-` | Am 2026-04-12 umgesetzt. |
+| 7 | `[erledigt]` fehlende nicht-interaktive Builtins | `erledigt` | `erledigt` | `-` | Der M0/M1-Block ohne echtes Job-Control wurde umgesetzt. |
+| 8 | `[erledigt]` `read`-/`mapfile`-Flags | `erledigt` | `erledigt` | `-` | Am 2026-04-12 umgesetzt. |
+| 9 | `[erledigt]` Flag-Lücken bei `declare`/`export`/`readonly`/`type`/`command` | `erledigt` | `erledigt` | `-` | Am 2026-04-12 umgesetzt. |
+| 10 | `[erledigt]` zusätzliche Test-/`[[`-Operatoren | `erledigt` | `erledigt` | `-` | Am 2026-04-12 umgesetzt. |
 | 11 | `set`-/`shopt`-Optionen unvollständig | `P2` | `M2` | `K2` | Viele kleine Schalter, aber semantisch breit über Parser, State und Executor verteilt. |
-| 12 | `time` und `times` fehlen | `P2` | `M1` | `K2` | Klar definierbar, aber für reale Portabilität unterhalb anderer Lücken. |
+| 12 | `[erledigt]` `time` und `times` | `erledigt` | `erledigt` | `-` | Am 2026-04-12 umgesetzt. |
 | 13 | History-/Completion-/interaktive Builtins | `P3` | `M3` | `K3` | Geringer Fit zum Kernmodell von `wasmsh`. |
 | 14 | Interaktive `shopt`-Features | `P3` | `M2` | `K3` | Ebenfalls niedriger ROI für die primären nicht-interaktiven Use Cases. |
 
@@ -288,23 +297,17 @@ Nicht mehr in der Gap-Liste, weil im Repo klar vorhanden:
 
 ### K0
 
-- `3`: Spezialparameter (`$$`, `$!`, `$-`, `$_`)
-- `5`: Redirection-Lücken (`&>>`, `>|`, FD-close)
+- kein verbleibender `K0`-Block; die früheren K0-Arbeiten sind umgesetzt
 
 ### K1
 
-- `2`: Trap- und Signalmodell
-- `6`: `select`-Semantik vervollständigen
-- `7`: fehlende nicht-interaktive Builtins, zuerst die nicht an Job-Control hängenden
-- `8`: `read`-/`mapfile`-Flags ergänzen
-- `9`: Flag-Lücken bei deklarativen Builtins schließen
+- kein verbleibender `K1`-Block; die früheren K1-Arbeiten sind umgesetzt oder in einen teureren Restblock übergegangen
 
 ### K2
 
 - `1`: Job-Control und echte Hintergrundausführung
-- `10`: zusätzliche Test-/`[[`-Operatoren
+- `2`: POSIX-Signalzustellung und verbleibende Trap-Randfälle
 - `11`: weitere `set`-/`shopt`-Optionen
-- `12`: `time` und `times`
 
 ### K3
 
@@ -314,11 +317,8 @@ Nicht mehr in der Gap-Liste, weil im Repo klar vorhanden:
 
 ## Empfohlene Arbeitsreihenfolge auf Basis der kombinierten Bewertung
 
-1. Spezialparameter bereinigen und Dokumentation mit Runtime synchronisieren
-2. Redirection-Lücken (`&>>`, `>|`, FD-close) schließen
-3. Trap-/Signalmodell ausbauen
-4. fehlende nicht-interaktive Builtins ergänzen, zuerst ohne Job-Control-Abhängigkeit
-5. deklarative Builtin-Flags sowie `read`/`mapfile` inkrementell komplettieren
-6. `select` von der Teilsemantik zur echten Schleifensemantik bringen
-7. erst danach Job-/Prozessmodell für `&`, `wait`, Jobspecs und `$!` angehen
+1. `set`-/`shopt`-Abdeckung verbreitern, weil das der nächste noch sinnvoll schneidbare Runtime-Block ist
+2. verbleibende Trap-Randfälle und POSIX-Signalmodell architektonisch planen
+3. erst danach Job-/Prozessmodell für `&`, `wait`, Jobspecs und echte Signalzustellung angehen
+4. `coproc` erst auf Basis eines tragfähigen Prozess-/FD-Modells angehen
 8. `coproc` und interaktive Bash-Features zuletzt behandeln

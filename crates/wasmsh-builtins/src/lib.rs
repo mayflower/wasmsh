@@ -1324,29 +1324,265 @@ fn ifs_split_fields<'a>(state: &ShellState, line: &'a str) -> Vec<&'a str> {
     }
 }
 
+struct TrapSpec {
+    name: &'static str,
+    number: Option<u8>,
+    handler_var: &'static str,
+    ignore_var: &'static str,
+}
+
+const TRAP_EVENT_SPECS: &[TrapSpec] = &[
+    TrapSpec {
+        name: "EXIT",
+        number: Some(0),
+        handler_var: "_TRAP_EXIT",
+        ignore_var: "_TRAP_IGNORE_EXIT",
+    },
+    TrapSpec {
+        name: "ERR",
+        number: None,
+        handler_var: "_TRAP_ERR",
+        ignore_var: "_TRAP_IGNORE_ERR",
+    },
+    TrapSpec {
+        name: "DEBUG",
+        number: None,
+        handler_var: "_TRAP_DEBUG",
+        ignore_var: "_TRAP_IGNORE_DEBUG",
+    },
+    TrapSpec {
+        name: "RETURN",
+        number: None,
+        handler_var: "_TRAP_RETURN",
+        ignore_var: "_TRAP_IGNORE_RETURN",
+    },
+];
+
+const TRAP_SIGNAL_SPECS: &[TrapSpec] = &[
+    TrapSpec {
+        name: "HUP",
+        number: Some(1),
+        handler_var: "_TRAP_SIG_HUP",
+        ignore_var: "_TRAP_IGNORE_SIG_HUP",
+    },
+    TrapSpec {
+        name: "INT",
+        number: Some(2),
+        handler_var: "_TRAP_SIG_INT",
+        ignore_var: "_TRAP_IGNORE_SIG_INT",
+    },
+    TrapSpec {
+        name: "QUIT",
+        number: Some(3),
+        handler_var: "_TRAP_SIG_QUIT",
+        ignore_var: "_TRAP_IGNORE_SIG_QUIT",
+    },
+    TrapSpec {
+        name: "ILL",
+        number: Some(4),
+        handler_var: "_TRAP_SIG_ILL",
+        ignore_var: "_TRAP_IGNORE_SIG_ILL",
+    },
+    TrapSpec {
+        name: "ABRT",
+        number: Some(6),
+        handler_var: "_TRAP_SIG_ABRT",
+        ignore_var: "_TRAP_IGNORE_SIG_ABRT",
+    },
+    TrapSpec {
+        name: "FPE",
+        number: Some(8),
+        handler_var: "_TRAP_SIG_FPE",
+        ignore_var: "_TRAP_IGNORE_SIG_FPE",
+    },
+    TrapSpec {
+        name: "KILL",
+        number: Some(9),
+        handler_var: "_TRAP_SIG_KILL",
+        ignore_var: "_TRAP_IGNORE_SIG_KILL",
+    },
+    TrapSpec {
+        name: "USR1",
+        number: Some(10),
+        handler_var: "_TRAP_SIG_USR1",
+        ignore_var: "_TRAP_IGNORE_SIG_USR1",
+    },
+    TrapSpec {
+        name: "SEGV",
+        number: Some(11),
+        handler_var: "_TRAP_SIG_SEGV",
+        ignore_var: "_TRAP_IGNORE_SIG_SEGV",
+    },
+    TrapSpec {
+        name: "USR2",
+        number: Some(12),
+        handler_var: "_TRAP_SIG_USR2",
+        ignore_var: "_TRAP_IGNORE_SIG_USR2",
+    },
+    TrapSpec {
+        name: "PIPE",
+        number: Some(13),
+        handler_var: "_TRAP_SIG_PIPE",
+        ignore_var: "_TRAP_IGNORE_SIG_PIPE",
+    },
+    TrapSpec {
+        name: "ALRM",
+        number: Some(14),
+        handler_var: "_TRAP_SIG_ALRM",
+        ignore_var: "_TRAP_IGNORE_SIG_ALRM",
+    },
+    TrapSpec {
+        name: "TERM",
+        number: Some(15),
+        handler_var: "_TRAP_SIG_TERM",
+        ignore_var: "_TRAP_IGNORE_SIG_TERM",
+    },
+    TrapSpec {
+        name: "CHLD",
+        number: Some(17),
+        handler_var: "_TRAP_SIG_CHLD",
+        ignore_var: "_TRAP_IGNORE_SIG_CHLD",
+    },
+    TrapSpec {
+        name: "CONT",
+        number: Some(18),
+        handler_var: "_TRAP_SIG_CONT",
+        ignore_var: "_TRAP_IGNORE_SIG_CONT",
+    },
+    TrapSpec {
+        name: "STOP",
+        number: Some(19),
+        handler_var: "_TRAP_SIG_STOP",
+        ignore_var: "_TRAP_IGNORE_SIG_STOP",
+    },
+    TrapSpec {
+        name: "TSTP",
+        number: Some(20),
+        handler_var: "_TRAP_SIG_TSTP",
+        ignore_var: "_TRAP_IGNORE_SIG_TSTP",
+    },
+    TrapSpec {
+        name: "TTIN",
+        number: Some(21),
+        handler_var: "_TRAP_SIG_TTIN",
+        ignore_var: "_TRAP_IGNORE_SIG_TTIN",
+    },
+    TrapSpec {
+        name: "TTOU",
+        number: Some(22),
+        handler_var: "_TRAP_SIG_TTOU",
+        ignore_var: "_TRAP_IGNORE_SIG_TTOU",
+    },
+    TrapSpec {
+        name: "WINCH",
+        number: Some(28),
+        handler_var: "_TRAP_SIG_WINCH",
+        ignore_var: "_TRAP_IGNORE_SIG_WINCH",
+    },
+];
+
+fn trap_specs() -> impl Iterator<Item = &'static TrapSpec> {
+    TRAP_EVENT_SPECS.iter().chain(TRAP_SIGNAL_SPECS.iter())
+}
+
+fn find_trap_spec(name: &str) -> Option<&'static TrapSpec> {
+    if name == "0" {
+        return TRAP_EVENT_SPECS.iter().find(|spec| spec.name == "EXIT");
+    }
+    if let Ok(number) = name.parse::<u8>() {
+        return TRAP_SIGNAL_SPECS
+            .iter()
+            .find(|spec| spec.number == Some(number));
+    }
+    let normalized = name
+        .strip_prefix("SIG")
+        .unwrap_or(name)
+        .to_ascii_uppercase();
+    trap_specs().find(|spec| spec.name == normalized)
+}
+
+fn set_trap_handler(ctx: &mut BuiltinContext<'_>, spec: &TrapSpec, handler: &str) {
+    if handler == "-" {
+        ctx.state.unset_var(spec.handler_var).ok();
+        ctx.state.unset_var(spec.ignore_var).ok();
+        return;
+    }
+
+    if handler.is_empty() {
+        ctx.state.unset_var(spec.handler_var).ok();
+        ctx.state
+            .set_var(SmolStr::from(spec.ignore_var), SmolStr::from("1"));
+        return;
+    }
+
+    ctx.state
+        .set_var(SmolStr::from(spec.handler_var), SmolStr::from(handler));
+    ctx.state.unset_var(spec.ignore_var).ok();
+}
+
+fn print_traps(ctx: &mut BuiltinContext<'_>) {
+    for spec in trap_specs() {
+        let ignored = ctx.state.get_var(spec.ignore_var).as_deref() == Some("1");
+        if ignored {
+            let line = format!("trap -- '' {}\n", spec.name);
+            ctx.output.stdout(line.as_bytes());
+            continue;
+        }
+
+        let Some(handler) = ctx.state.get_var(spec.handler_var) else {
+            continue;
+        };
+        if handler.is_empty() {
+            continue;
+        }
+
+        let line = format!("trap -- {} {}\n", shell_quote(handler.as_str()), spec.name);
+        ctx.output.stdout(line.as_bytes());
+    }
+}
+
+fn list_traps(ctx: &mut BuiltinContext<'_>) {
+    for spec in trap_specs() {
+        let line = match spec.number {
+            Some(number) => format!("{number} {}\n", spec.name),
+            None => format!("{}\n", spec.name),
+        };
+        ctx.output.stdout(line.as_bytes());
+    }
+}
+
 /// `trap` — set handlers for signals/events.
-/// In wasmsh, only EXIT and ERR traps are supported via shell variables.
 fn builtin_trap(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
     let args = &argv[1..];
+    if args.is_empty() {
+        print_traps(ctx);
+        return 0;
+    }
+
+    match args[0] {
+        "-p" => {
+            print_traps(ctx);
+            return 0;
+        }
+        "-l" => {
+            list_traps(ctx);
+            return 0;
+        }
+        _ => {}
+    }
+
     if args.len() < 2 {
         return 0;
     }
+
     let handler = args[0];
     for signal in &args[1..] {
-        match *signal {
-            "EXIT" | "0" => {
-                ctx.state
-                    .set_var(SmolStr::from("_TRAP_EXIT"), SmolStr::from(handler));
-            }
-            "ERR" => {
-                ctx.state
-                    .set_var(SmolStr::from("_TRAP_ERR"), SmolStr::from(handler));
-            }
-            _ => {
-                let msg = format!("trap: {signal}: signal not supported\n");
-                ctx.output.stderr(msg.as_bytes());
-            }
-        }
+        let Some(spec) = find_trap_spec(signal) else {
+            let msg = format!("trap: {signal}: signal not supported\n");
+            ctx.output.stderr(msg.as_bytes());
+            continue;
+        };
+        set_trap_handler(ctx, spec, handler);
     }
     0
 }
@@ -1354,6 +1590,14 @@ fn builtin_trap(ctx: &mut BuiltinContext<'_>, argv: &[&str]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn trap_handler_var(name: &str) -> &'static str {
+        find_trap_spec(name).unwrap().handler_var
+    }
+
+    fn trap_ignore_var(name: &str) -> &'static str {
+        find_trap_spec(name).unwrap().ignore_var
+    }
 
     fn run_builtin(name: &str, argv: &[&str]) -> (i32, VecSink) {
         let registry = BuiltinRegistry::new();
@@ -1635,5 +1879,58 @@ mod tests {
             run_builtin_with_state("set", &["set", "-o", "nonexistent"], &mut state);
         assert_eq!(status, 0); // set doesn't fail, just warns on stderr
         assert!(sink.stderr_str().contains("unrecognized option"));
+    }
+
+    #[test]
+    fn trap_registers_debug_and_return_handlers() {
+        let mut state = ShellState::new();
+        let (status, _) =
+            run_builtin_with_state("trap", &["trap", "echo hi", "DEBUG", "RETURN"], &mut state);
+        assert_eq!(status, 0);
+        assert_eq!(
+            state.get_var(trap_handler_var("DEBUG")).as_deref(),
+            Some("echo hi")
+        );
+        assert_eq!(
+            state.get_var(trap_handler_var("RETURN")).as_deref(),
+            Some("echo hi")
+        );
+    }
+
+    #[test]
+    fn trap_reset_clears_handler_and_ignore_state() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("trap", &["trap", "", "EXIT"], &mut state);
+        let (status, _) = run_builtin_with_state("trap", &["trap", "-", "EXIT"], &mut state);
+        assert_eq!(status, 0);
+        assert_eq!(state.get_var(trap_handler_var("EXIT")), None);
+        assert_eq!(state.get_var(trap_ignore_var("EXIT")), None);
+    }
+
+    #[test]
+    fn trap_prints_registered_handlers() {
+        let mut state = ShellState::new();
+        run_builtin_with_state("trap", &["trap", "echo cleanup", "EXIT"], &mut state);
+        run_builtin_with_state("trap", &["trap", "", "ERR"], &mut state);
+        let (status, sink) = run_builtin_with_state("trap", &["trap", "-p"], &mut state);
+        assert_eq!(status, 0);
+        assert!(sink.stdout_str().contains("trap -- $'echo cleanup' EXIT"));
+        assert!(sink.stdout_str().contains("trap -- '' ERR"));
+    }
+
+    #[test]
+    fn trap_lists_known_events_and_signals() {
+        let (status, sink) = run_builtin("trap", &["trap", "-l"]);
+        assert_eq!(status, 0);
+        assert!(sink.stdout_str().contains("0 EXIT"));
+        assert!(sink.stdout_str().contains("DEBUG"));
+        assert!(sink.stdout_str().contains("15 TERM"));
+    }
+
+    #[test]
+    fn trap_accepts_signal_names_without_warning() {
+        let (status, sink) = run_builtin("trap", &["trap", "echo hup", "SIGTERM", "INT"]);
+        assert_eq!(status, 0);
+        assert!(sink.stderr_str().is_empty());
     }
 }

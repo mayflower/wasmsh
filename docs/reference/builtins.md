@@ -241,7 +241,18 @@ Read and execute commands from file in the current shell context.
 
 ## `trap` command signal...
 
-Set a handler for signals. Supported: `EXIT` (fires on shell exit), `ERR` (fires on command failure). Other signals are no-ops in the browser.
+Set or inspect trap handlers.
+
+- `trap 'cmd' EXIT|ERR|DEBUG|RETURN` — register a handler
+- `trap '' NAME` — ignore the event or signal name
+- `trap - NAME` — reset to the default
+- `trap -p` — print registered handlers
+- `trap -l` — list known pseudo-events and accepted signal names
+
+`EXIT`, `ERR`, `DEBUG`, and `RETURN` are executed by the runtime. Regular
+signal names such as `TERM` or `INT` are accepted and shown by `trap -p`,
+but the sandbox still has no POSIX signal delivery, so those handlers are
+currently informational/no-op.
 
 ## `type` name...
 

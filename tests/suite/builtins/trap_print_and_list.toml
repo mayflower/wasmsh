@@ -1,0 +1,20 @@
+[test]
+name = "trap-print-and-list"
+tags = ["builtin", "P2"]
+tier = "P2"
+requires = ["trap", "grep"]
+
+[input]
+script = """
+trap 'echo cleanup' EXIT
+trap '' ERR
+trap 'echo term' TERM
+trap -p
+trap -l | grep '0 EXIT'
+trap -l | grep 'DEBUG'
+trap -l | grep '15 TERM'
+"""
+
+[expect]
+status = 0
+stdout = "trap -- $'echo cleanup' EXIT\ntrap -- '' ERR\ntrap -- $'echo term' TERM\n0 EXIT\nDEBUG\n15 TERM\n"

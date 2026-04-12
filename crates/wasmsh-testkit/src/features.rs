@@ -129,6 +129,9 @@ pub fn implemented_features() -> HashSet<&'static str> {
     f.insert("printf-repeat");
     f.insert("errexit");
     f.insert("trap-exit");
+    f.insert("trap-err");
+    f.insert("trap-debug");
+    f.insert("trap-return");
     f.insert("parameter-strip");
 
     // New syntax features (gap implementation)

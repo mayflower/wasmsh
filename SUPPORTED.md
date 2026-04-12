@@ -22,7 +22,7 @@
 - `for var in words; do/done`
 - `for (( init; cond; step )); do/done` (C-style arithmetic for)
 - `case/esac` with `;;`, `;&` (fall-through), `;;&` (continue-testing)
-- `select/do/done` (menu-driven; single iteration in sandbox)
+- `select/do/done` (menu-driven; repeats until `break` or EOF)
 - `(( expr ))` arithmetic command
 - `[[ expr ]]` extended test
 - Subshells: `( ... )`
@@ -59,8 +59,7 @@
 ### Not Yet Implemented
 
 - Coprocesses: `coproc`
-- Special parameters: `$$`, `$!`, `$-`, `$_`
-- Signal handling beyond EXIT and ERR traps
+- Full POSIX signal delivery / job-linked signal semantics
 
 ---
 
@@ -89,7 +88,7 @@
 | `eval`       | Done   | Re-parses and executes concatenated arguments |
 | `set`        | Done   | `-e` (errexit), `-u` (nounset), `-x` (xtrace), `-f` (noglob), `-a` (allexport), `-C` (noclobber), `-o pipefail`; `set -- args` sets positionals |
 | `getopts`    | Done   | Parses short options from positional parameters; updates OPTIND |
-| `trap`       | Done   | EXIT and ERR traps only; other signals print a warning |
+| `trap`       | Done   | `EXIT`, `ERR`, `DEBUG`, `RETURN`, `trap -p`, `trap -l`, reset/ignore; regular signal names are accepted but not delivered in the sandbox |
 | `declare` / `typeset` | Done | `-i` (integer), `-a` (indexed array), `-A` (assoc array), `-x` (export), `-r` (readonly), `-l` (lowercase), `-u` (uppercase), `-n` (nameref), `-p` (print); compound assignment `arr=(...)` |
 | `let`        | Done   | Evaluates arithmetic expressions; exit status is 0 if last result is non-zero |
 | `shopt`      | Done   | `-s` / `-u`; options: `extglob nullglob dotglob globstar nocasematch nocaseglob failglob lastpipe expand_aliases` |
@@ -406,8 +405,12 @@ Arithmetic is available in `$(( ))`, `(( ))`, `let`, and `declare -i` contexts. 
 | Variable       | Description |
 |----------------|-------------|
 | `?`            | Exit status of last command |
+| `$$`           | Virtual shell PID |
+| `$!`           | Last background PID slot (currently `0` without real job control) |
 | `#`            | Number of positional parameters |
 | `@` / `*`      | All positional parameters |
+| `$_`           | Last argument of the previous command |
+| `$-`           | Active single-letter shell flags |
 | `0`            | Shell/script name |
 | `IFS`          | Input field separator (default: space, tab, newline) |
 | `HOME`         | Home directory for tilde expansion and `cd` |
@@ -472,6 +475,6 @@ The Pyodide build includes [micropip](https://micropip.pyodide.org/) for install
 - No kernel or network administration tools
 - No TTY/terminal emulation
 - No full job control (`fg`, `bg`, `jobs`); `&` parses but runs synchronously
-- No POSIX signal delivery; only EXIT and ERR trap handlers are executed
+- No POSIX signal delivery; only shell-level traps such as `EXIT`, `ERR`, `DEBUG`, and `RETURN` are executed
 - No coprocesses
 - GPL/AGPL/SSPL code is forbidden in the core

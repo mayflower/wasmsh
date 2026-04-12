@@ -19,8 +19,9 @@ In particular:
 - The script has **no network access** unless the host explicitly
   allowlists hostnames at `Init` time.
 - The script has **no process model**. There is no `fork`, no `exec`, no
-  signals beyond `EXIT` and `ERR` traps. `kill`, `wait`, `jobs` are not
-  supported.
+  POSIX signal delivery. `kill`, `wait`, `jobs` are not supported. Trap
+  handlers exist for `EXIT`, `ERR`, `DEBUG`, and `RETURN`, but they run
+  inside the shell runtime rather than via an OS process model.
 - The script **cannot run arbitrary native code**. Builtins, utilities,
   and external command handlers are the only ways to enter native code,
   and all of them are registered statically by the host.

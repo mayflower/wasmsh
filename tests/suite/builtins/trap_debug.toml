@@ -1,0 +1,12 @@
+[test]
+name = "trap-debug-handler"
+tags = ["builtin", "P1"]
+tier = "P1"
+requires = ["trap", "trap-debug", "echo"]
+
+[input]
+script = "trap 'echo debug:$?' DEBUG; echo hi"
+
+[expect]
+status = 0
+stdout = "debug:0\nhi\n"
