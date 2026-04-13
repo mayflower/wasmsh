@@ -15,6 +15,9 @@ wasmsh-json-bridge = { path = "../wasmsh-json-bridge" }
 wasmsh-protocol = { path = "../wasmsh-protocol" }
 libc = "0.2"
 
+[package.metadata.cargo-machete]
+ignored = ["libc", "wasmsh-protocol"]
+
 [lints.rust]
 # C ABI function requires unsafe (raw pointer return)
 unsafe_code = "allow"

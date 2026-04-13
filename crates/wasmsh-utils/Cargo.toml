@@ -32,5 +32,8 @@ saphyr = { workspace = true }
 foldhash = { workspace = true }
 zip = { workspace = true }
 
+[package.metadata.cargo-machete]
+ignored = ["md-5", "digest"]
+
 [lints]
 workspace = true

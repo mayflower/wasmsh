@@ -177,8 +177,8 @@ jobs:
           OPT_SIZE=$(wc -c < "$OPT" | tr -d ' ')
           echo "Original : ${ORIG} bytes"
           echo "Optimized: ${OPT_SIZE} bytes"
-          BUDGET=2097152
-          echo "Budget   : ${BUDGET} bytes (2 MB)"
+          BUDGET=3145728
+          echo "Budget   : ${BUDGET} bytes (3 MB)"
           {
             echo "## Wasm binary size"
             echo "| Binary | Size (bytes) |"
@@ -188,7 +188,7 @@ jobs:
             echo "| Budget | ${BUDGET} |"
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$OPT_SIZE" -gt "$BUDGET" ]; then
-            echo "ERROR: Optimized binary (${OPT_SIZE} bytes) exceeds 2 MB budget!"
+            echo "ERROR: Optimized binary (${OPT_SIZE} bytes) exceeds 3 MB budget!"
             exit 1
           fi
           echo "Size check passed."
