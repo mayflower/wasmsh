@@ -312,6 +312,19 @@ struct TarFlags<'a> {
     change_dir: Option<&'a str>,
 }
 
+fn is_bare_tar_flags(arg: &str) -> bool {
+    !arg.starts_with('-') && !arg.is_empty() && arg.chars().all(|c| "cxtzvfC".contains(c))
+}
+
+fn tar_advance_skip(args: &mut &[&str], consumed: &mut usize, skip_next: bool) {
+    *args = &args[1..];
+    *consumed += 1;
+    if skip_next && !args.is_empty() {
+        *args = &args[1..];
+        *consumed += 1;
+    }
+}
+
 fn parse_tar_flags<'a>(
     ctx: &mut UtilContext<'_>,
     argv: &'a [&'a str],
@@ -332,26 +345,11 @@ fn parse_tar_flags<'a>(
     // leading dash (e.g. `tar czf archive.tar.gz files...`).  We detect this
     // when the first argument is not a known file and consists only of valid
     // tar flag characters.
-    let mut first_arg_is_bare_flags = false;
-    if let Some(first) = args.first() {
-        if !first.starts_with('-')
-            && !first.is_empty()
-            && first.chars().all(|c| "cxtzvfC".contains(c))
-        {
-            first_arg_is_bare_flags = true;
-        }
-    }
-
-    if first_arg_is_bare_flags {
+    if args.first().is_some_and(|f| is_bare_tar_flags(f)) {
         let bare = args[0];
         let with_dash = format!("-{bare}");
         let skip_next = parse_tar_bundled_flags(ctx, &with_dash, args, &mut flags)?;
-        args = &args[1..];
-        consumed += 1;
-        if skip_next && !args.is_empty() {
-            args = &args[1..];
-            consumed += 1;
-        }
+        tar_advance_skip(&mut args, &mut consumed, skip_next);
     }
 
     while let Some(arg) = args.first() {
@@ -365,12 +363,7 @@ fn parse_tar_flags<'a>(
             consumed += 2;
         } else if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") {
             let skip_next = parse_tar_bundled_flags(ctx, arg, args, &mut flags)?;
-            args = &args[1..];
-            consumed += 1;
-            if skip_next && !args.is_empty() {
-                args = &args[1..];
-                consumed += 1;
-            }
+            tar_advance_skip(&mut args, &mut consumed, skip_next);
         } else {
             break;
         }
@@ -845,23 +838,16 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         let uncompressed_size = entry.size();
 
         if list_only {
-            if !quiet {
-                let line = format!("{uncompressed_size:>9}  {raw_name}\n");
-                ctx.output.stdout(line.as_bytes());
-            }
+            unzip_list_entry(ctx, &raw_name, uncompressed_size, quiet);
             stats.total_files += 1;
             stats.total_size += uncompressed_size;
             continue;
         }
 
         if entry.is_dir() || raw_name.ends_with('/') {
-            let sanitised = sanitize_zip_name(&raw_name);
-            let full = resolve_path(&base_dir, &sanitised);
-            if !unzip_check_traversal(ctx, &full, &raw_name, &base_dir) {
-                continue;
+            if unzip_process_dir_entry(ctx, &raw_name, &base_dir, quiet) {
+                stats.total_files += 1;
             }
-            unzip_extract_dir(ctx, &full, &sanitised, quiet);
-            stats.total_files += 1;
             continue;
         }
 
@@ -871,41 +857,27 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
             continue;
         }
 
-        // Read the entry's decompressed bytes through the zip crate.
-        // `zip::read::ZipFile` implements `Read` and already handles
-        // DEFLATE, stored, deflate64, and (with extra features) bzip2
-        // / zstd / lzma.
-        let mut buf = Vec::with_capacity(uncompressed_size.min(16 * 1024 * 1024) as usize);
-        if let Err(e) = entry.read_to_end(&mut buf) {
-            let msg = format!("unzip: {raw_name}: {e}\n");
-            ctx.output.stderr(msg.as_bytes());
-            status = 1;
-            continue;
-        }
+        let buf = match unzip_read_entry_bytes(&mut entry, uncompressed_size) {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = format!("unzip: {raw_name}: {e}\n");
+                ctx.output.stderr(msg.as_bytes());
+                status = 1;
+                continue;
+            }
+        };
         // Drop the entry borrow on `archive` before touching the
         // filesystem / context (mutable borrow rules).
         drop(entry);
 
-        unzip_ensure_parent(ctx, &full);
-
-        if !overwrite && ctx.fs.stat(&full).is_ok() {
-            if !quiet {
-                let msg = format!("unzip: {sanitised}: already exists, skipping\n");
-                ctx.output.stderr(msg.as_bytes());
+        match unzip_write_file(ctx, &full, &sanitised, &buf, overwrite, quiet) {
+            UnzipWriteResult::Written => {
+                stats.total_files += 1;
+                stats.total_size += uncompressed_size;
             }
-            continue;
+            UnzipWriteResult::Skipped => {}
+            UnzipWriteResult::Error => status = 1,
         }
-        if write_file(ctx, "unzip", &full, &buf) != 0 {
-            status = 1;
-            continue;
-        }
-        if !quiet {
-            let msg = format!("  inflating: {sanitised}\n");
-            ctx.output.stdout(msg.as_bytes());
-        }
-
-        stats.total_files += 1;
-        stats.total_size += uncompressed_size;
     }
 
     unzip_emit_list_footer(ctx, &stats, quiet, list_only);
@@ -1047,6 +1019,75 @@ fn unzip_extract_dir(ctx: &mut UtilContext<'_>, full: &str, name: &str, quiet: b
         let msg = format!("   creating: {name}\n");
         ctx.output.stdout(msg.as_bytes());
     }
+}
+
+fn unzip_list_entry(ctx: &mut UtilContext<'_>, raw_name: &str, size: u64, quiet: bool) {
+    if !quiet {
+        let line = format!("{size:>9}  {raw_name}\n");
+        ctx.output.stdout(line.as_bytes());
+    }
+}
+
+/// Process a directory entry during unzip extraction.  Returns `true` if
+/// the entry was successfully created.
+fn unzip_process_dir_entry(
+    ctx: &mut UtilContext<'_>,
+    raw_name: &str,
+    base_dir: &str,
+    quiet: bool,
+) -> bool {
+    let sanitised = sanitize_zip_name(raw_name);
+    let full = resolve_path(base_dir, &sanitised);
+    if !unzip_check_traversal(ctx, &full, raw_name, base_dir) {
+        return false;
+    }
+    unzip_extract_dir(ctx, &full, &sanitised, quiet);
+    true
+}
+
+/// Read the decompressed bytes from a zip entry.
+fn unzip_read_entry_bytes(
+    entry: &mut zip::read::ZipFile<'_>,
+    uncompressed_size: u64,
+) -> Result<Vec<u8>, std::io::Error> {
+    let mut buf = Vec::with_capacity(uncompressed_size.min(16 * 1024 * 1024) as usize);
+    entry.read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+enum UnzipWriteResult {
+    Written,
+    Skipped,
+    Error,
+}
+
+/// Write a decompressed file entry, handling parent creation, overwrite
+/// checks, and status messages.
+fn unzip_write_file(
+    ctx: &mut UtilContext<'_>,
+    full: &str,
+    sanitised: &str,
+    buf: &[u8],
+    overwrite: bool,
+    quiet: bool,
+) -> UnzipWriteResult {
+    unzip_ensure_parent(ctx, full);
+
+    if !overwrite && ctx.fs.stat(full).is_ok() {
+        if !quiet {
+            let msg = format!("unzip: {sanitised}: already exists, skipping\n");
+            ctx.output.stderr(msg.as_bytes());
+        }
+        return UnzipWriteResult::Skipped;
+    }
+    if write_file(ctx, "unzip", full, buf) != 0 {
+        return UnzipWriteResult::Error;
+    }
+    if !quiet {
+        let msg = format!("  inflating: {sanitised}\n");
+        ctx.output.stdout(msg.as_bytes());
+    }
+    UnzipWriteResult::Written
 }
 
 fn tar_list(ctx: &mut UtilContext<'_>, archive_path: &str, gzipped: bool) -> i32 {

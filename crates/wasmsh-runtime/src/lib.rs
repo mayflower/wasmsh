@@ -1285,37 +1285,64 @@ impl HeadPipeProcess {
         PipeProcessPoll::Exited
     }
 
+    fn try_flush_pending(&mut self) -> Option<PipeProcessPoll> {
+        if self.pending_offset >= self.pending.len() {
+            return None;
+        }
+        let write_result = {
+            let mut pipe = self.output.borrow_mut();
+            pipe.write(&self.pending[self.pending_offset..])
+        };
+        match write_result {
+            WriteResult::Written(written) => {
+                self.pending_offset += written;
+                if self.pending_offset == self.pending.len() {
+                    self.pending.clear();
+                    self.pending_offset = 0;
+                    if self.stream_complete {
+                        return Some(self.finish());
+                    }
+                }
+                Some(PipeProcessPoll::Ready)
+            }
+            WriteResult::WouldBlock(0) => Some(PipeProcessPoll::PendingWrite),
+            WriteResult::WouldBlock(written) => {
+                self.pending_offset += written;
+                Some(PipeProcessPoll::Ready)
+            }
+            WriteResult::BrokenPipe => Some(self.finish()),
+        }
+    }
+
+    fn update_head_limit(&mut self, byte: u8, read: usize) {
+        match &mut self.mode {
+            StreamingHeadMode::Bytes(remaining) => {
+                *remaining = remaining.saturating_sub(read);
+                if *remaining == 0 {
+                    self.stream_complete = true;
+                    self.close_input();
+                }
+            }
+            StreamingHeadMode::Lines(limit) => {
+                if byte == b'\n' {
+                    self.lines_seen += 1;
+                    if self.lines_seen >= *limit {
+                        self.stream_complete = true;
+                        self.close_input();
+                    }
+                }
+            }
+        }
+    }
+
     fn poll(&mut self) -> PipeProcessPoll {
         if self.finished {
             return PipeProcessPoll::Exited;
         }
         loop {
-            if self.pending_offset < self.pending.len() {
-                let write_result = {
-                    let mut pipe = self.output.borrow_mut();
-                    pipe.write(&self.pending[self.pending_offset..])
-                };
-                match write_result {
-                    WriteResult::Written(written) => {
-                        self.pending_offset += written;
-                        if self.pending_offset == self.pending.len() {
-                            self.pending.clear();
-                            self.pending_offset = 0;
-                            if self.stream_complete {
-                                return self.finish();
-                            }
-                        }
-                        return PipeProcessPoll::Ready;
-                    }
-                    WriteResult::WouldBlock(0) => return PipeProcessPoll::PendingWrite,
-                    WriteResult::WouldBlock(written) => {
-                        self.pending_offset += written;
-                        return PipeProcessPoll::Ready;
-                    }
-                    WriteResult::BrokenPipe => return self.finish(),
-                }
+            if let Some(result) = self.try_flush_pending() {
+                return result;
             }
-
             if self.stream_complete {
                 return self.finish();
             }
@@ -1328,24 +1355,7 @@ impl HeadPipeProcess {
             match read_result {
                 ReadResult::Read(read) => {
                     self.pending.extend_from_slice(&one[..read]);
-                    match &mut self.mode {
-                        StreamingHeadMode::Bytes(remaining) => {
-                            *remaining = remaining.saturating_sub(read);
-                            if *remaining == 0 {
-                                self.stream_complete = true;
-                                self.close_input();
-                            }
-                        }
-                        StreamingHeadMode::Lines(limit) => {
-                            if one[0] == b'\n' {
-                                self.lines_seen += 1;
-                                if self.lines_seen >= *limit {
-                                    self.stream_complete = true;
-                                    self.close_input();
-                                }
-                            }
-                        }
-                    }
+                    self.update_head_limit(one[0], read);
                 }
                 ReadResult::WouldBlock => return PipeProcessPoll::PendingRead,
                 ReadResult::Eof => {
@@ -2428,6 +2438,35 @@ fn parse_streaming_sed_addr(s: &str) -> (StreamingSedAddr, &str) {
     (StreamingSedAddr::None, s)
 }
 
+fn parse_streaming_sed_cmd(rest: &str) -> Option<StreamingSedCmd> {
+    if rest.starts_with('s') {
+        return parse_streaming_sed_substitute(rest).map(StreamingSedCmd::Substitute);
+    }
+    match rest {
+        "d" => return Some(StreamingSedCmd::Delete),
+        "p" => return Some(StreamingSedCmd::Print),
+        "q" => return Some(StreamingSedCmd::Quit),
+        _ => {}
+    }
+    if rest.starts_with("y/") || rest.starts_with("y|") {
+        let delim = rest.as_bytes()[1] as char;
+        let parts: Vec<&str> = rest[2..].split(delim).collect();
+        return (parts.len() >= 2).then(|| {
+            StreamingSedCmd::Transliterate(parts[0].chars().collect(), parts[1].chars().collect())
+        });
+    }
+    if let Some(text) = rest.strip_prefix("a\\") {
+        return Some(StreamingSedCmd::AppendText(text.trim_start().to_string()));
+    }
+    if let Some(text) = rest.strip_prefix("i\\") {
+        return Some(StreamingSedCmd::InsertText(text.trim_start().to_string()));
+    }
+    if let Some(text) = rest.strip_prefix("c\\") {
+        return Some(StreamingSedCmd::ChangeText(text.trim_start().to_string()));
+    }
+    None
+}
+
 fn parse_streaming_sed_script(script: &str) -> Vec<StreamingSedInstruction> {
     let mut instructions = Vec::new();
     for part in script.split(';') {
@@ -2436,41 +2475,9 @@ fn parse_streaming_sed_script(script: &str) -> Vec<StreamingSedInstruction> {
             continue;
         }
         let (addr, rest) = parse_streaming_sed_addr(part);
-        let rest = rest.trim();
-        let cmd = if rest.starts_with('s') {
-            if let Some(sub) = parse_streaming_sed_substitute(rest) {
-                StreamingSedCmd::Substitute(sub)
-            } else {
-                continue;
-            }
-        } else if rest == "d" {
-            StreamingSedCmd::Delete
-        } else if rest == "p" {
-            StreamingSedCmd::Print
-        } else if rest == "q" {
-            StreamingSedCmd::Quit
-        } else if rest.starts_with("y/") || rest.starts_with("y|") {
-            let delim = rest.as_bytes()[1] as char;
-            let inner = &rest[2..];
-            let parts: Vec<&str> = inner.split(delim).collect();
-            if parts.len() >= 2 {
-                StreamingSedCmd::Transliterate(
-                    parts[0].chars().collect(),
-                    parts[1].chars().collect(),
-                )
-            } else {
-                continue;
-            }
-        } else if let Some(text) = rest.strip_prefix("a\\") {
-            StreamingSedCmd::AppendText(text.trim_start().to_string())
-        } else if let Some(text) = rest.strip_prefix("i\\") {
-            StreamingSedCmd::InsertText(text.trim_start().to_string())
-        } else if let Some(text) = rest.strip_prefix("c\\") {
-            StreamingSedCmd::ChangeText(text.trim_start().to_string())
-        } else {
-            continue;
-        };
-        instructions.push(StreamingSedInstruction { addr, cmd });
+        if let Some(cmd) = parse_streaming_sed_cmd(rest.trim()) {
+            instructions.push(StreamingSedInstruction { addr, cmd });
+        }
     }
     instructions
 }
@@ -2665,6 +2672,84 @@ impl<R> SedStreamReader<R> {
         self.initialized = true;
         Ok(())
     }
+
+    fn apply_instructions(&mut self, line: String, is_last: bool) -> StreamingSedLineResult {
+        let mut current_text = line;
+        let mut printed = false;
+
+        for (idx, instr) in self.stage.instructions.iter().enumerate() {
+            if !streaming_sed_addr_matches(
+                &instr.addr,
+                self.line_num,
+                is_last,
+                &current_text,
+                &mut self.range_states[idx],
+            ) {
+                continue;
+            }
+            match &instr.cmd {
+                StreamingSedCmd::Substitute(sub) => {
+                    current_text = streaming_sed_substitute(
+                        &current_text,
+                        &sub.pattern,
+                        &sub.replacement,
+                        sub.global,
+                    );
+                }
+                StreamingSedCmd::Delete => return StreamingSedLineResult::Delete,
+                StreamingSedCmd::Print => {
+                    streaming_sed_emit_line(&mut self.output_pending, &current_text);
+                    printed = true;
+                }
+                StreamingSedCmd::Transliterate(from, to) => {
+                    current_text = streaming_sed_transliterate(&current_text, from, to);
+                }
+                StreamingSedCmd::AppendText(text) => {
+                    if !self.stage.suppress_print && !printed {
+                        streaming_sed_emit_line(&mut self.output_pending, &current_text);
+                        printed = true;
+                    }
+                    streaming_sed_emit_line(&mut self.output_pending, text);
+                }
+                StreamingSedCmd::InsertText(text) => {
+                    streaming_sed_emit_line(&mut self.output_pending, text);
+                }
+                StreamingSedCmd::ChangeText(text) => {
+                    streaming_sed_emit_line(&mut self.output_pending, text);
+                    return StreamingSedLineResult::Delete;
+                }
+                StreamingSedCmd::Quit => {
+                    if !self.stage.suppress_print && !printed {
+                        streaming_sed_emit_line(&mut self.output_pending, &current_text);
+                    }
+                    return StreamingSedLineResult::Quit;
+                }
+            }
+        }
+
+        if !self.stage.suppress_print && !printed {
+            streaming_sed_emit_line(&mut self.output_pending, &current_text);
+        }
+        StreamingSedLineResult::Continue
+    }
+}
+
+enum StreamingSedLineResult {
+    Continue,
+    Delete,
+    Quit,
+}
+
+fn streaming_sed_transliterate(text: &str, from: &[char], to: &[char]) -> String {
+    text.chars()
+        .map(|c| {
+            if let Some(pos) = from.iter().position(|&fc| fc == c) {
+                to.get(pos).or(to.last()).copied().unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 impl<R: Read> Read for SedStreamReader<R> {
@@ -2690,86 +2775,16 @@ impl<R: Read> Read for SedStreamReader<R> {
             };
 
             let is_last = self.input_eof && self.next.is_none();
-            let mut current_text = line;
-            let mut deleted = false;
-            let mut printed = false;
-            let mut quit = false;
-
-            for (idx, instr) in self.stage.instructions.iter().enumerate() {
-                if !streaming_sed_addr_matches(
-                    &instr.addr,
-                    self.line_num,
-                    is_last,
-                    &current_text,
-                    &mut self.range_states[idx],
-                ) {
-                    continue;
-                }
-                match &instr.cmd {
-                    StreamingSedCmd::Substitute(sub) => {
-                        current_text = streaming_sed_substitute(
-                            &current_text,
-                            &sub.pattern,
-                            &sub.replacement,
-                            sub.global,
-                        );
+            match self.apply_instructions(line, is_last) {
+                StreamingSedLineResult::Quit => self.finished = true,
+                StreamingSedLineResult::Delete | StreamingSedLineResult::Continue => {
+                    self.current = self.next.take();
+                    if self.current.is_some() {
+                        self.line_num += 1;
+                        self.fill_lookahead()?;
+                    } else {
+                        self.finished = true;
                     }
-                    StreamingSedCmd::Delete => {
-                        deleted = true;
-                        break;
-                    }
-                    StreamingSedCmd::Print => {
-                        streaming_sed_emit_line(&mut self.output_pending, &current_text);
-                        printed = true;
-                    }
-                    StreamingSedCmd::Transliterate(from, to) => {
-                        current_text = current_text
-                            .chars()
-                            .map(|c| {
-                                if let Some(pos) = from.iter().position(|&fc| fc == c) {
-                                    to.get(pos).or(to.last()).copied().unwrap_or(c)
-                                } else {
-                                    c
-                                }
-                            })
-                            .collect();
-                    }
-                    StreamingSedCmd::AppendText(text) => {
-                        if !self.stage.suppress_print && !printed {
-                            streaming_sed_emit_line(&mut self.output_pending, &current_text);
-                            printed = true;
-                        }
-                        streaming_sed_emit_line(&mut self.output_pending, text);
-                    }
-                    StreamingSedCmd::InsertText(text) => {
-                        streaming_sed_emit_line(&mut self.output_pending, text);
-                    }
-                    StreamingSedCmd::ChangeText(text) => {
-                        streaming_sed_emit_line(&mut self.output_pending, text);
-                        deleted = true;
-                        printed = true;
-                        break;
-                    }
-                    StreamingSedCmd::Quit => {
-                        quit = true;
-                        break;
-                    }
-                }
-            }
-
-            if !deleted && !self.stage.suppress_print && !printed {
-                streaming_sed_emit_line(&mut self.output_pending, &current_text);
-            }
-
-            if quit {
-                self.finished = true;
-            } else {
-                self.current = self.next.take();
-                if self.current.is_some() {
-                    self.line_num += 1;
-                    self.fill_lookahead()?;
-                } else {
-                    self.finished = true;
                 }
             }
         }
@@ -3460,6 +3475,27 @@ impl<R: Read> Read for UniqStreamReader<R> {
     }
 }
 
+fn streaming_tr_expand_posix_class(class_name: &str, chars: &mut Vec<char>) {
+    match class_name {
+        "upper" => chars.extend('A'..='Z'),
+        "lower" => chars.extend('a'..='z'),
+        "digit" => chars.extend('0'..='9'),
+        "alpha" => {
+            chars.extend('A'..='Z');
+            chars.extend('a'..='z');
+        }
+        "alnum" => {
+            chars.extend('0'..='9');
+            chars.extend('A'..='Z');
+            chars.extend('a'..='z');
+        }
+        "space" => chars.extend([' ', '\t', '\n', '\r', '\x0b', '\x0c']),
+        "blank" => chars.extend([' ', '\t']),
+        "punct" => chars.extend("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~".chars()),
+        _ => {}
+    }
+}
+
 fn streaming_tr_expand_set(s: &str) -> Vec<char> {
     let mut chars = Vec::new();
     let mut iter = s.chars().peekable();
@@ -3468,54 +3504,49 @@ fn streaming_tr_expand_set(s: &str) -> Vec<char> {
             iter.next();
             let class_name: String = iter.by_ref().take_while(|&c| c != ':').collect();
             let _ = iter.next();
-            match class_name.as_str() {
-                "upper" => chars.extend('A'..='Z'),
-                "lower" => chars.extend('a'..='z'),
-                "digit" => chars.extend('0'..='9'),
-                "alpha" => {
-                    chars.extend('A'..='Z');
-                    chars.extend('a'..='z');
-                }
-                "alnum" => {
-                    chars.extend('0'..='9');
-                    chars.extend('A'..='Z');
-                    chars.extend('a'..='z');
-                }
-                "space" => chars.extend([' ', '\t', '\n', '\r', '\x0b', '\x0c']),
-                "blank" => chars.extend([' ', '\t']),
-                "punct" => chars.extend("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~".chars()),
-                _ => {}
-            }
+            streaming_tr_expand_posix_class(&class_name, &mut chars);
         } else if iter.peek() == Some(&'-') {
-            let saved = iter.clone();
-            iter.next();
-            if let Some(&end_ch) = iter.peek() {
-                if end_ch > ch {
-                    chars.extend(ch..=end_ch);
-                    iter.next();
-                } else {
-                    chars.push(ch);
-                    iter = saved;
-                    iter.next();
-                    chars.push('-');
-                }
-            } else {
-                chars.push(ch);
-                chars.push('-');
-            }
+            streaming_tr_expand_range(ch, &mut iter, &mut chars);
         } else if ch == '\\' {
-            match iter.next() {
-                Some('n') => chars.push('\n'),
-                Some('t') => chars.push('\t'),
-                Some('r') => chars.push('\r'),
-                Some('\\') | None => chars.push('\\'),
-                Some(other) => chars.push(other),
-            }
+            chars.push(streaming_tr_unescape(&mut iter));
         } else {
             chars.push(ch);
         }
     }
     chars
+}
+
+fn streaming_tr_expand_range(
+    ch: char,
+    iter: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    chars: &mut Vec<char>,
+) {
+    let saved = iter.clone();
+    iter.next(); // consume '-'
+    if let Some(&end_ch) = iter.peek() {
+        if end_ch > ch {
+            chars.extend(ch..=end_ch);
+            iter.next();
+        } else {
+            chars.push(ch);
+            *iter = saved;
+            iter.next();
+            chars.push('-');
+        }
+    } else {
+        chars.push(ch);
+        chars.push('-');
+    }
+}
+
+fn streaming_tr_unescape(iter: &mut std::iter::Peekable<std::str::Chars<'_>>) -> char {
+    match iter.next() {
+        Some('n') => '\n',
+        Some('t') => '\t',
+        Some('r') => '\r',
+        Some('\\') | None => '\\',
+        Some(other) => other,
+    }
 }
 
 fn streaming_tr_process_utf8_chunk(pending: &mut Vec<u8>, chunk: &[u8], mut f: impl FnMut(char)) {
@@ -3594,37 +3625,16 @@ impl<R> TrStreamReader<R> {
         self.prev = Some(ch);
     }
 
+    fn is_in_from_set(&self, ch: char) -> bool {
+        let in_set = self.stage.from_chars.contains(&ch);
+        if self.stage.complement { !in_set } else { in_set }
+    }
+
     fn process_char(&mut self, ch: char) {
-        if self.stage.delete && self.stage.squeeze && !self.stage.to_chars.is_empty() {
-            let in_set = self.stage.from_chars.contains(&ch);
-            let keep = if self.stage.complement {
-                in_set
-            } else {
-                !in_set
-            };
-            if !keep {
-                return;
-            }
-            if self.stage.to_chars.contains(&ch) && self.prev == Some(ch) {
-                return;
-            }
-            self.emit_char(ch);
-            return;
-        }
-
         if self.stage.delete {
-            let in_set = self.stage.from_chars.contains(&ch);
-            let keep = if self.stage.complement {
-                in_set
-            } else {
-                !in_set
-            };
-            if keep {
-                self.emit_char(ch);
-            }
+            self.process_char_delete(ch);
             return;
         }
-
         if self.stage.squeeze && self.stage.to_chars.is_empty() {
             if self.stage.from_chars.contains(&ch) && self.prev == Some(ch) {
                 return;
@@ -3632,7 +3642,23 @@ impl<R> TrStreamReader<R> {
             self.emit_char(ch);
             return;
         }
+        self.process_char_translate(ch);
+    }
 
+    fn process_char_delete(&mut self, ch: char) {
+        if self.is_in_from_set(ch) {
+            return;
+        }
+        if self.stage.squeeze
+            && self.stage.to_chars.contains(&ch)
+            && self.prev == Some(ch)
+        {
+            return;
+        }
+        self.emit_char(ch);
+    }
+
+    fn process_char_translate(&mut self, ch: char) {
         let from_set = if self.stage.complement {
             (0u8..=127)
                 .map(|b| b as char)
@@ -3641,16 +3667,11 @@ impl<R> TrStreamReader<R> {
         } else {
             self.stage.from_chars.clone()
         };
-        let translated = if let Some(pos) = from_set.iter().position(|&source| source == ch) {
-            self.stage
-                .to_chars
-                .get(pos)
-                .or(self.stage.to_chars.last())
-                .copied()
-                .unwrap_or(ch)
-        } else {
-            ch
-        };
+        let translated = from_set
+            .iter()
+            .position(|&source| source == ch)
+            .and_then(|pos| self.stage.to_chars.get(pos).or(self.stage.to_chars.last()).copied())
+            .unwrap_or(ch);
         if self.stage.squeeze
             && self.stage.to_chars.contains(&translated)
             && self.prev == Some(translated)
@@ -4272,6 +4293,36 @@ struct CommandLookup {
     kind: CommandLookupKind,
     name: String,
     detail: String,
+}
+
+fn format_command_verbose(lookup: &CommandLookup) -> String {
+    match lookup.kind {
+        CommandLookupKind::Alias => format!("alias {}='{}'", lookup.name, lookup.detail),
+        CommandLookupKind::Function | CommandLookupKind::Builtin => lookup.name.clone(),
+        CommandLookupKind::File => lookup.detail.clone(),
+    }
+}
+
+fn format_type_lookup(lookup: &CommandLookup, type_only: bool, path_only: bool) -> String {
+    if type_only {
+        return match lookup.kind {
+            CommandLookupKind::Alias => "alias".to_string(),
+            CommandLookupKind::Function => "function".to_string(),
+            CommandLookupKind::Builtin => "builtin".to_string(),
+            CommandLookupKind::File => "file".to_string(),
+        };
+    }
+    if path_only {
+        return lookup.detail.clone();
+    }
+    match lookup.kind {
+        CommandLookupKind::Alias => {
+            format!("{} is aliased to `{}`", lookup.name, lookup.detail)
+        }
+        CommandLookupKind::Function => format!("{} is a function", lookup.name),
+        CommandLookupKind::Builtin => format!("{} is a shell builtin", lookup.name),
+        CommandLookupKind::File => format!("{} is {}", lookup.name, lookup.detail),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -9150,28 +9201,9 @@ impl WorkerRuntime {
                 continue;
             }
 
-            for lookup in lookups.into_iter().take(if all { usize::MAX } else { 1 }) {
-                let line = if type_only {
-                    match lookup.kind {
-                        CommandLookupKind::Alias => "alias".to_string(),
-                        CommandLookupKind::Function => "function".to_string(),
-                        CommandLookupKind::Builtin => "builtin".to_string(),
-                        CommandLookupKind::File => "file".to_string(),
-                    }
-                } else if path_only {
-                    lookup.detail
-                } else {
-                    match lookup.kind {
-                        CommandLookupKind::Alias => {
-                            format!("{} is aliased to `{}`", lookup.name, lookup.detail)
-                        }
-                        CommandLookupKind::Function => format!("{} is a function", lookup.name),
-                        CommandLookupKind::Builtin => {
-                            format!("{} is a shell builtin", lookup.name)
-                        }
-                        CommandLookupKind::File => format!("{} is {}", lookup.name, lookup.detail),
-                    }
-                };
+            let limit = if all { usize::MAX } else { 1 };
+            for lookup in lookups.into_iter().take(limit) {
+                let line = format_type_lookup(&lookup, type_only, path_only);
                 self.write_stdout(format!("{line}\n").as_bytes());
             }
         }
@@ -9223,26 +9255,9 @@ impl WorkerRuntime {
                     continue;
                 };
                 let line = if verbose {
-                    match lookup.kind {
-                        CommandLookupKind::Alias => {
-                            format!("alias {}='{}'", lookup.name, lookup.detail)
-                        }
-                        CommandLookupKind::Function | CommandLookupKind::Builtin => {
-                            lookup.name.clone()
-                        }
-                        CommandLookupKind::File => lookup.detail.clone(),
-                    }
+                    format_command_verbose(lookup)
                 } else {
-                    match lookup.kind {
-                        CommandLookupKind::Alias => {
-                            format!("{} is aliased to `{}`", lookup.name, lookup.detail)
-                        }
-                        CommandLookupKind::Function => format!("{} is a function", lookup.name),
-                        CommandLookupKind::Builtin => {
-                            format!("{} is a shell builtin", lookup.name)
-                        }
-                        CommandLookupKind::File => format!("{} is {}", lookup.name, lookup.detail),
-                    }
+                    format_type_lookup(lookup, false, false)
                 };
                 self.write_stdout(format!("{line}\n").as_bytes());
             }
@@ -9756,26 +9771,38 @@ impl WorkerRuntime {
     fn declare_print(&mut self, argv: &[String], names: &[usize]) {
         let (flags, _) = parse_declare_flags(argv);
         if flags.is_functions || flags.is_function_names {
-            let function_names: Vec<String> = if names.is_empty() {
-                self.functions.keys().cloned().collect()
-            } else {
-                names.iter().map(|&idx| argv[idx].clone()).collect()
-            };
-            for name in function_names {
-                if !self.functions.contains_key(name.as_str()) {
-                    continue;
-                }
-                let line = if flags.is_function_names {
-                    format!("declare -f {name}\n")
-                } else {
-                    format!("{name} () {{ :; }}\n")
-                };
-                self.write_stdout(line.as_bytes());
-            }
-            self.vm.state.last_status = 0;
+            self.declare_print_functions(argv, names, flags.is_function_names);
             return;
         }
+        self.declare_print_vars(argv, names);
+    }
 
+    fn declare_print_functions(
+        &mut self,
+        argv: &[String],
+        names: &[usize],
+        names_only: bool,
+    ) {
+        let function_names: Vec<String> = if names.is_empty() {
+            self.functions.keys().cloned().collect()
+        } else {
+            names.iter().map(|&idx| argv[idx].clone()).collect()
+        };
+        for name in function_names {
+            if !self.functions.contains_key(name.as_str()) {
+                continue;
+            }
+            let line = if names_only {
+                format!("declare -f {name}\n")
+            } else {
+                format!("{name} () {{ :; }}\n")
+            };
+            self.write_stdout(line.as_bytes());
+        }
+        self.vm.state.last_status = 0;
+    }
+
+    fn declare_print_vars(&mut self, argv: &[String], names: &[usize]) {
         if names.is_empty() {
             let vars: Vec<(String, String)> = self
                 .vm

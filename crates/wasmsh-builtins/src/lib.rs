@@ -1217,39 +1217,44 @@ fn read_input_from_stdin(
     let mut buf = [0u8; 1];
 
     loop {
-        match stdin.read_chunk(&mut buf) {
-            Ok(0) => break,
-            Ok(_) => {
-                let byte = buf[0];
-                if let Some(n) = opts.exact_nchars {
-                    if data.len() < n {
-                        data.push(byte);
-                    }
-                    if data.len() >= n {
-                        break;
-                    }
-                    continue;
-                }
-
-                if byte == delimiter {
-                    break;
-                }
-                data.push(byte);
-                if let Some(n) = opts.nchars {
-                    if data.len() >= n {
-                        break;
-                    }
-                }
-            }
+        let n = match stdin.read_chunk(&mut buf) {
+            Ok(n) => n,
             Err(err) => {
                 let msg = format!("read: stdin read error: {err}\n");
                 ctx.output.stderr(msg.as_bytes());
                 return Err(());
             }
+        };
+        if n == 0 {
+            break;
+        }
+        if read_stdin_consume_byte(&mut data, buf[0], delimiter, opts) {
+            break;
         }
     }
 
     Ok((String::from_utf8_lossy(&data).to_string(), String::new()))
+}
+
+/// Process a single byte read from stdin.  Returns `true` when the caller
+/// should stop reading (delimiter hit or character limit reached).
+fn read_stdin_consume_byte(
+    data: &mut Vec<u8>,
+    byte: u8,
+    delimiter: u8,
+    opts: &ReadOpts<'_>,
+) -> bool {
+    if let Some(n) = opts.exact_nchars {
+        if data.len() < n {
+            data.push(byte);
+        }
+        return data.len() >= n;
+    }
+    if byte == delimiter {
+        return true;
+    }
+    data.push(byte);
+    opts.nchars.is_some_and(|n| data.len() >= n)
 }
 
 /// Split input into (`current_line`, remaining) according to `read` options (-N, -n, delimiter).

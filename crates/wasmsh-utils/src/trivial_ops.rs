@@ -1287,56 +1287,67 @@ pub(crate) fn util_cksum(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let file_args = &argv[1..];
 
     if file_args.is_empty() {
-        let mut crc = 0xFFFF_FFFFu32;
-        let mut len = 0usize;
-        if let Some(mut stdin) = ctx.stdin.take() {
-            let mut buffer = [0u8; 4096];
-            loop {
-                match stdin.read_chunk(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        crc = crc32_update(crc, &buffer[..read]);
-                        len += read;
-                    }
-                    Err(err) => {
-                        let msg = format!("cksum: stdin read error: {err}\n");
-                        ctx.output.stderr(msg.as_bytes());
-                        return 1;
-                    }
-                }
-            }
-        }
-        let checksum = !crc;
-        let out = format!("{checksum} {len}\n");
-        ctx.output.stdout(out.as_bytes());
-        return 0;
+        return cksum_stdin(ctx);
     }
 
     let mut status = 0;
     for path in file_args {
-        let full = resolve_path(ctx.cwd, path);
-        match ctx.fs.open(&full, OpenOptions::read()) {
-            Ok(h) => {
-                match ctx.fs.read_file(h) {
-                    Ok(data) => {
-                        let checksum = crc32(&data);
-                        let out = format!("{checksum} {} {path}\n", data.len());
-                        ctx.output.stdout(out.as_bytes());
-                    }
-                    Err(e) => {
-                        emit_error(ctx.output, "cksum", path, &e);
-                        status = 1;
-                    }
-                }
-                ctx.fs.close(h);
-            }
-            Err(e) => {
-                emit_error(ctx.output, "cksum", path, &e);
-                status = 1;
-            }
+        if cksum_file(ctx, path) != 0 {
+            status = 1;
         }
     }
     status
+}
+
+fn cksum_stdin(ctx: &mut UtilContext<'_>) -> i32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    let mut len = 0usize;
+    if let Some(mut stdin) = ctx.stdin.take() {
+        let mut buffer = [0u8; 4096];
+        loop {
+            match stdin.read_chunk(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    crc = crc32_update(crc, &buffer[..read]);
+                    len += read;
+                }
+                Err(err) => {
+                    let msg = format!("cksum: stdin read error: {err}\n");
+                    ctx.output.stderr(msg.as_bytes());
+                    return 1;
+                }
+            }
+        }
+    }
+    let checksum = !crc;
+    let out = format!("{checksum} {len}\n");
+    ctx.output.stdout(out.as_bytes());
+    0
+}
+
+fn cksum_file(ctx: &mut UtilContext<'_>, path: &str) -> i32 {
+    let full = resolve_path(ctx.cwd, path);
+    let h = match ctx.fs.open(&full, OpenOptions::read()) {
+        Ok(h) => h,
+        Err(e) => {
+            emit_error(ctx.output, "cksum", path, &e);
+            return 1;
+        }
+    };
+    let result = match ctx.fs.read_file(h) {
+        Ok(data) => {
+            let checksum = crc32(&data);
+            let out = format!("{checksum} {} {path}\n", data.len());
+            ctx.output.stdout(out.as_bytes());
+            0
+        }
+        Err(e) => {
+            emit_error(ctx.output, "cksum", path, &e);
+            1
+        }
+    };
+    ctx.fs.close(h);
+    result
 }
 
 // ---------------------------------------------------------------------------

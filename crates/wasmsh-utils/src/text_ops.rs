@@ -54,6 +54,67 @@ fn parse_head_args<'a>(argv: &'a [&'a str]) -> (HeadMode, bool, bool, Vec<&'a st
     (mode, quiet, verbose, files)
 }
 
+fn head_emit_bytes(
+    output: &mut dyn UtilOutput,
+    reader: &mut dyn Read,
+    limit: usize,
+    cmd: &str,
+) -> i32 {
+    let mut remaining = limit;
+    let mut buffer = [0u8; 4096];
+    while remaining > 0 {
+        let to_read = remaining.min(buffer.len());
+        match reader.read(&mut buffer[..to_read]) {
+            Ok(0) => break,
+            Ok(read) => {
+                output.stdout(&buffer[..read]);
+                remaining -= read;
+            }
+            Err(err) => {
+                let msg = format!("{cmd}: stdin read error: {err}\n");
+                output.stderr(msg.as_bytes());
+                return 1;
+            }
+        }
+    }
+    0
+}
+
+fn head_emit_lines(
+    output: &mut dyn UtilOutput,
+    reader: &mut dyn Read,
+    limit: usize,
+    cmd: &str,
+) -> i32 {
+    let mut lines_seen = 0usize;
+    let mut buffer = [0u8; 4096];
+    while lines_seen < limit {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                let mut consumed = 0usize;
+                while consumed < read && lines_seen < limit {
+                    let byte = buffer[consumed];
+                    output.stdout(&buffer[consumed..=consumed]);
+                    consumed += 1;
+                    if byte == b'\n' {
+                        lines_seen += 1;
+                    }
+                }
+                if lines_seen >= limit {
+                    break;
+                }
+            }
+            Err(err) => {
+                let msg = format!("{cmd}: stdin read error: {err}\n");
+                output.stderr(msg.as_bytes());
+                return 1;
+            }
+        }
+    }
+    0
+}
+
 fn head_emit_reader(
     output: &mut dyn UtilOutput,
     reader: &mut dyn Read,
@@ -61,55 +122,8 @@ fn head_emit_reader(
     cmd: &str,
 ) -> i32 {
     match mode {
-        HeadMode::Bytes(limit) => {
-            let mut remaining = *limit;
-            let mut buffer = [0u8; 4096];
-            while remaining > 0 {
-                let to_read = remaining.min(buffer.len());
-                match reader.read(&mut buffer[..to_read]) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        output.stdout(&buffer[..read]);
-                        remaining -= read;
-                    }
-                    Err(err) => {
-                        let msg = format!("{cmd}: stdin read error: {err}\n");
-                        output.stderr(msg.as_bytes());
-                        return 1;
-                    }
-                }
-            }
-            0
-        }
-        HeadMode::Lines(limit) => {
-            let mut lines_seen = 0usize;
-            let mut buffer = [0u8; 4096];
-            while lines_seen < *limit {
-                match reader.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        let mut consumed = 0usize;
-                        while consumed < read && lines_seen < *limit {
-                            let byte = buffer[consumed];
-                            output.stdout(&buffer[consumed..=consumed]);
-                            consumed += 1;
-                            if byte == b'\n' {
-                                lines_seen += 1;
-                            }
-                        }
-                        if lines_seen >= *limit {
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        let msg = format!("{cmd}: stdin read error: {err}\n");
-                        output.stderr(msg.as_bytes());
-                        return 1;
-                    }
-                }
-            }
-            0
-        }
+        HeadMode::Bytes(limit) => head_emit_bytes(output, reader, *limit, cmd),
+        HeadMode::Lines(limit) => head_emit_lines(output, reader, *limit, cmd),
     }
 }
 
@@ -2060,10 +2074,18 @@ fn tr_expand_set(s: &str) -> Vec<char> {
     chars
 }
 
+fn tr_emit_lossy(pending: &mut Vec<u8>, len: usize, f: &mut impl FnMut(char)) {
+    let text = String::from_utf8_lossy(&pending[..len]).to_string();
+    for ch in text.chars() {
+        f(ch);
+    }
+    pending.drain(..len);
+}
+
 fn tr_process_utf8_chunk(pending: &mut Vec<u8>, chunk: &[u8], mut f: impl FnMut(char)) {
     pending.extend_from_slice(chunk);
     loop {
-        match std::str::from_utf8(pending) {
+        let err = match std::str::from_utf8(pending) {
             Ok(text) => {
                 for ch in text.chars() {
                     f(ch);
@@ -2071,27 +2093,18 @@ fn tr_process_utf8_chunk(pending: &mut Vec<u8>, chunk: &[u8], mut f: impl FnMut(
                 pending.clear();
                 return;
             }
-            Err(err) => {
-                let valid = err.valid_up_to();
-                if valid > 0 {
-                    let text = String::from_utf8_lossy(&pending[..valid]).to_string();
-                    for ch in text.chars() {
-                        f(ch);
-                    }
-                    pending.drain(..valid);
-                    continue;
-                }
-                if err.error_len().is_some() {
-                    let text = String::from_utf8_lossy(&pending[..1]).to_string();
-                    for ch in text.chars() {
-                        f(ch);
-                    }
-                    pending.drain(..1);
-                    continue;
-                }
-                return;
-            }
+            Err(e) => e,
+        };
+        let valid = err.valid_up_to();
+        if valid > 0 {
+            tr_emit_lossy(pending, valid, &mut f);
+            continue;
         }
+        if err.error_len().is_some() {
+            tr_emit_lossy(pending, 1, &mut f);
+            continue;
+        }
+        return;
     }
 }
 
@@ -2301,6 +2314,38 @@ pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     0
 }
 
+fn tee_open_files<'a>(
+    fs: &mut wasmsh_fs::BackendFs,
+    output: &mut dyn UtilOutput,
+    cwd: &str,
+    args: &[&'a str],
+    append: bool,
+) -> (Vec<(&'a str, wasmsh_fs::FileHandle)>, i32) {
+    let mut handles = Vec::new();
+    let mut status = 0;
+    for path in args.iter().copied() {
+        let full = resolve_path(cwd, path);
+        if !append {
+            match fs.open(&full, OpenOptions::write()) {
+                Ok(h) => fs.close(h),
+                Err(e) => {
+                    emit_error(output, "tee", path, &e);
+                    status = 1;
+                    continue;
+                }
+            }
+        }
+        match fs.open(&full, OpenOptions::append()) {
+            Ok(h) => handles.push((path, h)),
+            Err(e) => {
+                emit_error(output, "tee", path, &e);
+                status = 1;
+            }
+        }
+    }
+    (handles, status)
+}
+
 pub(crate) fn util_tee(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut args = &argv[1..];
     let mut append = false;
@@ -2308,28 +2353,7 @@ pub(crate) fn util_tee(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         append = true;
         args = &args[1..];
     }
-    let mut status = 0;
-    let mut handles = Vec::new();
-    for path in args.iter().copied() {
-        let full = resolve_path(ctx.cwd, path);
-        if !append {
-            match ctx.fs.open(&full, OpenOptions::write()) {
-                Ok(h) => ctx.fs.close(h),
-                Err(e) => {
-                    emit_error(ctx.output, "tee", path, &e);
-                    status = 1;
-                    continue;
-                }
-            }
-        }
-        match ctx.fs.open(&full, OpenOptions::append()) {
-            Ok(h) => handles.push((path, h)),
-            Err(e) => {
-                emit_error(ctx.output, "tee", path, &e);
-                status = 1;
-            }
-        }
-    }
+    let (handles, mut status) = tee_open_files(ctx.fs, ctx.output, ctx.cwd, args, append);
 
     if let Some(mut stdin) = ctx.stdin.take() {
         let mut buffer = [0u8; 4096];
@@ -2478,6 +2502,18 @@ fn paste_serial(
     Ok(())
 }
 
+fn paste_emit_row(output: &mut dyn UtilOutput, row: &[Option<String>], delimiter: &str) {
+    for (idx, line) in row.iter().enumerate() {
+        if idx > 0 {
+            output.stdout(delimiter.as_bytes());
+        }
+        if let Some(line) = line {
+            output.stdout(line.as_bytes());
+        }
+    }
+    output.stdout(b"\n");
+}
+
 fn paste_merge(
     output: &mut dyn UtilOutput,
     sources: &mut [PasteSource<'_>],
@@ -2485,26 +2521,13 @@ fn paste_merge(
 ) -> Result<(), i32> {
     loop {
         let mut row = Vec::with_capacity(sources.len());
-        let mut saw_any = false;
         for source in sources.iter_mut() {
-            let line = source.next_line(output)?;
-            if line.is_some() {
-                saw_any = true;
-            }
-            row.push(line);
+            row.push(source.next_line(output)?);
         }
-        if !saw_any {
+        if !row.iter().any(Option::is_some) {
             return Ok(());
         }
-        for (idx, line) in row.into_iter().enumerate() {
-            if idx > 0 {
-                output.stdout(delimiter.as_bytes());
-            }
-            if let Some(line) = line {
-                output.stdout(line.as_bytes());
-            }
-        }
-        output.stdout(b"\n");
+        paste_emit_row(output, &row, delimiter);
     }
 }
 
@@ -2666,48 +2689,52 @@ fn apply_bat_style(flags: &mut BatFlags, style: &str) {
     }
 }
 
+fn bat_from_stdin(ctx: &mut UtilContext<'_>, flags: &BatFlags) -> i32 {
+    let separator = "\u{2500}";
+    let rule_left: String = separator.repeat(7);
+    let rule_right: String = separator.repeat(20);
+    let vert = "\u{2502}";
+    if flags.show_header {
+        bat_emit_chrome(ctx.output, None, &rule_left, &rule_right);
+    }
+    let mut line_num = 0usize;
+    if stream_input_lines(ctx, &[], "bat", |line, _had_newline, ctx| {
+        line_num += 1;
+        if !bat_in_range(line_num, flags.line_range) {
+            return Ok(());
+        }
+        let display_line = if flags.show_all {
+            make_visible(line)
+        } else {
+            line.to_string()
+        };
+        let out = if flags.show_numbers {
+            format!("{line_num:>5}   {vert} {display_line}\n")
+        } else {
+            format!("{display_line}\n")
+        };
+        ctx.output.stdout(out.as_bytes());
+        Ok(())
+    })
+    .is_err()
+    {
+        return 1;
+    }
+    if flags.show_header {
+        let bot_corner = "\u{2534}";
+        let footer = format!("{rule_left}{bot_corner}{rule_right}\n");
+        ctx.output.stdout(footer.as_bytes());
+    }
+    0
+}
+
 pub(crate) fn util_bat(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let (flags, consumed) = parse_bat_flags(argv);
     let file_args: Vec<&str> = argv[consumed..].to_vec();
 
     if file_args.is_empty() {
         if ctx.has_stdin() {
-            let separator = "\u{2500}";
-            let rule_left: String = separator.repeat(7);
-            let rule_right: String = separator.repeat(20);
-            let vert = "\u{2502}";
-            if flags.show_header {
-                bat_emit_chrome(ctx.output, None, &rule_left, &rule_right);
-            }
-            let mut line_num = 0usize;
-            if stream_input_lines(ctx, &[], "bat", |line, _had_newline, ctx| {
-                line_num += 1;
-                if !bat_in_range(line_num, flags.line_range) {
-                    return Ok(());
-                }
-                let display_line = if flags.show_all {
-                    make_visible(line)
-                } else {
-                    line.to_string()
-                };
-                let out = if flags.show_numbers {
-                    format!("{line_num:>5}   {vert} {display_line}\n")
-                } else {
-                    format!("{display_line}\n")
-                };
-                ctx.output.stdout(out.as_bytes());
-                Ok(())
-            })
-            .is_err()
-            {
-                return 1;
-            }
-            if flags.show_header {
-                let bot_corner = "\u{2534}";
-                let footer = format!("{rule_left}{bot_corner}{rule_right}\n");
-                ctx.output.stdout(footer.as_bytes());
-            }
-            return 0;
+            return bat_from_stdin(ctx, &flags);
         }
         ctx.output.stderr(b"bat: missing operand\n");
         return 1;

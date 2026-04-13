@@ -115,44 +115,45 @@ pub fn handle_python_command(
 
 /// Extract code to run from argv (`-c CODE`, script file, or stdin).
 fn extract_code(argv: &[String], stdin: Option<ExternalCommandStdin<'_>>) -> Option<String> {
+    if let Some(code) = extract_code_from_argv(argv) {
+        return Some(code);
+    }
+    if let Some(code) = read_stdin_code(stdin) {
+        return Some(code);
+    }
+    Some(String::new())
+}
+
+fn extract_code_from_argv(argv: &[String]) -> Option<String> {
     let mut i = 1;
     while i < argv.len() {
         if argv[i] == "-c" {
-            return if i + 1 < argv.len() {
-                Some(argv[i + 1].clone())
-            } else {
-                Some(String::new())
-            };
+            let code = argv.get(i + 1).cloned().unwrap_or_default();
+            return Some(code);
         }
-        // Skip known flags
         if argv[i].starts_with('-') {
             i += 1;
             continue;
         }
-        // Non-flag argument is a script file path — read it via libc
         return Some(read_script_file(&argv[i]));
     }
+    None
+}
 
-    if let Some(stdin) = stdin {
-        let mut stdin = stdin;
-        let mut data = Vec::new();
-        let mut buffer = [0u8; 4096];
-        loop {
-            let Ok(read) = stdin.read_chunk(&mut buffer) else {
-                return Some(String::new());
-            };
-            if read == 0 {
-                break;
-            }
-            data.extend_from_slice(&buffer[..read]);
+fn read_stdin_code(stdin: Option<ExternalCommandStdin<'_>>) -> Option<String> {
+    let mut stdin = stdin?;
+    let mut data = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let Ok(read) = stdin.read_chunk(&mut buffer) else {
+            return Some(String::new());
+        };
+        if read == 0 {
+            break;
         }
-        if !data.is_empty() {
-            return Some(String::from_utf8_lossy(&data).into_owned());
-        }
+        data.extend_from_slice(&buffer[..read]);
     }
-
-    // No code — empty success (interactive mode not supported).
-    Some(String::new())
+    if data.is_empty() { None } else { Some(String::from_utf8_lossy(&data).into_owned()) }
 }
 
 /// Read a script file from the Emscripten filesystem via libc.

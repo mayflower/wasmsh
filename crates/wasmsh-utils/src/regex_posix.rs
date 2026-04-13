@@ -180,16 +180,8 @@ impl Regex {
         let mut applied = 0usize;
         let mut match_count = 0usize;
 
-        loop {
-            if cursor > subject.len() {
-                break;
-            }
-            let remaining = &subject.as_bytes()[cursor..];
-            let matches = self.inner.matches(remaining, Some(1));
-            let Some(caps) = matches.into_iter().next() else {
-                break;
-            };
-            let Some(Some((rel_start, rel_end))) = caps.first().copied() else {
+        while cursor <= subject.len() {
+            let Some((caps, rel_start, rel_end)) = self.next_match(subject, cursor) else {
                 break;
             };
 
@@ -199,32 +191,21 @@ impl Regex {
                 ReplaceMode::All => true,
                 ReplaceMode::Nth(n) => match_count == n,
             };
+            let advance = advance_past_match(rel_start, rel_end);
 
-            if should_apply {
-                out.push_str(&subject[cursor..cursor + rel_start]);
-                // Replacement backrefs (\1, &, etc.) reference into
-                // the remaining slice, not the full subject, because
-                // capture offsets are relative to `remaining`.
-                let remaining_str = &subject[cursor..];
-                append_replacement(&mut out, replacement, remaining_str, &caps);
-                cursor += if rel_end == rel_start {
-                    rel_end + 1
-                } else {
-                    rel_end
-                };
-                applied += 1;
-                if matches!(mode, ReplaceMode::First | ReplaceMode::Nth(_)) {
-                    break;
-                }
-            } else {
-                // Skip this match — emit it unchanged and advance.
-                let skip_end = if rel_end == rel_start {
-                    rel_end + 1
-                } else {
-                    rel_end
-                };
-                out.push_str(&subject[cursor..cursor + skip_end]);
-                cursor += skip_end;
+            if !should_apply {
+                out.push_str(&subject[cursor..cursor + advance]);
+                cursor += advance;
+                continue;
+            }
+
+            out.push_str(&subject[cursor..cursor + rel_start]);
+            let remaining_str = &subject[cursor..];
+            append_replacement(&mut out, replacement, remaining_str, &caps);
+            cursor += advance;
+            applied += 1;
+            if matches!(mode, ReplaceMode::First | ReplaceMode::Nth(_)) {
+                break;
             }
         }
 
@@ -234,6 +215,20 @@ impl Regex {
         }
         out
     }
+
+    /// Find the next match starting at `cursor` and return captures plus
+    /// the relative start/end of the overall match.
+    fn next_match(
+        &self,
+        subject: &str,
+        cursor: usize,
+    ) -> Option<(Vec<Option<(usize, usize)>>, usize, usize)> {
+        let remaining = &subject.as_bytes()[cursor..];
+        let matches = self.inner.matches(remaining, Some(1));
+        let caps = matches.into_iter().next()?;
+        let (rel_start, rel_end) = caps.first().copied().flatten()?;
+        Some((caps.to_vec(), rel_start, rel_end))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -241,6 +236,45 @@ enum ReplaceMode {
     First,
     All,
     Nth(usize),
+}
+
+/// Compute how far to advance the cursor past a match.  For zero-length
+/// matches, advance by one extra byte to avoid infinite loops.
+fn advance_past_match(rel_start: usize, rel_end: usize) -> usize {
+    if rel_end == rel_start { rel_end + 1 } else { rel_end }
+}
+
+/// Push the captured group slice (if present) from `caps[idx]` onto `out`.
+fn push_capture(out: &mut String, subject: &str, caps: &[Option<(usize, usize)>], idx: usize) {
+    if let Some(Some((s, e))) = caps.get(idx).copied() {
+        out.push_str(&subject[s..e]);
+    }
+}
+
+fn append_replacement_backslash(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    subject: &str,
+    caps: &[Option<(usize, usize)>],
+) {
+    let Some(&next) = chars.peek() else {
+        out.push('\\');
+        return;
+    };
+    if let Some(digit) = next.to_digit(10) {
+        chars.next();
+        push_capture(out, subject, caps, digit as usize);
+        return;
+    }
+    chars.next();
+    match next {
+        '\\' => out.push('\\'),
+        '&' => out.push('&'),
+        'n' => out.push('\n'),
+        't' => out.push('\t'),
+        'r' => out.push('\r'),
+        other => out.push(other),
+    }
 }
 
 fn append_replacement(
@@ -252,34 +286,8 @@ fn append_replacement(
     let mut chars = template.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '\\' => {
-                let Some(&next) = chars.peek() else {
-                    out.push('\\');
-                    continue;
-                };
-                if let Some(digit) = next.to_digit(10) {
-                    chars.next();
-                    let idx = digit as usize;
-                    if let Some(Some((s, e))) = caps.get(idx).copied() {
-                        out.push_str(&subject[s..e]);
-                    }
-                    continue;
-                }
-                chars.next();
-                match next {
-                    '\\' => out.push('\\'),
-                    '&' => out.push('&'),
-                    'n' => out.push('\n'),
-                    't' => out.push('\t'),
-                    'r' => out.push('\r'),
-                    other => out.push(other),
-                }
-            }
-            '&' => {
-                if let Some(Some((s, e))) = caps.first().copied() {
-                    out.push_str(&subject[s..e]);
-                }
-            }
+            '\\' => append_replacement_backslash(out, &mut chars, subject, caps),
+            '&' => push_capture(out, subject, caps, 0),
             other => out.push(other),
         }
     }
