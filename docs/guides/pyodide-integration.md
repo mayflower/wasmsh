@@ -232,6 +232,31 @@ the first run. Subsequent boots are noticeably faster but still take a
 few seconds. If you are running many short scripts, prefer one
 long-lived session over many short-lived ones.
 
+## Standalone Pyodide-WASI Path
+
+The same Pyodide + wasmsh runtime can be built as a **standalone no-JS artifact**
+for direct Wasmtime execution (no Node.js or browser required):
+
+```bash
+just build-pyodide-wasi          # → dist/pyodide-wasi/wasmsh_pyodide_wasi.wasm
+just test-e2e-pyodide-wasi       # Python behavioral tests (5 tests)
+just test-e2e-pyodide-wasi-network # micropip + HTTP (5 tests)
+```
+
+Key differences from the JS-hosted path:
+
+| Aspect | JS-hosted (Node/browser) | Standalone (Wasmtime) |
+|--------|-------------------------|----------------------|
+| Filesystem | Emscripten JS MEMFS | Pure C memfs (`wasi-shims/memfs.c`) |
+| HTTP fetch | JS `wasmsh_js_http_fetch` | Host import `__wasmsh_host_fetch` |
+| micropip | `pyodide.loadPackage("micropip")` | Embedded in stdlib, `_micropip_sync.install()` |
+| asyncio | Full event loop via JS | Sequential coroutine execution (no event loop) |
+| Host runner | `loadPyodide()` + npm adapter | `tools/pyodide-wasi-host-runner/` (Wasmtime + ureq) |
+
+The standalone artifact uses the **same JSON runtime C ABI** (`wasmsh_runtime_new`,
+`wasmsh_runtime_handle_json`, etc.) and the **same `BackendFs = EmscriptenFs`** type alias.
+See [ADR-0031](../adr/adr-0031-pyodide-wasi-same-module-runtime.md) for details.
+
 ## See Also
 
 - [Worker protocol reference](../reference/protocol.md) for the underlying
@@ -244,3 +269,5 @@ long-lived session over many short-lived ones.
   for the design rationale.
 - [ADR-0021: Network capability](../adr/adr-0021-network-capability.md) for
   the security model behind `allowedHosts` and `installPythonPackages`.
+- [ADR-0031: Pyodide-WASI same-module runtime](../adr/adr-0031-pyodide-wasi-same-module-runtime.md)
+  for the standalone no-JS artifact architecture.

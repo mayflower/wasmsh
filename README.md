@@ -11,10 +11,11 @@
 
 A sandboxed shell with 88 utilities (grep, sed, awk, jq, tar, curl, …), Python 3.13 with pip/micropip for installing pure-Python packages, and a virtual filesystem — all running in-process as WebAssembly. No OS processes, no network access unless explicitly allowed, step budgets to prevent runaway execution.
 
-Three build targets from one codebase:
+Four build targets from one codebase:
 - **Standalone** (`wasm32-unknown-unknown`) — browser Web Worker
-- **Pyodide** (`wasm32-unknown-emscripten`) — shell and Python share the same filesystem
-- **Component Model** (`wasm32-wasip2`) — WASI P2 component exporting the same JSON `HostCommand` / `WorkerEvent` transport used by Pyodide through a thin `wasmsh:component/runtime` handle plus shared probe helpers. Reuses the same libc-backed filesystem path as Pyodide. See [ADR-0030](docs/adr/adr-0030-wasmcloud-component-transport.md).
+- **Pyodide** (`wasm32-unknown-emscripten`) — shell and Python share the same filesystem (JS-hosted via Node/browser)
+- **Pyodide-WASI** — standalone no-JS same-module Pyodide artifact runnable under Wasmtime. In-memory C filesystem, host-provided HTTP fetch, embedded micropip. See [ADR-0031](docs/adr/adr-0031-pyodide-wasi-same-module-runtime.md).
+- **Component Model** (`wasm32-wasip2`) — WASI P2 component exporting the same JSON `HostCommand` / `WorkerEvent` transport used by Pyodide through a thin `wasmsh:component/runtime` handle plus shared probe helpers. See [ADR-0030](docs/adr/adr-0030-wasmcloud-component-transport.md).
 
 ## Use with DeepAgents
 

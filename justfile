@@ -176,6 +176,24 @@ clippy-component:
 test-e2e-component:
     node --test e2e/build-contract/tests/component-build.test.mjs
 
+# ── Pyodide WASI Build + E2E ──────────────────────────────────
+
+# Build the no-JS same-module Pyodide-WASI artifact for Wasmtime
+build-pyodide-wasi:
+    bash tools/pyodide/build-wasi.sh
+
+# Run the Pyodide-WASI build-contract test
+test-e2e-pyodide-wasi-build:
+    node --test e2e/build-contract/tests/pyodide-wasi-build.test.mjs
+
+# Run the Pyodide-WASI Python behavioral tests (Wasmtime-backed)
+test-e2e-pyodide-wasi:
+    node --test e2e/build-contract/tests/pyodide-wasi-python.test.mjs
+
+# Run the Pyodide-WASI network + micropip tests (Wasmtime-backed)
+test-e2e-pyodide-wasi-network:
+    node --test e2e/build-contract/tests/pyodide-wasi-network.test.mjs
+
 # ── Wasm Post-processing ──────────────────────────────────────
 
 # Build optimized wasm with wasm-opt post-processing

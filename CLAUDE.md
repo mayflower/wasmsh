@@ -8,11 +8,12 @@ Always use maximum thinking effort. Never rush to completion. Read code thorough
 
 ## Project Overview
 
-**wasmsh** is a shell runtime written in Rust that targets three WebAssembly platforms from a shared core:
+**wasmsh** is a shell runtime written in Rust that targets four WebAssembly platforms from a shared core:
 
 1. **Standalone** (`wasm32-unknown-unknown`) — browser Web Worker via `wasm-bindgen`
 2. **Pyodide** (`wasm32-unknown-emscripten`) — linked into a custom Pyodide build, sharing the Python interpreter's Emscripten module and filesystem
-3. **Component Model** (`wasm32-wasip2`) — `wasmsh-component` crate, WASI P2 component exposing the same JSON `HostCommand` / `WorkerEvent` bridge as Pyodide through a thin `wasmsh:component/runtime` handle plus shared probe helpers. It reuses the same libc-backed filesystem path as Pyodide. First wasmCloud-facing transport seam; DeepAgents adapter and wasmCloud host plugin are deferred (see ADR-0030).
+3. **Pyodide-WASI** — standalone no-JS same-module Pyodide artifact for Wasmtime. Pure C in-memory filesystem (`wasi-shims/memfs.c`), host-provided HTTP fetch, embedded micropip. Built with `tools/pyodide/build-wasi.sh` (see ADR-0031).
+4. **Component Model** (`wasm32-wasip2`) — `wasmsh-component` crate, WASI P2 component exposing the same JSON `HostCommand` / `WorkerEvent` bridge as Pyodide through a thin `wasmsh:component/runtime` handle plus shared probe helpers. First wasmCloud-facing transport seam; DeepAgents adapter and wasmCloud host plugin are deferred (see ADR-0030).
 
 Execution pipeline: `source -> lexer -> parser -> AST -> HIR -> runtime executor`.
 
@@ -62,6 +63,12 @@ just build-pyodide          # custom Pyodide → dist/pyodide-custom/
 just test-e2e-pyodide-node  # Node E2E (19 tests)
 just test-e2e-pyodide-browser # Playwright browser E2E (4 tests)
 just build-emscripten-probe # emscripten staticlib probe
+
+# ── Pyodide-WASI (standalone, no JS) ──────────────
+just build-pyodide-wasi         # build-wasi.sh → dist/pyodide-wasi/
+just test-e2e-pyodide-wasi      # Wasmtime Python behavioral (5 tests)
+just test-e2e-pyodide-wasi-network # Wasmtime network + micropip (5 tests)
+just test-e2e-pyodide-wasi-build # build-contract (4 tests)
 
 # ── Component (WASI P2, wasmcloud-facing) ──────────
 just build-component        # cargo build --target wasm32-wasip2 -p wasmsh-component
@@ -126,6 +133,7 @@ ADRs are in `docs/adr/`. Key decisions:
 - ADR-0021: Network capability model (curl/wget with host allowlist)
 - ADR-0029: Dual-path executor (runtime interpreter + VM subset)
 - ADR-0030: WASI P2 Component Model transport (wasmcloud-facing)
+- ADR-0031: Pyodide-WASI same-module runtime (standalone no-JS artifact)
 
 ## Feature Flags
 
@@ -144,7 +152,11 @@ Pyodide/Emscripten versions are pinned in `tools/pyodide/versions.env` (single s
 ```
 e2e/
 ├── standalone/       # Playwright: standalone browser worker (6 tests)
-├── build-contract/   # node:test: emscripten probe build (2 tests)
+├── build-contract/   # node:test: build contracts + Pyodide-WASI tests
+│   └── tests/
+│       ├── pyodide-wasi-build.test.mjs    # build artifact contract (4 tests)
+│       ├── pyodide-wasi-python.test.mjs   # Wasmtime Python behavioral (5 tests)
+│       └── pyodide-wasi-network.test.mjs  # Wasmtime network + micropip (5 tests)
 ├── pyodide-node/     # node:test: Pyodide Node E2E (19 tests)
 ├── pyodide-browser/  # Playwright: Pyodide browser worker (4 tests)
 └── repo-checks/      # node:test: repo structure checks (12 tests)

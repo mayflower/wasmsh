@@ -1,0 +1,18 @@
+[package]
+name = "pyodide-wasi-host-runner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Wasmtime-based host runner for the standalone Pyodide+wasmsh artifact"
+
+[[bin]]
+name = "pyodide-wasi-host-runner"
+path = "src/main.rs"
+
+[dependencies]
+wasmtime = "43"
+wasmtime-wasi = "43"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "3"
+url = "2"
