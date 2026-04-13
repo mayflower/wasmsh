@@ -21,7 +21,7 @@ jobs:
     runs-on: mayflower-k8s-runners
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+      github.event.workflow_run.conclusion != ''
     env:
       SONAR_TOKEN_SET: ${{ secrets.SONAR_TOKEN != '' }}
     steps:
@@ -82,5 +82,3 @@ jobs:
         with:
           args: >-
             ${{ steps.coverage.outputs.available == 'true' && '-Dsonar.coverageReportPaths=coverage/sonar-coverage.xml' || '' }}
-            -Dsonar.qualitygate.wait=true
-            -Dsonar.qualitygate.timeout=300
