@@ -241,7 +241,11 @@ enum ReplaceMode {
 /// Compute how far to advance the cursor past a match.  For zero-length
 /// matches, advance by one extra byte to avoid infinite loops.
 fn advance_past_match(rel_start: usize, rel_end: usize) -> usize {
-    if rel_end == rel_start { rel_end + 1 } else { rel_end }
+    if rel_end == rel_start {
+        rel_end + 1
+    } else {
+        rel_end
+    }
 }
 
 /// Push the captured group slice (if present) from `caps[idx]` onto `out`.

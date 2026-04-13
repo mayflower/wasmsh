@@ -3627,7 +3627,11 @@ impl<R> TrStreamReader<R> {
 
     fn is_in_from_set(&self, ch: char) -> bool {
         let in_set = self.stage.from_chars.contains(&ch);
-        if self.stage.complement { !in_set } else { in_set }
+        if self.stage.complement {
+            !in_set
+        } else {
+            in_set
+        }
     }
 
     fn process_char(&mut self, ch: char) {
@@ -3649,10 +3653,7 @@ impl<R> TrStreamReader<R> {
         if self.is_in_from_set(ch) {
             return;
         }
-        if self.stage.squeeze
-            && self.stage.to_chars.contains(&ch)
-            && self.prev == Some(ch)
-        {
+        if self.stage.squeeze && self.stage.to_chars.contains(&ch) && self.prev == Some(ch) {
             return;
         }
         self.emit_char(ch);
@@ -3670,7 +3671,13 @@ impl<R> TrStreamReader<R> {
         let translated = from_set
             .iter()
             .position(|&source| source == ch)
-            .and_then(|pos| self.stage.to_chars.get(pos).or(self.stage.to_chars.last()).copied())
+            .and_then(|pos| {
+                self.stage
+                    .to_chars
+                    .get(pos)
+                    .or(self.stage.to_chars.last())
+                    .copied()
+            })
             .unwrap_or(ch);
         if self.stage.squeeze
             && self.stage.to_chars.contains(&translated)
@@ -9777,12 +9784,7 @@ impl WorkerRuntime {
         self.declare_print_vars(argv, names);
     }
 
-    fn declare_print_functions(
-        &mut self,
-        argv: &[String],
-        names: &[usize],
-        names_only: bool,
-    ) {
+    fn declare_print_functions(&mut self, argv: &[String], names: &[usize], names_only: bool) {
         let function_names: Vec<String> = if names.is_empty() {
             self.functions.keys().cloned().collect()
         } else {
