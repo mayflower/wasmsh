@@ -14,6 +14,9 @@
 
 pub use wasmsh_json_bridge::JsonRuntimeHandle;
 
+#[cfg(target_arch = "wasm32")]
+mod python;
+
 // ── Component export layer ──────────────────────────────────────────────
 //
 // The wit-bindgen-generated bindings and the component export glue are only

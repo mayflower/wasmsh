@@ -1,0 +1,14 @@
+[package]
+name = "wasmsh-component-host-runner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Wasmtime-based host runner for testing the wasmsh WASI P2 component artifact"
+
+[[bin]]
+name = "component-host-runner"
+path = "src/main.rs"
+
+[dependencies]
+wasmtime = { version = "43", features = ["component-model"] }
+wasmtime-wasi = "43"

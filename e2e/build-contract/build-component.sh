@@ -13,6 +13,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+PYTHON_WASI_SCRIPT="$REPO_ROOT/tools/python-wasi/build.sh"
+PYTHON_WASI_LIB="$REPO_ROOT/tools/python-wasi/output/libpython3.13.a"
 
 export PATH="$HOME/.cargo/bin:$PATH"
 
@@ -22,6 +24,11 @@ if [ "${SKIP_WASIP2:-0}" = "1" ]; then
 fi
 
 PROFILE="${WASMSH_COMPONENT_PROFILE:-dev}"
+
+if [ ! -f "$PYTHON_WASI_LIB" ]; then
+    echo "Building CPython WASI runtime assets..."
+    bash "$PYTHON_WASI_SCRIPT"
+fi
 
 # ── Ensure the Rust target is installed ─────────────────────
 rustup target add wasm32-wasip2 2>/dev/null || true

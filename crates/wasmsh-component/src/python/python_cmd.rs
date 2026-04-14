@@ -1,0 +1,238 @@
+#![allow(unsafe_code, reason = "embedded CPython and libc file I/O use C FFI")]
+
+use std::ffi::CString;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use wasmsh_runtime::{ExternalCommandResult, ExternalCommandStdin};
+
+unsafe extern "C" {
+    fn PyRun_SimpleString(command: *const std::os::raw::c_char) -> std::os::raw::c_int;
+}
+
+static INVOCATION_ID: AtomicU64 = AtomicU64::new(0);
+
+struct FileGuard(*mut libc::FILE);
+
+impl Drop for FileGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { libc::fclose(self.0) };
+        }
+    }
+}
+
+pub(super) fn handle_python_command(
+    cmd_name: &str,
+    argv: &[String],
+    stdin: Option<ExternalCommandStdin<'_>>,
+) -> Option<ExternalCommandResult> {
+    if cmd_name != "python" && cmd_name != "python3" {
+        return None;
+    }
+
+    let code = extract_code(argv, stdin)?;
+    let id = INVOCATION_ID.fetch_add(1, Ordering::Relaxed);
+    let stdout_path = format!("/workspace/.wasmsh_py_stdout_{id}");
+    let stderr_path = format!("/workspace/.wasmsh_py_stderr_{id}");
+    let exit_path = format!("/workspace/.wasmsh_py_exit_{id}");
+    let code_b64 = base64_encode(code.as_bytes());
+
+    let wrapped = format!(
+        concat!(
+            "import sys, io as _wasmsh_io, base64 as _wasmsh_b64\n",
+            "_wasmsh_old_stdout = sys.stdout\n",
+            "_wasmsh_old_stderr = sys.stderr\n",
+            "sys.stdout = _wasmsh_io.StringIO()\n",
+            "sys.stderr = _wasmsh_io.StringIO()\n",
+            "_wasmsh_exit_code = 0\n",
+            "try:\n",
+            "    _wasmsh_code = compile(_wasmsh_b64.b64decode(\"{code_b64}\").decode(), \"<string>\", \"exec\")\n",
+            "    exec(_wasmsh_code)\n",
+            "except SystemExit as _e:\n",
+            "    _wasmsh_exit_code = _e.code if isinstance(_e.code, int) else 1\n",
+            "except BaseException:\n",
+            "    import traceback\n",
+            "    traceback.print_exc()\n",
+            "    _wasmsh_exit_code = 1\n",
+            "_wasmsh_stdout_val = sys.stdout.getvalue()\n",
+            "_wasmsh_stderr_val = sys.stderr.getvalue()\n",
+            "sys.stdout = _wasmsh_old_stdout\n",
+            "sys.stderr = _wasmsh_old_stderr\n",
+            "with open(\"{stdout_path}\", \"w\") as _f:\n",
+            "    _f.write(_wasmsh_stdout_val)\n",
+            "with open(\"{stderr_path}\", \"w\") as _f:\n",
+            "    _f.write(_wasmsh_stderr_val)\n",
+            "with open(\"{exit_path}\", \"w\") as _f:\n",
+            "    _f.write(str(_wasmsh_exit_code))\n",
+        ),
+        code_b64 = code_b64,
+        stdout_path = stdout_path,
+        stderr_path = stderr_path,
+        exit_path = exit_path,
+    );
+
+    let c_wrapped = match CString::new(wrapped) {
+        Ok(c) => c,
+        Err(_) => {
+            return Some(ExternalCommandResult {
+                stdout: Vec::new(),
+                stderr: b"wasmsh: python: internal error (null in code)\n".to_vec(),
+                status: 1,
+            });
+        }
+    };
+
+    let rc = unsafe { PyRun_SimpleString(c_wrapped.as_ptr()) };
+    let stdout_bytes = read_temp_file(&stdout_path);
+    let stderr_bytes = read_temp_file(&stderr_path);
+    let exit_str = read_temp_file(&exit_path);
+    let status = if rc != 0 {
+        1
+    } else {
+        std::str::from_utf8(&exit_str)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+            .unwrap_or(0)
+    };
+
+    Some(ExternalCommandResult {
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+        status,
+    })
+}
+
+fn extract_code(argv: &[String], stdin: Option<ExternalCommandStdin<'_>>) -> Option<String> {
+    if let Some(code) = extract_code_from_argv(argv) {
+        return Some(code);
+    }
+    if let Some(code) = read_stdin_code(stdin) {
+        return Some(code);
+    }
+    Some(String::new())
+}
+
+fn extract_code_from_argv(argv: &[String]) -> Option<String> {
+    let mut i = 1;
+    while i < argv.len() {
+        if argv[i] == "-c" {
+            let code = argv.get(i + 1).cloned().unwrap_or_default();
+            return Some(code);
+        }
+        if argv[i].starts_with('-') {
+            i += 1;
+            continue;
+        }
+        return Some(read_script_file(&argv[i]));
+    }
+    None
+}
+
+fn read_stdin_code(stdin: Option<ExternalCommandStdin<'_>>) -> Option<String> {
+    let mut stdin = stdin?;
+    let mut data = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let Ok(read) = stdin.read_chunk(&mut buffer) else {
+            return Some(String::new());
+        };
+        if read == 0 {
+            break;
+        }
+        data.extend_from_slice(&buffer[..read]);
+    }
+    if data.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&data).into_owned())
+    }
+}
+
+fn read_script_file(path: &str) -> String {
+    let c_path = match CString::new(path) {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+    let fp = unsafe { libc::fopen(c_path.as_ptr(), c"r".as_ptr()) };
+    if fp.is_null() {
+        return String::new();
+    }
+    let guard = FileGuard(fp);
+    let data = read_fp_to_vec(guard.0);
+    String::from_utf8_lossy(&data).into_owned()
+}
+
+fn read_temp_file(path: &str) -> Vec<u8> {
+    let c_path = match CString::new(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let fp = unsafe { libc::fopen(c_path.as_ptr(), c"r".as_ptr()) };
+    if fp.is_null() {
+        return Vec::new();
+    }
+    let guard = FileGuard(fp);
+    let data = read_fp_to_vec(guard.0);
+    drop(guard);
+    unsafe { libc::unlink(c_path.as_ptr()) };
+    data
+}
+
+fn read_fp_to_vec(fp: *mut libc::FILE) -> Vec<u8> {
+    let mut result = Vec::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = unsafe { libc::fread(buf.as_mut_ptr().cast(), 1, buf.len(), fp) };
+        if n == 0 {
+            break;
+        }
+        result.extend_from_slice(&buf[..n]);
+    }
+    result
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(CHARS[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_code;
+    use wasmsh_runtime::ExternalCommandStdin;
+
+    #[test]
+    fn extract_code_prefers_c_flag() {
+        let argv = vec!["python3".to_string(), "-c".to_string(), "print(1)".to_string()];
+        assert_eq!(extract_code(&argv, None), Some("print(1)".to_string()));
+    }
+
+    #[test]
+    fn extract_code_reads_stdin_when_no_script_or_c_flag() {
+        let argv = vec!["python3".to_string()];
+        let stdin = ExternalCommandStdin::from_bytes(b"print('stdin')\n");
+        assert_eq!(
+            extract_code(&argv, Some(stdin)),
+            Some("print('stdin')\n".to_string())
+        );
+    }
+}

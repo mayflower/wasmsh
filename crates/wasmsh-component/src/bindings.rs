@@ -47,7 +47,7 @@ pub(crate) struct ComponentHandle {
 impl GuestHandle for ComponentHandle {
     fn new() -> Self {
         Self {
-            inner: RefCell::new(JsonRuntimeHandle::new()),
+            inner: RefCell::new(crate::python::new_runtime_handle()),
         }
     }
 

@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+build = "build.rs"
 description = "WASI P2 Component Model adapter for the wasmsh runtime. Exposes a stateful session resource as the first wasmCloud-facing transport."
 keywords = ["shell", "wasm", "wasmcloud", "component-model", "wasi"]
 categories = ["wasm", "command-line-utilities"]
@@ -23,6 +24,7 @@ default = []
 component-export = ["dep:wit-bindgen"]
 
 [dependencies]
+libc = "0.2"
 wasmsh-fs = { workspace = true, features = ["emscripten"] }
 wasmsh-json-bridge.workspace = true
 wasmsh-protocol.workspace = true
