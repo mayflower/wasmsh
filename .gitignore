@@ -51,5 +51,10 @@ packages/python/wasmsh-pyodide-runtime/*.egg-info/
 # ── npm install output for E2E test fixtures ───────────────────────
 e2e/*/node_modules/
 
+# ── Pyodide-WASI build outputs ─────────────────────────────────────
+dist/pyodide-wasi/
+tools/pyodide-wasi-host-runner/target/
+tools/pyodide/wasi-build/
+
 # ── Environment files (API keys, secrets) ─────────────────────────
 .env
