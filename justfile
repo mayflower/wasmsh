@@ -138,13 +138,25 @@ test-e2e-standalone:
 build-pyodide:
     bash tools/pyodide/build-custom.sh
 
+# Build the immutable snapshot artifact layout for the Node runner
+build-snapshot:
+    bash -lc 'NODE_BIN="${NODE_BIN:-/opt/homebrew/opt/node@22/bin/node}"; [ -x "$NODE_BIN" ] || NODE_BIN=node; cd "{{justfile_directory()}}" && "$NODE_BIN" tools/pyodide/build-snapshot.mjs --output-dir dist/pyodide-snapshot'
+
 # Copy the custom Pyodide dist into the runtime package layouts
 package-pyodide-runtime:
     node tools/pyodide/package-runtime-assets.mjs
 
 # Run Pyodide Node E2E tests
 test-e2e-pyodide-node:
-    cd {{justfile_directory()}} && node --test e2e/pyodide-node/tests/*.test.mjs
+    bash -lc 'NODE_BIN="${NODE_BIN:-/opt/homebrew/opt/node@22/bin/node}"; [ -x "$NODE_BIN" ] || NODE_BIN=node; cd "{{justfile_directory()}}" && "$NODE_BIN" --test --test-concurrency=1 e2e/pyodide-node/tests/*.test.mjs'
+
+# Run Node runner E2E tests
+test-e2e-runner-node:
+    bash -lc 'NODE_BIN="${NODE_BIN:-/opt/homebrew/opt/node@22/bin/node}"; [ -x "$NODE_BIN" ] || NODE_BIN=node; cd "{{justfile_directory()}}" && "$NODE_BIN" --test e2e/runner-node/tests/*.test.mjs'
+
+# Run the restore-latency smoke/bench with optional threshold enforcement
+bench-runner-restore:
+    bash -lc 'NODE_BIN="${NODE_BIN:-/opt/homebrew/opt/node@22/bin/node}"; [ -x "$NODE_BIN" ] || NODE_BIN=node; cd "{{justfile_directory()}}" && "$NODE_BIN" --test tools/runner-node/bench/restore-latency.test.mjs'
 
 # Run Pyodide browser E2E tests (Playwright)
 test-e2e-pyodide-browser:

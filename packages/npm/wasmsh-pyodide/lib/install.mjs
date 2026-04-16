@@ -84,7 +84,7 @@ export async function installPackages(reqs, pyodide, opts) {
     }
 
     if (!micropip) {
-      micropip = pyodide.pyimport("micropip");
+      micropip = await ensureMicropip(pyodide);
     }
     await micropip.install(req, { deps: deps !== false });
     installed.push({ requirement: req });
@@ -138,7 +138,7 @@ export async function handlePipCommand(command, pyodide, installFn) {
       return shellResult("", "Usage: pip uninstall <package> [package ...]\n", 1);
     }
     try {
-      const micropip = pyodide.pyimport("micropip");
+      const micropip = await ensureMicropip(pyodide);
       micropip.uninstall(packages);
       const msg = packages.map((p) => `Successfully uninstalled ${p}`).join("\n") + "\n";
       return shellResult(msg, "", 0);
@@ -150,7 +150,7 @@ export async function handlePipCommand(command, pyodide, installFn) {
   // pip list
   if (PIP_LIST_RE.test(command)) {
     try {
-      const micropip = pyodide.pyimport("micropip");
+      const micropip = await ensureMicropip(pyodide);
       const pkgDict = micropip.list();
       const entries = [];
       for (const name of pkgDict.keys()) {
@@ -176,7 +176,7 @@ export async function handlePipCommand(command, pyodide, installFn) {
   // pip freeze
   if (PIP_FREEZE_RE.test(command)) {
     try {
-      const micropip = pyodide.pyimport("micropip");
+      const micropip = await ensureMicropip(pyodide);
       const frozen = micropip.freeze();
       return shellResult(frozen + "\n", "", 0);
     } catch (err) {
@@ -193,6 +193,20 @@ export async function handlePipCommand(command, pyodide, installFn) {
     "  list        List installed packages\n" +
     "  freeze      Output installed packages in lockfile format\n";
   return shellResult(msg, "", 0);
+}
+
+async function ensureMicropip(pyodide) {
+  try {
+    return pyodide.pyimport("micropip");
+  } catch (error) {
+    const missingModule = String(error?.message ?? error).includes("No module named 'micropip'");
+    if (!missingModule) {
+      throw error;
+    }
+  }
+
+  await pyodide.loadPackage("micropip");
+  return pyodide.pyimport("micropip");
 }
 
 function shellResult(stdout, stderr, exitCode) {

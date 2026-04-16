@@ -1,8 +1,8 @@
 // Browser Web Worker for wasmsh-pyodide.
 //
 // Uses Pyodide's standard loadPyodide() for boot and micropip for package
-// installation — same approach as node-module.mjs. The only wasmsh-specific
-// wiring is the sentinel + network fetch stubs injected via instantiate patch.
+// installation — same approach as node-module.mjs. Baseline boot stays
+// offline/deterministic; package resolution remains a session-time concern.
 
 const decoder = new TextDecoder();
 
@@ -178,10 +178,6 @@ function sendHostCommand(command) {
 
 /**
  * Boot via Pyodide's standard loadPyodide() — same approach as node-module.mjs.
- *
- * We monkey-patch WebAssembly.instantiate to inject our wasmsh sentinel and
- * network fetch stubs, then restore it after boot. This avoids reimplementing
- * Pyodide's stdlib mounting, lockfile handling, and module initialization.
  */
 async function boot(baseUrl) {
   await ensureHelperModules();
@@ -190,28 +186,6 @@ async function boot(baseUrl) {
   // Dynamic import of pyodide.mjs works in classic workers (same as our
   // helper module imports above).
   const { loadPyodide } = await import(`${assetBaseUrl}/pyodide.mjs`);
-
-  // Patch WebAssembly.instantiate to inject wasmsh imports
-  const origInstantiate = WebAssembly.instantiate;
-  const SENTINEL_MARKER = {};
-  WebAssembly.instantiate = async function (binary, imports) {
-    if (imports) {
-      if (!imports.sentinel) {
-        imports.sentinel = {
-          create_sentinel: () => SENTINEL_MARKER,
-          is_sentinel: (value) => (value === SENTINEL_MARKER ? 1 : 0),
-        };
-      }
-      if (!imports.env) imports.env = {};
-      if (!imports.env.wasmsh_js_http_fetch || imports.env.wasmsh_js_http_fetch.stub) {
-        imports.env.wasmsh_js_http_fetch = (...args) => {
-          if (!moduleRef) return 0;
-          return createNetworkStubs(moduleRef).wasmsh_js_http_fetch(...args);
-        };
-      }
-    }
-    return origInstantiate.call(this, binary, imports);
-  };
 
   let pyodide;
   try {
@@ -225,7 +199,7 @@ async function boot(baseUrl) {
       stderr: () => {},
     });
   } finally {
-    WebAssembly.instantiate = origInstantiate;
+    // No global boot-time monkey patches to clean up.
   }
 
   const module = pyodide._module;
@@ -236,55 +210,6 @@ async function boot(baseUrl) {
   moduleRef = module;
   pyodideRef = pyodide;
   module.FS.mkdirTree("/workspace");
-
-  // Pre-load micropip
-  try {
-    await pyodide.loadPackage("micropip");
-  } catch {
-    // micropip not available — not fatal
-  }
-
-  // Pre-load sqlite3 — an unvendored cpython_module in Pyodide 0.28+.
-  // Loading it here keeps the sandbox offline-capable for the stdlib.
-  try {
-    await pyodide.loadPackage("sqlite3");
-  } catch {
-    // Older Pyodide versions ship sqlite3 in python_stdlib.zip.
-  }
-
-  // Pre-load pyyaml — agents frequently use `import yaml`.
-  try {
-    await pyodide.loadPackage("pyyaml");
-  } catch {
-    // not available — not fatal
-  }
-
-  // Pre-load beautifulsoup4 — agents frequently use it for HTML parsing.
-  try {
-    await pyodide.loadPackage("beautifulsoup4");
-  } catch {
-    // not available — not fatal
-  }
-
-  // Pre-install packages needed for Gemini sandbox compatibility that are
-  // not bundled in the Pyodide distribution.  micropip fetches pure-Python
-  // wheels from PyPI and wasm32 wheels from the Pyodide CDN at runtime.
-  try {
-    const micropip = pyodide.pyimport("micropip");
-    await micropip.install([
-      "fpdf2",        // PDF generation (provides `from fpdf import FPDF`)
-      "openpyxl",     // Excel .xlsx read/write
-      "python-docx",  // Word .docx generation
-      "python-pptx",  // PowerPoint .pptx generation
-      "reportlab",    // PDF generation (wasm32 wheel via Pyodide CDN)
-      "seaborn",      // statistical visualization
-      "striprtf",     // RTF text extraction
-      "tabulate",     // table formatting
-    ]);
-  } catch {
-    // Network unavailable or package not found — not fatal.
-    // Agents can still `pip install` individually at runtime.
-  }
 
   module._pyodide = pyodide;
   runtimeBridge = runtimeBridgeModule().createRuntimeBridge(module);

@@ -18,6 +18,7 @@ members = [
     "crates/wasmsh-component",
     "crates/wasmsh-json-bridge",
     "crates/wasmsh-protocol",
+    "crates/wasmsh-dispatcher",
     "crates/wasmsh-testkit",
 ]
 
@@ -107,6 +108,7 @@ wasmsh-browser = { version = "0.5.9", path = "crates/wasmsh-browser" }
 wasmsh-component = { version = "0.5.9", path = "crates/wasmsh-component" }
 wasmsh-json-bridge = { version = "0.5.9", path = "crates/wasmsh-json-bridge" }
 wasmsh-protocol = { version = "0.5.9", path = "crates/wasmsh-protocol" }
+wasmsh-dispatcher = { version = "0.5.9", path = "crates/wasmsh-dispatcher" }
 wasmsh-testkit = { version = "0.5.9", path = "crates/wasmsh-testkit" }
 
 # ── Workspace Lints ──────────────────────────────────────────

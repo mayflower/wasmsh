@@ -35,6 +35,31 @@ if (!SKIP) {
   ({ createNodeSession } = await import(resolve(PKG_DIR, "index.js")));
 }
 
+async function listenOnLoopbackOrSkip(t, server) {
+  try {
+    return await new Promise((resolvePort, reject) => {
+      const onError = (error) => {
+        server.off("listening", onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        server.off("error", onError);
+        resolvePort(server.address().port);
+      };
+
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(0, "127.0.0.1");
+    });
+  } catch (error) {
+    if (error?.code === "EPERM") {
+      t.skip("local TCP listen is not permitted in this environment");
+      return null;
+    }
+    throw error;
+  }
+}
+
 describe("installPythonPackages (Node)", () => {
   const openSession = SKIP ? null : createSessionTracker(createNodeSession, ASSETS_DIR);
 
@@ -228,15 +253,18 @@ describe("installPythonPackages (Node)", () => {
   it(
     "installs a wheel from HTTP URL via local server",
     { skip: SKIP, timeout: 120_000 },
-    async () => {
+    async (t) => {
       // Start a local HTTP server serving the wheel fixture
       const wheelBytes = readFileSync(WHEEL_PATH);
       const server = http.createServer((req, res) => {
         res.writeHead(200, { "Content-Type": "application/octet-stream" });
         res.end(wheelBytes);
       });
-      await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
-      const port = server.address().port;
+      const port = await listenOnLoopbackOrSkip(t, server);
+      if (port === null) {
+        server.close();
+        return;
+      }
 
       try {
         const session = await openSession({

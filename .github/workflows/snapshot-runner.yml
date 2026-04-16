@@ -1,0 +1,60 @@
+name: Snapshot Runner
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/snapshot-runner.yml"
+      - "tools/pyodide/**"
+      - "tools/runner-node/**"
+      - "packages/npm/wasmsh-pyodide/**"
+      - "e2e/build-contract/**"
+      - "justfile"
+  pull_request:
+    paths:
+      - ".github/workflows/snapshot-runner.yml"
+      - "tools/pyodide/**"
+      - "tools/runner-node/**"
+      - "packages/npm/wasmsh-pyodide/**"
+      - "e2e/build-contract/**"
+      - "justfile"
+
+jobs:
+  snapshot-artifact:
+    runs-on: mayflower-k8s-runners
+    timeout-minutes: 45
+    env:
+      SNAPSHOT_ARTIFACT_REF: ghcr.io/mayflower/wasmsh-snapshot@sha256:1111111111111111111111111111111111111111111111111111111111111111
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-emscripten
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: extractions/setup-just@v2
+
+      - name: Build Pyodide runtime
+        run: just build-pyodide
+
+      - name: Build immutable snapshot layout
+        run: just build-snapshot
+
+      - name: Verify snapshot artifact contract
+        run: node --test e2e/build-contract/tests/snapshot-oci-artifact.test.mjs
+
+      - name: Upload snapshot manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasmsh-snapshot-layout
+          path: |
+            dist/pyodide-snapshot/snapshot.manifest.json
+            dist/pyodide-snapshot/memory.bin.zst
+            dist/pyodide-snapshot/jsrefs.json
+            dist/pyodide-snapshot/table.json
+            dist/pyodide-snapshot/selftest.json
+            dist/pyodide-snapshot/sbom.json

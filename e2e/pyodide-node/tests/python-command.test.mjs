@@ -6,10 +6,24 @@
  */
 import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { extractStream } from "../../../packages/npm/wasmsh-pyodide/lib/protocol.mjs";
 
-const SKIP = process.env.SKIP_PYODIDE === "1";
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PKG_DIR = resolve(__dirname, "../../../packages/npm/wasmsh-pyodide");
+const ASSETS_DIR = resolve(PKG_DIR, "assets");
+
+const SKIP =
+  process.env.SKIP_PYODIDE === "1" ||
+  !existsSync(resolve(ASSETS_DIR, "pyodide.asm.wasm"));
+
+let createNodeSession;
+if (!SKIP) {
+  ({ createNodeSession } = await import(resolve(PKG_DIR, "index.js")));
+}
 
 function decodeStdout(events) {
   const bytes = extractStream(events, "Stdout");
@@ -83,12 +97,13 @@ EOF` },
     assert.equal(exit.Exit, 0);
   });
 
-  // ── sqlite3 stdlib: create, insert, query ────────────────
-  // Regression test for a missing sqlite3 wheel in bundled assets.
-  // sqlite3 is an unvendored cpython_module in Pyodide 0.28+; the
-  // runtime must ship the wheel or `import sqlite3` fails offline.
+  // ── sqlite3 bundled wheel: create, insert, query ─────────
+  // sqlite3 is shipped as a bundled offline wheel in this runtime, not
+  // as an eagerly-importable baseline module. Install it first, then
+  // verify end-to-end DB usage works offline.
 
-  it("python3 can use sqlite3 stdlib end-to-end", { skip: SKIP, timeout: 60_000 }, async () => {
+  it("python3 can use bundled sqlite3 end-to-end", { skip: SKIP, timeout: 60_000 }, async () => {
+    const session = await createNodeSession({ assetDir: ASSETS_DIR });
     const script = `python3 <<'EOF'
 import sqlite3
 conn = sqlite3.connect(":memory:")
@@ -102,14 +117,21 @@ cur.execute("SELECT name FROM t ORDER BY id DESC LIMIT 1")
 print("last:", cur.fetchone()[0])
 conn.close()
 EOF`;
-    const events = await adapter.send({ Run: { input: script } });
-    const stdout = decodeStdout(events);
-    const stderr = decodeStderr(events);
-    assert.ok(
-      stdout?.includes("count: 3") && stdout?.includes("last: c"),
-      `stdout: ${stdout} | stderr: ${stderr}`,
-    );
-    const exit = events.find((e) => "Exit" in e);
-    assert.equal(exit.Exit, 0, `stderr: ${stderr}`);
+
+    try {
+      await session.installPythonPackages("sqlite3");
+      const result = await session.run(script);
+      assert.equal(
+        result.exitCode,
+        0,
+        `stdout: ${result.stdout} | stderr: ${result.stderr}`,
+      );
+      assert.ok(
+        result.stdout.includes("count: 3") && result.stdout.includes("last: c"),
+        `stdout: ${result.stdout} | stderr: ${result.stderr}`,
+      );
+    } finally {
+      await session.close();
+    }
   });
 });

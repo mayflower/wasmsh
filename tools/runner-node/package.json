@@ -1,0 +1,5 @@
+{
+  "name": "wasmsh-runner-node",
+  "private": true,
+  "type": "module"
+}

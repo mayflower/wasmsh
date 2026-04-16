@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wasmsh-runner
+  labels:
+    app.kubernetes.io/name: wasmsh-runner
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wasmsh-runner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wasmsh-runner
+    spec:
+      containers:
+        - name: runner
+          image: ghcr.io/mayflower/wasmsh-runner@sha256:2222222222222222222222222222222222222222222222222222222222222222
+          imagePullPolicy: IfNotPresent
+          command: ["node", "tools/runner-node/src/server.mjs"]
+          ports:
+            - containerPort: 8787
+              name: http
+          env:
+            - name: PORT
+              value: "8787"
+            - name: WASMSH_RESTORE_SLOTS
+              value: "4"
+            - name: WASMSH_SNAPSHOT_REF
+              value: ghcr.io/mayflower/wasmsh-snapshot@sha256:1111111111111111111111111111111111111111111111111111111111111111
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10

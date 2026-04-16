@@ -1670,6 +1670,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasmsh-dispatcher"
+version = "0.5.9"
+dependencies = [
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "wasmsh-expand"
 version = "0.5.9"
 dependencies = [

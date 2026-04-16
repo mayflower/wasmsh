@@ -28,6 +28,22 @@ function findExitCode(events) {
   return getExitCode(events);
 }
 
+async function ensureExternalHttpsReachable(t, url) {
+  try {
+    const response = await fetch(url, {
+      redirect: "follow",
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (response.status >= 500) {
+      throw new Error(`unexpected status ${response.status}`);
+    }
+    return true;
+  } catch (error) {
+    t.skip(`external network is unavailable for ${url}: ${error.message}`);
+    return false;
+  }
+}
+
 describe("network allowlist security (Pyodide Node)", () => {
   const adapters = [];
 
@@ -61,7 +77,10 @@ describe("network allowlist security (Pyodide Node)", () => {
   it(
     "curl to allowed host (mayflower.de) succeeds",
     { skip: SKIP, timeout: 60_000 },
-    async () => {
+    async (t) => {
+      if (!(await ensureExternalHttpsReachable(t, "https://mayflower.de"))) {
+        return;
+      }
       const adapter = await createAdapter(["mayflower.de"]);
       const events = await adapter.send({
         Run: { input: "curl -sL https://mayflower.de" },
@@ -78,7 +97,10 @@ describe("network allowlist security (Pyodide Node)", () => {
   it(
     "wget to allowed host (mayflower.de) succeeds",
     { skip: SKIP, timeout: 60_000 },
-    async () => {
+    async (t) => {
+      if (!(await ensureExternalHttpsReachable(t, "https://mayflower.de"))) {
+        return;
+      }
       const adapter = await createAdapter(["mayflower.de"]);
       const events = await adapter.send({
         Run: { input: "wget -qO - https://mayflower.de" },
@@ -166,7 +188,10 @@ describe("network allowlist security (Pyodide Node)", () => {
   it(
     "wildcard *.mayflower.de allows base domain but blocks others",
     { skip: SKIP, timeout: 60_000 },
-    async () => {
+    async (t) => {
+      if (!(await ensureExternalHttpsReachable(t, "https://mayflower.de"))) {
+        return;
+      }
       const adapter = await createAdapter(["*.mayflower.de"]);
       const events = await adapter.send({
         Run: { input: "curl -sL https://mayflower.de" },
@@ -210,7 +235,10 @@ describe("network allowlist security (Pyodide Node)", () => {
   it(
     "curl piped to wc works with allowed host",
     { skip: SKIP, timeout: 60_000 },
-    async () => {
+    async (t) => {
+      if (!(await ensureExternalHttpsReachable(t, "https://mayflower.de"))) {
+        return;
+      }
       const adapter = await createAdapter(["mayflower.de"]);
       const events = await adapter.send({
         Run: { input: "curl -sL https://mayflower.de | wc -l" },

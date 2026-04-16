@@ -1,13 +1,7 @@
-import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { readFileSync, readdirSync } from "node:fs";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
-
-// Polyfill CJS globals for Deno — Emscripten's pyodide.asm.js expects them.
-if (typeof globalThis.require === "undefined") {
-  globalThis.require = createRequire(import.meta.url);
-}
 
 import { createFullModule } from "./lib/node-module.mjs";
 import { installPackages, handlePipCommand } from "./lib/install.mjs";
@@ -212,6 +206,7 @@ async function main() {
       const result = await host[method](request.params ?? {});
       process.stdout.write(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
       if (method === "close") {
+        rl.close();
         break;
       }
     } catch (error) {
@@ -224,6 +219,8 @@ async function main() {
       );
     }
   }
+
+  rl.close();
 }
 
 if (fileURLToPath(import.meta.url) === process.argv[1]) {

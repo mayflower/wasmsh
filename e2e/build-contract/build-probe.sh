@@ -43,7 +43,7 @@ echo "Building wasmsh-pyodide-probe for wasm32-unknown-emscripten..."
 cargo build \
     --manifest-path "$REPO_ROOT/crates/wasmsh-pyodide-probe/Cargo.toml" \
     --target wasm32-unknown-emscripten \
-    --locked \
+    --offline \
     --release
 
 ARTIFACT="$REPO_ROOT/crates/wasmsh-pyodide-probe/target/wasm32-unknown-emscripten/release/libwasmsh_pyodide_probe.a"

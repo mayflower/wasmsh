@@ -1,17 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { buildBaselineBootPlan } from "./baseline/boot-plan.mjs";
+import { composeWasmImports } from "./baseline/import-composer.mjs";
+import { assertOfflineBaselineBootPlan } from "./baseline/offline-guard.mjs";
+import { captureScopedGlobals, restoreScopedGlobals } from "./baseline/sandbox-globals.mjs";
 import { createRuntimeBridge } from "./runtime-bridge.mjs";
-
-// Deno's Node compat layer exposes `process` (so Emscripten detects
-// ENVIRONMENT_IS_NODE) but does not provide CJS globals in ESM context.
-// pyodide.asm.js uses `require("fs")` in its Node path.
-if (typeof globalThis.require === "undefined") {
-  globalThis.require = createRequire(import.meta.url);
-}
 
 const fetchHelperPath = resolve(
   new URL(".", import.meta.url).pathname,
@@ -71,78 +68,84 @@ function createNetworkStubsNode(moduleRef) {
   };
 }
 
-// Module reference for network fetch closure. Set in createFullModule().
-let _nodeModuleRef = null;
+function createScopedInstantiateWasm(fetchHandlerSync, moduleRefAccessor) {
+  const SENTINEL_MARKER = Symbol("wasmsh-sentinel");
+  return (info, successCallback) => {
+    const imports = composeWasmImports({
+      imports: info,
+      env: {
+        wasmsh_js_http_fetch: (...args) => {
+          const moduleRef = moduleRefAccessor();
+          if (!moduleRef) {
+            return 0;
+          }
+          return createNetworkStubsNode(moduleRef, fetchHandlerSync).wasmsh_js_http_fetch(...args);
+        },
+      },
+      sentinel: {
+        create_sentinel: () => SENTINEL_MARKER,
+        is_sentinel: (value) => (value === SENTINEL_MARKER ? 1 : 0),
+      },
+    });
+    const wasmBytes = readFileSync(resolve(globalThis.__dirname, "pyodide.asm.wasm"));
+    WebAssembly.instantiate(wasmBytes, imports).then(
+      ({ instance, module }) => successCallback(instance, module),
+    );
+    return {};
+  };
+}
 
-/**
- * Boot via Pyodide's standard `loadPyodide()` to get the full API
- * (runPythonAsync, loadPackage, pyimport, micropip support).
- *
- * We monkey-patch WebAssembly.instantiate to inject our wasmsh network
- * stubs and sentinel imports, then restore it after boot.
- */
-export async function createFullModule(distDir) {
+async function loadModuleWithBaseline(distDir, {
+  snapshotBytes = null,
+  fetchHandlerSync = syncHttpFetchNode,
+  makeSnapshot = false,
+} = {}) {
+  const bootPlan = assertOfflineBaselineBootPlan(
+    buildBaselineBootPlan({ assetDir: distDir }),
+  );
+
   // Polyfill __dirname/__filename for Deno — pyodide.asm.js needs them to
   // resolve its own location. Must point to the assets dir, not this module.
-  const savedDirname = globalThis.__dirname;
-  const savedFilename = globalThis.__filename;
+  const savedGlobals = captureScopedGlobals(["__dirname", "__filename", "require"]);
   globalThis.__dirname = distDir;
   globalThis.__filename = resolve(distDir, "pyodide.asm.js");
 
-  // Under Deno, pyodide.mjs's nodeLoadScript uses import() which loads
-  // pyodide.asm.js as ESM — but the glue is CJS and calls require("fs").
-  // Pre-load it via createRequire so _createPyodideModule is already
-  // defined as a global, skipping nodeLoadScript entirely.
-  if (IS_DENO && typeof globalThis._createPyodideModule === "undefined") {
-    const denoRequire = createRequire(resolve(distDir, "package.json"));
-    denoRequire("./pyodide.asm.js");
+  const requireForAssets = createRequire(resolve(distDir, "package.json"));
+  requireForAssets("./pyodide.asm.js");
+  const originalFactory = globalThis._createPyodideModule;
+  if (typeof originalFactory !== "function") {
+    throw new Error("_createPyodideModule not found");
   }
+  let moduleRef = null;
+  globalThis._createPyodideModule = (settings) => originalFactory({
+    ...settings,
+    instantiateWasm: createScopedInstantiateWasm(fetchHandlerSync, () => moduleRef),
+  });
 
-  // Import loadPyodide from the packaged pyodide.mjs
   const pyodideMjs = resolve(distDir, "pyodide.mjs");
   const { loadPyodide } = await import(pathToFileURL(pyodideMjs).href);
-
-  // Patch WebAssembly.instantiate to inject wasmsh imports
-  const origInstantiate = WebAssembly.instantiate;
-  const SENTINEL_MARKER = Symbol("wasmsh-sentinel");
-  WebAssembly.instantiate = async function (binary, imports) {
-    if (imports) {
-      // Inject sentinel stubs
-      if (!imports.sentinel) {
-        imports.sentinel = {
-          create_sentinel: () => SENTINEL_MARKER,
-          is_sentinel: (value) => (value === SENTINEL_MARKER ? 1 : 0),
-        };
-      }
-      // Inject wasmsh network fetch (replace Emscripten stubs too)
-      if (!imports.env) imports.env = {};
-      if (!imports.env.wasmsh_js_http_fetch || imports.env.wasmsh_js_http_fetch.stub) {
-        imports.env.wasmsh_js_http_fetch = (...args) => {
-          if (!_nodeModuleRef) return 0;
-          return createNetworkStubsNode(_nodeModuleRef).wasmsh_js_http_fetch(...args);
-        };
-      }
-    }
-    return origInstantiate.call(this, binary, imports);
-  };
 
   let pyodide;
   try {
     pyodide = await loadPyodide({
-      indexURL: distDir + "/",
+      indexURL: `${bootPlan.assetDir}/`,
       // Suppress prompts and version check (our build ID won't match CDN)
       checkAPIVersion: false,
       _sysExecutable: "wasmsh-pyodide",
       args: [],
-      env: { HOME: "/workspace", PYTHONHOME: "/" },
+      env: {
+        HOME: "/workspace",
+        PYTHONHOME: "/",
+        PYTHONHASHSEED: "0",
+      },
       stdout: () => {},
       stderr: () => {},
+      ...(makeSnapshot ? { _makeSnapshot: true } : {}),
+      ...(snapshotBytes ? { _loadSnapshot: snapshotBytes } : {}),
     });
   } finally {
-    // Restore original WebAssembly.instantiate and CJS globals
-    WebAssembly.instantiate = origInstantiate;
-    globalThis.__dirname = savedDirname;
-    globalThis.__filename = savedFilename;
+    globalThis._createPyodideModule = originalFactory;
+    restoreScopedGlobals(savedGlobals);
   }
 
   // The underlying Emscripten module is accessible via pyodide._module
@@ -151,65 +154,24 @@ export async function createFullModule(distDir) {
     throw new Error("Pyodide module ccall not available");
   }
 
-  _nodeModuleRef = module;
+  moduleRef = module;
   module.FS.mkdirTree("/workspace");
 
-  // Pre-load micropip so `import micropip` works immediately.
-  // The wheel file is in the assets dir and indexed in pyodide-lock.json.
-  try {
-    await pyodide.loadPackage("micropip");
-  } catch {
-    // micropip not available in this dist — not fatal
-  }
-
-  // Pre-load sqlite3 — it's an unvendored cpython_module in Pyodide
-  // 0.28+, so `import sqlite3` would otherwise fault to the CDN on
-  // first use.  Loading it here keeps the sandbox offline-capable for
-  // the Python stdlib surface that agents expect.
-  try {
-    await pyodide.loadPackage("sqlite3");
-  } catch {
-    // Older Pyodide distributions ship sqlite3 in python_stdlib.zip
-    // and have no "sqlite3" lockfile entry; this is fine.
-  }
-
-  // Pre-load pyyaml — agents frequently use `import yaml` for YAML
-  // processing.  The whl is in pyodide-lock.json.
-  try {
-    await pyodide.loadPackage("pyyaml");
-  } catch {
-    // pyyaml not available in this dist — not fatal
-  }
-
-  // Pre-load beautifulsoup4 — agents frequently use it for HTML parsing.
-  try {
-    await pyodide.loadPackage("beautifulsoup4");
-  } catch {
-    // not available — not fatal
-  }
-
-  // Pre-install packages needed for Gemini sandbox compatibility that are
-  // not bundled in the Pyodide distribution.  micropip fetches pure-Python
-  // wheels from PyPI and wasm32 wheels from the Pyodide CDN at runtime.
-  try {
-    const micropip = pyodide.pyimport("micropip");
-    await micropip.install([
-      "fpdf2",        // PDF generation (provides `from fpdf import FPDF`)
-      "openpyxl",     // Excel .xlsx read/write
-      "python-docx",  // Word .docx generation
-      "python-pptx",  // PowerPoint .pptx generation
-      "reportlab",    // PDF generation (wasm32 wheel via Pyodide CDN)
-      "seaborn",      // statistical visualization
-      "striprtf",     // RTF text extraction
-      "tabulate",     // table formatting
-    ]);
-  } catch {
-    // Network unavailable or package not found — not fatal.
-    // Agents can still `pip install` individually at runtime.
-  }
-
-  // Attach the pyodide API to the module so the host can use it
   module._pyodide = pyodide;
   createRuntimeBridge(module);
   return module;
+}
+
+export async function createFullModule(distDir, options = {}) {
+  return loadModuleWithBaseline(distDir, options);
+}
+
+export async function createRestoredModuleFromSnapshot(distDir, snapshotBytes, options = {}) {
+  if (!snapshotBytes) {
+    throw new Error("snapshotBytes are required");
+  }
+  return loadModuleWithBaseline(distDir, {
+    ...options,
+    snapshotBytes,
+  });
 }

@@ -79,6 +79,11 @@ class NodeSession extends RequestClient {
     let nextId = 1;
     const pending = new Map();
     const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+    let exited = false;
+    let exitResolve;
+    const exitPromise = new Promise((resolve) => {
+      exitResolve = resolve;
+    });
 
     rl.on("line", (line) => {
       if (!line.trim()) {
@@ -111,6 +116,8 @@ class NodeSession extends RequestClient {
     });
 
     child.on("exit", (code) => {
+      exited = true;
+      exitResolve(code);
       if (pending.size === 0) {
         return;
       }
@@ -122,6 +129,7 @@ class NodeSession extends RequestClient {
     });
 
     let closed = false;
+    let closePromise = null;
 
     super((method, params) => {
       if (closed) {
@@ -137,20 +145,53 @@ class NodeSession extends RequestClient {
 
     this._child = child;
     this._rl = rl;
+    this._exitPromise = exitPromise;
+    this._hasExited = () => exited;
     this._setClosed = () => { closed = true; };
+    this._setClosePromise = (promise) => {
+      closePromise = promise;
+    };
+    this._getClosePromise = () => closePromise;
   }
 
   async close() {
-    try {
-      await this._sendRaw("close", {});
-    } finally {
-      this._setClosed();
-      this._rl.close();
-      this._child.stdin.end();
-      if (!this._child.killed) {
-        this._child.kill();
-      }
+    const existing = this._getClosePromise();
+    if (existing) {
+      return existing;
     }
+
+    const closePromise = (async () => {
+      try {
+        await this._sendRaw("close", {});
+      } finally {
+        this._setClosed();
+        this._rl.close();
+        this._child.stdin.end();
+
+        if (!this._hasExited() && !this._child.killed) {
+          this._child.kill();
+        }
+
+        const waitForExit = (timeoutMs) =>
+          Promise.race([
+            this._exitPromise,
+            new Promise((resolve) => {
+              const timeoutId = setTimeout(resolve, timeoutMs);
+              timeoutId.unref?.();
+            }),
+          ]);
+
+        await waitForExit(1_000);
+
+        if (!this._hasExited()) {
+          this._child.kill("SIGKILL");
+          await waitForExit(1_000);
+        }
+      }
+    })();
+
+    this._setClosePromise(closePromise);
+    return closePromise;
   }
 }
 
