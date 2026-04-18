@@ -1,0 +1,82 @@
+{{- if .Values.dispatcher.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "wasmsh.componentName" (dict "root" . "component" "dispatcher") }}
+  labels:
+    {{- include "wasmsh.componentLabels" (dict "root" . "component" "dispatcher") | nindent 4 }}
+spec:
+  replicas: {{ .Values.dispatcher.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "wasmsh.componentSelectorLabels" (dict "root" . "component" "dispatcher") | nindent 6 }}
+  strategy:
+    {{- toYaml .Values.dispatcher.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "wasmsh.componentSelectorLabels" (dict "root" . "component" "dispatcher") | nindent 8 }}
+        {{- with .Values.dispatcher.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.dispatcher.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.dispatcher.terminationGracePeriodSeconds }}
+      {{- with .Values.dispatcher.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.dispatcher.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.dispatcher.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.dispatcher.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.dispatcher.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.dispatcher.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: dispatcher
+          image: {{ include "wasmsh.image" .Values.dispatcher.image }}
+          imagePullPolicy: {{ .Values.dispatcher.image.pullPolicy }}
+          {{- with .Values.dispatcher.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.dispatcher.port }}
+          env:
+            - name: HOST
+              value: {{ .Values.dispatcher.host | quote }}
+            - name: PORT
+              value: {{ .Values.dispatcher.port | quote }}
+            - name: RUNNER_SERVICE_URLS
+              value: {{ include "wasmsh.runnerServiceUrl" . | quote }}
+            {{- with .Values.dispatcher.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.dispatcher.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.dispatcher.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.dispatcher.resources | nindent 12 }}
+{{- end }}

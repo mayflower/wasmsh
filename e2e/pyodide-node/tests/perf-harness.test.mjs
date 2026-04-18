@@ -22,12 +22,17 @@ describe("pyodide node perf harness", () => {
     const report = await runSessionBenchmark({
       assetDir: ASSETS_DIR,
       warmup: 0,
-      samples: 2,
+      samples: 1,
+      concurrency: 2,
     });
 
     assert.equal(report.suite, "pyodide-node-session");
     assert.equal(report.measurements.length, 2);
+    assert.equal(report.concurrency, 2);
+    assert.equal(report.totalSessions, 2);
     assert.equal(report.metrics.initMs.count, 2);
+    assert.equal(report.batchMetrics.batchDurationMs.count, 1);
+    assert.equal(report.batches.length, 1);
 
     for (const sample of report.measurements) {
       assert.equal(sample.checks.shellExitCode, 0);
@@ -44,6 +49,7 @@ describe("pyodide node perf harness", () => {
     const written = JSON.parse(readFileSync(writtenPath, "utf-8"));
     assert.equal(written.measurements.length, 2);
     assert.equal(written.metrics.firstPythonMs.count, 2);
+    assert.equal(written.batchMetrics.batchDurationMs.count, 1);
   });
 
   it("enforces optional thresholds when requested", () => {

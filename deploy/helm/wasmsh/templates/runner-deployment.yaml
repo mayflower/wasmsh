@@ -1,0 +1,98 @@
+{{- if .Values.runner.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "wasmsh.componentName" (dict "root" . "component" "runner") }}
+  labels:
+    {{- include "wasmsh.componentLabels" (dict "root" . "component" "runner") | nindent 4 }}
+spec:
+  replicas: {{ .Values.runner.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "wasmsh.componentSelectorLabels" (dict "root" . "component" "runner") | nindent 6 }}
+  strategy:
+    {{- toYaml .Values.runner.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "wasmsh.componentSelectorLabels" (dict "root" . "component" "runner") | nindent 8 }}
+        {{- with .Values.runner.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.runner.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.runner.terminationGracePeriodSeconds }}
+      {{- with .Values.runner.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.runner.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runner.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runner.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runner.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runner.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: runner
+          image: {{ include "wasmsh.image" .Values.runner.image }}
+          imagePullPolicy: {{ .Values.runner.image.pullPolicy }}
+          command:
+            {{- toYaml .Values.runner.command | nindent 12 }}
+          {{- with .Values.runner.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.runner.port }}
+          env:
+            - name: HOST
+              value: {{ .Values.runner.host | quote }}
+            - name: PORT
+              value: {{ .Values.runner.port | quote }}
+            - name: WASMSH_RESTORE_SLOTS
+              value: {{ .Values.runner.restoreSlots | quote }}
+            - name: WASMSH_STARTUP_WARM_RESTORES
+              value: {{ .Values.runner.startupWarmRestores | quote }}
+            - name: WASMSH_WORKER_MAX_OLD_GENERATION_MB
+              value: {{ .Values.runner.workerResourceLimits.maxOldGenerationMb | quote }}
+            - name: WASMSH_WORKER_MAX_YOUNG_GENERATION_MB
+              value: {{ .Values.runner.workerResourceLimits.maxYoungGenerationMb | quote }}
+            - name: WASMSH_WORKER_STACK_MB
+              value: {{ .Values.runner.workerResourceLimits.stackMb | quote }}
+            - name: WASMSH_WORKER_CODE_RANGE_MB
+              value: {{ .Values.runner.workerResourceLimits.codeRangeMb | quote }}
+            - name: WASMSH_FETCH_BROKER_REQUEST_BYTES
+              value: {{ .Values.runner.fetchBroker.requestBytes | quote }}
+            - name: WASMSH_FETCH_BROKER_RESPONSE_BYTES
+              value: {{ .Values.runner.fetchBroker.responseBytes | quote }}
+            {{- with .Values.runner.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.runner.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.runner.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.runner.resources | nindent 12 }}
+{{- end }}

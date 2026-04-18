@@ -1,0 +1,28 @@
+{{- if and .Values.runner.enabled .Values.monitoring.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "wasmsh.componentName" (dict "root" . "component" "runner") }}
+  namespace: {{ default .Release.Namespace .Values.monitoring.serviceMonitor.namespace }}
+  labels:
+    {{- include "wasmsh.componentLabels" (dict "root" . "component" "runner") | nindent 4 }}
+    {{- with .Values.monitoring.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "wasmsh.componentSelectorLabels" (dict "root" . "component" "runner") | nindent 6 }}
+  {{- with .Values.monitoring.serviceMonitor.targetLabels }}
+  targetLabels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.monitoring.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout }}
+{{- end }}

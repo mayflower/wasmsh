@@ -58,6 +58,13 @@ export function buildSummary(samples) {
   };
 }
 
+export function buildBatchSummary(batches) {
+  return {
+    batchDurationMs: summarizeSamples(batches, "batchDurationMs"),
+    throughputSessionsPerSec: summarizeSamples(batches, "throughputSessionsPerSec"),
+  };
+}
+
 async function timeAsync(fn) {
   const started = performance.now();
   const result = await fn();
@@ -111,6 +118,8 @@ export async function collectSessionSample(options = {}) {
     closeMs = closeTiming.durationMs;
 
     return {
+      batchIndex: options.batchIndex ?? 0,
+      slot: options.slot ?? 0,
       spawnMs,
       initMs: initTiming.durationMs,
       firstShellMs: shellTiming.durationMs,
@@ -144,23 +153,48 @@ export async function collectSessionSample(options = {}) {
   }
 }
 
+async function collectBatch(options = {}, batchIndex = 0) {
+  const concurrency = Math.max(1, options.concurrency ?? 1);
+  const started = performance.now();
+  const measurements = await Promise.all(
+    Array.from({ length: concurrency }, (_, slot) =>
+      collectSessionSample({
+        ...options,
+        batchIndex,
+        slot,
+      }),
+    ),
+  );
+  const batchDurationMs = performance.now() - started;
+  return {
+    batchIndex,
+    batchDurationMs,
+    throughputSessionsPerSec: (concurrency * 1000) / Math.max(batchDurationMs, 1),
+    measurements,
+  };
+}
+
 export async function runSessionBenchmark(options = {}) {
   const warmup = options.warmup ?? 1;
   const samples = options.samples ?? 5;
+  const concurrency = Math.max(1, options.concurrency ?? 1);
 
   for (let i = 0; i < warmup; i += 1) {
-    await collectSessionSample(options);
+    await collectBatch(options, i);
   }
 
-  const measurements = [];
+  const batches = [];
   for (let i = 0; i < samples; i += 1) {
-    measurements.push(await collectSessionSample(options));
+    batches.push(await collectBatch(options, i));
   }
+  const measurements = batches.flatMap((batch) => batch.measurements);
 
   return {
     suite: "pyodide-node-session",
+    concurrency,
     samples,
     warmup,
+    totalSessions: measurements.length,
     nodeExecutable: options.nodeExecutable ?? process.execPath,
     assetDir: options.assetDir ?? resolveAssetPath(),
     commands: {
@@ -169,6 +203,8 @@ export async function runSessionBenchmark(options = {}) {
     },
     recordedAt: new Date().toISOString(),
     metrics: buildSummary(measurements),
+    batchMetrics: buildBatchSummary(batches),
+    batches,
     measurements,
   };
 }

@@ -1,0 +1,69 @@
+dispatcher:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: "1"
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: dispatcher
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: dispatcher
+
+runner:
+  replicaCount: 6
+  restoreSlots: 4
+  startupWarmRestores: 2
+  resources:
+    requests:
+      cpu: "12"
+      memory: 24Gi
+    limits:
+      cpu: "16"
+      memory: 32Gi
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: runner
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: runner
+
+autoscaling:
+  minReplicas: 6
+  maxReplicas: 12
+  metric:
+    averageValue: "2"
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+  prometheusRule:
+    enabled: true
+    restoreP95ThresholdMs: 250
+    queueDepthThreshold: 8
+    failureCountThreshold: 1
+

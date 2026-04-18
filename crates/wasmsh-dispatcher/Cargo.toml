@@ -12,8 +12,16 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+anyhow = "1"
+axum = { version = "0.7", features = ["http1", "json", "tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
 
 [lints]
 workspace = true

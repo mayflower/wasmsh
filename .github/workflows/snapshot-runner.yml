@@ -53,7 +53,7 @@ jobs:
           name: wasmsh-snapshot-layout
           path: |
             dist/pyodide-snapshot/snapshot.manifest.json
-            dist/pyodide-snapshot/memory.bin.zst
+            dist/pyodide-snapshot/memory.bin
             dist/pyodide-snapshot/jsrefs.json
             dist/pyodide-snapshot/table.json
             dist/pyodide-snapshot/selftest.json

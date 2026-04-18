@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: wasmsh-runner-headless
+  labels:
+    app.kubernetes.io/name: wasmsh-runner
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: wasmsh-runner
+  ports:
+    - name: http
+      port: 8787
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wasmsh-dispatcher
+  labels:
+    app.kubernetes.io/name: wasmsh-dispatcher
+spec:
+  selector:
+    app.kubernetes.io/name: wasmsh-dispatcher
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

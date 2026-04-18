@@ -1,0 +1,27 @@
+{{- if and .Values.dispatcher.enabled .Values.dispatcher.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "wasmsh.componentName" (dict "root" . "component" "dispatcher") }}
+  labels:
+    {{- include "wasmsh.componentLabels" (dict "root" . "component" "dispatcher") | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.dispatcher.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "wasmsh.componentSelectorLabels" (dict "root" . "component" "dispatcher") | nindent 6 }}
+---
+{{- end }}
+{{- if and .Values.runner.enabled .Values.runner.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "wasmsh.componentName" (dict "root" . "component" "runner") }}
+  labels:
+    {{- include "wasmsh.componentLabels" (dict "root" . "component" "runner") | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.runner.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "wasmsh.componentSelectorLabels" (dict "root" . "component" "runner") | nindent 6 }}
+{{- end }}

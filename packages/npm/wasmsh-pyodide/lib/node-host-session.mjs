@@ -1,9 +1,16 @@
 import cp from "node:child_process";
 import readline from "node:readline";
+import { mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 
 import { decodeBase64, encodeBase64 } from "./protocol.mjs";
 
 export const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+const defaultCompileCacheDir = resolve(
+  process.env.WASMSH_NODE_COMPILE_CACHE_DIR ?? tmpdir(),
+  "wasmsh-node-compile-cache",
+);
 
 function normalizeInitialFiles(initialFiles = []) {
   return initialFiles.map((file) => ({
@@ -198,10 +205,15 @@ export class NodeSession extends RequestClient {
 }
 
 export async function createNodeHostSession(options = {}) {
+  mkdirSync(defaultCompileCacheDir, { recursive: true });
   const child = cp.spawn(
     options.nodeExecutable ?? process.execPath,
     [options.hostPath, "--asset-dir", options.assetDir],
     {
+      env: {
+        ...process.env,
+        NODE_COMPILE_CACHE: process.env.NODE_COMPILE_CACHE ?? defaultCompileCacheDir,
+      },
       stdio: ["pipe", "pipe", "inherit"],
     },
   );

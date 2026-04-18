@@ -158,6 +158,14 @@ test-e2e-runner-node:
 bench-runner-restore:
     bash -lc 'NODE_BIN="${NODE_BIN:-/opt/homebrew/opt/node@22/bin/node}"; [ -x "$NODE_BIN" ] || NODE_BIN=node; cd "{{justfile_directory()}}" && "$NODE_BIN" --test tools/runner-node/bench/restore-latency.test.mjs'
 
+# Run the full scalable prompt-pack verification matrix
+verify-scalable-pack:
+    bash tools/verify-scalable-pack.sh
+
+# Validate the Helm chart
+verify-helm:
+    bash tools/verify-helm.sh
+
 # Run the Pyodide Node perf harness contract test
 test-e2e-pyodide-node-perf:
     cd {{justfile_directory()}} && node --test e2e/pyodide-node/tests/perf-harness.test.mjs
@@ -165,6 +173,10 @@ test-e2e-pyodide-node-perf:
 # Measure Pyodide Node startup and first-command latency
 bench-e2e-pyodide-node:
     cd {{justfile_directory()}} && node tools/perf/pyodide-node-session-bench.mjs
+
+# Measure scalable runner restore latency with explicit samples/concurrency controls
+bench-runner-load:
+    cd {{justfile_directory()}} && node tools/perf/runner-restore-bench.mjs
 
 # Run Pyodide browser E2E tests (Playwright)
 test-e2e-pyodide-browser:

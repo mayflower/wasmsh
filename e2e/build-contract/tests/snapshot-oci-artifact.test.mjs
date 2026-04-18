@@ -13,7 +13,8 @@ test("snapshot workflow and runtime config use immutable artifact references", (
 
   assert.match(workflow, /just build-snapshot/);
   assert.match(workflow, /snapshot\.manifest\.json/);
-  assert.match(workflow, /memory\.bin\.zst/);
+  assert.match(workflow, /memory\.bin(?!\.zst)/);
+  assert.ok(!workflow.includes("memory.bin.zst"));
   assert.match(workflow, /@sha256:/);
   assert.ok(!workflow.includes(":latest"));
 

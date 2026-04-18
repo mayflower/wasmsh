@@ -1,0 +1,23 @@
+{{- if and .Values.runner.enabled .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "wasmsh.componentName" (dict "root" . "component" "runner") }}
+  labels:
+    {{- include "wasmsh.componentLabels" (dict "root" . "component" "runner") | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "wasmsh.componentName" (dict "root" . "component" "runner") }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: {{ .Values.autoscaling.metric.type }}
+      pods:
+        metric:
+          name: {{ .Values.autoscaling.metric.name }}
+        target:
+          type: AverageValue
+          averageValue: {{ .Values.autoscaling.metric.averageValue | quote }}
+{{- end }}

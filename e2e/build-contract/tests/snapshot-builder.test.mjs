@@ -21,7 +21,7 @@ test("snapshot builder writes the canonical artifact layout deterministically", 
     assert.deepEqual(filesA, filesB);
     assert.deepEqual(filesA, [
       "jsrefs.json",
-      "memory.bin.zst",
+      "memory.bin",
       "sbom.json",
       "selftest.json",
       "snapshot.manifest.json",

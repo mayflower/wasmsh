@@ -1,0 +1,41 @@
+{{- if .Values.runner.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "wasmsh.runnerHeadlessServiceName" . }}
+  labels:
+    {{- include "wasmsh.componentLabels" (dict "root" . "component" "runner") | nindent 4 }}
+  {{- with .Values.runner.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "wasmsh.componentSelectorLabels" (dict "root" . "component" "runner") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.runner.service.port }}
+      targetPort: http
+---
+{{- end }}
+{{- if .Values.dispatcher.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "wasmsh.dispatcherServiceName" . }}
+  labels:
+    {{- include "wasmsh.componentLabels" (dict "root" . "component" "dispatcher") | nindent 4 }}
+  {{- with .Values.dispatcher.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.dispatcher.service.type }}
+  selector:
+    {{- include "wasmsh.componentSelectorLabels" (dict "root" . "component" "dispatcher") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.dispatcher.service.port }}
+      targetPort: http
+{{- end }}

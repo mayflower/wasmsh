@@ -1,9 +1,13 @@
-import { assertAllowedHost } from "./network-policy.mjs";
+import { assertAllowedHost, HostDeniedError } from "./network-policy.mjs";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 export const DEFAULT_BROKER_REQUEST_BYTES = 64 * 1024;
 export const DEFAULT_BROKER_RESPONSE_BYTES = 1024 * 1024;
+// Keep strictly below the 30 s guest-side Atomics.wait in createBrokerClient,
+// otherwise the host keeps writing a response into shared buffers after the
+// guest has already timed out and reset the control word.
+const DEFAULT_FETCH_TIMEOUT_MS = 25_000;
 
 export function createBrokerBuffers({
   requestBytes = DEFAULT_BROKER_REQUEST_BYTES,
@@ -16,9 +20,75 @@ export function createBrokerBuffers({
   };
 }
 
+async function readBodyWithLimit(response, byteLimit) {
+  const declared = Number(response.headers.get("content-length") ?? NaN);
+  if (Number.isFinite(declared) && declared > byteLimit) {
+    throw new BrokerPayloadTooLargeError(
+      `upstream Content-Length ${declared} exceeds broker body cap ${byteLimit}`,
+    );
+  }
+  const reader = response.body?.getReader();
+  if (!reader) {
+    // No stream body (e.g. HEAD response); fall back to arrayBuffer which
+    // we have already bounded via Content-Length above.
+    const buffer = new Uint8Array(await response.arrayBuffer());
+    if (buffer.byteLength > byteLimit) {
+      throw new BrokerPayloadTooLargeError(
+        `upstream body ${buffer.byteLength} exceeds broker body cap ${byteLimit}`,
+      );
+    }
+    return buffer;
+  }
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    total += value.byteLength;
+    if (total > byteLimit) {
+      await reader.cancel();
+      throw new BrokerPayloadTooLargeError(
+        `upstream body exceeded broker body cap ${byteLimit}`,
+      );
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+class BrokerPayloadTooLargeError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "BrokerPayloadTooLargeError";
+  }
+}
+
+function classifyBrokerError(error) {
+  if (error instanceof HostDeniedError) {
+    return "host_denied";
+  }
+  if (error instanceof BrokerPayloadTooLargeError) {
+    return "payload_too_large";
+  }
+  if (error?.name === "AbortError" || error?.name === "TimeoutError") {
+    return "timeout";
+  }
+  return "transport";
+}
+
 export function createFetchBroker({
   fetchImpl = fetch,
   metrics = null,
+  fetchTimeoutMs = DEFAULT_FETCH_TIMEOUT_MS,
+  responseByteLimit = DEFAULT_BROKER_RESPONSE_BYTES,
 } = {}) {
   return {
     async fetchJson(request, allowedHosts) {
@@ -28,12 +98,17 @@ export function createFetchBroker({
         headers: request.headers,
         body: request.body_base64 ? Buffer.from(request.body_base64, "base64") : undefined,
         redirect: request.follow_redirects ? "follow" : "manual",
+        signal: AbortSignal.timeout(fetchTimeoutMs),
       });
-      const body = Buffer.from(await response.arrayBuffer()).toString("base64");
+      // Reserve ~1 KiB of the response envelope for headers + JSON framing
+      // so a body that fits under the cap still serialises into the shared
+      // buffer without overflow.
+      const bodyCap = Math.max(0, responseByteLimit - 1024);
+      const bodyBytes = await readBodyWithLimit(response, bodyCap);
       return {
         status: response.status,
         headers: Array.from(response.headers.entries()),
-        body_base64: body,
+        body_base64: Buffer.from(bodyBytes).toString("base64"),
       };
     },
     async handleFetchMessage(message) {
@@ -48,24 +123,30 @@ export function createFetchBroker({
       try {
         response = await this.fetchJson(request, message.allowedHosts);
       } catch (error) {
-        if (String(error.message ?? error).includes("host denied")) {
-          metrics?.hostDenied();
+        const reason = classifyBrokerError(error);
+        if (reason === "host_denied") {
+          metrics?.hostDenied?.();
+        } else {
+          metrics?.brokerFetchError?.(reason);
         }
         response = {
           status: 0,
           headers: [],
           body_base64: "",
           error: error instanceof Error ? error.message : String(error),
+          error_reason: reason,
         };
       }
 
       const responseJson = encoder.encode(JSON.stringify(response));
       if (responseJson.length > responseView.byteLength) {
+        metrics?.brokerFetchError?.("response_overflow");
         const encoded = encoder.encode(JSON.stringify({
           status: 0,
           headers: [],
           body_base64: "",
           error: "broker response exceeds configured buffer size",
+          error_reason: "response_overflow",
         }));
         responseView.set(encoded, 0);
         Atomics.store(control, 2, encoded.length);
@@ -104,6 +185,7 @@ export function createBrokerClient({
           headers: [],
           body_base64: "",
           error: "broker request exceeds configured buffer size",
+          error_reason: "request_overflow",
         };
       }
 
@@ -118,6 +200,7 @@ export function createBrokerClient({
           headers: [],
           body_base64: "",
           error: "broker fetch timed out",
+          error_reason: "timeout",
         };
       }
       const responseLength = Atomics.load(control, 2);

@@ -15,6 +15,7 @@ export const REQUIRED_RUNNER_METRICS = Object.freeze([
   "wasmsh_restore_queue_depth",
   "wasmsh_snapshot_restore_failures_total",
   "wasmsh_allowed_host_denied_total",
+  "wasmsh_broker_fetch_errors_total",
 ]);
 
 export function renderPrometheusMetrics(snapshot) {
@@ -37,7 +38,12 @@ export function renderPrometheusMetrics(snapshot) {
     "# HELP wasmsh_allowed_host_denied_total Broker denied-host decisions.",
     "# TYPE wasmsh_allowed_host_denied_total counter",
     `wasmsh_allowed_host_denied_total ${snapshot.wasmsh_allowed_host_denied_total}`,
+    "# HELP wasmsh_broker_fetch_errors_total Broker fetch failures by reason.",
+    "# TYPE wasmsh_broker_fetch_errors_total counter",
   ];
+  for (const [reason, count] of Object.entries(snapshot.wasmsh_broker_fetch_errors_total)) {
+    lines.push(`wasmsh_broker_fetch_errors_total{reason="${reason}"} ${count}`);
+  }
 
   const stageMetrics = snapshot.wasmsh_restore_stage_duration_ms;
   lines.push(
@@ -58,6 +64,7 @@ export function createRunnerMetrics() {
   let activeSessions = 0;
   let restoreFailures = 0;
   let deniedHosts = 0;
+  const brokerFetchErrors = new Map();
 
   return {
     startRestore(queueDepth) {
@@ -107,6 +114,10 @@ export function createRunnerMetrics() {
     hostDenied() {
       deniedHosts += 1;
     },
+    brokerFetchError(reason) {
+      const key = typeof reason === "string" && reason.length > 0 ? reason : "unknown";
+      brokerFetchErrors.set(key, (brokerFetchErrors.get(key) ?? 0) + 1);
+    },
     snapshot() {
       return {
         wasmsh_session_restore_duration_ms: {
@@ -127,6 +138,7 @@ export function createRunnerMetrics() {
         wasmsh_restore_queue_depth: restoreQueueDepth,
         wasmsh_snapshot_restore_failures_total: restoreFailures,
         wasmsh_allowed_host_denied_total: deniedHosts,
+        wasmsh_broker_fetch_errors_total: Object.fromEntries(brokerFetchErrors),
       };
     },
   };

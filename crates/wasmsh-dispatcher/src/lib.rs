@@ -12,6 +12,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// HTTP control-plane service built on top of the routing core.
+pub mod service;
+
 /// Identifies a runner instance.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RunnerId(String);
@@ -136,6 +139,15 @@ impl Dispatcher {
     #[must_use]
     pub fn affinity_for(&self, session_id: &str) -> Option<&RunnerId> {
         self.session_affinity.get(session_id)
+    }
+
+    /// Returns how many runners can currently accept a new session.
+    #[must_use]
+    pub fn routable_runner_count(&self) -> usize {
+        self.runners
+            .values()
+            .filter(|snapshot| snapshot.accepts_new_sessions())
+            .count()
     }
 
     /// Routes a request using affinity first, then capacity ordering.

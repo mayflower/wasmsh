@@ -1,0 +1,38 @@
+dispatcher:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  pdb:
+    enabled: false
+
+runner:
+  replicaCount: 1
+  restoreSlots: 2
+  startupWarmRestores: 0
+  resources:
+    requests:
+      cpu: "2"
+      memory: 4Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+  pdb:
+    enabled: false
+
+autoscaling:
+  minReplicas: 1
+  maxReplicas: 3
+  metric:
+    averageValue: "1"
+
+monitoring:
+  serviceMonitor:
+    enabled: false
+  prometheusRule:
+    enabled: false
+

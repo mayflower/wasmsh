@@ -1,0 +1,56 @@
+{{- if and .Values.runner.enabled .Values.monitoring.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "wasmsh.componentName" (dict "root" . "component" "runner") }}
+  namespace: {{ default .Release.Namespace .Values.monitoring.prometheusRule.namespace }}
+  labels:
+    {{- include "wasmsh.componentLabels" (dict "root" . "component" "runner") | nindent 4 }}
+    {{- with .Values.monitoring.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: wasmsh-runner
+      rules:
+        - alert: WasmshRunnerMetricsAbsent
+          expr: absent(wasmsh_active_sessions{release="{{ .Release.Name }}"})
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: wasmsh runner metrics are absent
+            description: No runner metrics are being scraped for this release.
+        - alert: WasmshRunnerRestoreP95High
+          expr: wasmsh_session_restore_duration_ms{release="{{ .Release.Name }}",quantile="p95"} > {{ .Values.monitoring.prometheusRule.restoreP95ThresholdMs }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: wasmsh runner restore p95 is high
+            description: Session restore p95 is above the configured threshold.
+        - alert: WasmshRunnerRestoreFailures
+          expr: increase(wasmsh_snapshot_restore_failures_total{release="{{ .Release.Name }}"}[{{ .Values.monitoring.prometheusRule.failureRateWindow }}]) >= {{ .Values.monitoring.prometheusRule.failureCountThreshold }}
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: wasmsh runner restore failures detected
+            description: Snapshot restore failures increased within the configured window.
+        - alert: WasmshRunnerRestoreQueueDepthHigh
+          expr: wasmsh_restore_queue_depth{release="{{ .Release.Name }}"} > {{ .Values.monitoring.prometheusRule.queueDepthThreshold }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: wasmsh runner restore queue depth is high
+            description: Restore queue depth is above the configured threshold.
+        - alert: WasmshRunnerInflightRestoresHigh
+          expr: wasmsh_inflight_restores{release="{{ .Release.Name }}"} > {{ .Values.autoscaling.metric.averageValue }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: wasmsh inflight restores are above the scaling target
+            description: Runner restore pressure is above the configured HPA target.
+{{- end }}

@@ -42,6 +42,9 @@ packages/python/wasmsh-pyodide-runtime/wasmsh_pyodide_runtime/assets/lib/allowli
 packages/python/wasmsh-pyodide-runtime/wasmsh_pyodide_runtime/assets/lib/fetch-helper.mjs
 packages/python/wasmsh-pyodide-runtime/wasmsh_pyodide_runtime/assets/lib/protocol.mjs
 packages/python/wasmsh-pyodide-runtime/wasmsh_pyodide_runtime/assets/lib/runtime-bridge.mjs
+packages/python/wasmsh-pyodide-runtime/wasmsh_pyodide_runtime/assets/lib/node-host-session.mjs
+packages/python/wasmsh-pyodide-runtime/wasmsh_pyodide_runtime/assets/lib/snapshot/
+packages/python/wasmsh-pyodide-runtime/wasmsh_pyodide_runtime/assets/lib/baseline/
 
 # ── Python packaging build outputs ─────────────────────────────────
 packages/python/wasmsh-pyodide-runtime/build/
@@ -53,3 +56,21 @@ e2e/*/node_modules/
 
 # ── Environment files (API keys, secrets) ─────────────────────────
 .env
+
+# ── Scalable runner build outputs (local only) ─────────────────────
+# Rust and Python WASI toolchain trees materialised by per-tool scripts.
+# None of these should ever be committed; they are either cargo `target`
+# dirs, downloaded SDK trees, or snapshot artifacts rebuilt per run.
+/artifacts/
+/dist/pyodide-snapshot/
+/dist/pyodide-wasi/
+/e2e/pyodide-node/tmp/
+/tools/component-host-runner/target/
+/tools/pyodide-wasi-host-runner/target/
+/tools/python-wasi/build/
+/tools/python-wasi/output/
+/tools/python-wasi/wasi-sdk/
+/tools/pyodide/wasi-build/
+
+# Scratch code-pack for prompt bundling; not a shipped artifact.
+/wasmsh-codex-red-green-pack/

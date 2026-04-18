@@ -122,8 +122,10 @@ export async function createRunner(options = {}) {
   const fetchBroker = createFetchBroker({
     fetchImpl: options.fetchImpl ?? fetch,
     metrics,
+    responseByteLimit: brokerBufferOptions.responseBytes,
   });
   const compiledWasmModule = await loadCompiledWasmModule(assetDir);
+  let draining = false;
 
   let templateWorker = new Worker(templateWorkerPath, {
     env: applyCompileCacheEnv(),
@@ -195,6 +197,11 @@ export async function createRunner(options = {}) {
     initialFiles = [],
     stepBudget = 0,
   } = {}) {
+    if (draining) {
+      const error = new Error("runner is draining; not accepting new sessions");
+      error.code = "E_RUNNER_DRAINING";
+      throw error;
+    }
     pendingCreates += 1;
     try {
       await acquireRestoreSlot();
@@ -313,9 +320,20 @@ export async function createRunner(options = {}) {
         restore_queue_depth: snapshot.wasmsh_restore_queue_depth,
         restore_p95_ms: snapshot.wasmsh_session_restore_duration_ms.p95,
         active_sessions: snapshot.wasmsh_active_sessions,
-        draining: false,
+        draining,
         healthy: selftestPassed(templateInfo.selftest),
       };
+    },
+    drain() {
+      // Idempotent: dispatcher polls /runner/snapshot.draining on every
+      // /readyz refresh, so setting the flag is enough to stop new
+      // sessions from being assigned to this runner.  Existing sessions
+      // keep serving until their callers explicitly close them.
+      draining = true;
+      return { draining };
+    },
+    isDraining() {
+      return draining;
     },
     metrics: {
       snapshot() {
@@ -323,12 +341,32 @@ export async function createRunner(options = {}) {
       },
     },
     async close() {
+      draining = true;
+      const closeErrors = [];
       for (const session of registry.values()) {
-        await session.close();
+        try {
+          await session.close();
+        } catch (error) {
+          // Don't let one stuck session prevent cleanup of the rest —
+          // previously the first rejection aborted the loop and leaked
+          // every remaining worker.
+          closeErrors.push(error);
+        }
       }
       if (templateWorker) {
-        templateWorker.postMessage({ type: "close" });
-        await templateWorker.terminate();
+        try {
+          templateWorker.postMessage({ type: "close" });
+          await templateWorker.terminate();
+        } catch (error) {
+          closeErrors.push(error);
+        }
+      }
+      if (closeErrors.length > 0) {
+        const aggregated = new Error(
+          `runner.close encountered ${closeErrors.length} session/close errors`,
+        );
+        aggregated.causes = closeErrors;
+        throw aggregated;
       }
     },
   };

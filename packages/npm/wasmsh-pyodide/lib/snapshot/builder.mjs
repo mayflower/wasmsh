@@ -94,7 +94,7 @@ export async function buildSnapshot({
   if (outputDir) {
     await mkdir(outputDir, { recursive: true });
     await writeFile(resolve(outputDir, "snapshot.manifest.json"), stableJsonStringify(manifest));
-    await writeFile(resolve(outputDir, "memory.bin.zst"), memoryBytes);
+    await writeFile(resolve(outputDir, "memory.bin"), memoryBytes);
     await writeFile(resolve(outputDir, "jsrefs.json"), stableJsonStringify(jsRefs));
     await writeFile(resolve(outputDir, "table.json"), stableJsonStringify(tableState));
     await writeFile(resolve(outputDir, "selftest.json"), stableJsonStringify(selftest));

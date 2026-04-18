@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 export const SNAPSHOT_SCHEMA_VERSION = 1;
 export const SNAPSHOT_ARTIFACT_LAYOUT = Object.freeze([
   "snapshot.manifest.json",
-  "memory.bin.zst",
+  "memory.bin",
   "jsrefs.json",
   "table.json",
   "selftest.json",

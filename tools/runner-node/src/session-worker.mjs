@@ -22,18 +22,31 @@ const brokerClient = workerData.controlBuffer
   : null;
 
 const snapshotBytes = new Uint8Array(workerData.snapshotBuffer, 0, workerData.snapshotLength);
-
-let session = await restoreFromSnapshot({
-  assetDir: workerData.assetDir,
-  snapshotBytes,
-  allowedHosts: workerData.allowedHosts,
-  stepBudget: workerData.stepBudget,
-  initialFiles: workerData.initialFiles,
-  fetchHandlerSync: brokerClient ? brokerClient.fetchSync.bind(brokerClient) : deniedFetch,
-  compiledWasmModule: workerData.compiledWasmModule,
-});
-
 const workerId = `session-${threadId}`;
+
+let session;
+try {
+  session = await restoreFromSnapshot({
+    assetDir: workerData.assetDir,
+    snapshotBytes,
+    allowedHosts: workerData.allowedHosts,
+    stepBudget: workerData.stepBudget,
+    initialFiles: workerData.initialFiles,
+    fetchHandlerSync: brokerClient ? brokerClient.fetchSync.bind(brokerClient) : deniedFetch,
+    compiledWasmModule: workerData.compiledWasmModule,
+  });
+} catch (error) {
+  // Surface the restore failure with full stage context before the
+  // worker exits; otherwise the parent only sees a generic "exited
+  // with code N" and cannot tell OOM from a corrupt snapshot.
+  parentPort.postMessage({
+    type: "error",
+    stage: "restore",
+    error: error instanceof Error ? error.message : String(error),
+  });
+  throw error;
+}
+
 parentPort.postMessage({
   type: "ready",
   workerId,
@@ -43,9 +56,12 @@ function closeSession() {
   if (!session) {
     return;
   }
-  session.close();
-  session = null;
-  parentPort.removeAllListeners("message");
+  try {
+    session.close();
+  } finally {
+    session = null;
+    parentPort.removeAllListeners("message");
+  }
 }
 
 async function handleRequest(message) {
@@ -72,6 +88,7 @@ parentPort.on("message", async (message) => {
   if (message?.type !== "request") {
     return;
   }
+  const isClose = message.method === "close";
   try {
     const result = await handleRequest(message);
     parentPort.postMessage({
@@ -80,9 +97,6 @@ parentPort.on("message", async (message) => {
       ok: true,
       result,
     });
-    if (message.method === "close") {
-      setImmediate(() => process.exit(0));
-    }
   } catch (error) {
     parentPort.postMessage({
       type: "response",
@@ -90,5 +104,15 @@ parentPort.on("message", async (message) => {
       ok: false,
       error: error instanceof Error ? error.message : String(error),
     });
+  } finally {
+    // Always tear the worker down after any close attempt, successful
+    // or not.  Previously only the success branch scheduled exit, so a
+    // close whose handler threw left a zombie worker running forever
+    // — subsequent requests to the session would never see the session
+    // close complete.  process.exit inside a Worker only terminates
+    // the worker thread (not the parent runner) per Node docs.
+    if (isClose) {
+      setImmediate(() => process.exit(0));
+    }
   }
 });

@@ -93,12 +93,31 @@ export async function restoreSessionWorker({
   const onMessage = async (message) => {
     if (message?.type === "broker-fetch") {
       if (!brokerBuffers) {
+        // Worker was started without a broker but tried to use one.  This
+        // is a programming error; surface it as a worker failure so we do
+        // not leave the guest Atomics.waiting for 30s on a reply that
+        // never comes.
+        workerExitError = new Error(
+          "session worker issued broker-fetch but no broker buffers were provisioned",
+        );
+        rejectPending(workerExitError);
+        await worker.terminate().catch(() => {});
         return;
       }
-      await fetchBroker.handleFetchMessage({
-        ...brokerBuffers,
-        allowedHosts,
-      });
+      try {
+        await fetchBroker.handleFetchMessage({
+          ...brokerBuffers,
+          allowedHosts,
+        });
+      } catch (error) {
+        // handleFetchMessage is already defensive against fetch failures;
+        // reaching here means a host-side bug (corrupt shared buffers,
+        // JSON parse on the *request*, etc).  Terminate the worker rather
+        // than leave the guest blocked indefinitely.
+        workerExitError = error instanceof Error ? error : new Error(String(error));
+        rejectPending(workerExitError);
+        await worker.terminate().catch(() => {});
+      }
       return;
     }
     if (message?.type === "response") {
@@ -137,24 +156,53 @@ export async function restoreSessionWorker({
   worker.on("exit", onExit);
 
   const ready = await new Promise((resolveReady, rejectReady) => {
-    const onMessage = (message) => {
+    const readyTimeoutMs = Number(
+      process.env.WASMSH_SESSION_WORKER_READY_TIMEOUT_MS ?? 60_000,
+    );
+    let settled = false;
+    const settle = (fn, value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      worker.off("message", onReadyMessage);
+      worker.off("error", onReadyError);
+      worker.off("exit", onReadyExit);
+      clearTimeout(timeoutHandle);
+      fn(value);
+    };
+    const onReadyMessage = (message) => {
       if (message?.type === "ready") {
-        worker.off("message", onMessage);
-        resolveReady(message);
+        settle(resolveReady, message);
       } else if (message?.type === "error") {
-        worker.off("message", onMessage);
-        rejectReady(new Error(message.error));
+        settle(rejectReady, new Error(message.error));
       }
     };
-    worker.on("message", onMessage);
-    worker.on("error", rejectReady);
-    worker.on("exit", (code) => {
-      if (code !== 0) {
-        rejectReady(new Error(`session worker exited with code ${code}`));
-      }
-    });
-  }).catch((error) => {
+    const onReadyError = (error) => {
+      settle(rejectReady, error);
+    };
+    const onReadyExit = (code) => {
+      // Regardless of exit code, a worker that exits before emitting
+      // `ready` is a restore failure.  Previously only non-zero codes
+      // rejected, which let a clean `process.exit(0)` from a top-level
+      // module throw (or a snapshot that booted without emitting ready)
+      // hang the parent `await` forever.
+      settle(rejectReady, new Error(`session worker exited before ready with code ${code}`));
+    };
+    const timeoutHandle = setTimeout(() => {
+      settle(rejectReady, new Error(`session worker ready timed out after ${readyTimeoutMs}ms`));
+    }, readyTimeoutMs);
+    timeoutHandle.unref?.();
+    worker.on("message", onReadyMessage);
+    worker.on("error", onReadyError);
+    worker.on("exit", onReadyExit);
+  }).catch(async (error) => {
     restore.fail();
+    try {
+      await worker.terminate();
+    } catch {
+      // terminate() after an already-exited worker throws; ignore
+    }
     cleanupWorkerState();
     throw error;
   });

@@ -19,10 +19,26 @@ spec:
           image: ghcr.io/mayflower/wasmsh-dispatcher@sha256:3333333333333333333333333333333333333333333333333333333333333333
           imagePullPolicy: IfNotPresent
           env:
-            - name: RUNNER_SERVICE_URL
-              value: http://wasmsh-runner:8787
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "8080"
+            - name: RUNNER_SERVICE_URLS
+              value: http://wasmsh-runner-headless:8787
             - name: DISPATCHER_POLICY
               value: restore-capacity-only
           ports:
             - containerPort: 8080
               name: http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
