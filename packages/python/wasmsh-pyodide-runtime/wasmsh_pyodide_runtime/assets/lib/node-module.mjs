@@ -8,7 +8,6 @@ import { buildBaselineBootPlan } from "./baseline/boot-plan.mjs";
 import { composeWasmImports } from "./baseline/import-composer.mjs";
 import { assertOfflineBaselineBootPlan } from "./baseline/offline-guard.mjs";
 import { captureScopedGlobals, restoreScopedGlobals } from "./baseline/sandbox-globals.mjs";
-import { createRuntimeBridge } from "./runtime-bridge.mjs";
 
 const fetchHelperPath = resolve(
   new URL(".", import.meta.url).pathname,
@@ -158,7 +157,6 @@ async function loadModuleWithBaseline(distDir, {
   module.FS.mkdirTree("/workspace");
 
   module._pyodide = pyodide;
-  createRuntimeBridge(module);
   return module;
 }
 

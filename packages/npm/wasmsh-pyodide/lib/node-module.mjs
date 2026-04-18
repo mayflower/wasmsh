@@ -8,7 +8,6 @@ import { buildBaselineBootPlan } from "./baseline/boot-plan.mjs";
 import { composeWasmImports } from "./baseline/import-composer.mjs";
 import { assertOfflineBaselineBootPlan } from "./baseline/offline-guard.mjs";
 import { captureScopedGlobals, restoreScopedGlobals } from "./baseline/sandbox-globals.mjs";
-import { createRuntimeBridge } from "./runtime-bridge.mjs";
 
 const fetchHelperPath = resolve(
   new URL(".", import.meta.url).pathname,
@@ -68,7 +67,10 @@ function createNetworkStubsNode(moduleRef) {
   };
 }
 
-function createScopedInstantiateWasm(fetchHandlerSync, moduleRefAccessor) {
+function createScopedInstantiateWasm(fetchHandlerSync, moduleRefAccessor, {
+  compiledWasmModule = null,
+  wasmBytes = null,
+} = {}) {
   const SENTINEL_MARKER = Symbol("wasmsh-sentinel");
   return (info, successCallback) => {
     const imports = composeWasmImports({
@@ -87,8 +89,14 @@ function createScopedInstantiateWasm(fetchHandlerSync, moduleRefAccessor) {
         is_sentinel: (value) => (value === SENTINEL_MARKER ? 1 : 0),
       },
     });
-    const wasmBytes = readFileSync(resolve(globalThis.__dirname, "pyodide.asm.wasm"));
-    WebAssembly.instantiate(wasmBytes, imports).then(
+    if (compiledWasmModule) {
+      WebAssembly.instantiate(compiledWasmModule, imports).then(
+        (instance) => successCallback(instance, compiledWasmModule),
+      );
+      return {};
+    }
+    const wasmSource = wasmBytes ?? readFileSync(resolve(globalThis.__dirname, "pyodide.asm.wasm"));
+    WebAssembly.instantiate(wasmSource, imports).then(
       ({ instance, module }) => successCallback(instance, module),
     );
     return {};
@@ -99,6 +107,8 @@ async function loadModuleWithBaseline(distDir, {
   snapshotBytes = null,
   fetchHandlerSync = syncHttpFetchNode,
   makeSnapshot = false,
+  compiledWasmModule = null,
+  wasmBytes = null,
 } = {}) {
   const bootPlan = assertOfflineBaselineBootPlan(
     buildBaselineBootPlan({ assetDir: distDir }),
@@ -119,7 +129,10 @@ async function loadModuleWithBaseline(distDir, {
   let moduleRef = null;
   globalThis._createPyodideModule = (settings) => originalFactory({
     ...settings,
-    instantiateWasm: createScopedInstantiateWasm(fetchHandlerSync, () => moduleRef),
+    instantiateWasm: createScopedInstantiateWasm(fetchHandlerSync, () => moduleRef, {
+      compiledWasmModule,
+      wasmBytes,
+    }),
   });
 
   const pyodideMjs = resolve(distDir, "pyodide.mjs");
@@ -158,7 +171,6 @@ async function loadModuleWithBaseline(distDir, {
   module.FS.mkdirTree("/workspace");
 
   module._pyodide = pyodide;
-  createRuntimeBridge(module);
   return module;
 }
 

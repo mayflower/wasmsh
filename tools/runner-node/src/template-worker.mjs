@@ -4,6 +4,7 @@ import { buildSnapshot } from "../../../packages/npm/wasmsh-pyodide/lib/snapshot
 
 const artifact = await buildSnapshot({
   assetDir: workerData.assetDir,
+  compiledWasmModule: workerData.compiledWasmModule,
 });
 
 parentPort.postMessage({

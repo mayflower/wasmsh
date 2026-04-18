@@ -3,20 +3,34 @@ import { parentPort, threadId, workerData } from "node:worker_threads";
 import { createBrokerClient } from "./fetch-broker.mjs";
 import { restoreFromSnapshot } from "../../../packages/npm/wasmsh-pyodide/lib/snapshot/restore.mjs";
 
-const brokerClient = createBrokerClient({
-  parentPort,
-  controlBuffer: workerData.controlBuffer,
-  requestBuffer: workerData.requestBuffer,
-  responseBuffer: workerData.responseBuffer,
-});
+function deniedFetch() {
+  return {
+    status: 0,
+    headers: [],
+    body_base64: "",
+    error: "network access is disabled for this session",
+  };
+}
 
-const session = await restoreFromSnapshot({
+const brokerClient = workerData.controlBuffer
+  ? createBrokerClient({
+    parentPort,
+    controlBuffer: workerData.controlBuffer,
+    requestBuffer: workerData.requestBuffer,
+    responseBuffer: workerData.responseBuffer,
+  })
+  : null;
+
+const snapshotBytes = new Uint8Array(workerData.snapshotBuffer, 0, workerData.snapshotLength);
+
+let session = await restoreFromSnapshot({
   assetDir: workerData.assetDir,
-  snapshotBytes: workerData.snapshotBytes,
+  snapshotBytes,
   allowedHosts: workerData.allowedHosts,
   stepBudget: workerData.stepBudget,
   initialFiles: workerData.initialFiles,
-  fetchHandlerSync: brokerClient.fetchSync.bind(brokerClient),
+  fetchHandlerSync: brokerClient ? brokerClient.fetchSync.bind(brokerClient) : deniedFetch,
+  compiledWasmModule: workerData.compiledWasmModule,
 });
 
 const workerId = `session-${threadId}`;
@@ -24,6 +38,15 @@ parentPort.postMessage({
   type: "ready",
   workerId,
 });
+
+function closeSession() {
+  if (!session) {
+    return;
+  }
+  session.close();
+  session = null;
+  parentPort.removeAllListeners("message");
+}
 
 async function handleRequest(message) {
   switch (message.method) {
@@ -38,7 +61,7 @@ async function handleRequest(message) {
     case "listDir":
       return session.listDir(message.params.path);
     case "close":
-      session.close();
+      closeSession();
       return { closed: true };
     default:
       throw new Error(`unknown method: ${message.method}`);

@@ -24,25 +24,34 @@ function normalizeInitialFiles(initialFiles = []) {
 
 export async function restoreSessionWorker({
   assetDir,
-  snapshotBytes,
+  snapshotBuffer,
+  snapshotLength,
   allowedHosts,
   stepBudget,
   initialFiles,
   metrics,
   fetchBroker,
   queueDepth,
+  workerEnv,
+  brokerBufferOptions,
+  workerResourceLimits,
+  compiledWasmModule,
 }) {
   const restore = metrics.startRestore(queueDepth);
   restore.beginStage("worker_spawn");
-  const brokerBuffers = createBrokerBuffers();
+  let brokerBuffers = allowedHosts.length > 0 ? createBrokerBuffers(brokerBufferOptions) : null;
   const worker = new Worker(sessionWorkerPath, {
+    env: workerEnv,
+    resourceLimits: workerResourceLimits,
     workerData: {
       assetDir,
-      snapshotBytes,
+      snapshotBuffer,
+      snapshotLength,
       allowedHosts,
       stepBudget,
       initialFiles: normalizeInitialFiles(initialFiles),
-      ...brokerBuffers,
+      ...(brokerBuffers ?? {}),
+      compiledWasmModule,
     },
   });
 
@@ -52,6 +61,7 @@ export async function restoreSessionWorker({
   let workerExited = false;
   let workerExitError = null;
   let resolveExit;
+  let cleanedUp = false;
   const exitPromise = new Promise((resolve) => {
     resolveExit = resolve;
   });
@@ -69,8 +79,22 @@ export async function restoreSessionWorker({
     }
   }
 
-  worker.on("message", async (message) => {
+  function cleanupWorkerState() {
+    if (cleanedUp) {
+      return;
+    }
+    cleanedUp = true;
+    worker.off("message", onMessage);
+    worker.off("error", onError);
+    worker.off("exit", onExit);
+    brokerBuffers = null;
+  }
+
+  const onMessage = async (message) => {
     if (message?.type === "broker-fetch") {
+      if (!brokerBuffers) {
+        return;
+      }
       await fetchBroker.handleFetchMessage({
         ...brokerBuffers,
         allowedHosts,
@@ -89,13 +113,14 @@ export async function restoreSessionWorker({
         entry.reject(new Error(message.error));
       }
     }
-  });
-  worker.on("error", (error) => {
+  };
+  const onError = (error) => {
     workerExited = true;
     workerExitError = error;
     rejectPending(error);
-  });
-  worker.on("exit", (code) => {
+    cleanupWorkerState();
+  };
+  const onExit = (code) => {
     workerExited = true;
     resolveExit(code);
     if (!workerExitError && code !== 0) {
@@ -104,7 +129,12 @@ export async function restoreSessionWorker({
       workerExitError = new Error("session worker has been closed");
     }
     rejectPending(workerExitError);
-  });
+    cleanupWorkerState();
+  };
+
+  worker.on("message", onMessage);
+  worker.on("error", onError);
+  worker.on("exit", onExit);
 
   const ready = await new Promise((resolveReady, rejectReady) => {
     const onMessage = (message) => {
@@ -125,6 +155,7 @@ export async function restoreSessionWorker({
     });
   }).catch((error) => {
     restore.fail();
+    cleanupWorkerState();
     throw error;
   });
 

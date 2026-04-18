@@ -32,12 +32,18 @@ async function runSelftest(runtimeBridge) {
 export async function buildSnapshot({
   assetDir,
   outputDir = null,
+  compiledWasmModule = null,
+  wasmBytes = null,
 } = {}) {
   if (!assetDir) {
     throw new Error("assetDir is required");
   }
 
-  const module = await createFullModule(assetDir, { makeSnapshot: true });
+  const module = await createFullModule(assetDir, {
+    makeSnapshot: true,
+    compiledWasmModule,
+    wasmBytes,
+  });
 
   assertWorkspaceEmpty(module);
 

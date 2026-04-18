@@ -2,10 +2,12 @@ import { assertAllowedHost } from "./network-policy.mjs";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+export const DEFAULT_BROKER_REQUEST_BYTES = 64 * 1024;
+export const DEFAULT_BROKER_RESPONSE_BYTES = 1024 * 1024;
 
 export function createBrokerBuffers({
-  requestBytes = 64 * 1024,
-  responseBytes = 4 * 1024 * 1024,
+  requestBytes = DEFAULT_BROKER_REQUEST_BYTES,
+  responseBytes = DEFAULT_BROKER_RESPONSE_BYTES,
 } = {}) {
   return {
     controlBuffer: new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 3),

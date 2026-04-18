@@ -20,9 +20,15 @@ export async function restoreFromSnapshot({
   stepBudget = 0,
   initialFiles = [],
   fetchHandlerSync,
+  compiledWasmModule = null,
+  wasmBytes = null,
 }) {
-  const module = await createRestoredModuleFromSnapshot(assetDir, snapshotBytes, { fetchHandlerSync });
-  const runtimeBridge = createRuntimeBridge(module);
+  let module = await createRestoredModuleFromSnapshot(assetDir, snapshotBytes, {
+    fetchHandlerSync,
+    compiledWasmModule,
+    wasmBytes,
+  });
+  let runtimeBridge = createRuntimeBridge(module);
   runtimeBridge.sendHostCommand({
     Init: { step_budget: stepBudget, allowed_hosts: allowedHosts },
   });
@@ -37,20 +43,33 @@ export async function restoreFromSnapshot({
   }
 
   const bundled = new Set();
-  const pyodide = module._pyodide;
+  let pyodide = module._pyodide;
+
+  function requireOpen() {
+    if (!module || !runtimeBridge || !pyodide) {
+      throw new Error("session is closed");
+    }
+    return {
+      module,
+      runtimeBridge,
+      pyodide,
+    };
+  }
 
   return {
     module,
     runtimeBridge,
     async run(command) {
-      const pipResult = await handlePipCommand(command, pyodide, (opts) => this.installPythonPackages(opts));
+      const { pyodide: activePyodide, runtimeBridge: activeRuntimeBridge } = requireOpen();
+      const pipResult = await handlePipCommand(command, activePyodide, (opts) => this.installPythonPackages(opts));
       if (pipResult) {
         return pipResult;
       }
-      return buildRunResult(runtimeBridge.sendHostCommand({ Run: { input: command } }));
+      return buildRunResult(activeRuntimeBridge.sendHostCommand({ Run: { input: command } }));
     },
     async writeFile(path, content) {
-      const events = runtimeBridge.sendHostCommand({
+      const { runtimeBridge: activeRuntimeBridge } = requireOpen();
+      const events = activeRuntimeBridge.sendHostCommand({
         WriteFile: {
           path,
           data: Array.from(content),
@@ -59,7 +78,8 @@ export async function restoreFromSnapshot({
       return { events };
     },
     async readFile(path) {
-      const events = runtimeBridge.sendHostCommand({ ReadFile: { path } });
+      const { runtimeBridge: activeRuntimeBridge } = requireOpen();
+      const events = activeRuntimeBridge.sendHostCommand({ ReadFile: { path } });
       return {
         events,
         content: extractStream(events, "Stdout"),
@@ -67,27 +87,45 @@ export async function restoreFromSnapshot({
       };
     },
     async listDir(path) {
-      const events = runtimeBridge.sendHostCommand({ ListDir: { path } });
+      const { runtimeBridge: activeRuntimeBridge } = requireOpen();
+      const events = activeRuntimeBridge.sendHostCommand({ ListDir: { path } });
       return {
         events,
         output: new TextDecoder().decode(extractStream(events, "Stdout")),
       };
     },
     async installPythonPackages({ requirements, options = {} }) {
+      const {
+        pyodide: activePyodide,
+        module: activeModule,
+      } = requireOpen();
       if (bundled.size === 0) {
-        for (const fileName of loadBundledPackageNames(assetDir, pyodide.FS ? pyodide : module)) {
+        for (const fileName of loadBundledPackageNames(assetDir, activePyodide.FS ? activePyodide : activeModule)) {
           bundled.add(fileName);
         }
       }
       const reqs = typeof requirements === "string" ? [requirements] : requirements;
-      return installPackages(reqs, pyodide, {
+      return installPackages(reqs, activePyodide, {
         isBundled: (name) => bundled.has(name),
         allowedHosts,
         deps: options.deps,
       });
     },
     close() {
-      runtimeBridge.close();
+      if (!module && !runtimeBridge) {
+        return;
+      }
+      bundled.clear();
+      runtimeBridge?.close();
+      if (module?._pyodide === pyodide) {
+        delete module._pyodide;
+      }
+      if (module) {
+        delete module._wasmshRuntimeBridge;
+      }
+      pyodide = null;
+      runtimeBridge = null;
+      module = null;
     },
   };
 }
