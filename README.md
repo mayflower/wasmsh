@@ -68,6 +68,30 @@ just build-pyodide                                   # Pyodide wasm (needs emcc)
 just build-component                                 # wasm32-wasip2 component
 ```
 
+## Scalable deployment (Kubernetes)
+
+In addition to the in-process wasm targets, wasmsh ships a server-side
+deployment path: a Rust **dispatcher** plus a Node + Pyodide **runner**
+packaged as container images and installable via Helm. LLM agents or
+other clients talk HTTP to the dispatcher, which routes sessions across a
+horizontally-scaled pool of runner pods.
+
+| Piece | Purpose |
+|-|-|
+| [`crates/wasmsh-dispatcher`](crates/wasmsh-dispatcher/) | axum HTTP service: session routing, affinity, capacity-aware scheduling |
+| [`tools/runner-node`](tools/runner-node/) | Node runner: template worker, per-session restore, metrics |
+| [`deploy/docker/Dockerfile.{dispatcher,runner}`](deploy/docker/) | Production images (`ghcr.io/mayflower/wasmsh-{dispatcher,runner}`) |
+| [`deploy/helm/wasmsh`](deploy/helm/wasmsh/) | Helm chart with HPA, PDB, NetworkPolicy, optional ServiceMonitor |
+| [`e2e/kind`](e2e/kind/) | Full-stack kind end-to-end test suite (`just test-e2e-kind`) |
+
+Container images are built and pushed to GHCR automatically by the
+`Release` workflow on `v*` tags; digests are attached to the GitHub
+Release as `image-digests.json`. See
+[docs/explanation/snapshot-runner.md](docs/explanation/snapshot-runner.md)
+for architecture, [deploy/helm/wasmsh/README.md](deploy/helm/wasmsh/README.md)
+for the chart surface, and [docs/how-to/runner-runbook.md](docs/how-to/runner-runbook.md)
+for operations.
+
 ## Docs
 
 | | |

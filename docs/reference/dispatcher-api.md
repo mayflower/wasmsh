@@ -64,12 +64,34 @@ Deletes the session and releases dispatcher affinity.
 
 The dispatcher also exposes:
 
+- `GET /healthz` — always returns 200 once the process is up
+- `GET /readyz` — 200 once the dispatcher has discovered at least one
+  ready runner via `RUNNER_SERVICE_URLS`; 503 otherwise
+
+Runner pods additionally expose (not proxied through the dispatcher;
+intended for platform operators and the dispatcher itself):
+
 - `GET /healthz`
 - `GET /readyz`
+- `GET /metrics` — Prometheus exposition including
+  `wasmsh_inflight_restores`, `wasmsh_restore_queue_depth`,
+  `wasmsh_session_restore_duration_ms`, `wasmsh_active_sessions`,
+  `wasmsh_broker_fetch_errors_total`
+- `GET /runner/snapshot` — routing metadata consumed by the dispatcher
+  (`inflight_restores`, `restore_slots`, `draining`, selftest results)
+- `POST /runner/drain` — flip the pod into drain mode so the dispatcher
+  stops sending new sessions; existing affinity-pinned sessions
+  continue. Invoked automatically on `SIGTERM`
 
-Runner pods additionally expose:
+## Kubernetes service names
 
-- `GET /healthz`
-- `GET /readyz`
-- `GET /metrics`
-- `GET /runner/snapshot`
+When deployed via `deploy/helm/wasmsh` with release name `wasmsh` and
+namespace `wasmsh`:
+
+| Service | Target | Consumers |
+|-|-|-|
+| `wasmsh-dispatcher` (ClusterIP, 8080) | the endpoints above | external clients |
+| `wasmsh-runner-headless` (headless, 8787) | operational endpoints | the dispatcher only |
+
+Outside-cluster callers must reach the dispatcher through their own
+Ingress / LoadBalancer; the chart does not provision one.

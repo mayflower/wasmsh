@@ -56,3 +56,61 @@ The main values surface is:
 - Snapshot/runtime assets are assumed to be baked into the runner image.
 - No public ingress is created by default.
 - Monitoring resources are opt-in because they depend on Prometheus Operator CRDs.
+
+## Images
+
+The chart references two images:
+
+- `ghcr.io/mayflower/wasmsh-dispatcher`
+- `ghcr.io/mayflower/wasmsh-runner`
+
+Both are built from `deploy/docker/Dockerfile.{dispatcher,runner}` and
+pushed to GHCR by the `Release` GitHub Actions workflow on every `v*`
+tag, with `:vX.Y.Z`, `:X.Y.Z`, and `:latest` tags plus SLSA provenance
+and SBOM attestations.
+
+The sentinel digests shipped in `values.yaml` are placeholders; after a
+real release, override them with the real digests recorded in the
+release's `image-digests.json` artifact:
+
+```bash
+helm upgrade --install wasmsh deploy/helm/wasmsh \
+  --set dispatcher.image.digest=sha256:...<from image-digests.json>... \
+  --set runner.image.digest=sha256:...<from image-digests.json>...
+```
+
+A manually-dispatchable `Dev Images` workflow publishes
+`dev-<short-sha>` tags for integration testing without cutting a
+release.
+
+## Validation
+
+### Local (kind)
+
+The full chart install path is exercised end-to-end by `e2e/kind/`:
+
+```bash
+just build-pyodide          # once per Pyodide version bump
+just test-e2e-kind          # build images + cluster + tests + teardown
+```
+
+This boots a real kind cluster, loads locally built images, installs
+the chart with `e2e/kind/values-e2e.yaml`, and runs the test suite in
+`e2e/kind/tests/`. See `e2e/kind/README.md` for details.
+
+### Reaching the dispatcher during a manual run
+
+```bash
+kubectl -n <ns> port-forward svc/<release>-dispatcher 8080:8080
+curl -sf http://127.0.0.1:8080/healthz
+curl -sf http://127.0.0.1:8080/readyz
+```
+
+Inside the cluster, clients should use the in-cluster DNS name directly:
+
+```
+http://<release>-dispatcher.<ns>.svc.cluster.local:8080
+```
+
+The chart ships no Ingress / LoadBalancer; put your own behind it if
+external exposure is needed.

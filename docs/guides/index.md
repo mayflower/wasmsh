@@ -27,6 +27,10 @@ case where you already know which layer you need.
 |------|-------|
 | Diagnose common runtime errors | [Troubleshooting](troubleshooting.md) |
 | Measure Pyodide startup and first-command latency | [Performance testing](performance-testing.md) |
+| Develop against the scalable runner locally | [Local runner workflow](../how-to/runner-local.md) |
+| Operate the scalable dispatcher + runner in Kubernetes | [Runner runbook](../how-to/runner-runbook.md) |
+| Install the Helm chart | [Helm chart README](../../deploy/helm/wasmsh/README.md) |
+| End-to-end test the K8s deployment with kind | [`e2e/kind/README.md`](../../e2e/kind/README.md) |
 
 ## See Also
 
