@@ -307,10 +307,130 @@ jobs:
           packages-dir: package/dist/
           skip-existing: true
 
+  # ── Publish container images to GHCR ──────────────────────
+  # Tag-triggered build + push of the dispatcher and runner images
+  # referenced by deploy/helm/wasmsh.  Consumers of the chart pin by
+  # digest; the image digests are captured into `image-digests.json` and
+  # attached to the GitHub Release so downstream deployments can bump the
+  # chart values without re-running the build.
+  #
+  # Runs on the in-cluster runner pool (Docker + BuildKit available),
+  # matching the rest of the build-heavy jobs.  publish-npm / publish-pypi
+  # must stay on github-hosted runners for OIDC reasons, but image
+  # publishing has no such constraint.
+  publish-images:
+    name: publish container images
+    needs: [validate, build-pyodide]
+    runs-on: mayflower-k8s-runners
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      dispatcher-digest: ${{ steps.build-dispatcher.outputs.digest }}
+      runner-digest: ${{ steps.build-runner.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      # The runner image bakes prebuilt Pyodide assets.  Re-download the
+      # npm package artifact produced by build-pyodide instead of
+      # rebuilding Pyodide from source (which would add ~30 min to the
+      # release).
+      - name: Download pyodide npm package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wasmsh-pyodide-npm
+          path: packages/npm/wasmsh-pyodide
+      - name: Verify pyodide assets present
+        run: |
+          test -f packages/npm/wasmsh-pyodide/assets/pyodide.asm.wasm \
+            || (echo "missing pyodide.asm.wasm from build-pyodide artifact" >&2 && exit 1)
+      - name: Compute image tags
+        id: tags
+        env:
+          # Pinned by `on.push.tags: v*` — still routed through env to
+          # keep shell expansion away from ${{ }} templating.
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          TAG="$REF_NAME"
+          VERSION="${TAG#v}"
+          {
+            echo "tag=${TAG}"
+            echo "version=${VERSION}"
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build + push dispatcher image
+        id: build-dispatcher
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.dispatcher
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ghcr.io/mayflower/wasmsh-dispatcher:${{ steps.tags.outputs.tag }}
+            ghcr.io/mayflower/wasmsh-dispatcher:${{ steps.tags.outputs.version }}
+            ghcr.io/mayflower/wasmsh-dispatcher:latest
+          cache-from: type=gha,scope=dispatcher
+          cache-to: type=gha,scope=dispatcher,mode=max
+          provenance: true
+          sbom: true
+      - name: Build + push runner image
+        id: build-runner
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.runner
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ghcr.io/mayflower/wasmsh-runner:${{ steps.tags.outputs.tag }}
+            ghcr.io/mayflower/wasmsh-runner:${{ steps.tags.outputs.version }}
+            ghcr.io/mayflower/wasmsh-runner:latest
+          cache-from: type=gha,scope=runner
+          cache-to: type=gha,scope=runner,mode=max
+          provenance: true
+          sbom: true
+      - name: Record image digests
+        env:
+          TAG: ${{ steps.tags.outputs.tag }}
+          DISPATCHER_DIGEST: ${{ steps.build-dispatcher.outputs.digest }}
+          RUNNER_DIGEST: ${{ steps.build-runner.outputs.digest }}
+        run: |
+          # Use jq so the digest values are JSON-encoded safely rather
+          # than being spliced as raw text into a heredoc.
+          jq -n \
+            --arg version "$TAG" \
+            --arg dispatcher_digest "$DISPATCHER_DIGEST" \
+            --arg runner_digest "$RUNNER_DIGEST" \
+            '{
+               version: $version,
+               dispatcher: {
+                 repository: "ghcr.io/mayflower/wasmsh-dispatcher",
+                 digest: $dispatcher_digest
+               },
+               runner: {
+                 repository: "ghcr.io/mayflower/wasmsh-runner",
+                 digest: $runner_digest
+               }
+             }' > image-digests.json
+          cat image-digests.json
+      - name: Upload image digests artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasmsh-image-digests
+          path: image-digests.json
+
   # ── Create GitHub Release ──────────────────────────────────
   release:
     name: github release
-    needs: [build-standalone, build-pyodide, publish-crates, publish-npm, publish-pypi]
+    needs: [build-standalone, build-pyodide, publish-crates, publish-npm, publish-pypi, publish-images]
     runs-on: mayflower-k8s-runners
     timeout-minutes: 10
     steps:
@@ -323,10 +443,16 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasmsh-pyodide-dist
+      - name: Download image digests
+        uses: actions/download-artifact@v4
+        with:
+          name: wasmsh-image-digests
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: "wasmsh-*.tar.gz"
+          files: |
+            wasmsh-*.tar.gz
+            image-digests.json
           draft: false
           prerelease: false

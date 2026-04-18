@@ -1,0 +1,100 @@
+# Helm values overlay used by the kind-based end-to-end tests.
+#
+# Goals vs. the production defaults:
+#   - no digest pinning (we load images by tag via `kind load`)
+#   - pullPolicy: Never (kind-loaded images must not be re-pulled)
+#   - small resource requests so the whole stack fits on a single kind node
+#   - disable HPA, PDB, NetworkPolicy, monitoring — they need controllers
+#     kind does not ship by default, and they are not what we test here
+#
+# NOTE: the runner image assumes Pyodide assets are baked in; see
+# deploy/docker/Dockerfile.runner.
+
+dispatcher:
+  replicaCount: 1
+  image:
+    repository: wasmsh-dispatcher
+    tag: e2e
+    digest: ""
+    pullPolicy: Never
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  pdb:
+    enabled: false
+  terminationGracePeriodSeconds: 10
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: http
+    initialDelaySeconds: 1
+    periodSeconds: 2
+    failureThreshold: 10
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 2
+    periodSeconds: 5
+
+runner:
+  replicaCount: 2
+  image:
+    repository: wasmsh-runner
+    tag: e2e
+    digest: ""
+    pullPolicy: Never
+  # The kind-local runner needs much less headroom than production.  We only
+  # warm one restore slot so pod startup stays under ~60s on a laptop.
+  restoreSlots: 2
+  startupWarmRestores: 1
+  fetchBroker:
+    requestBytes: 65536
+    responseBytes: 524288
+  workerResourceLimits:
+    maxOldGenerationMb: 48
+    maxYoungGenerationMb: 8
+    stackMb: 1
+    codeRangeMb: 8
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 1536Mi
+  pdb:
+    enabled: false
+  terminationGracePeriodSeconds: 30
+  # Pyodide boot can easily take 30s+ in a cold container; give readiness a
+  # generous window so the dispatcher does not flap the pod out of rotation.
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 3
+    failureThreshold: 60
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 20
+    periodSeconds: 10
+    failureThreshold: 6
+
+networkPolicy:
+  enabled: false
+
+autoscaling:
+  enabled: false
+
+monitoring:
+  serviceMonitor:
+    enabled: false
+  prometheusRule:
+    enabled: false

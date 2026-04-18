@@ -1,0 +1,22 @@
+# BuildKit per-Dockerfile ignore for the runner image.  We need the Node
+# sources and the prebuilt Pyodide assets but nothing else from the repo.
+**/node_modules
+**/target
+target
+dist
+artifacts
+e2e/kind/.artifacts
+wasmsh-codex-red-green-pack
+tools/pyodide-wasi-host-runner
+tools/component-host-runner
+tools/python-wasi/build
+tools/python-wasi/output
+tools/python-wasi/wasi-sdk
+tools/pyodide/wasi-build
+e2e/pyodide-node/tmp
+.git
+**/*.log
+# Rust artefacts have no place in the runner image.
+crates
+Cargo.toml
+Cargo.lock

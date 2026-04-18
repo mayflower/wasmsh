@@ -1,0 +1,19 @@
+# BuildKit picks this file up for `-f deploy/docker/Dockerfile.dispatcher`
+# builds and uses it instead of any root .dockerignore.  Keep the dispatcher
+# build context tight — we only need the Rust workspace.
+**/node_modules
+**/target
+target
+dist
+artifacts
+e2e/kind/.artifacts
+wasmsh-codex-red-green-pack
+tools/pyodide-wasi-host-runner
+tools/component-host-runner
+tools/python-wasi/build
+tools/python-wasi/output
+tools/python-wasi/wasi-sdk
+tools/pyodide/wasi-build
+e2e/pyodide-node/tmp
+.git
+**/*.log

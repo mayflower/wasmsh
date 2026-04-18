@@ -1,0 +1,18 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: wasmsh-e2e
+nodes:
+  - role: control-plane
+    # Enable feature gates used by HPA v2 + NetworkPolicy out of the box.
+    kubeadmConfigPatches:
+      - |
+        kind: ClusterConfiguration
+        apiServer:
+          extraArgs:
+            v: "2"
+    extraPortMappings:
+      # Expose the dispatcher via NodePort on the host for the test runner.
+      - containerPort: 30080
+        hostPort: 30080
+        listenAddress: "127.0.0.1"
+        protocol: TCP

@@ -1,0 +1,54 @@
+# syntax=docker/dockerfile:1.7
+#
+# Image for the wasmsh-runner Node service.
+#
+# This image assumes Pyodide assets have already been built into
+# packages/npm/wasmsh-pyodide/assets/ (via `just build-pyodide` on a host
+# with emcc available).  The build context must therefore be the repo root.
+#
+# Contents:
+#   - Node 22 slim runtime
+#   - tini as PID 1 so SIGTERM reaches the Node process for drain
+#   - tools/runner-node/**
+#   - packages/npm/wasmsh-pyodide/{assets,lib,node-host.mjs,package.json}
+#   - non-root UID 10001
+
+ARG NODE_VERSION=22
+FROM node:${NODE_VERSION}-bookworm-slim AS runtime
+
+ARG APP_UID=10001
+ARG APP_GID=10001
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates tini; \
+    rm -rf /var/lib/apt/lists/*; \
+    groupadd --system --gid "${APP_GID}" wasmsh; \
+    useradd --system --uid "${APP_UID}" --gid wasmsh --home-dir /home/wasmsh \
+        --create-home --shell /sbin/nologin wasmsh
+
+WORKDIR /opt/wasmsh
+
+# The runner imports from relative paths (tools/runner-node and
+# packages/npm/wasmsh-pyodide), so we preserve that layout inside the image.
+COPY --chown=wasmsh:wasmsh tools/runner-node ./tools/runner-node
+COPY --chown=wasmsh:wasmsh packages/npm/wasmsh-pyodide ./packages/npm/wasmsh-pyodide
+
+# Fail the build early if the Pyodide asset build hasn't been run on the host.
+# Without pyodide.asm.wasm the runner would start and then fail on the first
+# session; surfacing the missing asset here keeps the failure close to its
+# cause.
+RUN test -f /opt/wasmsh/packages/npm/wasmsh-pyodide/assets/pyodide.asm.wasm \
+    || (echo "missing pyodide assets; run 'just build-pyodide' before building this image" >&2; exit 1)
+
+USER ${APP_UID}:${APP_GID}
+
+ENV NODE_ENV=production \
+    HOST=0.0.0.0 \
+    PORT=8787 \
+    WASMSH_RESTORE_SLOTS=4 \
+    WASMSH_STARTUP_WARM_RESTORES=2
+
+EXPOSE 8787
+
+ENTRYPOINT ["/usr/bin/tini", "--", "node", "tools/runner-node/src/server.mjs"]

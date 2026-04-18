@@ -208,6 +208,34 @@ clippy-component:
 test-e2e-component:
     node --test e2e/build-contract/tests/component-build.test.mjs
 
+# ── Kubernetes-in-Docker E2E (scalable dispatcher + runner) ─
+
+# Build the container images consumed by the kind e2e (expects
+# `just build-pyodide` to have baked the runner assets).
+build-images:
+    @test -f packages/npm/wasmsh-pyodide/assets/pyodide.asm.wasm \
+        || (echo "run 'just build-pyodide' first; runner image needs pyodide.asm.wasm" >&2 && exit 1)
+    DOCKER_BUILDKIT=1 docker build -f deploy/docker/Dockerfile.dispatcher -t wasmsh-dispatcher:e2e .
+    DOCKER_BUILDKIT=1 docker build -f deploy/docker/Dockerfile.runner -t wasmsh-runner:e2e .
+
+# Boot a kind cluster, helm install the chart, run the scalable-path E2E
+# suite, and tear the cluster down.  Requires docker/kind/kubectl/helm and
+# prebuilt pyodide assets (see `just build-pyodide`).
+test-e2e-kind:
+    node e2e/kind/scripts/run.mjs
+
+# Leave the cluster running after the tests to allow manual inspection.
+test-e2e-kind-keep:
+    node e2e/kind/scripts/run.mjs --keep
+
+# Reuse an existing cluster if one is already up (fast re-runs during dev).
+test-e2e-kind-reuse:
+    node e2e/kind/scripts/run.mjs --reuse --keep
+
+# Tear down the kind cluster created by the e2e (idempotent).
+kind-down:
+    kind delete cluster --name wasmsh-e2e || true
+
 # ── Wasm Post-processing ──────────────────────────────────────
 
 # Build optimized wasm with wasm-opt post-processing

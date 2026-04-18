@@ -1,0 +1,159 @@
+name: Dev Images (manual)
+
+# Manually-triggered workflow for validating the dispatcher + runner image
+# build pipeline against the `mayflower-k8s-runners` pool.  This exists to
+# exercise the same docker/build-push path used by release.yml on a tag
+# push, WITHOUT triggering any of the production publish targets.
+#
+# Safety guarantees (do not relax without review):
+#   - Only trigger is `workflow_dispatch`: no tag, push, or PR events.
+#   - Only registry pushed to is GHCR; never npm, PyPI, or crates.io.
+#   - Only secret consumed is the auto-provisioned `GITHUB_TOKEN`.
+#   - Permissions are the minimum needed to push to GHCR.  In particular,
+#     `contents` stays `read` (no release/tag creation) and there is no
+#     `id-token: write` (no OIDC trusted publishing possible).
+#   - Tags are always prefixed `dev-` and include the short commit SHA so
+#     they can never collide with the production `:latest` / `:vX.Y.Z`
+#     tags produced by release.yml.
+#
+# User-supplied input (tag_suffix) is sanitised to `[a-z0-9-]{0,30}` before
+# it reaches any shell command, so there is no command-injection surface
+# despite the workflow-injection guidance the security hook rightly flags
+# on any workflow edit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_suffix:
+        description: Optional suffix appended after `dev-<sha>` (lowercase alnum/dash, <=30 chars; sanitised server-side)
+        required: false
+        default: ""
+      run_pyodide_build:
+        description: Rebuild Pyodide from source (slow, ~30 min; disable to reuse a prior artifact)
+        required: false
+        default: "true"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-pyodide:
+    name: build pyodide
+    if: ${{ inputs.run_pyodide_build == 'true' }}
+    runs-on: mayflower-k8s-runners
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Pyodide source + emsdk
+        uses: actions/cache@v4
+        with:
+          path: tools/pyodide/pyodide-src
+          key: pyodide-toolchain-${{ runner.os }}-${{ hashFiles('tools/pyodide/versions.env') }}
+      - uses: ./.github/actions/setup-rust
+        with:
+          targets: wasm32-unknown-emscripten
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pyodide-dev-images
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: extractions/setup-just@v2
+      - name: Install Pyodide build deps
+        run: sudo apt-get install -y wget ccache xz-utils autoconf automake libtool
+      - name: Build custom Pyodide
+        run: just build-pyodide
+        env:
+          SED: sed
+      - name: Package runtime assets
+        run: just package-pyodide-runtime
+      - name: Upload pyodide npm package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasmsh-pyodide-npm-dev
+          path: packages/npm/wasmsh-pyodide/
+
+  publish-dev-images:
+    name: publish dev images
+    needs: build-pyodide
+    if: ${{ always() && (needs.build-pyodide.result == 'success' || needs.build-pyodide.result == 'skipped') }}
+    runs-on: mayflower-k8s-runners
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download pyodide npm package
+        if: ${{ needs.build-pyodide.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: wasmsh-pyodide-npm-dev
+          path: packages/npm/wasmsh-pyodide
+      - name: Verify pyodide assets present
+        run: |
+          test -f packages/npm/wasmsh-pyodide/assets/pyodide.asm.wasm \
+            || (echo "missing pyodide.asm.wasm; re-run with run_pyodide_build=true" >&2 && exit 1)
+      - name: Compute dev tag
+        id: tags
+        env:
+          SHA: ${{ github.sha }}
+          SUFFIX: ${{ inputs.tag_suffix }}
+        run: |
+          SHORT="${SHA:0:7}"
+          TAG="dev-${SHORT}"
+          CLEAN=$(printf '%s' "$SUFFIX" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-' | cut -c1-30)
+          if [ -n "$CLEAN" ]; then
+            TAG="${TAG}-${CLEAN}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build + push dispatcher image
+        id: build-dispatcher
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.dispatcher
+          push: true
+          platforms: linux/amd64
+          tags: ghcr.io/mayflower/wasmsh-dispatcher:${{ steps.tags.outputs.tag }}
+          cache-from: type=gha,scope=dispatcher
+          cache-to: type=gha,scope=dispatcher,mode=max
+      - name: Build + push runner image
+        id: build-runner
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.runner
+          push: true
+          platforms: linux/amd64
+          tags: ghcr.io/mayflower/wasmsh-runner:${{ steps.tags.outputs.tag }}
+          cache-from: type=gha,scope=runner
+          cache-to: type=gha,scope=runner,mode=max
+      - name: Job summary
+        env:
+          TAG: ${{ steps.tags.outputs.tag }}
+          DISPATCHER_DIGEST: ${{ steps.build-dispatcher.outputs.digest }}
+          RUNNER_DIGEST: ${{ steps.build-runner.outputs.digest }}
+        run: |
+          {
+            printf '## Dev images published\n\n'
+            printf '| Image | Reference |\n|---|---|\n'
+            printf '| wasmsh-dispatcher (tag)    | `ghcr.io/mayflower/wasmsh-dispatcher:%s` |\n' "$TAG"
+            printf '| wasmsh-dispatcher (digest) | `%s` |\n' "$DISPATCHER_DIGEST"
+            printf '| wasmsh-runner (tag)        | `ghcr.io/mayflower/wasmsh-runner:%s` |\n' "$TAG"
+            printf '| wasmsh-runner (digest)     | `%s` |\n' "$RUNNER_DIGEST"
+          } >> "$GITHUB_STEP_SUMMARY"

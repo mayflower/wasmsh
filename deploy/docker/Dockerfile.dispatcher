@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1.7
+#
+# Multi-stage build for the wasmsh-dispatcher binary.
+#
+# The dispatcher is a small axum HTTP service that routes session requests
+# across a pool of runner pods; it has no native runtime dependencies beyond
+# glibc, so we ship it on debian:bookworm-slim with a non-root user.
+
+ARG RUST_VERSION=1.89
+ARG DEBIAN_VERSION=bookworm
+
+FROM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS builder
+
+WORKDIR /workspace
+
+# Copy the whole workspace: the dispatcher's crate depends on shared workspace
+# metadata (Cargo.lock, workspace Cargo.toml) and we want the Cargo cache to be
+# reused across builds via docker buildx layers.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml clippy.toml ./
+COPY crates ./crates
+
+# Build only the dispatcher binary in release mode.  We pass --locked so the
+# image build fails fast if Cargo.lock would drift.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/workspace/target \
+    cargo build --release --locked -p wasmsh-dispatcher --bin wasmsh-dispatcher \
+    && cp /workspace/target/release/wasmsh-dispatcher /usr/local/bin/wasmsh-dispatcher
+
+FROM debian:${DEBIAN_VERSION}-slim AS runtime
+
+ARG APP_UID=10001
+ARG APP_GID=10001
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates tini; \
+    rm -rf /var/lib/apt/lists/*; \
+    groupadd --system --gid "${APP_GID}" wasmsh; \
+    useradd --system --uid "${APP_UID}" --gid wasmsh --home-dir /nonexistent \
+        --no-create-home --shell /sbin/nologin wasmsh
+
+COPY --from=builder /usr/local/bin/wasmsh-dispatcher /usr/local/bin/wasmsh-dispatcher
+
+USER ${APP_UID}:${APP_GID}
+
+ENV HOST=0.0.0.0 \
+    PORT=8080 \
+    RUST_LOG=info
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/wasmsh-dispatcher"]
