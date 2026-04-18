@@ -74,3 +74,14 @@ e2e/*/node_modules/
 
 # Scratch code-pack for prompt bundling; not a shipped artifact.
 /wasmsh-codex-red-green-pack/
+
+# ── Local working notes (kept on disk, never committed) ────────────
+# These files are personal planning/reference scratchpads that leaked
+# into the tree in earlier commits.  Untracked in a follow-up cleanup
+# and re-listed here so they cannot be re-added accidentally.
+# `bash.md` in particular paraphrases the GNU Bash manual and must
+# stay out of the tree for clean-room provenance (CLAUDE.md rule #4).
+/agent_utilities.md
+/bash.md
+/bash4_implementation_gaps.md
+/missing_perf_tuning.md
