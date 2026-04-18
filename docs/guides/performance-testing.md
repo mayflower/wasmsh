@@ -21,6 +21,42 @@ sample:
 The harness writes raw samples and summary percentiles to JSON so tuning work
 can compare before/after changes directly.
 
+For both performance harnesses in this repo:
+
+- `n` means the number of measured batches/samples
+- `c` means the concurrency per batch
+- total measured sessions = `n * c`
+
+With `c > 1`, the report includes both per-session latency summaries and
+per-batch throughput/wall-clock summaries.
+
+The runner restore smoke benchmark in
+[tools/runner-node/bench/restore-latency.test.mjs](/Users/johann/src/ml/wasmsh/tools/runner-node/bench/restore-latency.test.mjs)
+measures the ready-pod restore path separately. It now supports:
+
+- `WASMSH_RESTORE_BENCH_WARMUP` to discard extra warmup sessions
+- `WASMSH_RESTORE_BENCH_ITERATIONS` to control measured samples
+- `WASMSH_RESTORE_BENCH_CONCURRENCY` to run multiple restores in parallel
+- `WASMSH_RESTORE_STRICT_MS` to turn the smoke into a threshold gate
+
+The runner load benchmark in
+[tools/perf/runner-restore-bench.mjs](/Users/johann/src/ml/wasmsh/tools/perf/runner-restore-bench.mjs)
+also measures three post-restore command timings for each session:
+
+- `shellStartMs`: first shell command on a freshly restored session
+- `shellExecMs`: second simple shell command once the shell path is hot
+- `pythonExecMs`: simple Python command on that same session
+
+The scalable runner defaults its worker V8 envelope to:
+
+- `WASMSH_WORKER_MAX_OLD_GENERATION_MB=48`
+- `WASMSH_WORKER_MAX_YOUNG_GENERATION_MB=8`
+- `WASMSH_WORKER_STACK_MB=1`
+- `WASMSH_WORKER_CODE_RANGE_MB=8`
+
+Those defaults are tuned for higher live-session density. Override them only
+when you are intentionally trading memory for latency or debugging headroom.
+
 ## Run the benchmark locally
 
 Build the Pyodide assets first:
@@ -44,17 +80,41 @@ artifacts/perf/pyodide-node-session-bench.json
 Use a larger sample set when measuring an optimization:
 
 ```bash
-node tools/perf/pyodide-node-session-bench.mjs --warmup 2 --samples 10
+node tools/perf/pyodide-node-session-bench.mjs --warmup 2 -n 10 -c 4
 ```
+
+For the scalable runner restore path:
+
+```bash
+WASMSH_RESTORE_BENCH_WARMUP=2 WASMSH_RESTORE_BENCH_ITERATIONS=10 WASMSH_RESTORE_BENCH_CONCURRENCY=8 just bench-runner-restore
+```
+
+For an explicit runner load report with `n`/`c` flags:
+
+```bash
+node tools/perf/runner-restore-bench.mjs -n 10 -c 16
+```
+
+`just bench-runner-load` now defaults to `n=2000` and `c=100`, so the out-of-the-box run measures `200,000` total session restores and acts as a real per-runner load sample rather than a single-session smoke check.
 
 To turn the benchmark into a gate, pass explicit limits:
 
 ```bash
 node tools/perf/pyodide-node-session-bench.mjs \
-  --samples 10 \
+  -n 10 \
+  -c 4 \
   --max-init-p95-ms 1200 \
   --max-first-python-p95-ms 250 \
   --max-total-p95-ms 1800
+```
+
+For the runner restore bench:
+
+```bash
+node tools/perf/runner-restore-bench.mjs \
+  -n 10 \
+  -c 16 \
+  --max-restore-p95-ms 100
 ```
 
 No thresholds are enforced by default because the current purpose is to
@@ -80,6 +140,8 @@ Each report includes:
 
 - `measurements`: raw per-sample timings and command exit-code checks
 - `metrics`: summary stats for each phase (`min`, `mean`, `p50`, `p95`, `max`)
+- `batchMetrics`: wall-clock and throughput summaries for each measured batch
+- `memory`: process baseline RSS, runner baseline RSS, peak RSS, post-close RSS, a run-wide average per-active-session RSS delta, and a peak-derived per-active-session RSS estimate
 - `recordedAt`, `nodeExecutable`, and `assetDir`: enough context to compare runs
 
 When tuning startup:
@@ -89,3 +151,11 @@ When tuning startup:
    or post-init lazy work is leaking into the first request
 3. use `totalMs` only as a coarse user-visible number; it is less useful than
    the phase breakdown when you are trying to decide what to optimize next
+
+When tuning scalable runner capacity:
+
+1. increase `c` until `restoreMs p95` or `batchCreateWallMs p95` starts bending up
+2. watch `throughputSessionsPerSec` to find the useful saturation point
+3. compare `workerSpawnMs` versus `sandboxRestoreMs` to see whether the bottleneck is worker startup or the snapshot replay path
+4. compare `shellStartMs`, `shellExecMs`, and `pythonExecMs` to see whether post-restore latency is dominated by first-shell overhead, steady shell work, or Python startup
+5. use `averagePerActiveSessionRssBytesWhenBusy` to see the average single-sandbox memory cost across the run, and `estimatedPerActiveSessionRssBytes` to size for peak pressure

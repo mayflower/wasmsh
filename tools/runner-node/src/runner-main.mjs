@@ -98,17 +98,22 @@ export async function createRunner(options = {}) {
     maxOldGenerationSizeMb: Number(
       options.workerMaxOldGenerationSizeMb
       ?? process.env.WASMSH_WORKER_MAX_OLD_GENERATION_MB
-      ?? 64,
+      ?? 48,
     ),
     maxYoungGenerationSizeMb: Number(
       options.workerMaxYoungGenerationSizeMb
       ?? process.env.WASMSH_WORKER_MAX_YOUNG_GENERATION_MB
-      ?? 16,
+      ?? 8,
     ),
     stackSizeMb: Number(
       options.workerStackSizeMb
       ?? process.env.WASMSH_WORKER_STACK_MB
-      ?? 2,
+      ?? 1,
+    ),
+    codeRangeSizeMb: Number(
+      options.workerCodeRangeSizeMb
+      ?? process.env.WASMSH_WORKER_CODE_RANGE_MB
+      ?? 8,
     ),
   };
   const restoreSessionWorkerFn = options.restoreSessionWorker ?? restoreSessionWorker;
