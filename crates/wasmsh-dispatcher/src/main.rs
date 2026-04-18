@@ -8,8 +8,8 @@ use wasmsh_dispatcher::service::{DispatcherService, ServiceConfig};
 
 const SUPPORTED_DISPATCHER_POLICY: &str = "restore-capacity-only";
 
-fn configured_runner_urls() -> Vec<String> {
-    if let Ok(value) = env::var("RUNNER_SERVICE_URLS") {
+fn parse_runner_urls_from(urls_env: Option<&str>, single_env: Option<&str>) -> Vec<String> {
+    if let Some(value) = urls_env {
         let urls = value
             .split(',')
             .map(str::trim)
@@ -20,31 +20,42 @@ fn configured_runner_urls() -> Vec<String> {
             return urls;
         }
     }
+    single_env.map(|v| vec![v.to_owned()]).unwrap_or_default()
+}
 
-    env::var("RUNNER_SERVICE_URL")
-        .ok()
-        .map(|value| vec![value])
-        .unwrap_or_default()
+fn configured_runner_urls() -> Vec<String> {
+    parse_runner_urls_from(
+        env::var("RUNNER_SERVICE_URLS").ok().as_deref(),
+        env::var("RUNNER_SERVICE_URL").ok().as_deref(),
+    )
+}
+
+fn parse_port_from(raw: Option<&str>) -> Result<u16> {
+    match raw {
+        None => Ok(8080),
+        Some(value) => value
+            .trim()
+            .parse::<u16>()
+            .with_context(|| format!("PORT={value:?} is not a valid u16 TCP port")),
+    }
 }
 
 fn parse_port() -> Result<u16> {
-    match env::var("PORT") {
-        Err(_) => Ok(8080),
-        Ok(raw) => raw
-            .trim()
-            .parse::<u16>()
-            .with_context(|| format!("PORT={raw:?} is not a valid u16 TCP port")),
+    parse_port_from(env::var("PORT").ok().as_deref())
+}
+
+fn verify_policy_value(raw: Option<&str>) -> Result<()> {
+    match raw {
+        None => Ok(()),
+        Some(value) if value == SUPPORTED_DISPATCHER_POLICY => Ok(()),
+        Some(other) => Err(anyhow!(
+            "DISPATCHER_POLICY={other:?} is not supported; only {SUPPORTED_DISPATCHER_POLICY:?} is implemented"
+        )),
     }
 }
 
 fn verify_policy() -> Result<()> {
-    match env::var("DISPATCHER_POLICY") {
-        Err(_) => Ok(()),
-        Ok(value) if value == SUPPORTED_DISPATCHER_POLICY => Ok(()),
-        Ok(other) => Err(anyhow!(
-            "DISPATCHER_POLICY={other:?} is not supported; only {SUPPORTED_DISPATCHER_POLICY:?} is implemented"
-        )),
-    }
+    verify_policy_value(env::var("DISPATCHER_POLICY").ok().as_deref())
 }
 
 fn init_tracing() {
@@ -103,4 +114,92 @@ async fn shutdown_signal() {
         () = terminate => {}
     }
     info!("shutdown signal received; draining");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_runner_urls_splits_and_trims_comma_list() {
+        let urls = parse_runner_urls_from(Some("http://a:1 , http://b:2"), None);
+        assert_eq!(
+            urls,
+            vec!["http://a:1".to_string(), "http://b:2".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_runner_urls_ignores_empty_entries() {
+        let urls = parse_runner_urls_from(Some(",http://a:1,,"), None);
+        assert_eq!(urls, vec!["http://a:1".to_string()]);
+    }
+
+    #[test]
+    fn parse_runner_urls_falls_back_to_single_env() {
+        let urls = parse_runner_urls_from(None, Some("http://solo:1"));
+        assert_eq!(urls, vec!["http://solo:1".to_string()]);
+    }
+
+    #[test]
+    fn parse_runner_urls_prefers_plural_when_both_set_and_non_empty() {
+        let urls = parse_runner_urls_from(Some("http://a:1"), Some("http://b:2"));
+        assert_eq!(urls, vec!["http://a:1".to_string()]);
+    }
+
+    #[test]
+    fn parse_runner_urls_uses_single_when_plural_is_only_whitespace() {
+        let urls = parse_runner_urls_from(Some("  , , "), Some("http://fallback:1"));
+        assert_eq!(urls, vec!["http://fallback:1".to_string()]);
+    }
+
+    #[test]
+    fn parse_runner_urls_empty_when_nothing_set() {
+        let urls = parse_runner_urls_from(None, None);
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn parse_port_defaults_to_8080_when_unset() {
+        assert_eq!(parse_port_from(None).unwrap(), 8080);
+    }
+
+    #[test]
+    fn parse_port_accepts_valid_u16() {
+        assert_eq!(parse_port_from(Some("9001")).unwrap(), 9001);
+    }
+
+    #[test]
+    fn parse_port_trims_whitespace() {
+        assert_eq!(parse_port_from(Some("  9001  ")).unwrap(), 9001);
+    }
+
+    #[test]
+    fn parse_port_rejects_non_numeric() {
+        let err = parse_port_from(Some("abc")).unwrap_err();
+        assert!(err.to_string().contains("PORT=\"abc\""));
+    }
+
+    #[test]
+    fn parse_port_rejects_out_of_range() {
+        let err = parse_port_from(Some("99999")).unwrap_err();
+        assert!(err.to_string().contains("PORT=\"99999\""));
+    }
+
+    #[test]
+    fn verify_policy_accepts_unset() {
+        assert!(verify_policy_value(None).is_ok());
+    }
+
+    #[test]
+    fn verify_policy_accepts_supported_value() {
+        assert!(verify_policy_value(Some(SUPPORTED_DISPATCHER_POLICY)).is_ok());
+    }
+
+    #[test]
+    fn verify_policy_rejects_unknown_value() {
+        let err = verify_policy_value(Some("legacy-round-robin")).unwrap_err();
+        assert!(err.to_string().contains("legacy-round-robin"));
+        assert!(err.to_string().contains("restore-capacity-only"));
+    }
 }

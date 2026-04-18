@@ -59,15 +59,17 @@ struct RoutingState {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
 /// Inline file seed used during session creation.
 ///
-/// Wire format is camelCase so the field matches the runner's
-/// `contentBase64` key when this struct is forwarded verbatim.
+/// Serialization uses `camelCase` (`contentBase64`) because the runner's
+/// wire format expects that key; the inbound deserializer also accepts
+/// `snake_case` (`content_base64`) via a serde alias so existing callers
+/// written against the Rust-native naming still work.
 pub struct InitialFile {
     /// Absolute in-sandbox path.
     pub path: String,
     /// File contents encoded as base64.
+    #[serde(rename = "contentBase64", alias = "content_base64")]
     pub content_base64: String,
 }
 
@@ -108,6 +110,7 @@ pub struct WriteFileRequest {
     /// Absolute in-sandbox target path.
     pub path: String,
     /// File contents encoded as base64.
+    #[serde(rename = "contentBase64", alias = "content_base64")]
     pub content_base64: String,
 }
 
@@ -389,7 +392,12 @@ async fn expand_runner_urls(configured_urls: &[String]) -> Result<Vec<String>, S
             resolved.set_port(Some(address.port())).map_err(|()| {
                 ServiceError::Discovery(format!("failed to set port for {configured_url}"))
             })?;
-            let resolved_url = resolved.to_string();
+            // `Url::to_string` renders an empty path as `/`.  Every downstream
+            // caller concatenates a leading-slash path suffix (e.g.
+            // `/runner/snapshot`), so we strip the trailing `/` here to avoid
+            // producing `http://host:port//runner/snapshot`, which axum would
+            // route to 404.
+            let resolved_url = resolved.to_string().trim_end_matches('/').to_string();
             if seen.insert(resolved_url.clone()) {
                 expanded.push(resolved_url);
             }
