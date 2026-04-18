@@ -19,9 +19,15 @@ jobs:
   sonarqube:
     name: SonarQube Scan
     runs-on: mayflower-k8s-runners
+    # Only run on successful CI completions (or manual dispatch).  A
+    # failed / cancelled CI run never uploads the coverage artifact, so
+    # letting this job fire for it just produces noisy "artifact not
+    # found" errors in the Checks UI.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion != ''
+      github.event.workflow_run.conclusion == 'success'
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     env:
       SONAR_TOKEN_SET: ${{ secrets.SONAR_TOKEN != '' }}
     steps:

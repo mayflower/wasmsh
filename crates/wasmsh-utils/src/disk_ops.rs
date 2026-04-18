@@ -278,11 +278,7 @@ pub(crate) fn util_df(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let used = vfs_total_size(ctx.fs, "/");
     let total = VFS_CAPACITY;
     let avail = total.saturating_sub(used);
-    let use_pct = if total > 0 {
-        (used * 100 / total).min(100)
-    } else {
-        0
-    };
+    let use_pct = (used * 100).checked_div(total).unwrap_or(0).min(100);
 
     // Header
     if human {

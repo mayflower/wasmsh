@@ -6566,13 +6566,9 @@ impl WorkerRuntime {
                 for ch in arg[1..].chars() {
                     match ch {
                         's' => serial = true,
-                        'd' => {
-                            if i + 1 < args.len() {
-                                delimiter.clone_from(&args[i + 1]);
-                                i += 1;
-                            } else {
-                                return None;
-                            }
+                        'd' if i + 1 < args.len() => {
+                            delimiter.clone_from(&args[i + 1]);
+                            i += 1;
                         }
                         _ => return None,
                     }
@@ -10502,7 +10498,7 @@ impl WorkerRuntime {
                 continue;
             }
             let (child_path, child_prefix) = Self::globstar_child_paths(dir, prefix, &entry.name);
-            if self.fs.stat(&child_path).map(|m| m.is_dir).unwrap_or(false) {
+            if self.fs.stat(&child_path).is_ok_and(|m| m.is_dir) {
                 self.globstar_walk(
                     &child_path,
                     segments,
@@ -10569,7 +10565,7 @@ impl WorkerRuntime {
             matches.push(child_prefix);
             return;
         }
-        let is_dir = self.fs.stat(&child_path).map(|m| m.is_dir).unwrap_or(false);
+        let is_dir = self.fs.stat(&child_path).is_ok_and(|m| m.is_dir);
         if is_dir {
             self.globstar_walk(
                 &child_path,

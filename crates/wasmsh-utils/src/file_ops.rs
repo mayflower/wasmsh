@@ -280,7 +280,7 @@ fn ls_collect_entries(fs: &mut BackendFs, dir: &str, flags: &LsFlags) -> Result<
         .filter(|e| flags.all || !e.name.starts_with('.'))
         .map(|e| {
             let child = child_path(dir, &e.name);
-            let size = fs.stat(&child).map(|m| m.size).unwrap_or(0);
+            let size = fs.stat(&child).map_or(0, |m| m.size);
             LsEntry {
                 name: e.name,
                 is_dir: e.is_dir,
@@ -289,7 +289,7 @@ fn ls_collect_entries(fs: &mut BackendFs, dir: &str, flags: &LsFlags) -> Result<
         })
         .collect();
     if flags.sort_size {
-        result.sort_by(|a, b| b.size.cmp(&a.size));
+        result.sort_by_key(|entry| std::cmp::Reverse(entry.size));
     } else {
         result.sort_by(|a, b| a.name.cmp(&b.name));
     }
@@ -647,7 +647,7 @@ pub(crate) fn util_mv(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let dst_arg = args[1];
     let src = resolve_path(ctx.cwd, src_arg);
     let dst_base = resolve_path(ctx.cwd, dst_arg);
-    let dst = if ctx.fs.stat(&dst_base).map(|m| m.is_dir).unwrap_or(false) {
+    let dst = if ctx.fs.stat(&dst_base).is_ok_and(|m| m.is_dir) {
         let name = src_arg.rsplit('/').next().unwrap_or(src_arg);
         child_path(&dst_base, name)
     } else {
@@ -736,8 +736,8 @@ pub(crate) fn util_cp(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut status = 0;
     for src_arg in sources {
         let src = resolve_path(ctx.cwd, src_arg);
-        let is_dir = ctx.fs.stat(&src).map(|m| m.is_dir).unwrap_or(false);
-        let dst = if ctx.fs.stat(&dst_base).map(|m| m.is_dir).unwrap_or(false) {
+        let is_dir = ctx.fs.stat(&src).is_ok_and(|m| m.is_dir);
+        let dst = if ctx.fs.stat(&dst_base).is_ok_and(|m| m.is_dir) {
             let name = src_arg.rsplit('/').next().unwrap_or(src_arg);
             child_path(&dst_base, name)
         } else {
@@ -1148,11 +1148,7 @@ fn find_entry_matches(
     }
     if filters.empty {
         if is_dir {
-            matched = matched
-                && fs
-                    .read_dir(full_path)
-                    .map(|e| e.is_empty())
-                    .unwrap_or(false);
+            matched = matched && fs.read_dir(full_path).is_ok_and(|e| e.is_empty());
         } else {
             matched = matched && size == 0;
         }
@@ -1242,7 +1238,7 @@ fn walk_find(
     };
     for entry in entries {
         let child = child_path(path, &entry.name);
-        let size = fs.stat(&child).map(|m| m.size).unwrap_or(0);
+        let size = fs.stat(&child).map_or(0, |m| m.size);
         let emit_depth = filters.mindepth.unwrap_or(0);
         if depth + 1 >= emit_depth
             && find_entry_matches(filters, &entry.name, &child, entry.is_dir, size, fs)

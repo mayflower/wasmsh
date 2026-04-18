@@ -444,10 +444,7 @@ impl<'src> Lexer<'src> {
         let source_str =
             std::str::from_utf8(self.source).expect("lexer source must be valid UTF-8");
 
-        loop {
-            let Some(next) = self.peek() else {
-                break;
-            };
+        while let Some(next) = self.peek() {
             if is_word_break(next) {
                 break;
             }
