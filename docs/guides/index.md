@@ -26,6 +26,7 @@ case where you already know which layer you need.
 | Task | Guide |
 |------|-------|
 | Diagnose common runtime errors | [Troubleshooting](troubleshooting.md) |
+| Measure Pyodide startup and first-command latency | [Performance testing](performance-testing.md) |
 
 ## See Also
 

@@ -46,6 +46,7 @@ const ALLOWED_HOSTS = [
   "pypi.org",
   "files.pythonhosted.org",
 ];
+let packageNetworkAvailable;
 
 // Shared assertion helper: every `session.run()` result includes both
 // stdout and stderr plus the exit code in the failure message, so a
@@ -60,24 +61,70 @@ function assertRunOk(r, label) {
   );
 }
 
+async function hasPackageNetwork() {
+  if (packageNetworkAvailable !== undefined) {
+    return packageNetworkAvailable;
+  }
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5_000);
+    timeoutId.unref?.();
+    const response = await fetch("https://cdn.jsdelivr.net/pyodide/v0.29.3/full/pyodide-lock.json", {
+      method: "HEAD",
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    packageNetworkAvailable = response.ok;
+  } catch {
+    packageNetworkAvailable = false;
+  }
+  return packageNetworkAvailable;
+}
+
+async function skipWithoutPackageNetwork(t) {
+  if (!(await hasPackageNetwork())) {
+    t.skip("package download network unavailable in this environment");
+    return true;
+  }
+  return false;
+}
+
 describe("Pyodide packages", () => {
   const openSession = SKIP ? null : createSessionTracker(createNodeSession, ASSETS_DIR);
   const openNetworkSession = SKIP ? null : async () => openSession({ allowedHosts: ALLOWED_HOSTS });
 
-  // ── Pure-Python packages (always work) ───────────────────────
+  // ── Bundled pure-Python packages ─────────────────────────────
+
+  for (const [pkg, installRequirement, importCheck] of [
+    ["packaging", "packaging", "import packaging; print(packaging.__version__)"],
+  ]) {
+    it(pkg, { skip: SKIP, timeout: 120_000 }, async () => {
+      const s = await openSession();
+      if (installRequirement) {
+        await s.installPythonPackages(installRequirement);
+      }
+      const r = await s.run(`python3 -c "${importCheck}"`);
+      assertRunOk(r, `${pkg} import`);
+      assert.ok(r.stdout.trim().length > 0, "should print version");
+    });
+  }
+
+  // ── Network-fetched pure-Python packages ─────────────────────
 
   for (const [pkg, importCheck] of [
     ["micropip", "import micropip; print(micropip.__version__)"],
     ["six", "import six; print(six.__version__)"],
     ["attrs", "import attrs; print(attrs.__version__)"],
     ["click", "import click; print(click.__version__)"],
-    ["packaging", "import packaging; print(packaging.__version__)"],
     ["beautifulsoup4", "import bs4; print(bs4.__version__)"],
     ["networkx", "import networkx; print(networkx.__version__)"],
     ["idna", "import idna; print(idna.__version__)"],
     ["certifi", "import certifi; print(certifi.__version__)"],
   ]) {
-    it(pkg, { skip: SKIP, timeout: 120_000 }, async () => {
+    it(pkg, { skip: SKIP, timeout: 120_000 }, async (t) => {
+      if (await skipWithoutPackageNetwork(t)) {
+        return;
+      }
       const s = await openNetworkSession();
       await s.installPythonPackages(pkg);
       const r = await s.run(`python3 -c "${importCheck}"`);
@@ -94,7 +141,10 @@ describe("Pyodide packages", () => {
   // `import yaml` but defeats the whole point of this test suite —
   // so we assert the C loader was actually picked up.
 
-  it("pyyaml (C extension loader)", { skip: SKIP, timeout: 120_000 }, async () => {
+  it("pyyaml (C extension loader)", { skip: SKIP, timeout: 120_000 }, async (t) => {
+    if (await skipWithoutPackageNetwork(t)) {
+      return;
+    }
     const s = await openNetworkSession();
     await s.installPythonPackages("pyyaml");
     const r = await s.run(
@@ -130,7 +180,10 @@ describe("Pyodide packages", () => {
     it(`${pkg} — install + import compiled side module`, {
       skip: SKIP,
       timeout: 180_000,
-    }, async () => {
+    }, async (t) => {
+      if (await skipWithoutPackageNetwork(t)) {
+        return;
+      }
       const s = await openNetworkSession();
       const result = await s.installPythonPackages(pkg);
       assert.ok(
@@ -167,6 +220,9 @@ describe("Pyodide packages", () => {
     "numpy + pandas + scipy compute a real result",
     { skip: SKIP, timeout: 240_000 },
     async (t) => {
+      if (await skipWithoutPackageNetwork(t)) {
+        return;
+      }
       const s = await openNetworkSession();
       await s.installPythonPackages(["numpy", "pandas", "scipy"]);
       const r = await s.run(

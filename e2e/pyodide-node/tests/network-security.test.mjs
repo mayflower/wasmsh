@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { extractStream, getExitCode } from "../../../packages/npm/wasmsh-pyodide/lib/protocol.mjs";
 
 const SKIP = process.env.SKIP_PYODIDE === "1";
+let outboundHttpsAvailable;
 
 function findStdout(events) {
   return new TextDecoder().decode(extractStream(events, "Stdout"));
