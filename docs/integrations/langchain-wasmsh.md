@@ -1,0 +1,113 @@
+# langchain-wasmsh — LangChain Deep Agents sandbox backend
+
+The `langchain-wasmsh` packages expose the wasmsh sandbox as a
+[LangChain Deep Agents](https://docs.langchain.com/oss/python/deepagents/sandboxes)
+backend.  Both ecosystems ship a single `WasmshSandbox` class that runs bash
+(88 utilities) and Python 3 inside an in-process Pyodide/WASM sandbox — no
+containers, no server.
+
+| Ecosystem | Package | Import | Source |
+| --- | --- | --- | --- |
+| Python | `langchain-wasmsh` | `from langchain_wasmsh import WasmshSandbox` | [`packages/python/langchain-wasmsh`](../../packages/python/langchain-wasmsh) |
+| npm | `@mayflowergmbh/langchain-wasmsh` | `import { WasmshSandbox } from "@mayflowergmbh/langchain-wasmsh"` | [`packages/npm/langchain-wasmsh`](../../packages/npm/langchain-wasmsh) |
+
+Both packages are Mayflower-maintained and live in this repository.  The
+underlying Pyodide assets come from `wasmsh-pyodide-runtime` (Python) and
+`@mayflowergmbh/wasmsh-pyodide` (npm).
+
+## Why these packages are hosted here, not upstream
+
+LangChain's current policy for new integrations is to publish them as
+standalone packages under the maintainer's own organisation and submit a
+docs-only PR upstream.  Following that guidance:
+
+- Code lives in `mayflower/wasmsh` (this repo).
+- Class names stay sandbox-shaped (`WasmshSandbox`), not agent-shaped.
+- Package names are LangChain-style (`langchain-wasmsh`,
+  `@mayflowergmbh/langchain-wasmsh`) so consumers recognise the integration
+  role.
+
+See the naming recommendation in the repository notes for the full reasoning.
+
+## Python quickstart
+
+```bash
+pip install langchain-wasmsh deepagents langchain-anthropic
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+```python
+from deepagents import create_deep_agent
+from langchain_wasmsh import WasmshSandbox
+
+backend = WasmshSandbox()
+try:
+    agent = create_deep_agent(
+        model="claude-haiku-4-5-20251001",
+        system_prompt="You are a coding assistant with bash and Python access.",
+        backend=backend,
+    )
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": "Compute fibonacci(10)"}]},
+    )
+    print(result["messages"][-1].content)
+finally:
+    backend.close()
+```
+
+Full runnable examples: [`examples/deepagent-python`](../../examples/deepagent-python).
+
+## npm quickstart
+
+```bash
+pnpm add @mayflowergmbh/langchain-wasmsh deepagents @langchain/anthropic
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+```ts
+import { createDeepAgent } from "deepagents";
+import { WasmshSandbox } from "@mayflowergmbh/langchain-wasmsh";
+
+const sandbox = await WasmshSandbox.createNode();
+try {
+  const agent = createDeepAgent({
+    model: "claude-haiku-4-5-20251001",
+    systemPrompt: "You are a coding assistant with bash and Python access.",
+    backend: sandbox,
+  });
+  const result = await agent.invoke({
+    messages: [{ role: "user", content: "Compute fibonacci(10)" }],
+  });
+  console.log(result.messages.at(-1)?.content);
+} finally {
+  await sandbox.stop();
+}
+```
+
+Full runnable examples: [`examples/deepagent-typescript`](../../examples/deepagent-typescript),
+[`examples/deepagent-browser`](../../examples/deepagent-browser).
+
+## What the sandbox provides
+
+- Bash with 88 built-in utilities (`jq`, `awk`, `rg`, `fd`, `diff`, `tar`,
+  `gzip`, `curl`, `wget`, …).
+- `python` / `python3` via Pyodide — shares `/workspace` with bash.
+- `pip install` intercepted and routed through `micropip` for pure-Python
+  wheels and Pyodide-compatible compiled wheels.
+- A deterministic, capability-based network model (`allowedHosts`).
+
+This is not a Linux container.  If you need a full OS, use a container-based
+backend such as `langchain-modal` or `langchain-daytona`.
+
+## Reference
+
+Both packages expose the same public surface.  See the per-ecosystem READMEs
+for the full API:
+
+- [`packages/python/langchain-wasmsh/README.md`](../../packages/python/langchain-wasmsh/README.md)
+- [`packages/npm/langchain-wasmsh/README.md`](../../packages/npm/langchain-wasmsh/README.md)
+
+## `WasmshRemoteSandbox`
+
+A remote/Kubernetes-backed variant is deferred until the dispatcher
+surface is ready.  Track progress in the repository issues.

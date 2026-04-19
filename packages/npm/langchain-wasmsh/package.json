@@ -1,0 +1,89 @@
+{
+  "name": "@mayflowergmbh/langchain-wasmsh",
+  "version": "0.0.1",
+  "description": "wasmsh sandbox backend for LangChain Deep Agents",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsdown",
+    "clean": "rm -rf dist/ .tsdown/",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm build",
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "test:int": "vitest run --mode int"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mayflower/wasmsh.git",
+    "directory": "packages/npm/langchain-wasmsh"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "langchain",
+    "deepagents",
+    "langgraph",
+    "typescript",
+    "llm",
+    "sandbox",
+    "wasmsh",
+    "wasm",
+    "webassembly",
+    "pyodide"
+  ],
+  "author": "Mayflower GmbH",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/mayflower/wasmsh/issues"
+  },
+  "homepage": "https://github.com/mayflower/wasmsh/tree/main/packages/npm/langchain-wasmsh#readme",
+  "dependencies": {
+    "@mayflowergmbh/wasmsh-pyodide": "workspace:*"
+  },
+  "peerDependencies": {
+    "deepagents": ">=1.9.0-alpha.0"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
+    "@langchain/anthropic": "^1.3.25",
+    "@langchain/core": "^1.1.33",
+    "@langchain/sandbox-standard-tests": "^1.0.0",
+    "@playwright/test": "^1.58.2",
+    "@tsconfig/recommended": "^1.0.13",
+    "@types/node": "^22.10.0",
+    "@vitest/coverage-v8": "^4.0.18",
+    "deepagents": "^1.9.0-alpha.0",
+    "path-browserify": "^1.0.1",
+    "sirv": "^3.0.2",
+    "tsdown": "^0.21.4",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.3",
+    "vitest": "^4.0.18"
+  },
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -16,13 +16,18 @@ Three build targets from one codebase:
 - **Pyodide** (`wasm32-unknown-emscripten`) — shell and Python share the same filesystem
 - **Component Model** (`wasm32-wasip2`) — WASI P2 component exporting the same JSON `HostCommand` / `WorkerEvent` transport used by Pyodide through a thin `wasmsh:component/runtime` handle plus shared probe helpers. Reuses the same libc-backed filesystem path as Pyodide. See [ADR-0030](docs/adr/adr-0030-wasmcloud-component-transport.md).
 
-## Use with DeepAgents
+## Use with LangChain Deep Agents
 
-wasmsh is a sandbox backend for [DeepAgents](https://github.com/langchain-ai/deepagentsjs). LLM agents get `execute`, `read_file`, `write_file`, `edit_file`, `ls`, `grep`, `glob` tools backed by the WASM sandbox.
+wasmsh is a sandbox backend for [LangChain Deep Agents](https://github.com/langchain-ai/deepagentsjs). LLM agents get `execute`, `read_file`, `write_file`, `edit_file`, `ls`, `grep`, `glob` tools backed by the WASM sandbox.
+
+Adapter packages are Mayflower-maintained and live in this repo:
+
+- **npm** — [`@mayflowergmbh/langchain-wasmsh`](packages/npm/langchain-wasmsh) (Node + browser)
+- **Python** — [`langchain-wasmsh`](packages/python/langchain-wasmsh)
 
 ```typescript
 import { createDeepAgent } from "deepagents";
-import { WasmshSandbox } from "@langchain/wasmsh";
+import { WasmshSandbox } from "@mayflowergmbh/langchain-wasmsh";
 
 const sandbox = await WasmshSandbox.createNode();
 const agent = createDeepAgent({ backend: sandbox });
@@ -32,7 +37,15 @@ const result = await agent.invoke({
 await sandbox.stop();
 ```
 
-Also works in the browser (Web Worker, no backend needed) and from Python (`langchain-wasmsh`).
+```python
+from deepagents import create_deep_agent
+from langchain_wasmsh import WasmshSandbox
+
+sandbox = WasmshSandbox()
+agent = create_deep_agent(backend=sandbox)
+```
+
+See [`docs/integrations/langchain-wasmsh.md`](docs/integrations/langchain-wasmsh.md) for the full integration guide.
 
 ## Use directly
 

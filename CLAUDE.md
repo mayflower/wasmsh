@@ -98,6 +98,19 @@ just doc                    # docs with warnings-as-errors
 
 2 excluded crates (require emcc): `wasmsh-pyodide-probe`, `wasmsh-pyodide`.
 
+## Adapter Packages (non-Rust)
+
+Published alongside the Rust runtime, under `packages/`:
+
+- `packages/npm/wasmsh-pyodide` → `@mayflowergmbh/wasmsh-pyodide` — Pyodide runtime + Node/browser session helpers.
+- `packages/npm/langchain-wasmsh` → `@mayflowergmbh/langchain-wasmsh` — LangChain Deep Agents sandbox backend (TypeScript). Depends on `@mayflowergmbh/wasmsh-pyodide` via `workspace:*`.
+- `packages/python/wasmsh-pyodide-runtime` → `wasmsh-pyodide-runtime` — Pyodide dist assets.
+- `packages/python/langchain-wasmsh` → `langchain-wasmsh` — LangChain Deep Agents sandbox backend (Python). Depends on `wasmsh-pyodide-runtime`.
+
+The two npm packages form a pnpm workspace (`pnpm-workspace.yaml` at the repo root). Use `pnpm --filter @mayflowergmbh/langchain-wasmsh <cmd>` to run scripts against the adapter. The Python package uses `uv` — run `uv sync --group test` inside `packages/python/langchain-wasmsh` before `pytest`.
+
+The single `WasmshSandbox` class (both ecosystems) covers Node and browser. A remote/Kubernetes `WasmshRemoteSandbox` variant is deferred. See [`docs/integrations/langchain-wasmsh.md`](docs/integrations/langchain-wasmsh.md).
+
 ## Architecture Layers
 
 - **Syntax**: Lexer (stateful, multi-mode) → Parser (recursive descent) → AST

@@ -1,0 +1,132 @@
+name: Publish LangChain Adapters
+
+# Tag-triggered publish for the langchain-wasmsh adapter packages.
+#
+# Tag formats:
+#   langchain-wasmsh-py-v<version>      → PyPI       (langchain-wasmsh)
+#   langchain-wasmsh-npm-v<version>     → npm        (@mayflowergmbh/langchain-wasmsh)
+#
+# Both jobs also run on workflow_dispatch so a human can trigger them
+# manually from the Actions UI when a release is cut without a tag.
+
+on:
+  push:
+    tags:
+      - 'langchain-wasmsh-py-v*'
+      - 'langchain-wasmsh-npm-v*'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which package to publish"
+        required: true
+        type: choice
+        options:
+          - python
+          - npm
+          - both
+
+concurrency:
+  group: langchain-adapters-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # trusted publishing to PyPI via OIDC
+  id-token: write
+
+jobs:
+  # ── PyPI ───────────────────────────────────────────────────
+  publish-python:
+    name: Publish to PyPI
+    if: |
+      startsWith(github.ref, 'refs/tags/langchain-wasmsh-py-v') ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'python' || github.event.inputs.target == 'both'))
+    runs-on: mayflower-k8s-runners
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/p/langchain-wasmsh
+    defaults:
+      run:
+        working-directory: packages/python/langchain-wasmsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.7"
+
+      - name: Install Node.js (needed by the subprocess smoke test)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Sync dependencies
+        run: uv sync --group test
+
+      - name: Lint (ruff check)
+        run: uv run --group test ruff check langchain_wasmsh tests
+
+      - name: Unit tests (mocked)
+        run: uv run --group test pytest tests/unit_tests/test_sandbox_mocked.py tests/test_import.py -v
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - name: Publish to PyPI
+        # Trusted publishing via OIDC; no token needed on the runner.
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/python/langchain-wasmsh/dist
+
+  # ── npm ────────────────────────────────────────────────────
+  publish-npm:
+    name: Publish to npm
+    if: |
+      startsWith(github.ref, 'refs/tags/langchain-wasmsh-npm-v') ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'npm' || github.event.inputs.target == 'both'))
+    runs-on: mayflower-k8s-runners
+    timeout-minutes: 15
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@mayflowergmbh/langchain-wasmsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.20.0"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm --filter @mayflowergmbh/langchain-wasmsh typecheck
+
+      - name: Build
+        run: pnpm --filter @mayflowergmbh/langchain-wasmsh build
+
+      - name: Unit tests
+        run: pnpm --filter @mayflowergmbh/langchain-wasmsh test:unit
+
+      - name: Publish to npm
+        # `pnpm publish` refuses workspace:* protocol by default; use
+        # --no-git-checks because the workflow doesn't run on main HEAD
+        # (tag ref).  The `publishConfig.access` in package.json sets
+        # `public`.
+        run: pnpm --filter @mayflowergmbh/langchain-wasmsh publish --no-git-checks --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

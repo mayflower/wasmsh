@@ -1,0 +1,90 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "langchain-wasmsh"
+description = "wasmsh sandbox backend for LangChain Deep Agents"
+license = { text = "MIT" }
+readme = "README.md"
+
+classifiers = [
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+version = "0.0.1"
+requires-python = ">=3.11,<4.0"
+dependencies = [
+    "wasmsh-pyodide-runtime>=0.5.0",
+]
+
+[project.optional-dependencies]
+deepagents = ["deepagents>=0.5.0a2"]
+
+[project.urls]
+Homepage = "https://github.com/mayflower/wasmsh/tree/main/packages/python/langchain-wasmsh"
+Repository = "https://github.com/mayflower/wasmsh"
+Documentation = "https://github.com/mayflower/wasmsh/blob/main/docs/integrations/langchain-wasmsh.md"
+Issues = "https://github.com/mayflower/wasmsh/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["langchain_wasmsh"]
+
+[dependency-groups]
+dev = [
+    "deepagents>=0.5.0a2",
+]
+test = [
+    "deepagents>=0.5.0a2",
+    "pytest>=7.3.0,<10.0.0",
+    "pytest-cov",
+    "pytest-socket",
+    "pytest-xdist",
+    "pytest-timeout>=2.3.1,<3.0.0",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.13.1,<0.16.0",
+]
+
+[tool.uv]
+constraint-dependencies = ["urllib3>=2.6.3"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812",
+    "ISC001",
+    "ANN401",
+]
+extend-safe-fixes = ["PLR6201"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+ignore-var-parameters = true
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests: pytest assertions are the point, and docstring rules add noise
+# without buying readability for small test helpers.
+"tests/**" = [
+    "S101",  # use of assert
+    "D100", "D101", "D102", "D103", "D104",  # missing docstrings
+    "SLF001",  # accessing _private on the class under test
+    "PLR2004",  # magic numbers in assertions are fine
+    "ANN201", "ANN202",  # missing return annotations on test funcs
+    "INP001",  # implicit namespace packages
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]

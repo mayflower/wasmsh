@@ -10,6 +10,18 @@ fuzz/target/
 examples/typescript/node_modules/
 pkg/
 
+# ── pnpm workspace + adapter packages ──────────────────────────────
+node_modules/
+packages/npm/*/dist/
+packages/npm/*/node_modules/
+packages/npm/*/.tsdown/
+packages/npm/*/coverage/
+packages/npm/*/playwright-report/
+packages/npm/*/test-results/
+packages/python/langchain-wasmsh/.venv/
+packages/python/langchain-wasmsh/.pytest_cache/
+packages/python/langchain-wasmsh/uv.lock
+
 # ── Pyodide build outputs staged into the npm package ───────────────
 # `tools/pyodide/build-custom.sh` writes the wheel set, pyodide.asm.{js,wasm},
 # python_stdlib.zip, etc. into this dir right before `npm publish` packs them

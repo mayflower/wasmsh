@@ -7,7 +7,7 @@
     "start": "npx tsx example.ts"
   },
   "dependencies": {
-    "@langchain/wasmsh": "latest",
+    "@mayflowergmbh/langchain-wasmsh": "latest",
     "deepagents": "latest",
     "@langchain/anthropic": "latest",
     "@langchain/core": "latest"

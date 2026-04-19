@@ -13,7 +13,7 @@
  */
 import { createDeepAgent } from "deepagents";
 import { HumanMessage } from "@langchain/core/messages";
-import { WasmshSandbox } from "@langchain/wasmsh";
+import { WasmshSandbox } from "@mayflowergmbh/langchain-wasmsh";
 
 async function main() {
   // Create a sandboxed environment — shell, Python, and filesystem

@@ -27,6 +27,6 @@ The agent decides autonomously how to accomplish the task. All execution happens
 
 ## Packages
 
-- [`langchain-wasmsh`](https://github.com/mayflower/deepagents) — wasmsh sandbox provider for DeepAgents
+- [`langchain-wasmsh`](https://github.com/mayflower/wasmsh/tree/main/packages/python/langchain-wasmsh) — wasmsh sandbox backend for LangChain Deep Agents
 - [`wasmsh-pyodide-runtime`](https://pypi.org/project/wasmsh-pyodide-runtime/) — wasmsh Pyodide runtime assets
 - [`deepagents`](https://github.com/langchain-ai/deepagents) — LLM agent framework
