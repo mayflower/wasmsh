@@ -1913,6 +1913,12 @@ struct StreamingGrepStage {
     patterns: Vec<String>,
 }
 
+#[derive(Copy, Clone, Debug)]
+enum StreamingGrepStep {
+    Advance(usize),
+    NotMatched,
+}
+
 #[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 struct StreamingUniqFlags {
@@ -4237,6 +4243,14 @@ enum StreamingPipelineStage {
     Wc(StreamingWcFlags),
 }
 
+struct StreamingStageCtx<'a> {
+    stages: &'a [StreamingPipelineStage],
+    stage_pipe_stderr: &'a [bool],
+    stage_statuses: &'a [Rc<RefCell<i32>>],
+    stage_stderr: &'a [Rc<RefCell<Vec<u8>>>],
+    output_pipes: &'a [Rc<RefCell<PipeBuffer>>],
+}
+
 #[derive(Clone, Debug)]
 enum StreamingCutMode {
     Fields(Vec<StreamingCutRange>),
@@ -5887,173 +5901,246 @@ impl WorkerRuntime {
         let output_pipes: Vec<Rc<RefCell<PipeBuffer>>> = (0..stages.len())
             .map(|_| Rc::new(RefCell::new(PipeBuffer::new(PIPEBUFFER_STREAMING_CAPACITY))))
             .collect();
-        if let Some(source_reader) = source_reader {
-            let source_pipe = Rc::new(RefCell::new(PipeBuffer::new(PIPEBUFFER_STREAMING_CAPACITY)));
-            let source_stderr = Rc::new(RefCell::new(Vec::new()));
-            let source_status = Rc::new(RefCell::new(0));
-            processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
-                source_reader,
-                source_pipe.clone(),
-                source_stderr,
-                source_status,
-                "source",
-                false,
-            )));
-            match &stages[0] {
-                StreamingPipelineStage::Tee(stage) => {
-                    let reader = Box::new(PipeReader::new(source_pipe)) as Box<dyn Read>;
-                    processes.push(StreamingPipeProcess::Tee(TeePipeProcess::new(
-                        reader,
-                        output_pipes[0].clone(),
-                        &mut self.fs,
-                        self.vm.state.cwd.as_str(),
-                        stage,
-                        stage_stderr[0].clone(),
-                        stage_statuses[0].clone(),
-                        stage_pipe_stderr[0],
-                    )));
-                }
-                StreamingPipelineStage::BufferedCommand(argv) => {
-                    processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
-                        Some(source_pipe),
-                        output_pipes[0].clone(),
-                        argv.clone(),
-                        stage_pipe_stderr[0],
-                        stage_stderr[0].clone(),
-                        stage_statuses[0].clone(),
-                    )));
-                }
-                _ => {
-                    let reader = Box::new(PipeReader::new(source_pipe)) as Box<dyn Read>;
-                    let Some(stage_reader) =
-                        Self::wrap_non_tee_streaming_stage(reader, &stages[0], 0, stage_statuses)
-                    else {
-                        return false;
-                    };
-                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
-                        stage_reader,
-                        output_pipes[0].clone(),
-                        stage_stderr[0].clone(),
-                        stage_statuses[0].clone(),
-                        "stage",
-                        stage_pipe_stderr[0],
-                    )));
-                }
-            }
-        } else {
-            match &stages[0] {
-                StreamingPipelineStage::Literal(data) => {
-                    let first_reader: Box<dyn Read + '_> = Box::new(Cursor::new(data.clone()));
-                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
-                        first_reader,
-                        output_pipes[0].clone(),
-                        stage_stderr[0].clone(),
-                        stage_statuses[0].clone(),
-                        "source",
-                        stage_pipe_stderr[0],
-                    )));
-                }
-                StreamingPipelineStage::File(path) => {
-                    let resolved = self.resolve_cwd_path(path);
-                    let Ok(first_reader) = self.open_streaming_file_reader(&resolved, "cat") else {
-                        *stage_statuses[0].borrow_mut() = self.vm.state.last_status;
-                        return true;
-                    };
-                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
-                        first_reader,
-                        output_pipes[0].clone(),
-                        stage_stderr[0].clone(),
-                        stage_statuses[0].clone(),
-                        "source",
-                        stage_pipe_stderr[0],
-                    )));
-                }
-                StreamingPipelineStage::Yes { line } => {
-                    let first_reader: Box<dyn Read + '_> =
-                        Box::new(YesStreamReader::new(line.clone(), STREAMING_YES_MAX_LINES));
-                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
-                        first_reader,
-                        output_pipes[0].clone(),
-                        stage_stderr[0].clone(),
-                        stage_statuses[0].clone(),
-                        "source",
-                        stage_pipe_stderr[0],
-                    )));
-                }
-                StreamingPipelineStage::BufferedCommand(argv) => {
-                    processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
-                        None,
-                        output_pipes[0].clone(),
-                        argv.clone(),
-                        stage_pipe_stderr[0],
-                        stage_stderr[0].clone(),
-                        stage_statuses[0].clone(),
-                    )));
-                }
-                _ => unreachable!("unexpected first pipeline stage"),
+        let ctx = StreamingStageCtx {
+            stages,
+            stage_pipe_stderr,
+            stage_statuses,
+            stage_stderr,
+            output_pipes: &output_pipes,
+        };
+
+        if let Some(early) = self.setup_first_streaming_process(source_reader, &ctx, &mut processes)
+        {
+            return early;
+        }
+        for idx in 1..stages.len() {
+            if !self.setup_later_streaming_stage(idx, &ctx, &mut processes) {
+                return false;
             }
         }
 
-        for idx in 1..stages.len() {
-            match &stages[idx] {
-                StreamingPipelineStage::Head(mode) => {
-                    processes.push(StreamingPipeProcess::Head(HeadPipeProcess::new(
-                        output_pipes[idx - 1].clone(),
-                        output_pipes[idx].clone(),
-                        *mode,
-                    )));
-                }
-                StreamingPipelineStage::Tee(stage) => {
-                    let reader =
-                        Box::new(PipeReader::new(output_pipes[idx - 1].clone())) as Box<dyn Read>;
-                    processes.push(StreamingPipeProcess::Tee(TeePipeProcess::new(
-                        reader,
-                        output_pipes[idx].clone(),
-                        &mut self.fs,
-                        self.vm.state.cwd.as_str(),
-                        stage,
-                        stage_stderr[idx].clone(),
-                        stage_statuses[idx].clone(),
-                        stage_pipe_stderr[idx],
-                    )));
-                }
-                StreamingPipelineStage::BufferedCommand(argv) => {
-                    processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
-                        Some(output_pipes[idx - 1].clone()),
-                        output_pipes[idx].clone(),
-                        argv.clone(),
-                        stage_pipe_stderr[idx],
-                        stage_stderr[idx].clone(),
-                        stage_statuses[idx].clone(),
-                    )));
-                }
-                _ => {
-                    let reader =
-                        Box::new(PipeReader::new(output_pipes[idx - 1].clone())) as Box<dyn Read>;
-                    let Some(stage_reader) = Self::wrap_non_tee_streaming_stage(
-                        reader,
-                        &stages[idx],
-                        idx,
-                        stage_statuses,
-                    ) else {
-                        return false;
-                    };
-                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
-                        stage_reader,
-                        output_pipes[idx].clone(),
-                        stage_stderr[idx].clone(),
-                        stage_statuses[idx].clone(),
-                        "stage",
-                        stage_pipe_stderr[idx],
-                    )));
-                }
-            }
-        }
         let final_pipe = output_pipes
             .last()
             .cloned()
             .expect("final pipe missing for streaming pipeline");
+        self.drive_streaming_pipeline(&mut processes, &output_pipes, &final_pipe);
 
+        for process in &mut processes {
+            process.close(self);
+        }
+        self.drain_streaming_stage_stderr(stage_pipe_stderr, stage_stderr);
+        true
+    }
+
+    fn setup_first_streaming_process(
+        &mut self,
+        source_reader: Option<Box<dyn Read>>,
+        ctx: &StreamingStageCtx<'_>,
+        processes: &mut Vec<StreamingPipeProcess<'static>>,
+    ) -> Option<bool> {
+        if let Some(source_reader) = source_reader {
+            self.setup_first_with_source(source_reader, ctx, processes)
+        } else {
+            self.setup_first_without_source(ctx, processes)
+        }
+    }
+
+    fn setup_first_with_source(
+        &mut self,
+        source_reader: Box<dyn Read>,
+        ctx: &StreamingStageCtx<'_>,
+        processes: &mut Vec<StreamingPipeProcess<'static>>,
+    ) -> Option<bool> {
+        let source_pipe = Rc::new(RefCell::new(PipeBuffer::new(PIPEBUFFER_STREAMING_CAPACITY)));
+        let source_stderr = Rc::new(RefCell::new(Vec::new()));
+        let source_status = Rc::new(RefCell::new(0));
+        processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+            source_reader,
+            source_pipe.clone(),
+            source_stderr,
+            source_status,
+            "source",
+            false,
+        )));
+        match &ctx.stages[0] {
+            StreamingPipelineStage::Tee(stage) => {
+                let reader = Box::new(PipeReader::new(source_pipe)) as Box<dyn Read>;
+                processes.push(StreamingPipeProcess::Tee(TeePipeProcess::new(
+                    reader,
+                    ctx.output_pipes[0].clone(),
+                    &mut self.fs,
+                    self.vm.state.cwd.as_str(),
+                    stage,
+                    ctx.stage_stderr[0].clone(),
+                    ctx.stage_statuses[0].clone(),
+                    ctx.stage_pipe_stderr[0],
+                )));
+                None
+            }
+            StreamingPipelineStage::BufferedCommand(argv) => {
+                processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
+                    Some(source_pipe),
+                    ctx.output_pipes[0].clone(),
+                    argv.clone(),
+                    ctx.stage_pipe_stderr[0],
+                    ctx.stage_stderr[0].clone(),
+                    ctx.stage_statuses[0].clone(),
+                )));
+                None
+            }
+            _ => {
+                let reader = Box::new(PipeReader::new(source_pipe)) as Box<dyn Read>;
+                let Some(stage_reader) = Self::wrap_non_tee_streaming_stage(
+                    reader,
+                    &ctx.stages[0],
+                    0,
+                    ctx.stage_statuses,
+                ) else {
+                    return Some(false);
+                };
+                processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                    stage_reader,
+                    ctx.output_pipes[0].clone(),
+                    ctx.stage_stderr[0].clone(),
+                    ctx.stage_statuses[0].clone(),
+                    "stage",
+                    ctx.stage_pipe_stderr[0],
+                )));
+                None
+            }
+        }
+    }
+
+    fn setup_first_without_source(
+        &mut self,
+        ctx: &StreamingStageCtx<'_>,
+        processes: &mut Vec<StreamingPipeProcess<'static>>,
+    ) -> Option<bool> {
+        match &ctx.stages[0] {
+            StreamingPipelineStage::Literal(data) => {
+                let first_reader: Box<dyn Read> = Box::new(Cursor::new(data.clone()));
+                processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                    first_reader,
+                    ctx.output_pipes[0].clone(),
+                    ctx.stage_stderr[0].clone(),
+                    ctx.stage_statuses[0].clone(),
+                    "source",
+                    ctx.stage_pipe_stderr[0],
+                )));
+                None
+            }
+            StreamingPipelineStage::File(path) => {
+                let resolved = self.resolve_cwd_path(path);
+                let Ok(first_reader) = self.open_streaming_file_reader(&resolved, "cat") else {
+                    *ctx.stage_statuses[0].borrow_mut() = self.vm.state.last_status;
+                    return Some(true);
+                };
+                processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                    first_reader,
+                    ctx.output_pipes[0].clone(),
+                    ctx.stage_stderr[0].clone(),
+                    ctx.stage_statuses[0].clone(),
+                    "source",
+                    ctx.stage_pipe_stderr[0],
+                )));
+                None
+            }
+            StreamingPipelineStage::Yes { line } => {
+                let first_reader: Box<dyn Read> =
+                    Box::new(YesStreamReader::new(line.clone(), STREAMING_YES_MAX_LINES));
+                processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                    first_reader,
+                    ctx.output_pipes[0].clone(),
+                    ctx.stage_stderr[0].clone(),
+                    ctx.stage_statuses[0].clone(),
+                    "source",
+                    ctx.stage_pipe_stderr[0],
+                )));
+                None
+            }
+            StreamingPipelineStage::BufferedCommand(argv) => {
+                processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
+                    None,
+                    ctx.output_pipes[0].clone(),
+                    argv.clone(),
+                    ctx.stage_pipe_stderr[0],
+                    ctx.stage_stderr[0].clone(),
+                    ctx.stage_statuses[0].clone(),
+                )));
+                None
+            }
+            _ => unreachable!("unexpected first pipeline stage"),
+        }
+    }
+
+    fn setup_later_streaming_stage(
+        &mut self,
+        idx: usize,
+        ctx: &StreamingStageCtx<'_>,
+        processes: &mut Vec<StreamingPipeProcess<'static>>,
+    ) -> bool {
+        match &ctx.stages[idx] {
+            StreamingPipelineStage::Head(mode) => {
+                processes.push(StreamingPipeProcess::Head(HeadPipeProcess::new(
+                    ctx.output_pipes[idx - 1].clone(),
+                    ctx.output_pipes[idx].clone(),
+                    *mode,
+                )));
+            }
+            StreamingPipelineStage::Tee(stage) => {
+                let reader =
+                    Box::new(PipeReader::new(ctx.output_pipes[idx - 1].clone())) as Box<dyn Read>;
+                processes.push(StreamingPipeProcess::Tee(TeePipeProcess::new(
+                    reader,
+                    ctx.output_pipes[idx].clone(),
+                    &mut self.fs,
+                    self.vm.state.cwd.as_str(),
+                    stage,
+                    ctx.stage_stderr[idx].clone(),
+                    ctx.stage_statuses[idx].clone(),
+                    ctx.stage_pipe_stderr[idx],
+                )));
+            }
+            StreamingPipelineStage::BufferedCommand(argv) => {
+                processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
+                    Some(ctx.output_pipes[idx - 1].clone()),
+                    ctx.output_pipes[idx].clone(),
+                    argv.clone(),
+                    ctx.stage_pipe_stderr[idx],
+                    ctx.stage_stderr[idx].clone(),
+                    ctx.stage_statuses[idx].clone(),
+                )));
+            }
+            _ => {
+                let reader =
+                    Box::new(PipeReader::new(ctx.output_pipes[idx - 1].clone())) as Box<dyn Read>;
+                let Some(stage_reader) = Self::wrap_non_tee_streaming_stage(
+                    reader,
+                    &ctx.stages[idx],
+                    idx,
+                    ctx.stage_statuses,
+                ) else {
+                    return false;
+                };
+                processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                    stage_reader,
+                    ctx.output_pipes[idx].clone(),
+                    ctx.stage_stderr[idx].clone(),
+                    ctx.stage_statuses[idx].clone(),
+                    "stage",
+                    ctx.stage_pipe_stderr[idx],
+                )));
+            }
+        }
+        true
+    }
+
+    fn drive_streaming_pipeline(
+        &mut self,
+        processes: &mut [StreamingPipeProcess<'static>],
+        output_pipes: &[Rc<RefCell<PipeBuffer>>],
+        final_pipe: &Rc<RefCell<PipeBuffer>>,
+    ) {
         let mut finished = vec![false; processes.len()];
         loop {
             if self.check_resource_limits() {
@@ -6061,20 +6148,7 @@ impl WorkerRuntime {
                 break;
             }
 
-            let mut progressed = false;
-            for idx in (0..processes.len()).rev() {
-                if finished[idx] {
-                    continue;
-                }
-                match processes[idx].poll(self) {
-                    PipeProcessPoll::Ready => progressed = true,
-                    PipeProcessPoll::PendingRead | PipeProcessPoll::PendingWrite => {}
-                    PipeProcessPoll::Exited => {
-                        finished[idx] = true;
-                        progressed = true;
-                    }
-                }
-            }
+            let mut progressed = self.poll_streaming_processes(processes, &mut finished);
 
             let buffered_pipe_bytes = output_pipes
                 .iter()
@@ -6086,41 +6160,68 @@ impl WorkerRuntime {
                 break;
             }
 
-            loop {
-                let mut buffer = [0u8; 4096];
-                let read_result = {
-                    let mut pipe = final_pipe.borrow_mut();
-                    pipe.read(&mut buffer)
-                };
-                match read_result {
-                    ReadResult::Read(read) => {
-                        self.write_stdout(&buffer[..read]);
-                        progressed = true;
-                        if self.exec.resource_exhausted {
-                            final_pipe.borrow_mut().close_read();
-                            break;
-                        }
-                    }
-                    ReadResult::WouldBlock | ReadResult::Eof => break,
+            if self.drain_final_pipe_to_stdout(final_pipe, &mut progressed) {
+                break;
+            }
+
+            if self.exec.resource_exhausted || finished.iter().all(|done| *done) || !progressed {
+                break;
+            }
+        }
+    }
+
+    fn poll_streaming_processes(
+        &mut self,
+        processes: &mut [StreamingPipeProcess<'static>],
+        finished: &mut [bool],
+    ) -> bool {
+        let mut progressed = false;
+        for idx in (0..processes.len()).rev() {
+            if finished[idx] {
+                continue;
+            }
+            match processes[idx].poll(self) {
+                PipeProcessPoll::Ready => progressed = true,
+                PipeProcessPoll::PendingRead | PipeProcessPoll::PendingWrite => {}
+                PipeProcessPoll::Exited => {
+                    finished[idx] = true;
+                    progressed = true;
                 }
             }
+        }
+        progressed
+    }
 
-            if self.exec.resource_exhausted {
-                break;
-            }
-
-            if finished.iter().all(|done| *done) {
-                break;
-            }
-            if !progressed {
-                break;
+    fn drain_final_pipe_to_stdout(
+        &mut self,
+        final_pipe: &Rc<RefCell<PipeBuffer>>,
+        progressed: &mut bool,
+    ) -> bool {
+        loop {
+            let mut buffer = [0u8; 4096];
+            let read_result = {
+                let mut pipe = final_pipe.borrow_mut();
+                pipe.read(&mut buffer)
+            };
+            match read_result {
+                ReadResult::Read(read) => {
+                    self.write_stdout(&buffer[..read]);
+                    *progressed = true;
+                    if self.exec.resource_exhausted {
+                        final_pipe.borrow_mut().close_read();
+                        return true;
+                    }
+                }
+                ReadResult::WouldBlock | ReadResult::Eof => return false,
             }
         }
+    }
 
-        for process in &mut processes {
-            process.close(self);
-        }
-
+    fn drain_streaming_stage_stderr(
+        &mut self,
+        stage_pipe_stderr: &[bool],
+        stage_stderr: &[Rc<RefCell<Vec<u8>>>],
+    ) {
         for (idx, stderr) in stage_stderr.iter().enumerate() {
             if stage_pipe_stderr[idx] {
                 continue;
@@ -6130,7 +6231,6 @@ impl WorkerRuntime {
                 self.write_stderr(&data);
             }
         }
-        true
     }
 
     fn wrap_non_tee_streaming_stage<'a>(
@@ -6712,65 +6812,18 @@ impl WorkerRuntime {
                 rest.extend(args[i + 1..].iter().cloned());
                 break;
             }
-            if arg.starts_with("--include=")
-                || arg.starts_with("--exclude=")
-                || arg == "--color"
-                || arg.starts_with("--color=")
-                || arg == "-r"
-                || arg == "-R"
-                || arg == "--recursive"
-            {
+            if Self::streaming_grep_arg_rejected(arg) {
                 return None;
             }
-            if arg == "-e" && i + 1 < args.len() {
-                patterns.push(args[i + 1].clone());
-                i += 2;
-                continue;
-            }
-            if arg == "-f" && i + 1 < args.len() {
-                return None;
-            }
-            if arg == "-A" && i + 1 < args.len() {
-                flags.after_context = args[i + 1].parse().ok()?;
-                i += 2;
-                continue;
-            }
-            if arg == "-B" && i + 1 < args.len() {
-                flags.before_context = args[i + 1].parse().ok()?;
-                i += 2;
-                continue;
-            }
-            if arg == "-C" && i + 1 < args.len() {
-                let n = args[i + 1].parse().ok()?;
-                flags.before_context = n;
-                flags.after_context = n;
-                i += 2;
-                continue;
-            }
-            if arg == "-m" && i + 1 < args.len() {
-                flags.max_count = args[i + 1].parse().ok();
-                i += 2;
-                continue;
+            match Self::parse_streaming_grep_value_flag(args, i, &mut flags, &mut patterns)? {
+                StreamingGrepStep::Advance(delta) => {
+                    i += delta;
+                    continue;
+                }
+                StreamingGrepStep::NotMatched => {}
             }
             if arg.starts_with('-') && arg.len() > 1 {
-                for ch in arg[1..].chars() {
-                    match ch {
-                        'i' => flags.ignore_case = true,
-                        'v' => flags.invert = true,
-                        'c' => flags.count_only = true,
-                        'n' => flags.show_line_numbers = true,
-                        'l' => flags.files_only = true,
-                        'E' | 'P' => flags.extended = true,
-                        'F' => flags.fixed = true,
-                        'w' => flags.word_match = true,
-                        'o' => flags.only_matching = true,
-                        'q' => flags.quiet = true,
-                        'h' => flags.show_filename = Some(false),
-                        'H' => flags.show_filename = Some(true),
-                        'z' => {}
-                        _ => return None,
-                    }
-                }
+                Self::apply_streaming_grep_short_flags(&arg[1..], &mut flags)?;
                 i += 1;
             } else {
                 rest.push(args[i].clone());
@@ -6791,6 +6844,80 @@ impl WorkerRuntime {
             flags,
             patterns,
         }))
+    }
+
+    fn streaming_grep_arg_rejected(arg: &str) -> bool {
+        arg.starts_with("--include=")
+            || arg.starts_with("--exclude=")
+            || arg == "--color"
+            || arg.starts_with("--color=")
+            || arg == "-r"
+            || arg == "-R"
+            || arg == "--recursive"
+    }
+
+    fn parse_streaming_grep_value_flag(
+        args: &[String],
+        i: usize,
+        flags: &mut StreamingGrepFlags,
+        patterns: &mut Vec<String>,
+    ) -> Option<StreamingGrepStep> {
+        let arg = args[i].as_str();
+        let has_next = i + 1 < args.len();
+        if !has_next {
+            return Some(StreamingGrepStep::NotMatched);
+        }
+        match arg {
+            "-e" => {
+                patterns.push(args[i + 1].clone());
+                Some(StreamingGrepStep::Advance(2))
+            }
+            "-f" => None,
+            "-A" => {
+                flags.after_context = args[i + 1].parse().ok()?;
+                Some(StreamingGrepStep::Advance(2))
+            }
+            "-B" => {
+                flags.before_context = args[i + 1].parse().ok()?;
+                Some(StreamingGrepStep::Advance(2))
+            }
+            "-C" => {
+                let n = args[i + 1].parse().ok()?;
+                flags.before_context = n;
+                flags.after_context = n;
+                Some(StreamingGrepStep::Advance(2))
+            }
+            "-m" => {
+                flags.max_count = args[i + 1].parse().ok();
+                Some(StreamingGrepStep::Advance(2))
+            }
+            _ => Some(StreamingGrepStep::NotMatched),
+        }
+    }
+
+    fn apply_streaming_grep_short_flags(
+        short_flags: &str,
+        flags: &mut StreamingGrepFlags,
+    ) -> Option<()> {
+        for ch in short_flags.chars() {
+            match ch {
+                'i' => flags.ignore_case = true,
+                'v' => flags.invert = true,
+                'c' => flags.count_only = true,
+                'n' => flags.show_line_numbers = true,
+                'l' => flags.files_only = true,
+                'E' | 'P' => flags.extended = true,
+                'F' => flags.fixed = true,
+                'w' => flags.word_match = true,
+                'o' => flags.only_matching = true,
+                'q' => flags.quiet = true,
+                'h' => flags.show_filename = Some(false),
+                'H' => flags.show_filename = Some(true),
+                'z' => {}
+                _ => return None,
+            }
+        }
+        Some(())
     }
 
     fn parse_streaming_uniq_stage(args: &[String]) -> Option<StreamingPipelineStage> {
@@ -10708,141 +10835,181 @@ impl WorkerRuntime {
     fn prepare_exec_io(&mut self, redirections: &[HirRedirection]) -> Result<Option<ExecIo>, ()> {
         let mut exec_io = self.current_exec_io.clone().unwrap_or_default();
         let mut handled_any = false;
-
         for redir in redirections {
-            match redir.op {
-                RedirectionOp::HereDoc | RedirectionOp::HereDocStrip => {
-                    handled_any = true;
-                    if let Some(body) = &redir.here_doc_body {
-                        let expanded =
-                            wasmsh_expand::expand_string(&body.content, &mut self.vm.state);
-                        exec_io
-                            .fds_mut()
-                            .set_input(InputTarget::Bytes(expanded.into_bytes()));
-                    }
-                }
-                RedirectionOp::HereString => {
-                    handled_any = true;
-                    let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
-                    let resolved_target = resolved.first().unwrap_or(&redir.target);
-                    let content = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
-                    let mut data = content.into_bytes();
-                    data.push(b'\n');
-                    exec_io.fds_mut().set_input(InputTarget::Bytes(data));
-                }
-                RedirectionOp::Input => {
-                    handled_any = true;
-                    let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
-                    let resolved_target = resolved.first().unwrap_or(&redir.target);
-                    let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
-                    let path = self.resolve_cwd_path(&target);
-                    match self.fs.stat(&path) {
-                        Ok(metadata) if !metadata.is_dir => {
-                            exec_io.fds_mut().set_input(InputTarget::File {
-                                path,
-                                remove_after_read: false,
-                            });
-                        }
-                        Ok(_) => {
-                            let msg = format!("wasmsh: {target}: Is a directory\n");
-                            self.write_stderr(msg.as_bytes());
-                            self.vm.state.last_status = 1;
-                            return Err(());
-                        }
-                        Err(_) => {
-                            let msg = format!("wasmsh: {target}: No such file or directory\n");
-                            self.write_stderr(msg.as_bytes());
-                            self.vm.state.last_status = 1;
-                            return Err(());
-                        }
-                    }
-                }
-                RedirectionOp::Output
-                | RedirectionOp::Append
-                | RedirectionOp::Clobber
-                | RedirectionOp::AppendBoth => {
-                    handled_any = true;
-                    let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
-                    let resolved_target = resolved.first().unwrap_or(&redir.target);
-                    let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
-                    let path = self.resolve_cwd_path(&target);
-                    let append =
-                        matches!(redir.op, RedirectionOp::Append | RedirectionOp::AppendBoth);
-                    let clear_before =
-                        matches!(redir.op, RedirectionOp::Output | RedirectionOp::Clobber);
-
-                    if matches!(redir.op, RedirectionOp::Output)
-                        && self.noclobber_rejects(&path, &target)
-                    {
-                        return Err(());
-                    }
-
-                    let destination = if self.process_subst_out_sink_mut(&path).is_some() {
-                        if clear_before {
-                            if let Some(sink) = self.process_subst_out_sink_mut(&path) {
-                                sink.clear();
-                            }
-                        }
-                        OutputTarget::ProcessSubst { path }
-                    } else {
-                        match self.fs.open_write_sink(&path, append) {
-                            Ok(sink) => OutputTarget::File {
-                                path,
-                                append,
-                                sink: Rc::new(RefCell::new(sink)),
-                            },
-                            Err(err) => {
-                                let msg = format!("wasmsh: {target}: {err}\n");
-                                self.write_stderr(msg.as_bytes());
-                                self.vm.state.last_status = 1;
-                                return Err(());
-                            }
-                        }
-                    };
-                    match redir
-                        .fd
-                        .unwrap_or(if matches!(redir.op, RedirectionOp::AppendBoth) {
-                            FD_BOTH
-                        } else {
-                            1
-                        }) {
-                        FD_BOTH => {
-                            exec_io.fds_mut().open_output(1, destination.clone());
-                            exec_io.fds_mut().open_output(2, destination);
-                        }
-                        2 => exec_io.fds_mut().open_output(2, destination),
-                        _ => exec_io.fds_mut().open_output(1, destination),
-                    }
-                }
-                RedirectionOp::DupOutput => {
-                    handled_any = true;
-                    let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
-                    let resolved_target = resolved.first().unwrap_or(&redir.target);
-                    let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
-                    let source_fd = redir.fd.unwrap_or(1);
-                    if target == "-" {
-                        exec_io.fds_mut().close(source_fd);
-                    } else if let Ok(target_fd) = target.parse() {
-                        exec_io.fds_mut().dup_output(source_fd, target_fd);
-                    }
-                }
-                RedirectionOp::DupInput => {
-                    handled_any = true;
-                    let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
-                    let resolved_target = resolved.first().unwrap_or(&redir.target);
-                    let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
-                    let source_fd = redir.fd.unwrap_or(0);
-                    if target == "-" {
-                        exec_io.fds_mut().close(source_fd);
-                    } else if let Ok(target_fd) = target.parse() {
-                        exec_io.fds_mut().dup_input(source_fd, target_fd);
-                    }
-                }
-                _ => {}
+            if self.apply_hir_redir(redir, &mut exec_io)? {
+                handled_any = true;
             }
         }
-
         Ok(handled_any.then_some(exec_io))
+    }
+
+    fn apply_hir_redir(
+        &mut self,
+        redir: &HirRedirection,
+        exec_io: &mut ExecIo,
+    ) -> Result<bool, ()> {
+        match redir.op {
+            RedirectionOp::HereDoc | RedirectionOp::HereDocStrip => {
+                self.apply_heredoc_redir(redir, exec_io);
+                Ok(true)
+            }
+            RedirectionOp::HereString => {
+                self.apply_herestring_redir(redir, exec_io);
+                Ok(true)
+            }
+            RedirectionOp::Input => self.apply_input_redir(redir, exec_io).map(|()| true),
+            RedirectionOp::Output
+            | RedirectionOp::Append
+            | RedirectionOp::Clobber
+            | RedirectionOp::AppendBoth => self.apply_write_redir(redir, exec_io).map(|()| true),
+            RedirectionOp::DupOutput => {
+                self.apply_dup_output_redir(redir, exec_io);
+                Ok(true)
+            }
+            RedirectionOp::DupInput => {
+                self.apply_dup_input_redir(redir, exec_io);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn resolve_redir_target(&mut self, redir: &HirRedirection) -> String {
+        let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
+        let resolved_target = resolved.first().unwrap_or(&redir.target);
+        wasmsh_expand::expand_word(resolved_target, &mut self.vm.state)
+    }
+
+    fn apply_heredoc_redir(&mut self, redir: &HirRedirection, exec_io: &mut ExecIo) {
+        if let Some(body) = &redir.here_doc_body {
+            let expanded = wasmsh_expand::expand_string(&body.content, &mut self.vm.state);
+            exec_io
+                .fds_mut()
+                .set_input(InputTarget::Bytes(expanded.into_bytes()));
+        }
+    }
+
+    fn apply_herestring_redir(&mut self, redir: &HirRedirection, exec_io: &mut ExecIo) {
+        let content = self.resolve_redir_target(redir);
+        let mut data = content.into_bytes();
+        data.push(b'\n');
+        exec_io.fds_mut().set_input(InputTarget::Bytes(data));
+    }
+
+    fn apply_input_redir(
+        &mut self,
+        redir: &HirRedirection,
+        exec_io: &mut ExecIo,
+    ) -> Result<(), ()> {
+        let target = self.resolve_redir_target(redir);
+        let path = self.resolve_cwd_path(&target);
+        match self.fs.stat(&path) {
+            Ok(metadata) if !metadata.is_dir => {
+                exec_io.fds_mut().set_input(InputTarget::File {
+                    path,
+                    remove_after_read: false,
+                });
+                Ok(())
+            }
+            Ok(_) => self.fail_input_redir(&target, "Is a directory"),
+            Err(_) => self.fail_input_redir(&target, "No such file or directory"),
+        }
+    }
+
+    fn fail_input_redir(&mut self, target: &str, reason: &str) -> Result<(), ()> {
+        let msg = format!("wasmsh: {target}: {reason}\n");
+        self.write_stderr(msg.as_bytes());
+        self.vm.state.last_status = 1;
+        Err(())
+    }
+
+    fn apply_write_redir(
+        &mut self,
+        redir: &HirRedirection,
+        exec_io: &mut ExecIo,
+    ) -> Result<(), ()> {
+        let target = self.resolve_redir_target(redir);
+        let path = self.resolve_cwd_path(&target);
+        let append = matches!(redir.op, RedirectionOp::Append | RedirectionOp::AppendBoth);
+        let clear_before = matches!(redir.op, RedirectionOp::Output | RedirectionOp::Clobber);
+
+        if matches!(redir.op, RedirectionOp::Output) && self.noclobber_rejects(&path, &target) {
+            return Err(());
+        }
+
+        let destination = self.open_write_destination(path, &target, append, clear_before)?;
+        Self::attach_write_destination(redir, exec_io, destination);
+        Ok(())
+    }
+
+    fn open_write_destination(
+        &mut self,
+        path: String,
+        target: &str,
+        append: bool,
+        clear_before: bool,
+    ) -> Result<OutputTarget, ()> {
+        if self.process_subst_out_sink_mut(&path).is_some() {
+            if clear_before {
+                if let Some(sink) = self.process_subst_out_sink_mut(&path) {
+                    sink.clear();
+                }
+            }
+            return Ok(OutputTarget::ProcessSubst { path });
+        }
+        match self.fs.open_write_sink(&path, append) {
+            Ok(sink) => Ok(OutputTarget::File {
+                path,
+                append,
+                sink: Rc::new(RefCell::new(sink)),
+            }),
+            Err(err) => {
+                let msg = format!("wasmsh: {target}: {err}\n");
+                self.write_stderr(msg.as_bytes());
+                self.vm.state.last_status = 1;
+                Err(())
+            }
+        }
+    }
+
+    fn attach_write_destination(
+        redir: &HirRedirection,
+        exec_io: &mut ExecIo,
+        destination: OutputTarget,
+    ) {
+        let default_fd = if matches!(redir.op, RedirectionOp::AppendBoth) {
+            FD_BOTH
+        } else {
+            1
+        };
+        match redir.fd.unwrap_or(default_fd) {
+            FD_BOTH => {
+                exec_io.fds_mut().open_output(1, destination.clone());
+                exec_io.fds_mut().open_output(2, destination);
+            }
+            2 => exec_io.fds_mut().open_output(2, destination),
+            _ => exec_io.fds_mut().open_output(1, destination),
+        }
+    }
+
+    fn apply_dup_output_redir(&mut self, redir: &HirRedirection, exec_io: &mut ExecIo) {
+        let target = self.resolve_redir_target(redir);
+        let source_fd = redir.fd.unwrap_or(1);
+        if target == "-" {
+            exec_io.fds_mut().close(source_fd);
+        } else if let Ok(target_fd) = target.parse() {
+            exec_io.fds_mut().dup_output(source_fd, target_fd);
+        }
+    }
+
+    fn apply_dup_input_redir(&mut self, redir: &HirRedirection, exec_io: &mut ExecIo) {
+        let target = self.resolve_redir_target(redir);
+        let source_fd = redir.fd.unwrap_or(0);
+        if target == "-" {
+            exec_io.fds_mut().close(source_fd);
+        } else if let Ok(target_fd) = target.parse() {
+            exec_io.fds_mut().dup_input(source_fd, target_fd);
+        }
     }
 
     /// Apply redirections: for `>` and `>>`, write captured stdout/stderr to file.
