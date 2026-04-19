@@ -1,37 +1,57 @@
 # wasmsh
 
-**Bash-compatible shell runtime in Rust, compiled to WebAssembly. Runs in browsers and inside Pyodide — no server needed.**
+**Bash-compatible shell runtime in Rust, compiled to WebAssembly. Runs in browsers, inside Pyodide, and as a horizontally-scaled sandbox pool on Kubernetes — all from one codebase.**
 
 [![CI](https://img.shields.io/badge/CI-passing-brightgreen)](.github/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![crates.io](https://img.shields.io/crates/v/wasmsh-runtime.svg)](https://crates.io/crates/wasmsh-runtime)
 [![npm](https://img.shields.io/npm/v/@mayflowergmbh/wasmsh-pyodide.svg)](https://www.npmjs.com/package/@mayflowergmbh/wasmsh-pyodide)
 
-## What it does
+## What it is
 
-A sandboxed shell with 88 utilities (grep, sed, awk, jq, tar, curl, …), Python 3.13 with pip/micropip for installing pure-Python packages, and a virtual filesystem — all running in-process as WebAssembly. No OS processes, no network access unless explicitly allowed, step budgets to prevent runaway execution.
+A sandbox for LLM agents that need a shell, Python, and a filesystem without giving the model host access. Bash with 88 utilities (grep, sed, awk, jq, tar, curl, …), Python 3.13 with pip/micropip for pure-Python packages, a virtual filesystem — all running in-process as WebAssembly, with no OS processes and no network unless explicitly allowed.
 
-Two in-process build targets plus one scalable server-side path from one codebase:
-- **Standalone** (`wasm32-unknown-unknown`) — browser Web Worker
-- **Pyodide** (`wasm32-unknown-emscripten`) — shell and Python share the same filesystem
-- **Scalable** (Kubernetes) — `wasmsh-dispatcher` (Rust, HTTP control plane) plus a pool of `wasmsh-runner` pods (Node + Pyodide) installed via the [Helm chart](deploy/helm/wasmsh/). Clients speak JSON/HTTP to the dispatcher. See [Scalable deployment](#scalable-deployment-kubernetes) below.
+Three deployment modes from one core:
+
+| Target | When | Entry point |
+|-|-|-|
+| **Standalone** (`wasm32-unknown-unknown`) | browser Web Worker, offline | [`crates/wasmsh-browser`](crates/wasmsh-browser/) |
+| **Pyodide** (`wasm32-unknown-emscripten`) | Node or browser, Python sharing the VFS | [`packages/npm/wasmsh-pyodide`](packages/npm/wasmsh-pyodide/) |
+| **Scalable** (Kubernetes) | multi-tenant agent platforms | [`deploy/helm/wasmsh`](deploy/helm/wasmsh/) |
+
+## Why it's a good fit for Deep Agents
+
+### Secure by construction
+
+LLM-generated shell commands are adversarial input. wasmsh is built so a bad `rm -rf /` or a curl to an exfil host cannot escape the sandbox:
+
+- **WASM boundary.** No syscalls, no `std::fs`, no host `exec` in any shipped profile. The wasm module only sees what the embedder hands it.
+- **Capability-based VFS.** Every session gets an isolated in-memory filesystem; nothing on the host is visible unless the embedder mounts it.
+- **Network allowlist.** `curl` / `wget` route through a host-mediated broker that enforces a per-session hostname allowlist. Empty list = no network.
+- **Step budgets.** Every command runs with a bounded step count; runaway loops and fork-bombs terminate deterministically.
+- **Per-session V8 isolation** (scalable path). Each session is its own worker with a capped heap; one session cannot starve its neighbours.
+- **Clean-room provenance.** No GPL code in the core — behavior-compatible with bash, but a fresh implementation, so no licence contamination for downstream embedders.
+
+Full surface in [docs/reference/sandbox-and-capabilities.md](docs/reference/sandbox-and-capabilities.md); threat model and design choices in [docs/explanation/design-decisions.md](docs/explanation/design-decisions.md).
+
+### Fast and dense
+
+No containers, no VMs, no OS processes per session. Starting a sandbox is a wasm snapshot restore, not a `docker run`:
+
+- **~300 ms cold spawn**, **~6 ms snapshot restore** once the template worker is warm
+- **~1.5 ms** per warm bash command, **~3 ms** per warm `python3 -c` round-trip through the dispatcher
+- **~80 MB RSS** per active session in steady state (stock Pyodide + bash)
+
+That makes per-node density the ceiling instead of CPU. Rough sizing on a 64 GB / 40-core node: **~500–800 warm sessions** for typical agent workloads, **~100 session creates/s** burst throughput. See [docs/guides/performance-testing.md#sizing-a-scalable-deployment](docs/guides/performance-testing.md#sizing-a-scalable-deployment) for the benchmark and full capacity table — and re-run `just bench-dispatcher-compose` on your own hardware before committing to a size.
 
 ## Use with LangChain Deep Agents
 
-wasmsh is a sandbox backend for [LangChain Deep Agents](https://github.com/langchain-ai/deepagentsjs). LLM agents get `execute`, `read_file`, `write_file`, `edit_file`, `ls`, `grep`, `glob` tools backed by the WASM sandbox.
-
-Adapter packages are Mayflower-maintained and live in this repo. Each
-ships two interchangeable backend classes — `WasmshSandbox` for
-single-process use and `WasmshRemoteSandbox` for dispatcher-backed
-Kubernetes deployments — with the identical `BaseSandbox` surface so
-upgrading is a one-line import change:
+Two interchangeable backend classes with the identical `BaseSandbox` surface — upgrading from laptop to cluster is a one-line import change:
 
 | Ecosystem | Package | In-process | Scalable |
 |-|-|-|-|
-| npm | [`@mayflowergmbh/langchain-wasmsh`](packages/npm/langchain-wasmsh) | `WasmshSandbox.createNode()` / `.createBrowserWorker()` | `WasmshRemoteSandbox.create({ dispatcherUrl })` |
+| npm | [`@mayflowergmbh/langchain-wasmsh`](packages/npm/langchain-wasmsh) | `WasmshSandbox.createNode()` | `WasmshRemoteSandbox.create({ dispatcherUrl })` |
 | Python | [`langchain-wasmsh`](packages/python/langchain-wasmsh) | `WasmshSandbox()` | `WasmshRemoteSandbox(dispatcher_url)` |
-
-### In-process (single machine, no server)
 
 ```typescript
 import { createDeepAgent } from "deepagents";
@@ -39,138 +59,39 @@ import { WasmshSandbox } from "@mayflowergmbh/langchain-wasmsh";
 
 const sandbox = await WasmshSandbox.createNode();
 const agent = createDeepAgent({ backend: sandbox });
-const result = await agent.invoke({
-  messages: [{ role: "user", content: "Analyze data.csv and create a summary" }],
-});
-await sandbox.stop();
 ```
 
 ```python
 from deepagents import create_deep_agent
 from langchain_wasmsh import WasmshSandbox
 
-sandbox = WasmshSandbox()
-agent = create_deep_agent(backend=sandbox)
+agent = create_deep_agent(backend=WasmshSandbox())
 ```
 
-### Scalable (Kubernetes, shared with other agents)
-
-```typescript
-import { WasmshRemoteSandbox } from "@mayflowergmbh/langchain-wasmsh";
-
-const sandbox = await WasmshRemoteSandbox.create({
-  dispatcherUrl: "http://wasmsh-dispatcher.wasmsh.svc.cluster.local:8080",
-});
-const agent = createDeepAgent({ backend: sandbox });
-```
-
-```python
-from langchain_wasmsh import WasmshRemoteSandbox
-
-sandbox = WasmshRemoteSandbox("http://wasmsh-dispatcher.wasmsh.svc.cluster.local:8080")
-```
-
-The remote backend talks HTTP to the `wasmsh-dispatcher` provisioned by
-[`deploy/helm/wasmsh`](deploy/helm/wasmsh/); the dispatcher routes
-sessions across a horizontally-scaled pool of `wasmsh-runner` pods with
-session affinity and restore-capacity-aware scheduling. See
-[Scalable deployment](#scalable-deployment-kubernetes) for the server
-side.
-
-Runnable examples (both include LLM-free and Deep Agent variants):
-
-- Python: [`examples/deepagent-python/`](examples/deepagent-python/) — `basic.py`, `remote_basic.py`, `example.py`.
-- TypeScript: [`examples/deepagent-typescript/`](examples/deepagent-typescript/) — `basic.ts`, `remote-basic.ts`, `example.ts`.
-
-See [`docs/integrations/langchain-wasmsh.md`](docs/integrations/langchain-wasmsh.md) for the full integration guide.
-
-## Use directly
-
-```rust
-use wasmsh_runtime::WorkerRuntime;
-use wasmsh_protocol::HostCommand;
-
-let mut rt = WorkerRuntime::new();
-rt.handle_command(HostCommand::Init {
-    step_budget: 100_000,
-    allowed_hosts: vec![],
-});
-let events = rt.handle_command(HostCommand::Run { input: "echo hello".into() });
-// [Stdout(b"hello\n"), Exit(0)]
-```
+Full integration guide (remote variant, deployment topology, operational knobs): [docs/integrations/langchain-wasmsh.md](docs/integrations/langchain-wasmsh.md). Runnable examples: [`examples/deepagent-typescript/`](examples/deepagent-typescript/), [`examples/deepagent-python/`](examples/deepagent-python/).
 
 ## Install
 
 | Registry | Package | Install |
-|----------|---------|---------|
+|-|-|-|
 | crates.io | `wasmsh-runtime` | `cargo add wasmsh-runtime` |
 | npm | `@mayflowergmbh/wasmsh-pyodide` | `npm i @mayflowergmbh/wasmsh-pyodide` |
 | PyPI | `wasmsh-pyodide-runtime` | `pip install wasmsh-pyodide-runtime` |
+| Containers | `ghcr.io/mayflower/wasmsh-{dispatcher,runner}` | `docker pull` |
 
-Pre-built tarballs: [GitHub Releases](https://github.com/mayflower/wasmsh/releases)
-
-## Build from source
-
-```bash
-cargo build --workspace && cargo test --workspace   # Rust (1.89+)
-just build-standalone                                # standalone wasm
-just build-pyodide                                   # Pyodide wasm (needs emcc)
-```
-
-## Scalable deployment (Kubernetes)
-
-In addition to the in-process wasm targets, wasmsh ships a server-side
-deployment path: a Rust **dispatcher** plus a Node + Pyodide **runner**
-packaged as container images and installable via Helm. Clients speak
-JSON/HTTP to the dispatcher, which routes sessions across a
-horizontally-scaled pool of runner pods.
-
-| Piece | Purpose |
-|-|-|
-| [`crates/wasmsh-dispatcher`](crates/wasmsh-dispatcher/) | axum HTTP service: session routing, affinity, capacity-aware scheduling |
-| [`tools/runner-node`](tools/runner-node/) | Node runner: template worker, per-session restore, metrics |
-| [`deploy/docker/Dockerfile.{dispatcher,runner}`](deploy/docker/) | Production images (`ghcr.io/mayflower/wasmsh-{dispatcher,runner}`) |
-| [`deploy/docker/compose.dispatcher-test.yml`](deploy/docker/compose.dispatcher-test.yml) | Single-host docker-compose stack for local smoke tests |
-| [`deploy/helm/wasmsh`](deploy/helm/wasmsh/) | Helm chart with HPA, PDB, NetworkPolicy, optional ServiceMonitor |
-| [`e2e/kind`](e2e/kind/) | Kind-based end-to-end suite (`just test-e2e-kind`) |
-| [`e2e/dispatcher-compose`](e2e/dispatcher-compose/) | docker-compose-based end-to-end suite (`just test-e2e-dispatcher-compose`) |
-
-Clients:
-
-- **LangChain Deep Agents** — the `WasmshRemoteSandbox` class in both
-  adapter packages is the officially-supported client. See
-  [Use with LangChain Deep Agents](#use-with-langchain-deep-agents)
-  above and the [integration guide](docs/integrations/langchain-wasmsh.md).
-- **Anything else** — the dispatcher contract is plain JSON/HTTP,
-  documented in [docs/reference/dispatcher-api.md](docs/reference/dispatcher-api.md).
-  Write your own client in whatever stack you like.
-
-Container images are built and pushed to GHCR automatically by the
-`Release` workflow on `v*` tags; digests are attached to the GitHub
-Release as `image-digests.json`.
-
-The scalable path is exercised end-to-end on every PR by
-[`.github/workflows/remote-sandbox-e2e.yml`](.github/workflows/remote-sandbox-e2e.yml),
-which runs both the docker-compose and the kind+Helm variants through
-the `WasmshRemoteSandbox` TypeScript and Python clients plus the
-`langchain-tests` sandbox standard suite.
-
-See [docs/explanation/snapshot-runner.md](docs/explanation/snapshot-runner.md)
-for architecture, [deploy/helm/wasmsh/README.md](deploy/helm/wasmsh/README.md)
-for the chart surface, and [docs/how-to/runner-runbook.md](docs/how-to/runner-runbook.md)
-for operations.
+Pre-built tarballs and image digests: [GitHub Releases](https://github.com/mayflower/wasmsh/releases). Build from source: `just ci` (Rust), `just build-standalone`, `just build-pyodide`.
 
 ## Docs
 
 | | |
 |-|-|
-| [Tutorials](docs/tutorials/index.md) | Step-by-step on-ramps for [JavaScript](docs/tutorials/javascript-quickstart.md), [Python](docs/tutorials/python-quickstart.md), and [Rust](docs/tutorials/getting-started.md) |
-| [How-to Guides](docs/guides/index.md) | [Embedding](docs/guides/embedding.md), [Pyodide integration](docs/guides/pyodide-integration.md), [Adding a command](docs/guides/adding-commands.md), [Troubleshooting](docs/guides/troubleshooting.md) |
-| [Reference](docs/reference/index.md) | [Shell syntax](docs/reference/shell-syntax.md), [builtins](docs/reference/builtins.md), [utilities](docs/reference/utilities.md), [protocol](docs/reference/protocol.md), [sandbox](docs/reference/sandbox-and-capabilities.md) |
-| [Explanation](docs/explanation/index.md) | [Architecture](docs/explanation/architecture.md), [design decisions](docs/explanation/design-decisions.md), trade-offs |
-| [ADRs](docs/adr/) | Architectural Decision Records |
-| [Supported Features](SUPPORTED.md) | Complete syntax and command matrix |
-| [Examples](examples/) | Standalone and TypeScript usage |
+| **Start here** | [Tutorials](docs/tutorials/index.md): [Rust](docs/tutorials/getting-started.md), [JavaScript](docs/tutorials/javascript-quickstart.md), [Python](docs/tutorials/python-quickstart.md) |
+| **Deep Agents** | [Integration guide](docs/integrations/langchain-wasmsh.md) (in-process + remote, both languages) |
+| **Deploy** | [Helm chart](deploy/helm/wasmsh/README.md), [snapshot-runner architecture](docs/explanation/snapshot-runner.md), [runner runbook](docs/how-to/runner-runbook.md) |
+| **Tune** | [Performance testing & sizing](docs/guides/performance-testing.md), [dispatcher API](docs/reference/dispatcher-api.md), [runner metrics](docs/reference/runner-metrics.md) |
+| **How-to** | [Embedding](docs/guides/embedding.md), [Pyodide integration](docs/guides/pyodide-integration.md), [Adding a command](docs/guides/adding-commands.md), [Troubleshooting](docs/guides/troubleshooting.md) |
+| **Reference** | [Shell syntax](docs/reference/shell-syntax.md), [builtins](docs/reference/builtins.md), [utilities](docs/reference/utilities.md), [protocol](docs/reference/protocol.md), [sandbox & capabilities](docs/reference/sandbox-and-capabilities.md), [supported features](SUPPORTED.md) |
+| **Explanation** | [Architecture](docs/explanation/architecture.md), [design decisions](docs/explanation/design-decisions.md), [ADRs](docs/adr/) |
 
 ## Acknowledgements
 

@@ -159,3 +159,59 @@ When tuning scalable runner capacity:
 3. compare `workerSpawnMs` versus `sandboxRestoreMs` to see whether the bottleneck is worker startup or the snapshot replay path
 4. compare `shellStartMs`, `shellExecMs`, and `pythonExecMs` to see whether post-restore latency is dominated by first-shell overhead, steady shell work, or Python startup
 5. use `averagePerActiveSessionRssBytesWhenBusy` to see the average single-sandbox memory cost across the run, and `estimatedPerActiveSessionRssBytes` to size for peak pressure
+
+## End-to-end dispatcher benchmark
+
+The in-process harness above measures the runner in isolation. To
+include the dispatcher HTTP hop and restore-capacity routing — what a
+remote `WasmshRemoteSandbox` client actually sees — run:
+
+```bash
+just bench-dispatcher-compose           # build + compose up + bench + down
+just bench-dispatcher-compose-reuse     # skip compose cycle (faster)
+node e2e/dispatcher-compose/scripts/benchmark.mjs --help
+```
+
+The benchmark drives `WasmshRemoteSandbox` through four phases
+(sequential session create, steady-state execute, concurrency sweep,
+file round-trip) and appends the runner's `/runner/snapshot` and
+Prometheus text to the JSON report so queue depth and restore p95 sit
+alongside the client-side latencies.
+
+## Sizing a scalable deployment
+
+Order-of-magnitude numbers from a local compose run on a developer
+laptop (Apple Silicon, single runner, 4 restore slots). Treat as rough
+guidance; your workload will differ.
+
+Per session (stock Pyodide + bash, no heavy Python packages):
+
+| metric | value |
+|-|-|
+| settled RSS (amortised across concurrent sessions) | **~80 MB** |
+| cold create (worker spawn bound) | **~300 ms** |
+| snapshot restore once template is warm | **~6 ms** |
+| warm bash command via dispatcher | **~1.5 ms** |
+| warm `python3 -c` round-trip | **~3 ms** |
+
+Projected density for a **64 GB / 40-core** node (~58 GB usable after
+OS, dispatcher, and per-pod runner baselines):
+
+| profile | per-session memory | concurrent active sessions |
+|-|-|-|
+| Lean (fresh sessions, `MAX_OLD=48`) | ~60 MB | **~950** |
+| Typical agent | ~80 MB | **~700** |
+| Heavy (pandas/numpy, large wasm heap) | ~250 MB | **~230** |
+
+Cold-start throughput is CPU-bound (~300 ms per spawn on one core), so a
+40-thread box sustains roughly **~100 session creates/s** once
+`restoreSlots` is raised from the chart default of 4. Memory is the
+binding constraint in steady state; CPU only hurts during cold-start
+bursts, which the HPA on `wasmsh_inflight_restores` smooths out.
+
+Practical starting point for a node of that shape: **8 runner pods × 8
+restore slots**, target ~500–800 warm sessions.
+
+Re-run `just bench-dispatcher-compose` on your own hardware — or better,
+`just test-e2e-kind` against a production-parity Helm install — before
+committing to a deployment size.
