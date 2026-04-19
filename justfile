@@ -236,6 +236,22 @@ test-e2e-kind-reuse:
 kind-down:
     kind delete cluster --name wasmsh-e2e || true
 
+# ── Docker-compose remote-sandbox E2E ──────────────────────
+# Exercises `WasmshRemoteSandbox` end-to-end against the same dispatcher
+# + runner images as the kind e2e, but via docker compose for a faster
+# local loop (no kind cluster required).  Requires prebuilt Pyodide
+# assets (`just build-pyodide`) and docker on PATH.
+test-e2e-dispatcher-compose:
+    node e2e/dispatcher-compose/scripts/run.mjs
+
+# Leave the compose stack running after the tests for manual inspection.
+test-e2e-dispatcher-compose-keep:
+    node e2e/dispatcher-compose/scripts/run.mjs --keep
+
+# Reuse existing images (skip the build step) for fast re-runs.
+test-e2e-dispatcher-compose-reuse:
+    node e2e/dispatcher-compose/scripts/run.mjs --skip-build
+
 # ── Wasm Post-processing ──────────────────────────────────────
 
 # Build optimized wasm with wasm-opt post-processing

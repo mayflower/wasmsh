@@ -1,0 +1,9 @@
+{
+  "name": "wasmsh-dispatcher-compose-e2e",
+  "private": true,
+  "type": "module",
+  "description": "docker-compose end-to-end tests for WasmshRemoteSandbox against a locally-built dispatcher+runner stack",
+  "dependencies": {
+    "@mayflowergmbh/langchain-wasmsh": "workspace:*"
+  }
+}

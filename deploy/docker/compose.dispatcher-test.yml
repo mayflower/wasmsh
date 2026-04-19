@@ -1,0 +1,57 @@
+# Minimal dispatcher + 1 runner stack for integration testing the
+# langchain-wasmsh remote sandbox backend.
+#
+# Usage (from repo root):
+#   docker compose -f deploy/docker/compose.dispatcher-test.yml up -d --wait
+#   WASMSH_DISPATCHER_URL=http://localhost:8080 \
+#     uv --project packages/python/langchain-wasmsh run pytest \
+#     packages/python/langchain-wasmsh/tests/integration_tests/test_remote_integration.py
+#   WASMSH_DISPATCHER_URL=http://localhost:8080 \
+#     pnpm --filter @mayflowergmbh/langchain-wasmsh test:int
+#   docker compose -f deploy/docker/compose.dispatcher-test.yml down
+#
+# Pulls the pre-built dispatcher and runner images from ghcr.io.
+# The image tag is taken from WASMSH_IMAGE_TAG (defaults to "latest",
+# published by release.yml on every `vX.Y.Z` tag).
+
+services:
+  runner:
+    image: ghcr.io/mayflower/wasmsh-runner:${WASMSH_IMAGE_TAG:-latest}
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8787"
+      WASMSH_RESTORE_SLOTS: "4"
+      WASMSH_STARTUP_WARM_RESTORES: "2"
+      # Raise session-worker heap so the `langchain-tests` standard suite's
+      # 10 MiB upload/read tests (which expand to ~13 MiB as base64) fit.
+      # Production operators tune this downward for higher density.
+      WASMSH_WORKER_MAX_OLD_GENERATION_MB: "256"
+    # Node 22 slim -> Node is available; use it to probe /readyz
+    # (no wget/curl in the image by default).
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - >-
+          node -e "require('http').get('http://127.0.0.1:8787/readyz',
+          r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 60s
+
+  dispatcher:
+    image: ghcr.io/mayflower/wasmsh-dispatcher:${WASMSH_IMAGE_TAG:-latest}
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      RUST_LOG: info
+      RUNNER_SERVICE_URLS: http://runner:8787
+    ports:
+      - "${WASMSH_DISPATCHER_PORT:-8080}:8080"
+    depends_on:
+      runner:
+        condition: service_healthy
+    # Dispatcher image is debian:bookworm-slim with neither wget nor
+    # curl; host-side readiness check is performed by the caller
+    # (compose `up --wait` will succeed as soon as the container starts,
+    # which is fine because the dispatcher serves /healthz immediately).

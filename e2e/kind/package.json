@@ -2,5 +2,8 @@
   "name": "wasmsh-kind-e2e",
   "private": true,
   "type": "module",
-  "description": "Kubernetes-in-Docker end-to-end tests for the scalable dispatcher+runner deployment"
+  "description": "Kubernetes-in-Docker end-to-end tests for the scalable dispatcher+runner deployment",
+  "dependencies": {
+    "@mayflowergmbh/langchain-wasmsh": "workspace:*"
+  }
 }

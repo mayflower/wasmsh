@@ -57,6 +57,17 @@ Flags passed there:
 - `tests/runner-resilience.test.mjs` — scaling the runner deployment up and
   back down, and verifying the dispatcher still answers requests after a
   runner pod is deleted out-of-band.
+- `tests/langchain-wasmsh-sandbox.test.mjs` — exercises the
+  `@mayflowergmbh/langchain-wasmsh` **`WasmshRemoteSandbox`** client
+  (the LangChain Deep Agents adapter) against the live dispatcher:
+  `execute`, binary `uploadFiles`/`downloadFiles` round-trip, non-zero
+  exit propagation, and `initialFiles` seeding.
+
+After the Node suites complete, the orchestrator also runs the
+`@mayflowergmbh/langchain-wasmsh` **Python** adapter's full
+`SandboxIntegrationTests` (`test_remote_integration.py`) through the
+same port-forward — `uv` must be on PATH, otherwise the Python step is
+skipped cleanly.
 
 Pyodide snapshot restore is slow on cold pods (30–60 s on a laptop); the
 tests apply generous per-request timeouts accordingly.

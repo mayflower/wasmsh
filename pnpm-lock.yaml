@@ -8,6 +8,18 @@ importers:
 
   .: {}
 
+  e2e/dispatcher-compose:
+    dependencies:
+      '@mayflowergmbh/langchain-wasmsh':
+        specifier: workspace:*
+        version: link:../../packages/npm/langchain-wasmsh
+
+  e2e/kind:
+    dependencies:
+      '@mayflowergmbh/langchain-wasmsh':
+        specifier: workspace:*
+        version: link:../../packages/npm/langchain-wasmsh
+
   examples/deepagent-typescript:
     dependencies:
       '@langchain/anthropic':

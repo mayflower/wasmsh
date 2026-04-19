@@ -1,3 +1,5 @@
 packages:
   - "packages/npm/*"
   - "examples/deepagent-typescript"
+  - "e2e/kind"
+  - "e2e/dispatcher-compose"

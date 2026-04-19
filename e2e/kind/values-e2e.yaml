@@ -20,10 +20,15 @@ dispatcher:
   resources:
     requests:
       cpu: 50m
-      memory: 64Mi
+      memory: 128Mi
     limits:
       cpu: 500m
-      memory: 256Mi
+      # Peak RSS per 10 MiB upload is ~15 MiB Bytes (in) + 15 MiB Bytes
+      # (out to/from runner) + tokio/reqwest buffers.  With the streaming
+      # forward (service.rs `response_to_json_response`) we no longer
+      # parse serde_json::Value trees, so concurrent standard-suite
+      # requests fit comfortably in 512 MiB.
+      memory: 512Mi
   pdb:
     enabled: false
   terminationGracePeriodSeconds: 10
@@ -56,17 +61,24 @@ runner:
     requestBytes: 65536
     responseBytes: 524288
   workerResourceLimits:
-    maxOldGenerationMb: 48
-    maxYoungGenerationMb: 8
+    # Raised from the production default (48 MiB) so the langchain-tests
+    # standard suite's 10 MiB upload (~13 MiB after base64) fits.  The
+    # dispatcher-compose e2e uses the same 256 MiB value.
+    maxOldGenerationMb: 256
+    maxYoungGenerationMb: 16
     stackMb: 1
     codeRangeMb: 8
   resources:
     requests:
       cpu: 250m
-      memory: 512Mi
+      memory: 768Mi
     limits:
       cpu: "2"
-      memory: 1536Mi
+      # Must fit: 2 warm session workers + template worker + runner proc +
+      # JSON parse headroom for 10 MiB base64 uploads (~13 MiB expanded).
+      # 256 MiB worker heap × 3 + overhead ≈ 1 GiB; allow ~3× that so the
+      # runner container never OOMs under the langchain-tests suite.
+      memory: 3Gi
   pdb:
     enabled: false
   terminationGracePeriodSeconds: 30

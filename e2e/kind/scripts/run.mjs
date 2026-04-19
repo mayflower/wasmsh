@@ -23,6 +23,7 @@ import {
   E2E_ROOT,
   HELM_RELEASE,
   NAMESPACE,
+  REPO_ROOT,
   setupCluster,
   teardownCluster,
 } from "../lib/cluster.mjs";
@@ -84,7 +85,7 @@ async function main() {
     readyTimeoutMs: 30_000,
   });
 
-  let testsFailed = false;
+  const failures = [];
   try {
     const testFiles = await discoverTestFiles(values.tests);
     // Each node --test run receives the port-forward URL + kubeconfig via
@@ -102,13 +103,47 @@ async function main() {
       timeoutMs: 20 * 60 * 1000,
     });
   } catch (error) {
-    testsFailed = true;
-    console.error("kind e2e tests failed:", error.message);
-  } finally {
-    await portForward.stop();
-    const keep = values.keep || (values["keep-on-failure"] && testsFailed);
-    await teardownCluster({ keep });
+    failures.push(`node --test: ${error.message}`);
   }
+
+  // Python-side parity: exercise the same dispatcher through
+  // `WasmshRemoteSandbox` (Python).  Runs independently of the Node step —
+  // a failure in one shouldn't mask diagnostic output from the other.
+  // Skips cleanly when `uv` isn't on PATH or when a test filter narrows
+  // the run to Node-only files.
+  if (!values.tests && (await commandExists("uv"))) {
+    try {
+      const pythonPkgDir = resolve(REPO_ROOT, "packages/python/langchain-wasmsh");
+      await runCommand(
+        "uv",
+        [
+          "run",
+          "--group",
+          "test",
+          "pytest",
+          "tests/integration_tests/test_remote_integration.py",
+          "-v",
+          "--timeout",
+          "180",
+        ],
+        {
+          cwd: pythonPkgDir,
+          env: { WASMSH_DISPATCHER_URL: portForward.url },
+          inherit: true,
+          timeoutMs: 30 * 60 * 1000,
+        },
+      );
+    } catch (error) {
+      failures.push(`pytest: ${error.message}`);
+    }
+  }
+
+  const testsFailed = failures.length > 0;
+  for (const failure of failures) console.error("kind e2e tests failed:", failure);
+
+  await portForward.stop();
+  const keep = values.keep || (values["keep-on-failure"] && testsFailed);
+  await teardownCluster({ keep });
 
   if (testsFailed) {
     process.exit(1);

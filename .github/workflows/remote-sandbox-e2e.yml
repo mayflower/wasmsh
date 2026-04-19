@@ -1,0 +1,209 @@
+name: Remote Sandbox E2E
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/remote-sandbox-e2e.yml"
+      - "crates/wasmsh-dispatcher/**"
+      - "tools/runner-node/**"
+      - "packages/npm/langchain-wasmsh/**"
+      - "packages/python/langchain-wasmsh/**"
+      - "packages/npm/wasmsh-pyodide/**"
+      - "deploy/docker/Dockerfile.dispatcher"
+      - "deploy/docker/Dockerfile.runner"
+      - "deploy/docker/compose.dispatcher-test.yml"
+      - "deploy/helm/wasmsh/**"
+      - "e2e/dispatcher-compose/**"
+      - "e2e/kind/**"
+      - "pnpm-workspace.yaml"
+      - "pnpm-lock.yaml"
+      - "justfile"
+  pull_request:
+    paths:
+      - ".github/workflows/remote-sandbox-e2e.yml"
+      - "crates/wasmsh-dispatcher/**"
+      - "tools/runner-node/**"
+      - "packages/npm/langchain-wasmsh/**"
+      - "packages/python/langchain-wasmsh/**"
+      - "packages/npm/wasmsh-pyodide/**"
+      - "deploy/docker/Dockerfile.dispatcher"
+      - "deploy/docker/Dockerfile.runner"
+      - "deploy/docker/compose.dispatcher-test.yml"
+      - "deploy/helm/wasmsh/**"
+      - "e2e/dispatcher-compose/**"
+      - "e2e/kind/**"
+      - "pnpm-workspace.yaml"
+      - "pnpm-lock.yaml"
+      - "justfile"
+
+concurrency:
+  group: remote-sandbox-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Kept in sync with packages/npm/wasmsh-pyodide/package.json — CI stages
+  # pre-built Pyodide assets from the published tarball so runner image
+  # builds don't have to rebuild Pyodide (~30min).
+  WASMSH_PYODIDE_NPM_VERSION: "0.5.10"
+
+jobs:
+  # ── Docker-compose: WasmshRemoteSandbox (TS + Python) ──────
+  dispatcher-compose:
+    name: dispatcher-compose (ts + python)
+    runs-on: mayflower-k8s-runners
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.20.0"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.7"
+
+      - name: Stage Pyodide assets (for runner image)
+        env:
+          VERSION: ${{ env.WASMSH_PYODIDE_NPM_VERSION }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
+          echo "Fetching $url"
+          curl -fsSL "$url" -o "$tmp/pkg.tgz"
+          mkdir -p "$tmp/extract"
+          tar -xzf "$tmp/pkg.tgz" -C "$tmp/extract"
+          cp -r "$tmp/extract/package/assets/"* packages/npm/wasmsh-pyodide/assets/
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build langchain-wasmsh (needed by the e2e workspace dep)
+        run: pnpm --filter @mayflowergmbh/langchain-wasmsh build
+
+      - name: Sync Python deps
+        working-directory: packages/python/langchain-wasmsh
+        run: uv sync --group test
+
+      - name: Run docker-compose e2e (TS + Python pytest)
+        run: node e2e/dispatcher-compose/scripts/run.mjs
+
+      - name: Collect compose logs on failure
+        if: failure()
+        run: |
+          docker compose -f deploy/docker/compose.dispatcher-test.yml logs --no-color > compose-logs.txt || true
+
+      - name: Upload compose logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dispatcher-compose-logs
+          path: compose-logs.txt
+          if-no-files-found: ignore
+
+  # ── Kind: WasmshRemoteSandbox inside Kubernetes ────────────
+  dispatcher-kind:
+    name: dispatcher-kind (ts + python)
+    runs-on: mayflower-k8s-runners
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.20.0"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.7"
+
+      - name: Install kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+          version: v0.24.0
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.31.0
+
+      - name: Install helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - name: Stage Pyodide assets (for runner image)
+        env:
+          VERSION: ${{ env.WASMSH_PYODIDE_NPM_VERSION }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
+          echo "Fetching $url"
+          curl -fsSL "$url" -o "$tmp/pkg.tgz"
+          mkdir -p "$tmp/extract"
+          tar -xzf "$tmp/pkg.tgz" -C "$tmp/extract"
+          cp -r "$tmp/extract/package/assets/"* packages/npm/wasmsh-pyodide/assets/
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build langchain-wasmsh
+        run: pnpm --filter @mayflowergmbh/langchain-wasmsh build
+
+      - name: Sync Python deps
+        working-directory: packages/python/langchain-wasmsh
+        run: uv sync --group test
+
+      - name: Run kind e2e (TS + Python pytest against a live cluster)
+        run: node e2e/kind/scripts/run.mjs --keep-on-failure
+
+      - name: Collect kind pod logs on failure
+        if: failure()
+        run: |
+          mkdir -p kind-logs
+          export KUBECONFIG="$(pwd)/e2e/kind/.artifacts/kubeconfig"
+          kubectl --context kind-wasmsh-e2e -n wasmsh get pods -o wide > kind-logs/pods.txt || true
+          for p in $(kubectl --context kind-wasmsh-e2e -n wasmsh get pods -o name 2>/dev/null); do
+            kubectl --context kind-wasmsh-e2e -n wasmsh logs "$p" --all-containers --tail=2000 > "kind-logs/$(echo "$p" | tr / _).log" 2>&1 || true
+          done
+
+      - name: Upload kind logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dispatcher-kind-logs
+          path: kind-logs/
+          if-no-files-found: ignore
+
+      - name: Tear down kind cluster
+        if: always()
+        run: kind delete cluster --name wasmsh-e2e || true
