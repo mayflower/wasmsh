@@ -27,6 +27,12 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "CC0-1.0",
+    # webpki-roots 1.0+ publishes the Mozilla Root CA list under the
+    # Linux Foundation's CDLA-Permissive-2.0.  The license is
+    # permissive (no reciprocity, no share-alike), so allowing it does
+    # not widen the project's license posture beyond the MIT/Apache
+    # baseline.
+    "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
     "MIT-0",
