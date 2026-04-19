@@ -55,7 +55,10 @@ finally:
     backend.close()
 ```
 
-Full runnable examples: [`examples/deepagent-python`](../../examples/deepagent-python).
+Runnable examples:
+
+- [`examples/deepagent-python/basic.py`](../../examples/deepagent-python/basic.py) — bash + Python, no LLM.
+- [`examples/deepagent-python/example.py`](../../examples/deepagent-python/example.py) — full Deep Agent with CSV analysis (needs `ANTHROPIC_API_KEY`).
 
 ## npm quickstart
 
@@ -84,8 +87,11 @@ try {
 }
 ```
 
-Full runnable examples: [`examples/deepagent-typescript`](../../examples/deepagent-typescript),
-[`examples/deepagent-browser`](../../examples/deepagent-browser).
+Runnable examples:
+
+- [`examples/deepagent-typescript/basic.ts`](../../examples/deepagent-typescript/basic.ts) — minimal Node usage, no LLM.
+- [`examples/deepagent-typescript/example.ts`](../../examples/deepagent-typescript/example.ts) — full Deep Agent, needs `ANTHROPIC_API_KEY`.
+- [`examples/deepagent-browser/main.js`](../../examples/deepagent-browser/main.js) — fully in-browser agent, needs `ANTHROPIC_API_KEY`.
 
 ## What the sandbox provides
 

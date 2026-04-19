@@ -7,6 +7,8 @@ on:
       - '.github/workflows/langchain-adapters.yml'
       - 'packages/npm/langchain-wasmsh/**'
       - 'packages/python/langchain-wasmsh/**'
+      - 'examples/deepagent-python/**'
+      - 'examples/deepagent-typescript/**'
       - 'pnpm-workspace.yaml'
       - 'pnpm-lock.yaml'
       - 'package.json'
@@ -15,6 +17,8 @@ on:
       - '.github/workflows/langchain-adapters.yml'
       - 'packages/npm/langchain-wasmsh/**'
       - 'packages/python/langchain-wasmsh/**'
+      - 'examples/deepagent-python/**'
+      - 'examples/deepagent-typescript/**'
       - 'pnpm-workspace.yaml'
       - 'pnpm-lock.yaml'
       - 'package.json'
@@ -26,8 +30,14 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Version of the published @mayflowergmbh/wasmsh-pyodide tarball to
+  # pull when the workspace source tree has no built Pyodide assets.
+  # Keep in sync with packages/npm/wasmsh-pyodide/package.json.
+  WASMSH_PYODIDE_NPM_VERSION: "0.5.10"
+
 jobs:
-  # ── Python adapter ─────────────────────────────────────────
+  # ── Python: unit + integration (no LLM) + basic example ────
   python:
     name: Python (${{ matrix.python-version }})
     runs-on: mayflower-k8s-runners
@@ -69,17 +79,28 @@ jobs:
         run: uv run --group test pytest tests/unit_tests/test_sandbox_mocked.py tests/test_import.py -v --disable-socket --allow-unix-socket
 
       - name: Subprocess tests (real Node runtime)
-        # tests/unit_tests/test_sandbox.py pokes a real wasmsh-pyodide
-        # subprocess and needs the bundled pyodide assets.  Run it as a
-        # smoke check — skipif handles the missing-runtime case.
         run: uv run --group test pytest tests/unit_tests/test_sandbox.py -v
+
+      - name: Integration tests (no LLM)
+        # test_e2e_agent.py — bash+python sharing /workspace (3 tests).
+        # test_integration.py — full langchain-tests sandbox standard
+        #   suite (~85 tests + 1 xfail for chmod which Emscripten's VFS
+        #   cannot enforce).
+        # test_agent_sandbox.py is LLM-only and runs in `*-llm.yml`.
+        run: uv run --group test pytest tests/integration_tests/test_e2e_agent.py tests/integration_tests/test_integration.py -v --timeout 60
+
+      - name: Basic example smoke
+        # Runs the non-LLM example from examples/deepagent-python/ via the
+        # adapter's own venv, bypassing the requirements.txt which points
+        # at PyPI (the package isn't published yet).
+        run: uv run --group test python ../../../examples/deepagent-python/basic.py
 
       - name: Build wheel
         run: uv build --wheel
 
-  # ── npm adapter ────────────────────────────────────────────
+  # ── npm: unit + build + typecheck ──────────────────────────
   npm:
-    name: npm (Node ${{ matrix.node-version }})
+    name: npm unit (Node ${{ matrix.node-version }})
     runs-on: mayflower-k8s-runners
     timeout-minutes: 15
     strategy:
@@ -111,3 +132,50 @@ jobs:
 
       - name: Unit tests
         run: pnpm --filter @mayflowergmbh/langchain-wasmsh test:unit
+
+  # ── npm: integration (no LLM) + basic example ──────────────
+  # Requires Pyodide assets in packages/npm/wasmsh-pyodide/assets/.
+  # These are gitignored (built by tools/pyodide/build-custom.sh, ~30min).
+  # In CI we download the published npm tarball and stage its assets dir
+  # into the workspace source tree — the workspace-protocol dep then
+  # resolves exactly the bits end users install from the registry.
+  npm-integration:
+    name: npm integration
+    runs-on: mayflower-k8s-runners
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.20.0"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Stage Pyodide assets from published npm tarball
+        env:
+          VERSION: ${{ env.WASMSH_PYODIDE_NPM_VERSION }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
+          echo "Fetching $url"
+          curl -fsSL "$url" -o "$tmp/pkg.tgz"
+          mkdir -p "$tmp/extract"
+          tar -xzf "$tmp/pkg.tgz" -C "$tmp/extract"
+          cp -r "$tmp/extract/package/assets/"* packages/npm/wasmsh-pyodide/assets/
+          ls packages/npm/wasmsh-pyodide/assets/pyodide.asm.wasm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Integration tests (sandbox standard suite, no LLM)
+        run: pnpm --filter @mayflowergmbh/langchain-wasmsh test:int
+
+      - name: Basic example smoke
+        run: pnpm --filter wasmsh-deepagent-typescript-example run basic

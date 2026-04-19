@@ -17,9 +17,11 @@ from uuid import uuid4
 from deepagents.backends.protocol import (
     EditResult,
     ExecuteResponse,
+    FileData,
     FileDownloadResponse,
     FileOperationError,
     FileUploadResponse,
+    ReadResult,
 )
 from deepagents.backends.sandbox import BaseSandbox
 from wasmsh_pyodide_runtime import get_dist_dir, get_node_host_script
@@ -27,6 +29,17 @@ from wasmsh_pyodide_runtime import get_dist_dir, get_node_host_script
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_DIR = "/workspace"
+
+# Binary preview + text-output caps, kept identical to BaseSandbox so the
+# `langchain-tests` standard suite's exact-match assertions pass.
+_MAX_BINARY_PREVIEW_BYTES = 500 * 1024
+_MAX_TEXT_OUTPUT_BYTES = 500 * 1024
+_TEXT_TRUNCATION_NOTE = (
+    "\n\n[Output was truncated due to size limits. "
+    "This paginated read result exceeded the sandbox stdout limit. "
+    "Continue reading with a larger offset or smaller limit to inspect "
+    "the rest of the file.]"
+)
 
 
 def _encode_content(content: bytes) -> str:
@@ -287,27 +300,99 @@ class WasmshSandbox(BaseSandbox):
             truncated=False,
         )
 
-    def read(  # ty: ignore[invalid-method-override]  # returns str for langchain-tests v1 compat
+    def read(
         self,
         file_path: str,
         offset: int = 0,
         limit: int = 2000,
-    ) -> str:
-        """Read file content via download_files.
+    ) -> ReadResult:
+        """Read a file, returning text with offset/limit or base64 binary.
 
-        Overrides BaseSandbox which runs a Python script via execute() —
-        that approach fails under wasmsh's Pyodide runtime with I/O errors.
-        Returns str for compatibility with langchain-tests v1 standard suite.
+        Overrides `BaseSandbox.read`, which invokes a `python3 -c` script
+        through `execute()` — that path doesn't work against wasmsh's
+        Pyodide runtime (the large heredoc trips the shell layer).  The
+        JSON-RPC `readFile` command used by `download_files` is the
+        Pyodide-safe equivalent.
+
+        The return shape matches `BaseSandbox.read` exactly so the
+        `langchain-tests` sandbox standard suite passes against this
+        backend.
         """
         responses = self.download_files([file_path])
         resp = responses[0]
         if resp.error or resp.content is None:
             detail = resp.error or "file not found"
-            return f"Error: File '{file_path}': {detail}"
-        content = resp.content.decode("utf-8", errors="replace")
-        lines = content.splitlines(keepends=True)
-        page = lines[offset : offset + limit]
-        return "".join(f"{i + offset + 1:6d}\t{line}" for i, line in enumerate(page))
+            return ReadResult(error=f"File '{file_path}': {detail}")
+
+        raw = resp.content
+
+        if not raw:
+            return ReadResult(
+                file_data=FileData(
+                    content="System reminder: File exists but has empty contents",
+                    encoding="utf-8",
+                ),
+            )
+
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            if len(raw) > _MAX_BINARY_PREVIEW_BYTES:
+                return ReadResult(
+                    error=(
+                        f"File '{file_path}': Binary file exceeds maximum "
+                        f"preview size of {_MAX_BINARY_PREVIEW_BYTES} bytes"
+                    ),
+                )
+            return ReadResult(
+                file_data=FileData(
+                    content=base64.b64encode(raw).decode("ascii"),
+                    encoding="base64",
+                ),
+            )
+
+        page = self._paginate_text(text, offset=int(offset), limit=int(limit))
+        return ReadResult(file_data=FileData(content=page, encoding="utf-8"))
+
+    @staticmethod
+    def _paginate_text(text: str, *, offset: int, limit: int) -> str:
+        """Apply (offset, limit) line-window + 500 KiB output cap.
+
+        Matches BaseSandbox's semantics: lines are 0-indexed starting from
+        `offset`, at most `limit` lines are returned, and the assembled
+        content is truncated at ~500 KiB with a user-facing note so agents
+        know to paginate further.
+        """
+        lines = text.split("\n")
+        window = lines[offset : offset + limit]
+        if not window:
+            return ""
+
+        parts: list[str] = []
+        current_bytes = 0
+        truncation_bytes = len(_TEXT_TRUNCATION_NOTE.encode("utf-8"))
+        effective_limit = _MAX_TEXT_OUTPUT_BYTES - truncation_bytes
+        truncated = False
+        for i, line in enumerate(window):
+            piece = line if i == 0 else "\n" + line
+            piece_bytes = len(piece.encode("utf-8"))
+            if current_bytes + piece_bytes > effective_limit:
+                truncated = True
+                remaining = effective_limit - current_bytes
+                if remaining > 0:
+                    prefix = piece.encode("utf-8")[:remaining].decode(
+                        "utf-8", errors="ignore"
+                    )
+                    if prefix:
+                        parts.append(prefix)
+                break
+            parts.append(piece)
+            current_bytes += piece_bytes
+
+        output = "".join(parts)
+        if truncated:
+            output += _TEXT_TRUNCATION_NOTE
+        return output
 
     def edit(  # noqa: C901, PLR0911
         self,
@@ -318,20 +403,21 @@ class WasmshSandbox(BaseSandbox):
     ) -> EditResult:
         """Edit a file via download + string replace + upload.
 
-        Overrides BaseSandbox which runs a Python script via execute() —
-        that approach fails under wasmsh's Pyodide runtime with I/O errors.
-        Uses download_files/upload_files directly instead.
+        Overrides `BaseSandbox.edit` for the same reason as `read`: the
+        default implementation uses `python3 -c` and fails under Pyodide.
+        Error strings match BaseSandbox so the standard suite passes.
         """
         responses = self.download_files([file_path])
         if responses[0].error or responses[0].content is None:
-            return EditResult(error=f"Error: File '{file_path}' not found")
+            detail = responses[0].error or "file_not_found"
+            return EditResult(error=f"File '{file_path}': {detail}")
 
         text = responses[0].content.decode("utf-8", errors="replace")
 
         if not old_string:
             if text:
                 return EditResult(
-                    error="oldString must not be empty unless file is empty"
+                    error="oldString must not be empty unless file is empty",
                 )
             if not new_string:
                 return EditResult(path=file_path, occurrences=0)
@@ -339,7 +425,7 @@ class WasmshSandbox(BaseSandbox):
             upload = self.upload_files([(file_path, data)])
             if upload[0].error:
                 return EditResult(
-                    error=f"Failed to write '{file_path}': {upload[0].error}"
+                    error=f"Failed to write '{file_path}': {upload[0].error}",
                 )
             return EditResult(path=file_path, occurrences=1)
 
@@ -357,8 +443,10 @@ class WasmshSandbox(BaseSandbox):
             second = text.find(old_string, idx + len(old_string))
             if second != -1:
                 return EditResult(
-                    error=f"Multiple occurrences found in '{file_path}'. "
-                    "Use replace_all=True to replace all.",
+                    error=(
+                        f"Multiple occurrences found in '{file_path}'. "
+                        "Use replace_all=True to replace all."
+                    ),
                 )
             count = 1
             new_text = text[:idx] + new_string + text[idx + len(old_string) :]
@@ -366,7 +454,9 @@ class WasmshSandbox(BaseSandbox):
         data = new_text.encode("utf-8")
         upload = self.upload_files([(file_path, data)])
         if upload[0].error:
-            return EditResult(error=f"Failed to write '{file_path}': {upload[0].error}")
+            return EditResult(
+                error=f"Failed to write '{file_path}': {upload[0].error}",
+            )
         return EditResult(path=file_path, occurrences=count)
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:

@@ -1,0 +1,182 @@
+name: LangChain Adapters (LLM)
+
+# LLM-dependent integration + end-to-end tests for the langchain-wasmsh
+# adapters.  Manually dispatched (and run on a weekly schedule) because
+# these tests call the Anthropic API and need a valid `ANTHROPIC_API_KEY`.
+#
+# Required secrets (set at repository or `integration-tests` environment level):
+#   ANTHROPIC_API_KEY — scoped key for CI, rate-limited
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Which suite to run"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - python
+          - npm
+          - browser-e2e
+  schedule:
+    # Weekly at 02:00 UTC Monday.  Low-traffic slot on Anthropic's API.
+    - cron: "0 2 * * 1"
+
+concurrency:
+  group: langchain-adapters-llm-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  WASMSH_PYODIDE_NPM_VERSION: "0.5.10"
+
+jobs:
+  # ── Python LLM agent tests ─────────────────────────────────
+  python:
+    name: Python LLM agent tests
+    if: |
+      github.event_name == 'schedule' ||
+      github.event.inputs.suite == 'all' ||
+      github.event.inputs.suite == 'python'
+    runs-on: mayflower-k8s-runners
+    timeout-minutes: 30
+    environment: integration-tests
+    defaults:
+      run:
+        working-directory: packages/python/langchain-wasmsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.7"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Sync dependencies
+        run: uv sync --group test
+
+      - name: LLM agent integration tests
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: uv run --group test pytest tests/integration_tests/test_agent_sandbox.py -v --timeout 180
+
+  # ── npm LLM agent tests ────────────────────────────────────
+  npm:
+    name: npm LLM agent tests
+    if: |
+      github.event_name == 'schedule' ||
+      github.event.inputs.suite == 'all' ||
+      github.event.inputs.suite == 'npm'
+    runs-on: mayflower-k8s-runners
+    timeout-minutes: 30
+    environment: integration-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.20.0"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Stage Pyodide assets from published npm tarball
+        env:
+          VERSION: ${{ env.WASMSH_PYODIDE_NPM_VERSION }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
+          curl -fsSL "$url" -o "$tmp/pkg.tgz"
+          mkdir -p "$tmp/extract"
+          tar -xzf "$tmp/pkg.tgz" -C "$tmp/extract"
+          cp -r "$tmp/extract/package/assets/"* packages/npm/wasmsh-pyodide/assets/
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm --filter @mayflowergmbh/langchain-wasmsh build
+
+      - name: LLM agent integration tests
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: pnpm --filter @mayflowergmbh/langchain-wasmsh test:int
+
+  # ── Browser E2E (Playwright) ───────────────────────────────
+  browser-e2e:
+    name: Browser E2E (Playwright)
+    if: |
+      github.event_name == 'schedule' ||
+      github.event.inputs.suite == 'all' ||
+      github.event.inputs.suite == 'browser-e2e'
+    runs-on: mayflower-k8s-runners
+    timeout-minutes: 45
+    environment: integration-tests
+    defaults:
+      run:
+        working-directory: packages/npm/langchain-wasmsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.20.0"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Stage Pyodide assets from published npm tarball
+        working-directory: .
+        env:
+          VERSION: ${{ env.WASMSH_PYODIDE_NPM_VERSION }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
+          curl -fsSL "$url" -o "$tmp/pkg.tgz"
+          mkdir -p "$tmp/extract"
+          tar -xzf "$tmp/pkg.tgz" -C "$tmp/extract"
+          cp -r "$tmp/extract/package/assets/"* packages/npm/wasmsh-pyodide/assets/
+
+      - name: Install dependencies
+        working-directory: .
+        run: pnpm install --frozen-lockfile
+
+      - name: Build adapter
+        working-directory: .
+        run: pnpm --filter @mayflowergmbh/langchain-wasmsh build
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Run Playwright E2E
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: pnpm exec playwright test
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: packages/npm/langchain-wasmsh/playwright-report/
+          retention-days: 7

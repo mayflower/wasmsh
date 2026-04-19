@@ -6,6 +6,19 @@ Mayflower-maintained, hosted under [`mayflower/wasmsh`](https://github.com/mayfl
 Runs bash and Python 3 inside an in-process Pyodide/WASM sandbox locally — no
 container or cloud service required.
 
+## Examples
+
+Runnable examples live in the repository at
+[`examples/deepagent-python`](https://github.com/mayflower/wasmsh/tree/main/examples/deepagent-python):
+
+- [`basic.py`](https://github.com/mayflower/wasmsh/blob/main/examples/deepagent-python/basic.py) —
+  minimal non-LLM usage (bash + Python sharing `/workspace`).
+- [`example.py`](https://github.com/mayflower/wasmsh/blob/main/examples/deepagent-python/example.py) —
+  full Deep Agent analyzing a CSV, requires `ANTHROPIC_API_KEY`.
+
+See also the
+[integration guide](https://github.com/mayflower/wasmsh/blob/main/docs/integrations/langchain-wasmsh.md).
+
 ## Getting started
 
 ### Requirements
