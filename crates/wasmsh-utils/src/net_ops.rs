@@ -1897,53 +1897,12 @@ fn run_single_url(
         curl_log_request(ctx, &request);
     }
 
-    let backend = ctx
-        .network
-        .expect("network capability is checked before dispatching per-URL");
-    let mut response = match fetch_with_retries(backend, &request, &opts) {
+    let response = match fetch_and_prepare_response(ctx, &opts, &request, url, url_index) {
         Ok(r) => r,
-        Err(e) => {
-            let code = curl_handle_fetch_error(ctx, &e, &opts);
-            emit_write_out_for(
-                ctx,
-                &opts,
-                url,
-                url_index,
-                &HttpResponse::default(),
-                Some(&e),
-            );
-            return code;
-        }
+        Err(code) => return code,
     };
 
-    if opts.compressed {
-        if let Err(e) = maybe_decompress(&mut response) {
-            if !opts.silent || opts.show_error {
-                ctx.output
-                    .stderr(format!("curl: decompression failed: {e}\n").as_bytes());
-            }
-            return 61;
-        }
-    }
-
-    if opts.verbose {
-        curl_log_response(ctx, &response);
-    }
-
-    if let Some(code) = enforce_response_size(&opts, &response) {
-        if !opts.silent || opts.show_error {
-            ctx.output.stderr(b"curl: Maximum file size exceeded\n");
-        }
-        emit_write_out_for(ctx, &opts, url, url_index, &response, None);
-        return code;
-    }
-
-    if let Some(code) = fail_response_code(&opts, &response) {
-        if opts.fail_with_body {
-            let _ = write_curl_response(ctx, &opts, &response, url);
-        }
-        emit_fail_error(ctx, &opts, response.status);
-        emit_write_out_for(ctx, &opts, url, url_index, &response, None);
+    if let Some(code) = finalize_response(ctx, &opts, &response, url, url_index) {
         return code;
     }
 
@@ -1953,6 +1912,85 @@ fn run_single_url(
     }
     emit_write_out_for(ctx, &opts, url, url_index, &response, None);
     0
+}
+
+/// Fetch the response, decompress if requested, and log verbose output.
+/// Returns `Err(exit_code)` if any stage failed with a reportable curl code.
+fn fetch_and_prepare_response(
+    ctx: &mut UtilContext<'_>,
+    opts: &CurlOpts,
+    request: &HttpRequest,
+    url: &str,
+    url_index: u32,
+) -> Result<HttpResponse, i32> {
+    let backend = ctx
+        .network
+        .expect("network capability is checked before dispatching per-URL");
+    let mut response = match fetch_with_retries(backend, request, opts) {
+        Ok(r) => r,
+        Err(e) => {
+            let code = curl_handle_fetch_error(ctx, &e, opts);
+            emit_write_out_for(
+                ctx,
+                opts,
+                url,
+                url_index,
+                &HttpResponse::default(),
+                Some(&e),
+            );
+            return Err(code);
+        }
+    };
+
+    if opts.compressed {
+        if let Err(e) = maybe_decompress(&mut response) {
+            curl_report_decompression_failure(ctx, opts, &e);
+            return Err(61);
+        }
+    }
+
+    if opts.verbose {
+        curl_log_response(ctx, &response);
+    }
+
+    Ok(response)
+}
+
+/// Apply size limits and `--fail*` handling.  Returns `Some(exit_code)` if
+/// the response should short-circuit; `None` means continue to writing the
+/// body.
+fn finalize_response(
+    ctx: &mut UtilContext<'_>,
+    opts: &CurlOpts,
+    response: &HttpResponse,
+    url: &str,
+    url_index: u32,
+) -> Option<i32> {
+    if let Some(code) = enforce_response_size(opts, response) {
+        if !opts.silent || opts.show_error {
+            ctx.output.stderr(b"curl: Maximum file size exceeded\n");
+        }
+        emit_write_out_for(ctx, opts, url, url_index, response, None);
+        return Some(code);
+    }
+
+    if let Some(code) = fail_response_code(opts, response) {
+        if opts.fail_with_body {
+            let _ = write_curl_response(ctx, opts, response, url);
+        }
+        emit_fail_error(ctx, opts, response.status);
+        emit_write_out_for(ctx, opts, url, url_index, response, None);
+        return Some(code);
+    }
+
+    None
+}
+
+fn curl_report_decompression_failure(ctx: &mut UtilContext<'_>, opts: &CurlOpts, err: &str) {
+    if !opts.silent || opts.show_error {
+        ctx.output
+            .stderr(format!("curl: decompression failed: {err}\n").as_bytes());
+    }
 }
 
 /// Produce the effective per-URL options.  Currently this just promotes
