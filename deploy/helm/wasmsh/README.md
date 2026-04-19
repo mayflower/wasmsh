@@ -114,3 +114,27 @@ http://<release>-dispatcher.<ns>.svc.cluster.local:8080
 
 The chart ships no Ingress / LoadBalancer; put your own behind it if
 external exposure is needed.
+
+## Clients
+
+The dispatcher speaks plain JSON/HTTP
+([`docs/reference/dispatcher-api.md`](../../../docs/reference/dispatcher-api.md))
+so any language can drive it. The repo also ships two first-party
+LangChain Deep Agents sandbox backends that point at this chart:
+
+```ts
+// npm — @mayflowergmbh/langchain-wasmsh
+import { WasmshRemoteSandbox } from "@mayflowergmbh/langchain-wasmsh";
+const sandbox = await WasmshRemoteSandbox.create({
+  dispatcherUrl: "http://wasmsh-dispatcher.wasmsh.svc.cluster.local:8080",
+});
+```
+
+```python
+# Python — langchain-wasmsh
+from langchain_wasmsh import WasmshRemoteSandbox
+sandbox = WasmshRemoteSandbox("http://wasmsh-dispatcher.wasmsh.svc.cluster.local:8080")
+```
+
+See [`docs/integrations/langchain-wasmsh.md`](../../../docs/integrations/langchain-wasmsh.md)
+for the full API.

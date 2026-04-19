@@ -2,18 +2,28 @@
 
 The `langchain-wasmsh` packages expose the wasmsh sandbox as a
 [LangChain Deep Agents](https://docs.langchain.com/oss/python/deepagents/sandboxes)
-backend.  Both ecosystems ship a single `WasmshSandbox` class that runs bash
-(88 utilities) and Python 3 inside an in-process Pyodide/WASM sandbox — no
-containers, no server.
+backend.  Each ecosystem ships **two** interchangeable backends so an
+agent can scale from a single laptop to a Kubernetes cluster with a
+one-line import change — both classes implement the identical
+`BaseSandbox` surface:
+
+| Backend | Use for | Transport |
+| --- | --- | --- |
+| `WasmshSandbox` | Local development, CI, single-process agents, browser | In-process Pyodide/WASM over a Deno or Node subprocess (or Web Worker) |
+| `WasmshRemoteSandbox` | Production, Kubernetes, shared agent fleets | JSON/HTTP to the wasmsh dispatcher + runner pool ([Helm chart](../../deploy/helm/wasmsh/)) |
+
+Packages:
 
 | Ecosystem | Package | Import | Source |
 | --- | --- | --- | --- |
-| Python | `langchain-wasmsh` | `from langchain_wasmsh import WasmshSandbox` | [`packages/python/langchain-wasmsh`](../../packages/python/langchain-wasmsh) |
-| npm | `@mayflowergmbh/langchain-wasmsh` | `import { WasmshSandbox } from "@mayflowergmbh/langchain-wasmsh"` | [`packages/npm/langchain-wasmsh`](../../packages/npm/langchain-wasmsh) |
+| Python | `langchain-wasmsh` | `from langchain_wasmsh import WasmshSandbox, WasmshRemoteSandbox` | [`packages/python/langchain-wasmsh`](../../packages/python/langchain-wasmsh) |
+| npm | `@mayflowergmbh/langchain-wasmsh` | `import { WasmshSandbox, WasmshRemoteSandbox } from "@mayflowergmbh/langchain-wasmsh"` | [`packages/npm/langchain-wasmsh`](../../packages/npm/langchain-wasmsh) |
 
 Both packages are Mayflower-maintained and live in this repository.  The
 underlying Pyodide assets come from `wasmsh-pyodide-runtime` (Python) and
-`@mayflowergmbh/wasmsh-pyodide` (npm).
+`@mayflowergmbh/wasmsh-pyodide` (npm).  The dispatcher + runner images
+the remote backend talks to are published by `release.yml` to
+`ghcr.io/mayflower/wasmsh-{dispatcher,runner}`.
 
 ## Why these packages are hosted here, not upstream
 

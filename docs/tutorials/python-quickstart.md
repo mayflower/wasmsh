@@ -196,9 +196,19 @@ embedding you probably want:
 - A connection pool / process pool if you want to run many sessions.
 - Cancellation handling that sends `{"Cancel": null}` from another thread.
 
-For a higher-level Python API, see the `langchain-wasmsh` package, which
-wraps this same protocol with a richer interface designed for LangChain
-and DeepAgents integrations.
+For a higher-level Python API, see the [`langchain-wasmsh`](../../packages/python/langchain-wasmsh/)
+package, which wraps this protocol with the LangChain Deep Agents
+`BaseSandbox` interface.  It ships two backends:
+
+- `WasmshSandbox()` — in-process, same single-subprocess model as this
+  tutorial.
+- `WasmshRemoteSandbox(dispatcher_url)` — talks HTTP to the scalable
+  dispatcher + runner pool ([Helm chart](../../deploy/helm/wasmsh/))
+  for Kubernetes deployments.  Same surface as the in-process variant;
+  a one-line import change lets an agent scale from laptop to cluster.
+
+See [`docs/integrations/langchain-wasmsh.md`](../integrations/langchain-wasmsh.md)
+for the full guide.
 
 ## Where to go next
 

@@ -11,19 +11,28 @@
 
 A sandboxed shell with 88 utilities (grep, sed, awk, jq, tar, curl, …), Python 3.13 with pip/micropip for installing pure-Python packages, and a virtual filesystem — all running in-process as WebAssembly. No OS processes, no network access unless explicitly allowed, step budgets to prevent runaway execution.
 
-Three build targets from one codebase:
+Three in-process build targets plus one scalable server-side path from one codebase:
 - **Standalone** (`wasm32-unknown-unknown`) — browser Web Worker
 - **Pyodide** (`wasm32-unknown-emscripten`) — shell and Python share the same filesystem
 - **Component Model** (`wasm32-wasip2`) — WASI P2 component exporting the same JSON `HostCommand` / `WorkerEvent` transport used by Pyodide through a thin `wasmsh:component/runtime` handle plus shared probe helpers. Reuses the same libc-backed filesystem path as Pyodide. See [ADR-0030](docs/adr/adr-0030-wasmcloud-component-transport.md).
+- **Scalable** (Kubernetes) — `wasmsh-dispatcher` (Rust, HTTP control plane) plus a pool of `wasmsh-runner` pods (Node + Pyodide) installed via the [Helm chart](deploy/helm/wasmsh/). Clients speak JSON/HTTP to the dispatcher. See [Scalable deployment](#scalable-deployment-kubernetes) below.
 
 ## Use with LangChain Deep Agents
 
 wasmsh is a sandbox backend for [LangChain Deep Agents](https://github.com/langchain-ai/deepagentsjs). LLM agents get `execute`, `read_file`, `write_file`, `edit_file`, `ls`, `grep`, `glob` tools backed by the WASM sandbox.
 
-Adapter packages are Mayflower-maintained and live in this repo:
+Adapter packages are Mayflower-maintained and live in this repo. Each
+ships two interchangeable backend classes — `WasmshSandbox` for
+single-process use and `WasmshRemoteSandbox` for dispatcher-backed
+Kubernetes deployments — with the identical `BaseSandbox` surface so
+upgrading is a one-line import change:
 
-- **npm** — [`@mayflowergmbh/langchain-wasmsh`](packages/npm/langchain-wasmsh) (Node + browser)
-- **Python** — [`langchain-wasmsh`](packages/python/langchain-wasmsh)
+| Ecosystem | Package | In-process | Scalable |
+|-|-|-|-|
+| npm | [`@mayflowergmbh/langchain-wasmsh`](packages/npm/langchain-wasmsh) | `WasmshSandbox.createNode()` / `.createBrowserWorker()` | `WasmshRemoteSandbox.create({ dispatcherUrl })` |
+| Python | [`langchain-wasmsh`](packages/python/langchain-wasmsh) | `WasmshSandbox()` | `WasmshRemoteSandbox(dispatcher_url)` |
+
+### In-process (single machine, no server)
 
 ```typescript
 import { createDeepAgent } from "deepagents";
@@ -45,10 +54,34 @@ sandbox = WasmshSandbox()
 agent = create_deep_agent(backend=sandbox)
 ```
 
-For Kubernetes / horizontally-scalable deployments, swap `WasmshSandbox`
-for `WasmshRemoteSandbox` (routes through the dispatcher +
-`deploy/helm/wasmsh` Helm chart) — same `BaseSandbox` surface, one-line
-import change.
+### Scalable (Kubernetes, shared with other agents)
+
+```typescript
+import { WasmshRemoteSandbox } from "@mayflowergmbh/langchain-wasmsh";
+
+const sandbox = await WasmshRemoteSandbox.create({
+  dispatcherUrl: "http://wasmsh-dispatcher.wasmsh.svc.cluster.local:8080",
+});
+const agent = createDeepAgent({ backend: sandbox });
+```
+
+```python
+from langchain_wasmsh import WasmshRemoteSandbox
+
+sandbox = WasmshRemoteSandbox("http://wasmsh-dispatcher.wasmsh.svc.cluster.local:8080")
+```
+
+The remote backend talks HTTP to the `wasmsh-dispatcher` provisioned by
+[`deploy/helm/wasmsh`](deploy/helm/wasmsh/); the dispatcher routes
+sessions across a horizontally-scaled pool of `wasmsh-runner` pods with
+session affinity and restore-capacity-aware scheduling. See
+[Scalable deployment](#scalable-deployment-kubernetes) for the server
+side.
+
+Runnable examples (both include LLM-free and Deep Agent variants):
+
+- Python: [`examples/deepagent-python/`](examples/deepagent-python/) — `basic.py`, `remote_basic.py`, `example.py`.
+- TypeScript: [`examples/deepagent-typescript/`](examples/deepagent-typescript/) — `basic.ts`, `remote-basic.ts`, `example.ts`.
 
 See [`docs/integrations/langchain-wasmsh.md`](docs/integrations/langchain-wasmsh.md) for the full integration guide.
 
@@ -90,8 +123,8 @@ just build-component                                 # wasm32-wasip2 component
 
 In addition to the in-process wasm targets, wasmsh ships a server-side
 deployment path: a Rust **dispatcher** plus a Node + Pyodide **runner**
-packaged as container images and installable via Helm. LLM agents or
-other clients talk HTTP to the dispatcher, which routes sessions across a
+packaged as container images and installable via Helm. Clients speak
+JSON/HTTP to the dispatcher, which routes sessions across a
 horizontally-scaled pool of runner pods.
 
 | Piece | Purpose |
@@ -99,13 +132,32 @@ horizontally-scaled pool of runner pods.
 | [`crates/wasmsh-dispatcher`](crates/wasmsh-dispatcher/) | axum HTTP service: session routing, affinity, capacity-aware scheduling |
 | [`tools/runner-node`](tools/runner-node/) | Node runner: template worker, per-session restore, metrics |
 | [`deploy/docker/Dockerfile.{dispatcher,runner}`](deploy/docker/) | Production images (`ghcr.io/mayflower/wasmsh-{dispatcher,runner}`) |
+| [`deploy/docker/compose.dispatcher-test.yml`](deploy/docker/compose.dispatcher-test.yml) | Single-host docker-compose stack for local smoke tests |
 | [`deploy/helm/wasmsh`](deploy/helm/wasmsh/) | Helm chart with HPA, PDB, NetworkPolicy, optional ServiceMonitor |
-| [`e2e/kind`](e2e/kind/) | Full-stack kind end-to-end test suite (`just test-e2e-kind`) |
+| [`e2e/kind`](e2e/kind/) | Kind-based end-to-end suite (`just test-e2e-kind`) |
+| [`e2e/dispatcher-compose`](e2e/dispatcher-compose/) | docker-compose-based end-to-end suite (`just test-e2e-dispatcher-compose`) |
+
+Clients:
+
+- **LangChain Deep Agents** — the `WasmshRemoteSandbox` class in both
+  adapter packages is the officially-supported client. See
+  [Use with LangChain Deep Agents](#use-with-langchain-deep-agents)
+  above and the [integration guide](docs/integrations/langchain-wasmsh.md).
+- **Anything else** — the dispatcher contract is plain JSON/HTTP,
+  documented in [docs/reference/dispatcher-api.md](docs/reference/dispatcher-api.md).
+  Write your own client in whatever stack you like.
 
 Container images are built and pushed to GHCR automatically by the
 `Release` workflow on `v*` tags; digests are attached to the GitHub
-Release as `image-digests.json`. See
-[docs/explanation/snapshot-runner.md](docs/explanation/snapshot-runner.md)
+Release as `image-digests.json`.
+
+The scalable path is exercised end-to-end on every PR by
+[`.github/workflows/remote-sandbox-e2e.yml`](.github/workflows/remote-sandbox-e2e.yml),
+which runs both the docker-compose and the kind+Helm variants through
+the `WasmshRemoteSandbox` TypeScript and Python clients plus the
+`langchain-tests` sandbox standard suite.
+
+See [docs/explanation/snapshot-runner.md](docs/explanation/snapshot-runner.md)
 for architecture, [deploy/helm/wasmsh/README.md](deploy/helm/wasmsh/README.md)
 for the chart surface, and [docs/how-to/runner-runbook.md](docs/how-to/runner-runbook.md)
 for operations.

@@ -37,7 +37,35 @@ The dispatcher is the stable ingress surface for the scalable sandbox platform. 
 - `POST /sessions/{session_id}/close`
 - `DELETE /sessions/{session_id}`
 
+Full request/response shapes live in
+[`docs/reference/dispatcher-api.md`](../reference/dispatcher-api.md).
+All JSON bodies (request and response) are capped at 32 MiB by the
+`DefaultBodyLimit` layer; bodies are streamed through as raw `Bytes`
+rather than parsed into a `serde_json::Value` tree, so the dispatcher's
+peak RSS per request stays close to the payload size plus
+tokio/reqwest buffers.
+
 The runner still exposes `/healthz`, `/readyz`, `/metrics`, and `/runner/snapshot`, but those are pod-local operational endpoints for the dispatcher and platform operators.
+
+### First-party clients
+
+The repository ships two LangChain Deep Agents sandbox backends that
+speak this API natively, matching the `BaseSandbox` surface of their
+in-process counterparts one-for-one:
+
+- **npm** — `WasmshRemoteSandbox.create({ dispatcherUrl })` in
+  [`@mayflowergmbh/langchain-wasmsh`](../../packages/npm/langchain-wasmsh)
+- **Python** — `WasmshRemoteSandbox(dispatcher_url)` in
+  [`langchain-wasmsh`](../../packages/python/langchain-wasmsh)
+
+Both are exercised end-to-end on every PR through the
+[`Remote Sandbox E2E`](../../.github/workflows/remote-sandbox-e2e.yml)
+workflow, which runs them against both the docker-compose stack at
+[`deploy/docker/compose.dispatcher-test.yml`](../../deploy/docker/compose.dispatcher-test.yml)
+(fast) and the full Helm install inside kind (production parity).
+
+Any other language can target the dispatcher directly — there is no
+language-specific coupling in the protocol.
 
 ## Kubernetes Shape
 
@@ -91,16 +119,26 @@ dispatcher service if you need external access.
   routing new sessions → in-flight work finishes within
   `terminationGracePeriodSeconds`.
 
-### Local validation (kind)
+### Local validation
 
-The `e2e/kind/` suite boots a real single-node kind cluster, loads
-locally built images, installs the chart with `values-e2e.yaml`, and
-exercises the scalable path end-to-end (health, session lifecycle,
-scaling, pod-delete resilience):
+Two e2e suites exercise the scalable path end-to-end. Both build the
+same dispatcher + runner images, but differ in deployment target and
+cycle time:
 
 ```bash
-just build-pyodide           # once per Pyodide version
-just test-e2e-kind           # full cycle with teardown
+just build-pyodide                   # once per Pyodide version
+just test-e2e-dispatcher-compose     # docker-compose cycle (~2 min)
+just test-e2e-kind                   # kind + Helm cycle (~7 min)
 ```
 
-See `e2e/kind/README.md` for `--keep` / `--reuse` modes and filter flags.
+Each orchestrator brings up the stack, runs the dispatcher-client
+suite (`e2e/{dispatcher-compose,kind}/tests/`), then runs the Python
+`WasmshRemoteSandbox` adapter's `SandboxIntegrationTests` standard
+suite against the same port-forwarded dispatcher, and tears down.
+The compose variant is the fast iteration loop; the kind variant is
+the production-parity check (Helm install, HPA, headless service
+discovery, pod-delete resilience).
+
+See [`e2e/kind/README.md`](../../e2e/kind/README.md) and
+[`e2e/dispatcher-compose/README.md`](../../e2e/dispatcher-compose/README.md)
+for `--keep` / `--reuse` modes and filter flags.

@@ -166,6 +166,23 @@ no access to your host machine's filesystem, processes, or network. Every
 command — the coreutils, the pipeline glue, the Python interpreter — ran
 in-process inside the same wasm module.
 
+## Higher-level API: LangChain Deep Agents
+
+If you're building an LLM agent rather than embedding wasmsh directly,
+use the [`@mayflowergmbh/langchain-wasmsh`](../../packages/npm/langchain-wasmsh/)
+package. It wraps this protocol with the LangChain Deep Agents
+`BaseSandbox` surface and ships two interchangeable backends:
+
+- `WasmshSandbox.createNode()` / `.createBrowserWorker()` — in-process,
+  same boot as this tutorial under the hood.
+- `WasmshRemoteSandbox.create({ dispatcherUrl })` — talks HTTP to the
+  scalable dispatcher + runner pool ([Helm chart](../../deploy/helm/wasmsh/))
+  for Kubernetes deployments. One-line import change to scale an agent
+  from laptop to cluster.
+
+See [`docs/integrations/langchain-wasmsh.md`](../integrations/langchain-wasmsh.md)
+for the full guide.
+
 ## Where to go next
 
 - [Python quick start](python-quickstart.md) for the same flow from Python.
