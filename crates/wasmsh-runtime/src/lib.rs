@@ -3267,80 +3267,111 @@ impl<R: Read> Read for GrepStreamReader<R> {
             if self.finished {
                 return Ok(0);
             }
+            self.pump_one_line()?;
+        }
+    }
+}
 
-            if let Some((line, _had_newline)) =
-                streaming_read_next_line(&mut self.inner, &mut self.input_pending)?
-            {
-                self.line_num += 1;
-                if streaming_grep_line_matches(&line, &self.stage.flags, &self.stage.patterns) {
-                    self.found = true;
-                    *self.status.borrow_mut() = 0;
-                    self.match_count += 1;
-
-                    if self.stage.flags.quiet || self.stage.flags.files_only {
-                        if let Some(max) = self.stage.flags.max_count {
-                            if self.match_count >= max as u64 {
-                                self.finished = true;
-                            }
-                        }
-                        continue;
-                    }
-
-                    if !self.stage.flags.count_only {
-                        if self.stage.flags.before_context > 0 && !self.before_buf.is_empty() {
-                            if self.printed_separator && self.stage.flags.before_context > 0 {
-                                self.output_pending.extend_from_slice(b"--\n");
-                            }
-                            for (before_line_num, before_line) in &self.before_buf {
-                                emit_streaming_grep_one(
-                                    &mut self.output_pending,
-                                    before_line,
-                                    *before_line_num,
-                                    &self.stage.flags,
-                                    &self.stage.patterns,
-                                );
-                            }
-                        }
-                        self.before_buf.clear();
-                        emit_streaming_grep_one(
-                            &mut self.output_pending,
-                            &line,
-                            self.line_num,
-                            &self.stage.flags,
-                            &self.stage.patterns,
-                        );
-                        self.remaining_after = self.stage.flags.after_context;
-                        self.printed_separator = true;
-                    }
-
-                    if let Some(max) = self.stage.flags.max_count {
-                        if self.match_count >= max as u64 {
-                            self.emit_count_summary();
-                            self.finished = true;
-                        }
-                    }
-                } else if self.remaining_after > 0 && !self.stage.flags.count_only {
-                    emit_streaming_grep_one(
-                        &mut self.output_pending,
-                        &line,
-                        self.line_num,
-                        &self.stage.flags,
-                        &self.stage.patterns,
-                    );
-                    self.remaining_after -= 1;
-                } else if self.stage.flags.before_context > 0 {
-                    self.before_buf.push_back((self.line_num, line));
-                    if self.before_buf.len() > self.stage.flags.before_context {
-                        self.before_buf.pop_front();
-                    }
-                }
-            } else {
-                self.emit_count_summary();
-                if !self.found {
-                    *self.status.borrow_mut() = 1;
-                }
-                self.finished = true;
+impl<R: Read> GrepStreamReader<R> {
+    fn pump_one_line(&mut self) -> std::io::Result<()> {
+        let Some((line, _had_newline)) =
+            streaming_read_next_line(&mut self.inner, &mut self.input_pending)?
+        else {
+            self.emit_count_summary();
+            if !self.found {
+                *self.status.borrow_mut() = 1;
             }
+            self.finished = true;
+            return Ok(());
+        };
+        self.line_num += 1;
+        if streaming_grep_line_matches(&line, &self.stage.flags, &self.stage.patterns) {
+            self.on_match(&line);
+        } else {
+            self.on_nonmatch(line);
+        }
+        Ok(())
+    }
+
+    fn on_match(&mut self, line: &str) {
+        self.found = true;
+        *self.status.borrow_mut() = 0;
+        self.match_count += 1;
+
+        if self.stage.flags.quiet || self.stage.flags.files_only {
+            self.check_max_count();
+            return;
+        }
+
+        if !self.stage.flags.count_only {
+            self.flush_before_context();
+            emit_streaming_grep_one(
+                &mut self.output_pending,
+                line,
+                self.line_num,
+                &self.stage.flags,
+                &self.stage.patterns,
+            );
+            self.remaining_after = self.stage.flags.after_context;
+            self.printed_separator = true;
+        }
+
+        if self.should_stop_for_max_count() {
+            self.emit_count_summary();
+            self.finished = true;
+        }
+    }
+
+    fn on_nonmatch(&mut self, line: String) {
+        if self.remaining_after > 0 && !self.stage.flags.count_only {
+            emit_streaming_grep_one(
+                &mut self.output_pending,
+                &line,
+                self.line_num,
+                &self.stage.flags,
+                &self.stage.patterns,
+            );
+            self.remaining_after -= 1;
+            return;
+        }
+        if self.stage.flags.before_context > 0 {
+            self.before_buf.push_back((self.line_num, line));
+            if self.before_buf.len() > self.stage.flags.before_context {
+                self.before_buf.pop_front();
+            }
+        }
+    }
+
+    fn flush_before_context(&mut self) {
+        if self.stage.flags.before_context == 0 || self.before_buf.is_empty() {
+            self.before_buf.clear();
+            return;
+        }
+        if self.printed_separator {
+            self.output_pending.extend_from_slice(b"--\n");
+        }
+        for (before_line_num, before_line) in &self.before_buf {
+            emit_streaming_grep_one(
+                &mut self.output_pending,
+                before_line,
+                *before_line_num,
+                &self.stage.flags,
+                &self.stage.patterns,
+            );
+        }
+        self.before_buf.clear();
+    }
+
+    fn should_stop_for_max_count(&self) -> bool {
+        self.stage
+            .flags
+            .max_count
+            .is_some_and(|m| self.match_count >= m as u64)
+    }
+
+    fn check_max_count(&mut self) {
+        if self.should_stop_for_max_count() {
+            self.finished = true;
         }
     }
 }
