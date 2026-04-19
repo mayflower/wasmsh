@@ -642,7 +642,36 @@ struct GrepFlags {
 }
 
 fn parse_grep_flags<'a>(argv: &'a [&'a str]) -> (GrepFlags, Vec<&'a str>) {
-    let mut flags = GrepFlags {
+    let mut flags = default_grep_flags();
+    let mut rest = Vec::new();
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = argv[i];
+        if arg == "--" {
+            rest.extend(argv[i + 1..].iter().copied());
+            break;
+        }
+        if parse_grep_long_option(arg, &mut flags) {
+            i += 1;
+            continue;
+        }
+        if let Some(consumed) = parse_grep_valued_short_option(argv, i, &mut flags) {
+            i += consumed;
+            continue;
+        }
+        if arg.starts_with('-') && arg.len() > 1 {
+            parse_grep_short_cluster(&arg[1..], &mut flags);
+            i += 1;
+        } else {
+            rest.push(arg);
+            i += 1;
+        }
+    }
+    (flags, rest)
+}
+
+fn default_grep_flags() -> GrepFlags {
+    GrepFlags {
         ignore_case: false,
         invert: false,
         count_only: false,
@@ -661,88 +690,81 @@ fn parse_grep_flags<'a>(argv: &'a [&'a str]) -> (GrepFlags, Vec<&'a str>) {
         patterns: Vec::new(),
         include_glob: None,
         exclude_glob: None,
-    };
-    let mut rest = Vec::new();
-    let mut i = 1;
-    while i < argv.len() {
-        let arg = argv[i];
-        if arg == "--" {
-            rest.extend(argv[i + 1..].iter().copied());
-            break;
+    }
+}
+
+/// Apply a single long-form option (`--include=`, `--exclude=`, `--color`).
+/// Returns `true` if the arg was consumed.
+fn parse_grep_long_option(arg: &str, flags: &mut GrepFlags) -> bool {
+    if let Some(g) = arg.strip_prefix("--include=") {
+        flags.include_glob = Some(g.to_string());
+        return true;
+    }
+    if let Some(g) = arg.strip_prefix("--exclude=") {
+        flags.exclude_glob = Some(g.to_string());
+        return true;
+    }
+    arg == "--color" || arg.starts_with("--color=")
+}
+
+/// Apply a short option that takes a value (`-e`, `-f`, `-A`, `-B`, `-C`, `-m`).
+/// Returns `Some(consumed)` to advance the iterator, or `None` if this arg is
+/// not a valued short option.
+fn parse_grep_valued_short_option(argv: &[&str], i: usize, flags: &mut GrepFlags) -> Option<usize> {
+    let arg = argv[i];
+    let next = argv.get(i + 1).copied()?;
+    match arg {
+        "-e" => {
+            flags.patterns.push(next.to_string());
+            Some(2)
         }
-        if let Some(g) = arg.strip_prefix("--include=") {
-            flags.include_glob = Some(g.to_string());
-            i += 1;
-            continue;
+        // pattern file — not handled here, would need fs access
+        "-f" => Some(2),
+        "-A" => {
+            flags.after_context = next.parse().unwrap_or(0);
+            Some(2)
         }
-        if let Some(g) = arg.strip_prefix("--exclude=") {
-            flags.exclude_glob = Some(g.to_string());
-            i += 1;
-            continue;
+        "-B" => {
+            flags.before_context = next.parse().unwrap_or(0);
+            Some(2)
         }
-        if arg == "--color" || arg.starts_with("--color=") {
-            i += 1;
-            continue;
-        }
-        if arg == "-e" && i + 1 < argv.len() {
-            flags.patterns.push(argv[i + 1].to_string());
-            i += 2;
-            continue;
-        }
-        if arg == "-f" && i + 1 < argv.len() {
-            // pattern file - not handled here, would need fs access
-            i += 2;
-            continue;
-        }
-        if arg == "-A" && i + 1 < argv.len() {
-            flags.after_context = argv[i + 1].parse().unwrap_or(0);
-            i += 2;
-            continue;
-        }
-        if arg == "-B" && i + 1 < argv.len() {
-            flags.before_context = argv[i + 1].parse().unwrap_or(0);
-            i += 2;
-            continue;
-        }
-        if arg == "-C" && i + 1 < argv.len() {
-            let n = argv[i + 1].parse().unwrap_or(0);
+        "-C" => {
+            let n = next.parse().unwrap_or(0);
             flags.before_context = n;
             flags.after_context = n;
-            i += 2;
-            continue;
+            Some(2)
         }
-        if arg == "-m" && i + 1 < argv.len() {
-            flags.max_count = argv[i + 1].parse().ok();
-            i += 2;
-            continue;
+        "-m" => {
+            flags.max_count = next.parse().ok();
+            Some(2)
         }
-        if arg.starts_with('-') && arg.len() > 1 {
-            for c in arg[1..].chars() {
-                match c {
-                    'i' => flags.ignore_case = true,
-                    'v' => flags.invert = true,
-                    'c' => flags.count_only = true,
-                    'n' => flags.show_line_numbers = true,
-                    'r' | 'R' => flags.recursive = true,
-                    'l' => flags.files_only = true,
-                    'E' | 'P' => flags.extended = true,
-                    'F' => flags.fixed = true,
-                    'w' => flags.word_match = true,
-                    'o' => flags.only_matching = true,
-                    'q' => flags.quiet = true,
-                    'h' => flags.show_filename = Some(false),
-                    'H' => flags.show_filename = Some(true),
-                    // 'z' etc. — accepted, no-op
-                    _ => {}
-                }
-            }
-            i += 1;
-        } else {
-            rest.push(arg);
-            i += 1;
+        _ => None,
+    }
+}
+
+/// Apply a cluster of single-letter boolean flags (everything after the
+/// leading `-`, e.g. `-ivn` -> `ivn`). Unknown letters are silently
+/// accepted for compatibility.
+fn parse_grep_short_cluster(cluster: &str, flags: &mut GrepFlags) {
+    for c in cluster.chars() {
+        match c {
+            'i' => flags.ignore_case = true,
+            'v' => flags.invert = true,
+            'c' => flags.count_only = true,
+            'n' => flags.show_line_numbers = true,
+            'r' | 'R' => flags.recursive = true,
+            'l' => flags.files_only = true,
+            'E' | 'P' => flags.extended = true,
+            'F' => flags.fixed = true,
+            'w' => flags.word_match = true,
+            'o' => flags.only_matching = true,
+            'q' => flags.quiet = true,
+            'h' => flags.show_filename = Some(false),
+            'H' => flags.show_filename = Some(true),
+            // 'z' etc. — accepted, no-op
+            _ => {}
         }
     }
-    (flags, rest)
 }
 
 fn grep_match_pattern(line: &str, pattern: &str, flags: &GrepFlags) -> bool {
