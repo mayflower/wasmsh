@@ -24,14 +24,13 @@ pub use opfs::OpfsFs;
 /// Platform filesystem backend.
 ///
 /// Resolves to the libc-backed [`EmscriptenFs`] when the `emscripten` feature
-/// is enabled and the target is either `wasm32-unknown-emscripten` or
-/// `wasm32-wasip2` (`target_os = "wasi", target_env = "p2"`). Otherwise
+/// is enabled and the target is `wasm32-unknown-emscripten`; otherwise
 /// [`MemoryFs`]. The feature gate keeps native `--all-features` builds working
-/// while letting both embedded WASM targets share the same libc/POSIX backend.
+/// while letting the Pyodide embedding share the same libc/POSIX backend.
 #[cfg(all(
     feature = "emscripten",
     target_arch = "wasm32",
-    any(target_os = "emscripten", all(target_os = "wasi", target_env = "p2"))
+    target_os = "emscripten"
 ))]
 pub type BackendFs = EmscriptenFs;
 
@@ -39,7 +38,7 @@ pub type BackendFs = EmscriptenFs;
 #[cfg(not(all(
     feature = "emscripten",
     target_arch = "wasm32",
-    any(target_os = "emscripten", all(target_os = "wasi", target_env = "p2"))
+    target_os = "emscripten"
 )))]
 pub type BackendFs = MemoryFs;
 

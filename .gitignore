@@ -77,7 +77,6 @@ e2e/*/node_modules/
 /dist/pyodide-snapshot/
 /dist/pyodide-wasi/
 /e2e/pyodide-node/tmp/
-/tools/component-host-runner/target/
 /tools/pyodide-wasi-host-runner/target/
 /tools/python-wasi/build/
 /tools/python-wasi/output/

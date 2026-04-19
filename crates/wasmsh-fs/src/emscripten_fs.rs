@@ -1,10 +1,7 @@
-//! Libc-backed filesystem for embedded wasmsh targets.
+//! Libc-backed filesystem for the Pyodide embedding.
 //!
-//! Delegates to libc POSIX calls which go through the target's in-process
-//! virtual filesystem. On `wasm32-unknown-emscripten` this is Emscripten's
-//! VFS, which is the same filesystem Python sees inside Pyodide. On
-//! `wasm32-wasip2`, the same libc-backed implementation is reused so the
-//! Component Model target does not silently fall back to `MemoryFs`.
+//! Delegates to libc POSIX calls which route through Emscripten's in-process
+//! VFS — the same filesystem Python sees inside Pyodide.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

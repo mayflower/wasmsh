@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["fuzz", "crates/wasmsh-pyodide-probe", "crates/wasmsh-pyodide", "tools/component-host-runner"]
+exclude = ["fuzz", "crates/wasmsh-pyodide-probe", "crates/wasmsh-pyodide"]
 members = [
     "crates/wasmsh-ast",
     "crates/wasmsh-lex",
@@ -15,7 +15,6 @@ members = [
     "crates/wasmsh-utils",
     "crates/wasmsh-runtime",
     "crates/wasmsh-browser",
-    "crates/wasmsh-component",
     "crates/wasmsh-json-bridge",
     "crates/wasmsh-protocol",
     "crates/wasmsh-dispatcher",
@@ -105,7 +104,6 @@ wasmsh-builtins = { version = "0.5.9", path = "crates/wasmsh-builtins" }
 wasmsh-utils = { version = "0.5.9", path = "crates/wasmsh-utils" }
 wasmsh-runtime = { version = "0.5.9", path = "crates/wasmsh-runtime" }
 wasmsh-browser = { version = "0.5.9", path = "crates/wasmsh-browser" }
-wasmsh-component = { version = "0.5.9", path = "crates/wasmsh-component" }
 wasmsh-json-bridge = { version = "0.5.9", path = "crates/wasmsh-json-bridge" }
 wasmsh-protocol = { version = "0.5.9", path = "crates/wasmsh-protocol" }
 wasmsh-dispatcher = { version = "0.5.9", path = "crates/wasmsh-dispatcher" }

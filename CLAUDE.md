@@ -8,11 +8,11 @@ Always use maximum thinking effort. Never rush to completion. Read code thorough
 
 ## Project Overview
 
-**wasmsh** is a shell runtime written in Rust that targets three WebAssembly platforms from a shared core:
+**wasmsh** is a shell runtime written in Rust that targets two in-process WebAssembly platforms plus a scalable server-side deployment path from a shared core:
 
 1. **Standalone** (`wasm32-unknown-unknown`) — browser Web Worker via `wasm-bindgen`
 2. **Pyodide** (`wasm32-unknown-emscripten`) — linked into a custom Pyodide build, sharing the Python interpreter's Emscripten module and filesystem
-3. **Component Model** (`wasm32-wasip2`) — `wasmsh-component` crate, WASI P2 component exposing the same JSON `HostCommand` / `WorkerEvent` bridge as Pyodide through a thin `wasmsh:component/runtime` handle plus shared probe helpers. It reuses the same libc-backed filesystem path as Pyodide. First wasmCloud-facing transport seam; DeepAgents adapter and wasmCloud host plugin are deferred (see ADR-0030).
+3. **Scalable** (Kubernetes) — `wasmsh-dispatcher` (Rust HTTP control plane) plus a pool of `wasmsh-runner` pods (Node + Pyodide) installed via `deploy/helm/wasmsh`. Clients speak JSON/HTTP to the dispatcher; the `langchain-wasmsh` adapters ship `WasmshRemoteSandbox` as the first-party client. See `docs/explanation/snapshot-runner.md`.
 
 Execution pipeline: `source -> lexer -> parser -> AST -> HIR -> runtime executor`.
 
@@ -32,13 +32,13 @@ The repository has multi-layer coverage across crate tests, runtime/protocol tes
 
 **Pyodide path**: `wasmsh-pyodide` wraps `wasmsh-runtime` with C ABI + JSON protocol. `EmscriptenFs` backend routes VFS through libc (shared with Python). `python`/`python3` commands run in-process via `PyRun_SimpleString`. `pip install` is intercepted at the JS host and routed through micropip. Both Node and browser use `loadPyodide()` for boot. 19 Node E2E + 12 Playwright browser E2E tests.
 
-**Component path**: `wasmsh-component` wraps the shared `wasmsh-json-bridge` transport and exports `wasmsh:component/runtime` with `resource handle { constructor(); handle-json(input: string) -> string; }` plus `probe-version`, `probe-write-text`, and `probe-file-equals`. Built with plain Cargo + `wit-bindgen` targeting `wasm32-wasip2` (no `cargo-component` dependency). The build-contract test inspects the WIT surface with `wasm-tools` and uses `wasmtime` to prove the probe helpers perform real file I/O through `/workspace`.
+**Scalable path**: `crates/wasmsh-dispatcher` is an Axum HTTP control plane with session affinity, restore-capacity routing, drain, and Prometheus metrics. Runner pods run `tools/runner-node/src/server.mjs` (Node + the Pyodide path above) and expose `/readyz`, `/runner/snapshot`, `/sessions/...`. Deployment lives in `deploy/helm/wasmsh` (HPA, PDB, NetworkPolicy, headless service) with production images `ghcr.io/mayflower/wasmsh-{dispatcher,runner}`. End-to-end coverage: `e2e/dispatcher-compose` (docker-compose, fast) and `e2e/kind` (full Helm install in kind).
 
 Notable features: `[[ ]]`, `(( ))`, C-style `for (( ))`, arrays, `declare`/`typeset`, `alias`/`unalias`, `let`, `shopt`, extended globbing, globstar, full arithmetic, case modification, indirect expansion, dynamic variables (`$RANDOM`, `$LINENO`, `$SECONDS`, `$FUNCNAME`, `$BASH_SOURCE`, `$PIPESTATUS`), `printf`/`read`, `mapfile`, `builtin`, `select`, `|&`, `case` fall-through, `set -euo pipefail`, 88 utilities (jq, awk, yq, bc, rg, fd, diff/patch, tree, tar, gzip, unzip, xxd, dd, strings, md5sum/sha*sum, curl, wget).
 
 ## Rust Toolchain
 
-Pinned via `rust-toolchain.toml` (stable + rustfmt, clippy, rust-src, llvm-tools, `wasm32-unknown-unknown` + `wasm32-unknown-emscripten` + `wasm32-wasip2` targets). Cargo may not be on PATH by default:
+Pinned via `rust-toolchain.toml` (stable + rustfmt, clippy, rust-src, llvm-tools, `wasm32-unknown-unknown` + `wasm32-unknown-emscripten` targets). Cargo may not be on PATH by default:
 ```bash
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 ```
@@ -63,10 +63,9 @@ just test-e2e-pyodide-node  # Node E2E (19 tests)
 just test-e2e-pyodide-browser # Playwright browser E2E (4 tests)
 just build-emscripten-probe # emscripten staticlib probe
 
-# ── Component (WASI P2, wasmcloud-facing) ──────────
-just build-component        # cargo build --target wasm32-wasip2 -p wasmsh-component
-just clippy-component       # clippy on the wasip2 target
-just test-e2e-component     # build + optional wasm-tools/wasmtime smoke
+# ── Scalable dispatcher + runner ────────────────────
+just test-e2e-dispatcher-compose  # docker-compose e2e (fast local loop)
+just test-e2e-kind                # kind + Helm e2e (production parity)
 
 # ── Quality ─────────────────────────────────────────
 just clippy-wasm            # clippy for wasm32 target
@@ -94,7 +93,7 @@ just doc                    # docs with warnings-as-errors
 
 ## Cargo Workspace Structure
 
-16 workspace crates under `crates/`: `wasmsh-ast`, `wasmsh-lex`, `wasmsh-parse`, `wasmsh-expand`, `wasmsh-hir`, `wasmsh-ir`, `wasmsh-vm`, `wasmsh-state`, `wasmsh-fs`, `wasmsh-builtins`, `wasmsh-utils`, `wasmsh-runtime`, `wasmsh-browser`, `wasmsh-component`, `wasmsh-protocol`, `wasmsh-testkit`.
+18 workspace crates under `crates/`: `wasmsh-ast`, `wasmsh-lex`, `wasmsh-parse`, `wasmsh-expand`, `wasmsh-hir`, `wasmsh-ir`, `wasmsh-vm`, `wasmsh-state`, `wasmsh-fs`, `wasmsh-builtins`, `wasmsh-utils`, `wasmsh-runtime`, `wasmsh-browser`, `wasmsh-json-bridge`, `wasmsh-protocol`, `wasmsh-dispatcher`, `wasmsh-testkit`.
 
 2 excluded crates (require emcc): `wasmsh-pyodide-probe`, `wasmsh-pyodide`.
 
@@ -109,7 +108,7 @@ Published alongside the Rust runtime, under `packages/`:
 
 The two npm packages form a pnpm workspace (`pnpm-workspace.yaml` at the repo root). Use `pnpm --filter @mayflowergmbh/langchain-wasmsh <cmd>` to run scripts against the adapter. The Python package uses `uv` — run `uv sync --group test` inside `packages/python/langchain-wasmsh` before `pytest`.
 
-The single `WasmshSandbox` class (both ecosystems) covers Node and browser. A remote/Kubernetes `WasmshRemoteSandbox` variant is deferred. See [`docs/integrations/langchain-wasmsh.md`](docs/integrations/langchain-wasmsh.md).
+Each adapter ships two backends on the identical `BaseSandbox` surface: `WasmshSandbox` (in-process, Node/browser) and `WasmshRemoteSandbox` (HTTP to the `wasmsh-dispatcher` Helm chart for Kubernetes deployments). One-line import change to scale from laptop to cluster. See [`docs/integrations/langchain-wasmsh.md`](docs/integrations/langchain-wasmsh.md).
 
 ## Architecture Layers
 
@@ -118,10 +117,10 @@ The single `WasmshSandbox` class (both ecosystems) covers Node and browser. A re
 - **Execution**: `wasmsh-runtime` interprets HIR directly and can lower a bounded subset into `wasmsh-ir` / `wasmsh-vm`
 - **VM subset**: simple assignments, builtin execution, selected redirections, and top-level `&&` / `||` short-circuiting
 - **Runtime**: `wasmsh-runtime` — shared platform-agnostic core used by both targets
-- **Platform**: `BackendFs` type alias → `MemoryFs` (standalone/native tests) or the libc-backed `EmscriptenFs` path (Pyodide and `wasm32-wasip2`, via `emscripten` feature)
+- **Platform**: `BackendFs` type alias → `MemoryFs` (standalone/native tests) or the libc-backed `EmscriptenFs` path (Pyodide, via `emscripten` feature)
 - **Standalone embedding**: `wasmsh-browser` — wasm-bindgen Web Worker with `WasmShell` JS API
 - **Pyodide embedding**: `wasmsh-pyodide` — C ABI + JSON protocol, `python`/`python3` via `ExternalCommandHandler`
-- **Component embedding**: `wasmsh-component` — wit-bindgen WASI P2 component exporting the shared JSON bridge as `wasmsh:component/runtime`; host-native tests exercise the same `JsonRuntimeHandle` used by Pyodide
+- **Scalable embedding**: `wasmsh-dispatcher` (Axum HTTP) + `tools/runner-node` (Node host running the Pyodide embedding per session) — the JSON bridge in `wasmsh-json-bridge` serialises the same `HostCommand` / `WorkerEvent` protocol that Pyodide uses, so backend code stays shared
 
 ## Key ADRs
 
@@ -138,12 +137,12 @@ ADRs are in `docs/adr/`. Key decisions:
 - ADR-0020: E2E-first testing policy
 - ADR-0021: Network capability model (curl/wget with host allowlist)
 - ADR-0029: Dual-path executor (runtime interpreter + VM subset)
-- ADR-0030: WASI P2 Component Model transport (wasmcloud-facing)
+- ADR-0030: Superseded — the WASI P2 Component transport was an early wasmCloud seam; the scalable dispatcher + runner path supersedes it.
 
 ## Feature Flags
 
 - `wasmsh-fs/opfs` — OPFS filesystem adapter (stub, planned)
-- `wasmsh-fs/emscripten` — libc-backed filesystem path used by Pyodide and `wasm32-wasip2`
+- `wasmsh-fs/emscripten` — libc-backed filesystem path used by Pyodide
 - `wasmsh-runtime/emscripten` — forwards to `wasmsh-fs/emscripten`, swaps `BackendFs` to `EmscriptenFs`
 - `wasmsh-browser/browser-core` (default) — core shell runtime for browser
 - `wasmsh-browser/browser-extended` — adds OPFS persistence

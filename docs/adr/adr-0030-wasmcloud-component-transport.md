@@ -2,7 +2,24 @@
 
 ## Status
 
-Accepted
+**Superseded.** The wasmCloud-facing WASI P2 Component transport was
+implemented but abandoned in favour of the scalable `wasmsh-dispatcher`
++ `wasmsh-runner` path, which ships the same JSON `HostCommand` /
+`WorkerEvent` protocol over plain HTTP/Kubernetes and has a
+first-party LangChain Deep Agents client (`WasmshRemoteSandbox`).  The
+`wasmsh-component` crate, its WIT surface, the `wasm32-wasip2` target
+pin, and the associated CI job have been removed from the tree.  The
+`wasmsh-json-bridge` crate — the shared JSON transport that both the
+component and Pyodide embeddings used — stays, because the Pyodide
+embedding still depends on it.
+
+This ADR is retained for historical context: it documents why the
+third-target Component Model path was attempted, what it cost, and
+what replaced it.
+
+---
+
+(Original "Accepted" decision follows.)
 
 ## Context
 

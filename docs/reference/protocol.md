@@ -3,7 +3,7 @@
 Communication protocol between the host application and the wasmsh runtime
 (`WorkerRuntime`). The protocol is defined as Rust enums in the
 [`wasmsh-protocol`](../../crates/wasmsh-protocol/src/lib.rs) crate and
-exposed in three transports:
+exposed through two transports:
 
 - **Native Rust**: enum values are passed directly into
   `WorkerRuntime::handle_command(...)` and a `Vec<WorkerEvent>` is returned.
@@ -11,46 +11,20 @@ exposed in three transports:
 - **JSON over C ABI**: the `wasmsh-pyodide` adapter exposes
   `wasmsh_runtime_handle_json(handle, json_in)` which accepts a JSON-encoded
   `HostCommand` and returns a JSON-encoded `Vec<WorkerEvent>`. This is the
-  path used by the npm package and any embedder talking to wasmsh through
-  Pyodide.
-- **Component Model (WASI P2)**: the
-  [`wasmsh-component`](../../crates/wasmsh-component) crate builds for
-  `wasm32-wasip2` and exports a thin
-  [`wasmsh:component/runtime`](../../crates/wasmsh-component/wit/world.wit)
-  interface with `resource handle { constructor(); handle-json(input: string)
-  -> string; }` plus `probe-version`, `probe-write-text`, and
-  `probe-file-equals`. This transport intentionally mirrors the Pyodide JSON
-  bridge instead of defining a second typed command API. It also reuses the
-  same libc-backed filesystem path that Pyodide uses, so `/workspace` probe
-  file I/O goes through real host-backed WASI preopens instead of `MemoryFs`.
-  See [ADR-0030](../adr/adr-0030-wasmcloud-component-transport.md).
+  path used by the npm package, and the same JSON shape is forwarded over
+  HTTP by the scalable `wasmsh-dispatcher` + `wasmsh-runner` deployment
+  (see [`docs/reference/dispatcher-api.md`](dispatcher-api.md)).
 
-All three transports carry the same semantics. The Rust definitions remain
+Both transports carry the same semantics. The Rust definitions remain
 the canonical schema; the JSON form is `serde_json`'s default tagged
-representation of those enums (see [JSON Wire Format](#json-wire-format)),
-and the Component Model transport simply exposes that same JSON shape through
-`handle-json`.
+representation of those enums (see [JSON Wire Format](#json-wire-format)).
 
-There are also two separate WIT files in the tree, both additive projections
-of the same protocol concepts:
-
-- [`crates/wasmsh-protocol/wit/worker-protocol.wit`](../../crates/wasmsh-protocol/wit/worker-protocol.wit)
-  (`package wasmsh:protocol`) — an experimental typed mirror of the serde
-  enums, exposing `init`, `run`, `start-run`, `poll-run`, `cancel`,
-  `read-file`, `write-file`, `list-dir`, and `mount` as typed functions.
-  Used today only by the `wasmsh-protocol` crate's `wit_contract` test to
-  lock the shape of the existing protocol enums.
-- [`crates/wasmsh-component/wit/world.wit`](../../crates/wasmsh-component/wit/world.wit)
-  (`package wasmsh:component`) — the canonical contract for the Component
-  Model transport. Unlike the protocol-level mirror above, this one does
-  not mirror each command/event as a typed WIT function; it is a thin
-  Component Model projection of the existing Pyodide JSON bridge and is
-  actually linked into a Wasm component via `wit-bindgen`.
-
-The two WIT packages coexist on purpose: `wasmsh:protocol` documents the
-protocol-level enum shape, while `wasmsh:component/runtime` is the
-consumer-facing handle that wasmCloud hosts and other Component Model
-embedders call into to submit JSON commands and read JSON event arrays.
+A typed mirror of the protocol lives in
+[`crates/wasmsh-protocol/wit/worker-protocol.wit`](../../crates/wasmsh-protocol/wit/worker-protocol.wit)
+(`package wasmsh:protocol`) — it exposes `init`, `run`, `start-run`,
+`poll-run`, `cancel`, `read-file`, `write-file`, `list-dir`, and `mount`
+as typed WIT functions. Used today only by the `wasmsh-protocol` crate's
+`wit_contract` test to lock the shape of the existing protocol enums.
 
 ## Protocol Version
 

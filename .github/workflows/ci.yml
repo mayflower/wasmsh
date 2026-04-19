@@ -98,43 +98,6 @@ jobs:
       - name: TOML suite tests
         run: cargo test -p wasmsh-testkit --test suite_runner
 
-  # ── Component Model (wasm32-wasip2) ────────────────────────
-  #
-  # Builds and validates the `wasmsh-component` crate as a Component Model
-  # component. This target mirrors the Pyodide JSON bridge through a thin
-  # WIT handle surface and shared probe helpers; see ADR-0030.
-  # The job installs `wasm-tools` to verify the exported WIT surface and
-  # `wasmtime` to invoke the probe helpers against a real preopened
-  # `/workspace`. Both assertions are mandatory in CI; locally they fall
-  # back to skips via the SKIP_WASMTOOLS and SKIP_WASMTIME env vars when
-  # those binaries are not installed.
-  component:
-    name: component (wasm32-wasip2)
-    runs-on: mayflower-k8s-runners
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-rust
-        with:
-          targets: wasm32-wasip2
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: wasm32-wasip2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-tools,wasmtime
-      - name: Clippy on wasm32-wasip2
-        run: cargo clippy --target wasm32-wasip2 -p wasmsh-component --features component-export -- -D warnings
-      - name: Build wasmsh-component component artifact
-        run: bash e2e/build-contract/build-component.sh
-      - name: Component build-contract test
-        run: node --test e2e/build-contract/tests/component-build.test.mjs
-
   # ── Wasm build ─────────────────────────────────────────────
   wasm-build:
     name: wasm32 build
@@ -365,7 +328,7 @@ jobs:
   ci-pass:
     name: CI passed
     if: always()
-    needs: [fmt, clippy, clippy-wasm, component, test, wasm-build, msrv, deny, docs, feature-check, machete]
+    needs: [fmt, clippy, clippy-wasm, test, wasm-build, msrv, deny, docs, feature-check, machete]
     runs-on: mayflower-k8s-runners
     steps:
       - name: Check all jobs
@@ -373,7 +336,6 @@ jobs:
           R_FMT: ${{ needs.fmt.result }}
           R_CLIPPY: ${{ needs.clippy.result }}
           R_CLIPPY_WASM: ${{ needs.clippy-wasm.result }}
-          R_COMPONENT: ${{ needs.component.result }}
           R_TEST: ${{ needs.test.result }}
           R_WASM_BUILD: ${{ needs.wasm-build.result }}
           R_MSRV: ${{ needs.msrv.result }}
@@ -382,7 +344,7 @@ jobs:
           R_FEATURE_CHECK: ${{ needs.feature-check.result }}
           R_MACHETE: ${{ needs.machete.result }}
         run: |
-          for r in "$R_FMT" "$R_CLIPPY" "$R_CLIPPY_WASM" "$R_COMPONENT" "$R_TEST" "$R_WASM_BUILD" "$R_MSRV" "$R_DENY" "$R_DOCS" "$R_FEATURE_CHECK" "$R_MACHETE"; do
+          for r in "$R_FMT" "$R_CLIPPY" "$R_CLIPPY_WASM" "$R_TEST" "$R_WASM_BUILD" "$R_MSRV" "$R_DENY" "$R_DOCS" "$R_FEATURE_CHECK" "$R_MACHETE"; do
             if [ "$r" != "success" ]; then
               echo "Job failed: $r"
               exit 1

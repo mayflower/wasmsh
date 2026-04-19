@@ -9,7 +9,6 @@ artifacts
 e2e/kind/.artifacts
 wasmsh-codex-red-green-pack
 tools/pyodide-wasi-host-runner
-tools/component-host-runner
 tools/python-wasi/build
 tools/python-wasi/output
 tools/python-wasi/wasi-sdk

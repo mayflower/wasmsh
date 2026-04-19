@@ -11,10 +11,9 @@
 
 A sandboxed shell with 88 utilities (grep, sed, awk, jq, tar, curl, …), Python 3.13 with pip/micropip for installing pure-Python packages, and a virtual filesystem — all running in-process as WebAssembly. No OS processes, no network access unless explicitly allowed, step budgets to prevent runaway execution.
 
-Three in-process build targets plus one scalable server-side path from one codebase:
+Two in-process build targets plus one scalable server-side path from one codebase:
 - **Standalone** (`wasm32-unknown-unknown`) — browser Web Worker
 - **Pyodide** (`wasm32-unknown-emscripten`) — shell and Python share the same filesystem
-- **Component Model** (`wasm32-wasip2`) — WASI P2 component exporting the same JSON `HostCommand` / `WorkerEvent` transport used by Pyodide through a thin `wasmsh:component/runtime` handle plus shared probe helpers. Reuses the same libc-backed filesystem path as Pyodide. See [ADR-0030](docs/adr/adr-0030-wasmcloud-component-transport.md).
 - **Scalable** (Kubernetes) — `wasmsh-dispatcher` (Rust, HTTP control plane) plus a pool of `wasmsh-runner` pods (Node + Pyodide) installed via the [Helm chart](deploy/helm/wasmsh/). Clients speak JSON/HTTP to the dispatcher. See [Scalable deployment](#scalable-deployment-kubernetes) below.
 
 ## Use with LangChain Deep Agents
@@ -116,7 +115,6 @@ Pre-built tarballs: [GitHub Releases](https://github.com/mayflower/wasmsh/releas
 cargo build --workspace && cargo test --workspace   # Rust (1.89+)
 just build-standalone                                # standalone wasm
 just build-pyodide                                   # Pyodide wasm (needs emcc)
-just build-component                                 # wasm32-wasip2 component
 ```
 
 ## Scalable deployment (Kubernetes)

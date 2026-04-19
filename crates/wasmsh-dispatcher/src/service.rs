@@ -536,9 +536,7 @@ async fn forward_post_json<T: Serialize>(
 /// bytes through keeps peak RSS close to the payload size plus
 /// tokio/reqwest buffers.  We only parse JSON on the error path to
 /// extract a human-readable `error` field.
-async fn response_to_json_response(
-    response: reqwest::Response,
-) -> Result<Response, ServiceError> {
+async fn response_to_json_response(response: reqwest::Response) -> Result<Response, ServiceError> {
     let raw_status = response.status().as_u16();
     let status = StatusCode::from_u16(raw_status).unwrap_or_else(|_| {
         warn!(
@@ -563,7 +561,11 @@ async fn response_to_json_response(
     let message = serde_json::from_slice::<Value>(&body)
         .ok()
         .as_ref()
-        .and_then(|v| v.get("error").and_then(Value::as_str).map(ToString::to_string))
+        .and_then(|v| {
+            v.get("error")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
         .unwrap_or_else(|| String::from_utf8_lossy(&body).into_owned());
     Err(ServiceError::UpstreamStatus { status, message })
 }

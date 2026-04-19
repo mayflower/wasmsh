@@ -168,11 +168,12 @@ representation of `HostCommand` and `WorkerEvent`. See
 [Worker protocol reference](../reference/protocol.md#json-wire-format) for
 the exact shape and a worked example.
 
-The `wasm32-wasip2` component target intentionally reuses this same JSON
-bridge through `wasmsh:component/runtime.handle-json(...)`. Treat this guide
-as the authoritative description of the transport semantics; the component
-target is a different embedder surface over the same payloads, not a second
-protocol.
+The scalable dispatcher/runner deployment forwards the identical JSON
+shape over HTTP (see
+[`docs/reference/dispatcher-api.md`](../reference/dispatcher-api.md)),
+so code written against the Pyodide bridge ports cleanly to the remote
+backend and vice-versa.  Treat this guide as the authoritative
+description of the transport semantics.
 
 If you are writing a custom host adapter, the contract is:
 
