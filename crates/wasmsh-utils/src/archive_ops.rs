@@ -821,68 +821,96 @@ pub(crate) fn util_unzip(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     let mut status = 0;
 
     for i in 0..archive.len() {
-        let mut entry = match archive.by_index(i) {
-            Ok(e) => e,
-            Err(e) => {
-                let msg = format!("unzip: entry {i}: {e}\n");
-                ctx.output.stderr(msg.as_bytes());
-                status = 1;
-                continue;
-            }
-        };
-
-        // jaq-independent path sanitisation: fall back to the
-        // historical heuristic if the zip crate's `enclosed_name`
-        // rejects the entry as unsafe.
-        let raw_name = entry.name().to_string();
-        let uncompressed_size = entry.size();
-
-        if list_only {
-            unzip_list_entry(ctx, &raw_name, uncompressed_size, quiet);
-            stats.total_files += 1;
-            stats.total_size += uncompressed_size;
-            continue;
-        }
-
-        if entry.is_dir() || raw_name.ends_with('/') {
-            if unzip_process_dir_entry(ctx, &raw_name, &base_dir, quiet) {
-                stats.total_files += 1;
-            }
-            continue;
-        }
-
-        let sanitised = sanitize_zip_name(&raw_name);
-        let full = resolve_path(&base_dir, &sanitised);
-        if !unzip_check_traversal(ctx, &full, &raw_name, &base_dir) {
-            continue;
-        }
-
-        let buf = match unzip_read_entry_bytes(&mut entry, uncompressed_size) {
-            Ok(b) => b,
-            Err(e) => {
-                let msg = format!("unzip: {raw_name}: {e}\n");
-                ctx.output.stderr(msg.as_bytes());
-                status = 1;
-                continue;
-            }
-        };
-        // Drop the entry borrow on `archive` before touching the
-        // filesystem / context (mutable borrow rules).
-        drop(entry);
-
-        match unzip_write_file(ctx, &full, &sanitised, &buf, overwrite, quiet) {
-            UnzipWriteResult::Written => {
-                stats.total_files += 1;
-                stats.total_size += uncompressed_size;
-            }
-            UnzipWriteResult::Skipped => {}
-            UnzipWriteResult::Error => status = 1,
-        }
+        unzip_process_one_entry(
+            ctx,
+            &mut archive,
+            i,
+            &base_dir,
+            UnzipEntryFlags {
+                list_only,
+                overwrite,
+                quiet,
+            },
+            &mut stats,
+            &mut status,
+        );
     }
 
     unzip_emit_list_footer(ctx, &stats, quiet, list_only);
 
     status
+}
+
+#[derive(Clone, Copy)]
+struct UnzipEntryFlags {
+    list_only: bool,
+    overwrite: bool,
+    quiet: bool,
+}
+
+fn unzip_process_one_entry<R: Read + std::io::Seek>(
+    ctx: &mut UtilContext<'_>,
+    archive: &mut zip::ZipArchive<R>,
+    index: usize,
+    base_dir: &str,
+    flags: UnzipEntryFlags,
+    stats: &mut UnzipStats,
+    status: &mut i32,
+) {
+    let mut entry = match archive.by_index(index) {
+        Ok(e) => e,
+        Err(e) => {
+            let msg = format!("unzip: entry {index}: {e}\n");
+            ctx.output.stderr(msg.as_bytes());
+            *status = 1;
+            return;
+        }
+    };
+
+    let raw_name = entry.name().to_string();
+    let uncompressed_size = entry.size();
+
+    if flags.list_only {
+        unzip_list_entry(ctx, &raw_name, uncompressed_size, flags.quiet);
+        stats.total_files += 1;
+        stats.total_size += uncompressed_size;
+        return;
+    }
+
+    if entry.is_dir() || raw_name.ends_with('/') {
+        if unzip_process_dir_entry(ctx, &raw_name, base_dir, flags.quiet) {
+            stats.total_files += 1;
+        }
+        return;
+    }
+
+    let sanitised = sanitize_zip_name(&raw_name);
+    let full = resolve_path(base_dir, &sanitised);
+    if !unzip_check_traversal(ctx, &full, &raw_name, base_dir) {
+        return;
+    }
+
+    let buf = match unzip_read_entry_bytes(&mut entry, uncompressed_size) {
+        Ok(b) => b,
+        Err(e) => {
+            let msg = format!("unzip: {raw_name}: {e}\n");
+            ctx.output.stderr(msg.as_bytes());
+            *status = 1;
+            return;
+        }
+    };
+    // Drop the entry borrow on `archive` before touching the
+    // filesystem / context (mutable borrow rules).
+    drop(entry);
+
+    match unzip_write_file(ctx, &full, &sanitised, &buf, flags.overwrite, flags.quiet) {
+        UnzipWriteResult::Written => {
+            stats.total_files += 1;
+            stats.total_size += uncompressed_size;
+        }
+        UnzipWriteResult::Skipped => {}
+        UnzipWriteResult::Error => *status = 1,
+    }
 }
 
 struct ParsedUnzipOpts {

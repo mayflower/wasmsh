@@ -224,111 +224,149 @@ fn tail_emit_reader(
     cmd: &str,
 ) -> i32 {
     match mode {
-        TailMode::Bytes(limit) => {
-            let mut ring = VecDeque::with_capacity(*limit);
-            let mut buffer = [0u8; 4096];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        for &byte in &buffer[..read] {
-                            if ring.len() == *limit && *limit > 0 {
-                                ring.pop_front();
-                            }
-                            if *limit > 0 {
-                                ring.push_back(byte);
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        let msg = format!("{cmd}: stdin read error: {err}\n");
-                        output.stderr(msg.as_bytes());
-                        return 1;
-                    }
-                }
-            }
-            let bytes: Vec<u8> = ring.into_iter().collect();
-            output.stdout(&bytes);
-            0
-        }
-        TailMode::Lines(limit, from_start) => {
-            let mut buffer = [0u8; 4096];
-            let mut current = Vec::new();
-            if *from_start {
-                let mut lines_seen = 0usize;
-                loop {
-                    match reader.read(&mut buffer) {
-                        Ok(0) => break,
-                        Ok(read) => {
-                            for &byte in &buffer[..read] {
-                                if byte == b'\n' {
-                                    if lines_seen + 1 >= *limit {
-                                        output.stdout(&current);
-                                        output.stdout(b"\n");
-                                    }
-                                    current.clear();
-                                    lines_seen += 1;
-                                } else {
-                                    current.push(byte);
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            let msg = format!("{cmd}: stdin read error: {err}\n");
-                            output.stderr(msg.as_bytes());
-                            return 1;
-                        }
-                    }
-                }
-                if !current.is_empty() && lines_seen + 1 >= *limit {
-                    output.stdout(&current);
-                    output.stdout(b"\n");
-                }
-                return 0;
-            }
+        TailMode::Bytes(limit) => tail_emit_bytes(output, reader, *limit, cmd),
+        TailMode::Lines(limit, true) => tail_emit_lines_from_start(output, reader, *limit, cmd),
+        TailMode::Lines(limit, false) => tail_emit_lines_tail(output, reader, *limit, cmd),
+    }
+}
 
-            let mut ring: VecDeque<Vec<u8>> = VecDeque::with_capacity(*limit);
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        for &byte in &buffer[..read] {
-                            if byte == b'\n' {
-                                if ring.len() == *limit && *limit > 0 {
-                                    ring.pop_front();
-                                }
-                                if *limit > 0 {
-                                    ring.push_back(std::mem::take(&mut current));
-                                } else {
-                                    current.clear();
-                                }
-                            } else {
-                                current.push(byte);
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        let msg = format!("{cmd}: stdin read error: {err}\n");
-                        output.stderr(msg.as_bytes());
-                        return 1;
-                    }
+fn report_stdin_read_error(output: &mut dyn UtilOutput, cmd: &str, err: &std::io::Error) -> i32 {
+    let msg = format!("{cmd}: stdin read error: {err}\n");
+    output.stderr(msg.as_bytes());
+    1
+}
+
+fn push_bounded<T>(ring: &mut VecDeque<T>, item: T, limit: usize) {
+    if limit == 0 {
+        return;
+    }
+    if ring.len() == limit {
+        ring.pop_front();
+    }
+    ring.push_back(item);
+}
+
+fn tail_emit_bytes(
+    output: &mut dyn UtilOutput,
+    reader: &mut dyn Read,
+    limit: usize,
+    cmd: &str,
+) -> i32 {
+    let mut ring: VecDeque<u8> = VecDeque::with_capacity(limit);
+    let mut buffer = [0u8; 4096];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                for &byte in &buffer[..read] {
+                    push_bounded(&mut ring, byte, limit);
                 }
             }
-            if !current.is_empty() {
-                if ring.len() == *limit && *limit > 0 {
-                    ring.pop_front();
-                }
-                if *limit > 0 {
-                    ring.push_back(current);
-                }
-            }
-            for line in ring {
-                output.stdout(&line);
-                output.stdout(b"\n");
-            }
-            0
+            Err(err) => return report_stdin_read_error(output, cmd, &err),
         }
     }
+    let bytes: Vec<u8> = ring.into_iter().collect();
+    output.stdout(&bytes);
+    0
+}
+
+fn tail_emit_lines_from_start(
+    output: &mut dyn UtilOutput,
+    reader: &mut dyn Read,
+    limit: usize,
+    cmd: &str,
+) -> i32 {
+    let mut buffer = [0u8; 4096];
+    let mut current = Vec::new();
+    let mut lines_seen = 0usize;
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                for &byte in &buffer[..read] {
+                    consume_line_byte_from_start(
+                        output,
+                        byte,
+                        &mut current,
+                        &mut lines_seen,
+                        limit,
+                    );
+                }
+            }
+            Err(err) => return report_stdin_read_error(output, cmd, &err),
+        }
+    }
+    if !current.is_empty() && lines_seen + 1 >= limit {
+        output.stdout(&current);
+        output.stdout(b"\n");
+    }
+    0
+}
+
+fn consume_line_byte_from_start(
+    output: &mut dyn UtilOutput,
+    byte: u8,
+    current: &mut Vec<u8>,
+    lines_seen: &mut usize,
+    limit: usize,
+) {
+    if byte != b'\n' {
+        current.push(byte);
+        return;
+    }
+    if *lines_seen + 1 >= limit {
+        output.stdout(current);
+        output.stdout(b"\n");
+    }
+    current.clear();
+    *lines_seen += 1;
+}
+
+fn tail_emit_lines_tail(
+    output: &mut dyn UtilOutput,
+    reader: &mut dyn Read,
+    limit: usize,
+    cmd: &str,
+) -> i32 {
+    let mut buffer = [0u8; 4096];
+    let mut current = Vec::new();
+    let mut ring: VecDeque<Vec<u8>> = VecDeque::with_capacity(limit);
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                for &byte in &buffer[..read] {
+                    collect_trailing_line_byte(byte, &mut current, &mut ring, limit);
+                }
+            }
+            Err(err) => return report_stdin_read_error(output, cmd, &err),
+        }
+    }
+    if !current.is_empty() {
+        push_bounded(&mut ring, current, limit);
+    }
+    for line in ring {
+        output.stdout(&line);
+        output.stdout(b"\n");
+    }
+    0
+}
+
+fn collect_trailing_line_byte(
+    byte: u8,
+    current: &mut Vec<u8>,
+    ring: &mut VecDeque<Vec<u8>>,
+    limit: usize,
+) {
+    if byte != b'\n' {
+        current.push(byte);
+        return;
+    }
+    if limit == 0 {
+        current.clear();
+        return;
+    }
+    push_bounded(ring, std::mem::take(current), limit);
 }
 
 pub(crate) fn util_tail(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
@@ -454,6 +492,45 @@ fn parse_wc_flags<'a>(args: &[&'a str]) -> (WcFlags, Vec<&'a str>) {
     )
 }
 
+#[derive(Default)]
+struct WcStats {
+    lines: usize,
+    words: usize,
+    bytes: usize,
+    max_line_length: usize,
+    current_line_length: usize,
+    in_word: bool,
+    saw_input: bool,
+    ended_with_newline: bool,
+}
+
+impl WcStats {
+    fn update(&mut self, byte: u8) {
+        if byte.is_ascii_whitespace() {
+            self.in_word = false;
+        } else if !self.in_word {
+            self.words += 1;
+            self.in_word = true;
+        }
+        if byte == b'\n' {
+            self.lines += 1;
+            self.max_line_length = self.max_line_length.max(self.current_line_length);
+            self.current_line_length = 0;
+            self.ended_with_newline = true;
+        } else {
+            self.current_line_length += 1;
+            self.ended_with_newline = false;
+        }
+    }
+
+    fn finalize(&mut self) {
+        if self.saw_input && !self.ended_with_newline {
+            self.lines += 1;
+            self.max_line_length = self.max_line_length.max(self.current_line_length);
+        }
+    }
+}
+
 fn wc_emit_reader(
     output: &mut dyn UtilOutput,
     reader: &mut dyn Read,
@@ -461,84 +538,51 @@ fn wc_emit_reader(
     flags: &WcFlags,
     cmd: &str,
 ) -> Result<(usize, usize, usize, usize), i32> {
+    let mut stats = WcStats::default();
     let mut buffer = [0u8; 4096];
-    let mut lines = 0usize;
-    let mut words = 0usize;
-    let mut bytes = 0usize;
-    let mut max_line_length = 0usize;
-    let mut current_line_length = 0usize;
-    let mut in_word = false;
-    let mut saw_input = false;
-    let mut ended_with_newline = false;
 
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(read) => {
-                saw_input = true;
-                bytes += read;
+                stats.saw_input = true;
+                stats.bytes += read;
                 for &byte in &buffer[..read] {
-                    let is_whitespace = byte.is_ascii_whitespace();
-                    if is_whitespace {
-                        in_word = false;
-                    } else if !in_word {
-                        words += 1;
-                        in_word = true;
-                    }
-
-                    if byte == b'\n' {
-                        lines += 1;
-                        max_line_length = max_line_length.max(current_line_length);
-                        current_line_length = 0;
-                        ended_with_newline = true;
-                    } else {
-                        current_line_length += 1;
-                        ended_with_newline = false;
-                    }
+                    stats.update(byte);
                 }
             }
             Err(err) => {
-                let msg = format!("{cmd}: stdin read error: {err}\n");
-                output.stderr(msg.as_bytes());
-                return Err(1);
+                return Err(report_stdin_read_error(output, cmd, &err));
             }
         }
     }
 
-    if saw_input && !ended_with_newline {
-        lines += 1;
-        max_line_length = max_line_length.max(current_line_length);
-    }
+    stats.finalize();
+    wc_emit_row(output, path, flags, &stats);
+    Ok((stats.lines, stats.words, stats.bytes, stats.max_line_length))
+}
 
-    let mut parts = Vec::new();
+fn wc_emit_row(output: &mut dyn UtilOutput, path: Option<&str>, flags: &WcFlags, stats: &WcStats) {
     let padded = path.is_some();
-    if flags.lines {
-        parts.push(if padded {
-            format!("{lines:>7}")
+    let fmt = |n: usize| {
+        if padded {
+            format!("{n:>7}")
         } else {
-            lines.to_string()
-        });
+            n.to_string()
+        }
+    };
+    let mut parts = Vec::new();
+    if flags.lines {
+        parts.push(fmt(stats.lines));
     }
     if flags.words {
-        parts.push(if padded {
-            format!("{words:>7}")
-        } else {
-            words.to_string()
-        });
+        parts.push(fmt(stats.words));
     }
     if flags.bytes {
-        parts.push(if padded {
-            format!("{bytes:>7}")
-        } else {
-            bytes.to_string()
-        });
+        parts.push(fmt(stats.bytes));
     }
     if flags.max_line_length {
-        parts.push(if padded {
-            format!("{max_line_length:>7}")
-        } else {
-            max_line_length.to_string()
-        });
+        parts.push(fmt(stats.max_line_length));
     }
     let sep = if padded { "" } else { " " };
     let mut out = parts.join(sep);
@@ -548,7 +592,6 @@ fn wc_emit_reader(
     }
     out.push('\n');
     output.stdout(out.as_bytes());
-    Ok((lines, words, bytes, max_line_length))
 }
 
 fn wc_emit_totals(
@@ -774,52 +817,87 @@ fn grep_find_match<'a>(line: &'a str, pattern: &str, flags: &GrepFlags) -> Optio
         (line.to_string(), pattern.to_string())
     };
 
-    // Regex-aware match for `-o`: fall through to literal substring on
-    // compile failure, matching the behaviour of `grep_match_pattern`.
     if !flags.fixed {
-        let compiled = if flags.extended {
-            crate::regex_posix::Regex::compile_ere(&p)
-        } else {
-            crate::regex_posix::Regex::compile_bre(&p)
-        };
-        if let Ok(re) = compiled {
-            for (start, end) in re.find_iter_offsets(&l) {
-                if flags.word_match {
-                    let before_ok = start == 0
-                        || !l.as_bytes()[start - 1].is_ascii_alphanumeric()
-                            && l.as_bytes()[start - 1] != b'_';
-                    let after_ok = end >= l.len()
-                        || !l.as_bytes()[end].is_ascii_alphanumeric() && l.as_bytes()[end] != b'_';
-                    if !(before_ok && after_ok) {
-                        continue;
-                    }
-                }
-                return Some(&line[start..end]);
-            }
-            return None;
+        if let Some(hit) = grep_find_regex_match(line, &l, &p, flags) {
+            return Some(hit);
         }
+        // On regex compile failure we fall through to literal substring
+        // matching so malformed patterns still produce output.
     }
 
-    if flags.word_match {
-        let start = l.find(&p)?;
-        // Check word boundaries
-        if start > 0 && l.as_bytes()[start - 1].is_ascii_alphanumeric() {
-            return None;
-        }
-        let end = start + p.len();
-        if end < l.len() && l.as_bytes()[end].is_ascii_alphanumeric() {
-            return None;
-        }
-        Some(&line[start..start + p.len()])
+    grep_find_literal_match(line, &l, &p, flags.word_match)
+}
+
+fn grep_find_regex_match<'a>(
+    line: &'a str,
+    needle_line: &str,
+    pattern: &str,
+    flags: &GrepFlags,
+) -> Option<&'a str> {
+    let compiled = if flags.extended {
+        crate::regex_posix::Regex::compile_ere(pattern)
     } else {
-        let idx = l.find(&p)?;
-        Some(&line[idx..idx + p.len()])
+        crate::regex_posix::Regex::compile_bre(pattern)
+    };
+    let re = compiled.ok()?;
+    re.find_iter_offsets(needle_line)
+        .into_iter()
+        .find(|&(start, end)| !flags.word_match || word_boundaries_ok(needle_line, start, end))
+        .map(|(start, end)| &line[start..end])
+}
+
+fn grep_find_literal_match<'a>(
+    line: &'a str,
+    needle_line: &str,
+    pattern: &str,
+    word_match: bool,
+) -> Option<&'a str> {
+    let start = needle_line.find(pattern)?;
+    let end = start + pattern.len();
+    if word_match && !word_boundaries_ok(needle_line, start, end) {
+        return None;
     }
+    Some(&line[start..end])
+}
+
+fn word_boundaries_ok(line: &str, start: usize, end: usize) -> bool {
+    let bytes = line.as_bytes();
+    let before_ok = start == 0 || !is_word_byte(bytes[start - 1]);
+    let after_ok = end >= bytes.len() || !is_word_byte(bytes[end]);
+    before_ok && after_ok
+}
+
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn grep_line_matches(line: &str, flags: &GrepFlags, patterns: &[&str]) -> bool {
     let matched = patterns.iter().any(|p| grep_match_pattern(line, p, flags));
     matched != flags.invert
+}
+
+struct GrepProcessState {
+    match_count: u64,
+    found: bool,
+    remaining_after: usize,
+    printed_separator: bool,
+    before_buf: VecDeque<(usize, String)>,
+}
+
+impl GrepProcessState {
+    fn new() -> Self {
+        Self {
+            match_count: 0,
+            found: false,
+            remaining_after: 0,
+            printed_separator: false,
+            before_buf: VecDeque::new(),
+        }
+    }
+
+    fn should_stop(&self, max_count: Option<usize>) -> bool {
+        max_count.is_some_and(|m| self.match_count >= m as u64)
+    }
 }
 
 fn grep_process_reader(
@@ -830,11 +908,7 @@ fn grep_process_reader(
     patterns: &[&str],
     cmd: &str,
 ) -> Result<(bool, u64), i32> {
-    let mut match_count = 0u64;
-    let mut found = false;
-    let mut remaining_after = 0usize;
-    let mut printed_separator = false;
-    let mut before_buf: VecDeque<(usize, String)> = VecDeque::new();
+    let mut state = GrepProcessState::new();
     let mut pending = Vec::new();
     let mut line_num = 0usize;
 
@@ -843,69 +917,110 @@ fn grep_process_reader(
     {
         line_num += 1;
         if grep_line_matches(&line, flags, patterns) {
-            found = true;
-            match_count += 1;
-
-            if flags.quiet || flags.files_only {
-                if let Some(max) = flags.max_count {
-                    if match_count >= max as u64 {
-                        break;
-                    }
-                }
-                continue;
+            if grep_handle_match(
+                output, &line, line_num, filename, flags, patterns, &mut state,
+            ) {
+                break;
             }
-            if !flags.count_only {
-                if flags.before_context > 0 && !before_buf.is_empty() {
-                    if printed_separator && flags.before_context > 0 {
-                        output.stdout(b"--\n");
-                    }
-                    for (before_line_num, before_line) in &before_buf {
-                        grep_emit_one(
-                            output,
-                            before_line,
-                            *before_line_num,
-                            filename,
-                            flags,
-                            patterns,
-                        );
-                    }
-                }
-                before_buf.clear();
-                grep_emit_one(output, &line, line_num, filename, flags, patterns);
-                remaining_after = flags.after_context;
-                printed_separator = true;
-            }
-            if let Some(max) = flags.max_count {
-                if match_count >= max as u64 {
-                    break;
-                }
-            }
-        } else if remaining_after > 0 && !flags.count_only {
-            grep_emit_one(output, &line, line_num, filename, flags, patterns);
-            remaining_after -= 1;
-        } else if flags.before_context > 0 {
-            before_buf.push_back((line_num, line));
-            if before_buf.len() > flags.before_context {
-                before_buf.pop_front();
-            }
+        } else {
+            grep_handle_nonmatch(
+                output, line, line_num, filename, flags, patterns, &mut state,
+            );
         }
     }
 
     if flags.count_only && !flags.quiet {
-        if let Some(f) = filename {
-            if flags.show_filename != Some(false) {
-                let s = format!("{f}:{match_count}\n");
-                output.stdout(s.as_bytes());
-            } else {
-                let s = format!("{match_count}\n");
-                output.stdout(s.as_bytes());
-            }
-        } else {
-            let s = format!("{match_count}\n");
-            output.stdout(s.as_bytes());
+        grep_emit_count_result(output, filename, flags, state.match_count);
+    }
+    Ok((state.found, state.match_count))
+}
+
+// Returns true if the outer read loop should break (max_count reached).
+fn grep_handle_match(
+    output: &mut dyn UtilOutput,
+    line: &str,
+    line_num: usize,
+    filename: Option<&str>,
+    flags: &GrepFlags,
+    patterns: &[&str],
+    state: &mut GrepProcessState,
+) -> bool {
+    state.found = true;
+    state.match_count += 1;
+
+    if flags.quiet || flags.files_only {
+        return state.should_stop(flags.max_count);
+    }
+    if !flags.count_only {
+        grep_flush_before_context(output, filename, flags, patterns, state);
+        grep_emit_one(output, line, line_num, filename, flags, patterns);
+        state.remaining_after = flags.after_context;
+        state.printed_separator = true;
+    }
+    state.should_stop(flags.max_count)
+}
+
+fn grep_handle_nonmatch(
+    output: &mut dyn UtilOutput,
+    line: String,
+    line_num: usize,
+    filename: Option<&str>,
+    flags: &GrepFlags,
+    patterns: &[&str],
+    state: &mut GrepProcessState,
+) {
+    if state.remaining_after > 0 && !flags.count_only {
+        grep_emit_one(output, &line, line_num, filename, flags, patterns);
+        state.remaining_after -= 1;
+        return;
+    }
+    if flags.before_context > 0 {
+        state.before_buf.push_back((line_num, line));
+        if state.before_buf.len() > flags.before_context {
+            state.before_buf.pop_front();
         }
     }
-    Ok((found, match_count))
+}
+
+fn grep_flush_before_context(
+    output: &mut dyn UtilOutput,
+    filename: Option<&str>,
+    flags: &GrepFlags,
+    patterns: &[&str],
+    state: &mut GrepProcessState,
+) {
+    if flags.before_context == 0 || state.before_buf.is_empty() {
+        state.before_buf.clear();
+        return;
+    }
+    if state.printed_separator {
+        output.stdout(b"--\n");
+    }
+    for (before_line_num, before_line) in &state.before_buf {
+        grep_emit_one(
+            output,
+            before_line,
+            *before_line_num,
+            filename,
+            flags,
+            patterns,
+        );
+    }
+    state.before_buf.clear();
+}
+
+fn grep_emit_count_result(
+    output: &mut dyn UtilOutput,
+    filename: Option<&str>,
+    flags: &GrepFlags,
+    match_count: u64,
+) {
+    let with_filename = filename.is_some() && flags.show_filename != Some(false);
+    let line = match (filename, with_filename) {
+        (Some(f), true) => format!("{f}:{match_count}\n"),
+        _ => format!("{match_count}\n"),
+    };
+    output.stdout(line.as_bytes());
 }
 
 fn grep_process_stdin(
@@ -1243,6 +1358,24 @@ fn sed_emit_line(output: &mut dyn UtilOutput, capture: &mut Option<String>, line
     }
 }
 
+struct SedLineState {
+    text: String,
+    deleted: bool,
+    printed: bool,
+    quit: bool,
+}
+
+impl SedLineState {
+    fn new(text: String) -> Self {
+        Self {
+            text,
+            deleted: false,
+            printed: false,
+            quit: false,
+        }
+    }
+}
+
 fn sed_process_reader(
     output: &mut dyn UtilOutput,
     reader: &mut dyn Read,
@@ -1263,90 +1396,23 @@ fn sed_process_reader(
 
     while let Some((line, _had_newline)) = current.take() {
         let is_last = next.is_none();
-        let mut current_text = line;
-        let mut deleted = false;
-        let mut printed = false;
-        let mut quit = false;
+        let mut state = SedLineState::new(line);
 
-        for (ci, instr) in instructions.iter().enumerate() {
-            if !sed_addr_matches(
-                &instr.addr,
-                line_num,
-                is_last,
-                &current_text,
-                &mut range_states[ci],
-            ) {
-                continue;
-            }
-            match &instr.cmd {
-                SedCmd::Substitute(sub) => {
-                    // Use POSIX BRE regex when the pattern compiles;
-                    // fall back to literal replacement otherwise so
-                    // malformed patterns still behave sensibly.
-                    current_text = match crate::regex_posix::Regex::compile_bre(&sub.pattern) {
-                        Ok(re) => {
-                            if sub.global {
-                                re.replace_all(&current_text, &sub.replacement)
-                            } else {
-                                re.replace(&current_text, &sub.replacement)
-                            }
-                        }
-                        Err(_) => {
-                            if sub.global {
-                                current_text.replace(&sub.pattern, &sub.replacement)
-                            } else {
-                                current_text.replacen(&sub.pattern, &sub.replacement, 1)
-                            }
-                        }
-                    };
-                }
-                SedCmd::Delete => {
-                    deleted = true;
-                    break;
-                }
-                SedCmd::Print => {
-                    sed_emit_line(output, capture, &current_text);
-                    printed = true;
-                }
-                SedCmd::Transliterate(from, to) => {
-                    current_text = current_text
-                        .chars()
-                        .map(|c| {
-                            if let Some(pos) = from.iter().position(|&fc| fc == c) {
-                                to.get(pos).or(to.last()).copied().unwrap_or(c)
-                            } else {
-                                c
-                            }
-                        })
-                        .collect();
-                }
-                SedCmd::AppendText(text) => {
-                    if !suppress_print && !printed {
-                        sed_emit_line(output, capture, &current_text);
-                        printed = true;
-                    }
-                    sed_emit_line(output, capture, text);
-                }
-                SedCmd::InsertText(text) => {
-                    sed_emit_line(output, capture, text);
-                }
-                SedCmd::ChangeText(text) => {
-                    sed_emit_line(output, capture, text);
-                    deleted = true;
-                    printed = true;
-                    break;
-                }
-                SedCmd::Quit => {
-                    quit = true;
-                    break;
-                }
-            }
-        }
+        sed_run_instructions(
+            instructions,
+            &mut range_states,
+            line_num,
+            is_last,
+            output,
+            capture,
+            suppress_print,
+            &mut state,
+        );
 
-        if !deleted && !suppress_print && !printed {
-            sed_emit_line(output, capture, &current_text);
+        if !state.deleted && !suppress_print && !state.printed {
+            sed_emit_line(output, capture, &state.text);
         }
-        if quit {
+        if state.quit {
             break;
         }
 
@@ -1358,6 +1424,104 @@ fn sed_process_reader(
     }
 
     Ok(())
+}
+
+fn sed_run_instructions(
+    instructions: &[SedInstruction],
+    range_states: &mut [bool],
+    line_num: usize,
+    is_last: bool,
+    output: &mut dyn UtilOutput,
+    capture: &mut Option<String>,
+    suppress_print: bool,
+    state: &mut SedLineState,
+) {
+    for (ci, instr) in instructions.iter().enumerate() {
+        if !sed_addr_matches(
+            &instr.addr,
+            line_num,
+            is_last,
+            &state.text,
+            &mut range_states[ci],
+        ) {
+            continue;
+        }
+        if sed_apply_command(&instr.cmd, output, capture, suppress_print, state) {
+            break;
+        }
+    }
+}
+
+// Returns true when the caller should stop iterating instructions for this
+// line (e.g. on delete / change / quit).
+fn sed_apply_command(
+    cmd: &SedCmd,
+    output: &mut dyn UtilOutput,
+    capture: &mut Option<String>,
+    suppress_print: bool,
+    state: &mut SedLineState,
+) -> bool {
+    match cmd {
+        SedCmd::Substitute(sub) => {
+            state.text = sed_apply_substitute(&state.text, sub);
+            false
+        }
+        SedCmd::Delete => {
+            state.deleted = true;
+            true
+        }
+        SedCmd::Print => {
+            sed_emit_line(output, capture, &state.text);
+            state.printed = true;
+            false
+        }
+        SedCmd::Transliterate(from, to) => {
+            state.text = sed_apply_transliterate(&state.text, from, to);
+            false
+        }
+        SedCmd::AppendText(text) => {
+            if !suppress_print && !state.printed {
+                sed_emit_line(output, capture, &state.text);
+                state.printed = true;
+            }
+            sed_emit_line(output, capture, text);
+            false
+        }
+        SedCmd::InsertText(text) => {
+            sed_emit_line(output, capture, text);
+            false
+        }
+        SedCmd::ChangeText(text) => {
+            sed_emit_line(output, capture, text);
+            state.deleted = true;
+            state.printed = true;
+            true
+        }
+        SedCmd::Quit => {
+            state.quit = true;
+            true
+        }
+    }
+}
+
+fn sed_apply_substitute(text: &str, sub: &SedSubstitute) -> String {
+    // Use POSIX BRE regex when the pattern compiles; fall back to literal
+    // replacement otherwise so malformed patterns still behave sensibly.
+    match crate::regex_posix::Regex::compile_bre(&sub.pattern) {
+        Ok(re) if sub.global => re.replace_all(text, &sub.replacement),
+        Ok(re) => re.replace(text, &sub.replacement),
+        Err(_) if sub.global => text.replace(&sub.pattern, &sub.replacement),
+        Err(_) => text.replacen(&sub.pattern, &sub.replacement, 1),
+    }
+}
+
+fn sed_apply_transliterate(text: &str, from: &[char], to: &[char]) -> String {
+    text.chars()
+        .map(|c| match from.iter().position(|&fc| fc == c) {
+            Some(pos) => to.get(pos).or(to.last()).copied().unwrap_or(c),
+            None => c,
+        })
+        .collect()
 }
 
 pub(crate) fn util_sed(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
@@ -2347,42 +2511,67 @@ fn tee_open_files<'a>(
 }
 
 pub(crate) fn util_tee(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut args = &argv[1..];
-    let mut append = false;
-    if args.first() == Some(&"-a") {
-        append = true;
-        args = &args[1..];
-    }
+    let (append, args) = tee_parse_flags(&argv[1..]);
     let (handles, mut status) = tee_open_files(ctx.fs, ctx.output, ctx.cwd, args, append);
 
-    if let Some(mut stdin) = ctx.stdin.take() {
-        let mut buffer = [0u8; 4096];
-        loop {
-            match stdin.read_chunk(&mut buffer) {
-                Ok(0) => break,
-                Ok(read) => {
-                    let chunk = &buffer[..read];
-                    ctx.output.stdout(chunk);
-                    for (path, handle) in &handles {
-                        if let Err(e) = ctx.fs.write_file(*handle, chunk) {
-                            emit_error(ctx.output, "tee", path, &e);
-                            status = 1;
-                        }
-                    }
-                }
-                Err(err) => {
-                    let msg = format!("tee: stdin read error: {err}\n");
-                    ctx.output.stderr(msg.as_bytes());
-                    status = 1;
-                    break;
-                }
-            }
+    if let Some(stdin) = ctx.stdin.take() {
+        if tee_pipe_stdin(ctx, stdin, &handles, &mut status).is_err() {
+            // Error path already recorded via status / stderr; continue to
+            // close handles normally so we do not leak descriptors.
         }
     }
     for (_, handle) in handles {
         ctx.fs.close(handle);
     }
     status
+}
+
+fn tee_parse_flags<'a>(mut args: &'a [&'a str]) -> (bool, &'a [&'a str]) {
+    let mut append = false;
+    if args.first() == Some(&"-a") {
+        append = true;
+        args = &args[1..];
+    }
+    (append, args)
+}
+
+fn tee_pipe_stdin(
+    ctx: &mut UtilContext<'_>,
+    mut stdin: crate::UtilStdin<'_>,
+    handles: &[(&str, wasmsh_fs::FileHandle)],
+    status: &mut i32,
+) -> Result<(), ()> {
+    let mut buffer = [0u8; 4096];
+    loop {
+        match stdin.read_chunk(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(read) => {
+                let chunk = &buffer[..read];
+                ctx.output.stdout(chunk);
+                tee_forward_chunk(ctx, handles, chunk, status);
+            }
+            Err(err) => {
+                let msg = format!("tee: stdin read error: {err}\n");
+                ctx.output.stderr(msg.as_bytes());
+                *status = 1;
+                return Err(());
+            }
+        }
+    }
+}
+
+fn tee_forward_chunk(
+    ctx: &mut UtilContext<'_>,
+    handles: &[(&str, wasmsh_fs::FileHandle)],
+    chunk: &[u8],
+    status: &mut i32,
+) {
+    for (path, handle) in handles {
+        if let Err(e) = ctx.fs.write_file(*handle, chunk) {
+            emit_error(ctx.output, "tee", path, &e);
+            *status = 1;
+        }
+    }
 }
 
 struct PasteFlags {
