@@ -2306,32 +2306,17 @@ fn tr_flush_pending_lossy(pending: &mut Vec<u8>, mut f: impl FnMut(char)) {
 }
 
 pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut delete = false;
-    let mut squeeze = false;
-    let mut complement = false;
-    let mut set_args: Vec<&str> = Vec::new();
-
-    for arg in &argv[1..] {
-        if arg.starts_with('-') && arg.len() > 1 {
-            for ch in arg[1..].chars() {
-                match ch {
-                    'd' => delete = true,
-                    's' => squeeze = true,
-                    'c' | 'C' => complement = true,
-                    // 't' (truncate) etc. — accepted
-                    _ => {}
-                }
-            }
-        } else {
-            set_args.push(arg);
-        }
-    }
+    let TrFlags {
+        delete,
+        squeeze,
+        complement,
+        set_args,
+    } = parse_tr_flags(&argv[1..]);
 
     if !ctx.has_stdin() {
         ctx.output.stderr(b"tr: missing operand\n");
         return 1;
     }
-
     if set_args.is_empty() {
         ctx.output.stderr(b"tr: missing operand\n");
         return 1;
@@ -2341,163 +2326,153 @@ pub(crate) fn util_tr(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 
     if delete && squeeze && set_args.len() >= 2 {
         let squeeze_chars = tr_expand_set(set_args[1]);
-        let mut prev: Option<char> = None;
-        let mut pending = Vec::new();
-        if stream_input_chunks(ctx, &[], "tr", |chunk, ctx| {
-            tr_process_utf8_chunk(&mut pending, chunk, |c| {
-                let in_set = from_chars.contains(&c);
-                let keep = if complement { in_set } else { !in_set };
-                if !keep {
-                    return;
-                }
-                if squeeze_chars.contains(&c) && prev == Some(c) {
-                    return;
-                }
-                let mut buf = [0u8; 4];
-                ctx.output.stdout(c.encode_utf8(&mut buf).as_bytes());
-                prev = Some(c);
-            });
-            Ok(())
-        })
-        .is_err()
-        {
-            return 1;
-        }
-        if !pending.is_empty() {
-            tr_flush_pending_lossy(&mut pending, |c| {
-                let in_set = from_chars.contains(&c);
-                let keep = if complement { in_set } else { !in_set };
-                if !keep {
-                    return;
-                }
-                if squeeze_chars.contains(&c) && prev == Some(c) {
-                    return;
-                }
-                let mut buf = [0u8; 4];
-                ctx.output.stdout(c.encode_utf8(&mut buf).as_bytes());
-                prev = Some(c);
-            });
-        }
-        return 0;
+        return run_tr_delete_squeeze(ctx, &from_chars, &squeeze_chars, complement);
     }
-
     if delete {
-        let mut pending = Vec::new();
-        if stream_input_chunks(ctx, &[], "tr", |chunk, ctx| {
-            tr_process_utf8_chunk(&mut pending, chunk, |c| {
-                let in_set = from_chars.contains(&c);
-                let keep = if complement { in_set } else { !in_set };
-                if keep {
-                    let mut buf = [0u8; 4];
-                    ctx.output.stdout(c.encode_utf8(&mut buf).as_bytes());
-                }
-            });
-            Ok(())
-        })
-        .is_err()
-        {
-            return 1;
-        }
-        if !pending.is_empty() {
-            tr_flush_pending_lossy(&mut pending, |c| {
-                let in_set = from_chars.contains(&c);
-                let keep = if complement { in_set } else { !in_set };
-                if keep {
-                    let mut buf = [0u8; 4];
-                    ctx.output.stdout(c.encode_utf8(&mut buf).as_bytes());
-                }
-            });
-        }
-        return 0;
+        return run_tr_delete(ctx, &from_chars, complement);
     }
-
     if squeeze && set_args.len() < 2 {
-        let mut prev: Option<char> = None;
-        let mut pending = Vec::new();
-        if stream_input_chunks(ctx, &[], "tr", |chunk, ctx| {
-            tr_process_utf8_chunk(&mut pending, chunk, |c| {
-                if from_chars.contains(&c) && prev == Some(c) {
-                    return;
-                }
-                let mut buf = [0u8; 4];
-                ctx.output.stdout(c.encode_utf8(&mut buf).as_bytes());
-                prev = Some(c);
-            });
-            Ok(())
-        })
-        .is_err()
-        {
-            return 1;
-        }
-        if !pending.is_empty() {
-            tr_flush_pending_lossy(&mut pending, |c| {
-                if from_chars.contains(&c) && prev == Some(c) {
-                    return;
-                }
-                let mut buf = [0u8; 4];
-                ctx.output.stdout(c.encode_utf8(&mut buf).as_bytes());
-                prev = Some(c);
-            });
-        }
-        return 0;
+        return run_tr_squeeze_only(ctx, &from_chars);
     }
-
     if set_args.len() < 2 {
         ctx.output.stderr(b"tr: missing operand\n");
         return 1;
     }
 
     let to_chars = tr_expand_set(set_args[1]);
-    let from_set = if complement {
+    run_tr_translate(ctx, &from_chars, &to_chars, complement, squeeze)
+}
+
+struct TrFlags<'a> {
+    delete: bool,
+    squeeze: bool,
+    complement: bool,
+    set_args: Vec<&'a str>,
+}
+
+fn parse_tr_flags<'a>(args: &[&'a str]) -> TrFlags<'a> {
+    let mut flags = TrFlags {
+        delete: false,
+        squeeze: false,
+        complement: false,
+        set_args: Vec::new(),
+    };
+    for arg in args {
+        if arg.starts_with('-') && arg.len() > 1 {
+            for ch in arg[1..].chars() {
+                match ch {
+                    'd' => flags.delete = true,
+                    's' => flags.squeeze = true,
+                    'c' | 'C' => flags.complement = true,
+                    // 't' (truncate) etc. — accepted
+                    _ => {}
+                }
+            }
+        } else {
+            flags.set_args.push(arg);
+        }
+    }
+    flags
+}
+
+/// Stream stdin through `per_char`, which is called once for every decoded
+/// character both during streaming chunks and the final UTF-8 flush.  The
+/// helper hides the common pump-plus-flush boilerplate every tr mode needs.
+fn tr_stream(
+    ctx: &mut UtilContext<'_>,
+    mut per_char: impl FnMut(char, &mut UtilContext<'_>),
+) -> i32 {
+    let mut pending = Vec::new();
+    let pump = stream_input_chunks(ctx, &[], "tr", |chunk, ctx| {
+        tr_process_utf8_chunk(&mut pending, chunk, |c| per_char(c, ctx));
+        Ok(())
+    });
+    if pump.is_err() {
+        return 1;
+    }
+    if !pending.is_empty() {
+        tr_flush_pending_lossy(&mut pending, |c| per_char(c, ctx));
+    }
+    0
+}
+
+fn tr_emit_char(ctx: &mut UtilContext<'_>, c: char) {
+    let mut buf = [0u8; 4];
+    ctx.output.stdout(c.encode_utf8(&mut buf).as_bytes());
+}
+
+fn run_tr_delete_squeeze(
+    ctx: &mut UtilContext<'_>,
+    from_chars: &[char],
+    squeeze_chars: &[char],
+    complement: bool,
+) -> i32 {
+    let mut prev: Option<char> = None;
+    tr_stream(ctx, |c, ctx| {
+        let in_set = from_chars.contains(&c);
+        let keep = if complement { in_set } else { !in_set };
+        if !keep {
+            return;
+        }
+        if squeeze_chars.contains(&c) && prev == Some(c) {
+            return;
+        }
+        tr_emit_char(ctx, c);
+        prev = Some(c);
+    })
+}
+
+fn run_tr_delete(ctx: &mut UtilContext<'_>, from_chars: &[char], complement: bool) -> i32 {
+    tr_stream(ctx, |c, ctx| {
+        let in_set = from_chars.contains(&c);
+        let keep = if complement { in_set } else { !in_set };
+        if keep {
+            tr_emit_char(ctx, c);
+        }
+    })
+}
+
+fn run_tr_squeeze_only(ctx: &mut UtilContext<'_>, from_chars: &[char]) -> i32 {
+    let mut prev: Option<char> = None;
+    tr_stream(ctx, |c, ctx| {
+        if from_chars.contains(&c) && prev == Some(c) {
+            return;
+        }
+        tr_emit_char(ctx, c);
+        prev = Some(c);
+    })
+}
+
+fn run_tr_translate(
+    ctx: &mut UtilContext<'_>,
+    from_chars: &[char],
+    to_chars: &[char],
+    complement: bool,
+    squeeze: bool,
+) -> i32 {
+    let from_set: Vec<char> = if complement {
         // Build complement: all ASCII chars not in from_chars
         (0u8..=127)
             .map(|b| b as char)
             .filter(|c| !from_chars.contains(c))
             .collect()
     } else {
-        from_chars.clone()
+        from_chars.to_vec()
     };
 
     let mut prev: Option<char> = None;
-    let mut pending = Vec::new();
-    if stream_input_chunks(ctx, &[], "tr", |chunk, ctx| {
-        tr_process_utf8_chunk(&mut pending, chunk, |c| {
-            let translated = if let Some(pos) = from_set.iter().position(|&fc| fc == c) {
-                to_chars.get(pos).or(to_chars.last()).copied().unwrap_or(c)
-            } else {
-                c
-            };
-            if squeeze && to_chars.contains(&translated) && prev == Some(translated) {
-                return;
-            }
-            let mut buf = [0u8; 4];
-            ctx.output
-                .stdout(translated.encode_utf8(&mut buf).as_bytes());
-            prev = Some(translated);
-        });
-        Ok(())
+    tr_stream(ctx, |c, ctx| {
+        let translated = if let Some(pos) = from_set.iter().position(|&fc| fc == c) {
+            to_chars.get(pos).or(to_chars.last()).copied().unwrap_or(c)
+        } else {
+            c
+        };
+        if squeeze && to_chars.contains(&translated) && prev == Some(translated) {
+            return;
+        }
+        tr_emit_char(ctx, translated);
+        prev = Some(translated);
     })
-    .is_err()
-    {
-        return 1;
-    }
-    if !pending.is_empty() {
-        tr_flush_pending_lossy(&mut pending, |c| {
-            let translated = if let Some(pos) = from_set.iter().position(|&fc| fc == c) {
-                to_chars.get(pos).or(to_chars.last()).copied().unwrap_or(c)
-            } else {
-                c
-            };
-            if squeeze && to_chars.contains(&translated) && prev == Some(translated) {
-                return;
-            }
-            let mut buf = [0u8; 4];
-            ctx.output
-                .stdout(translated.encode_utf8(&mut buf).as_bytes());
-            prev = Some(translated);
-        });
-    }
-    0
 }
 
 fn tee_open_files<'a>(
