@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -22,9 +23,11 @@ use crate::{DispatchError, DispatchRequest, Dispatcher, RunnerId, RunnerSnapshot
 /// The dispatcher is intended to run behind a trusted mesh — there is no
 /// user-facing auth layer here — but we still cap bodies so a misbehaving
 /// caller can't exhaust runner memory with a single oversized `initial_files`
-/// payload.  8 MiB covers a worst-case base64 seeded-file blob while staying
-/// well below the runner's own per-session quota.
-const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
+/// or `write-file` payload.  32 MiB fits the `langchain-tests` sandbox
+/// standard suite's 10 MiB upload test (which expands to ~13 MiB after
+/// base64) with generous headroom, and stays comfortably below typical
+/// runner per-session quotas.
+const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 /// Per-request timeout for upstream calls to a runner.
 const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -512,7 +515,7 @@ async fn forward_post_json<T: Serialize>(
     base_url: &str,
     path: &str,
     payload: &T,
-) -> Result<(StatusCode, Json<Value>), ServiceError> {
+) -> Result<Response, ServiceError> {
     let response = client
         .post(format!("{base_url}{path}"))
         .json(payload)
@@ -522,9 +525,20 @@ async fn forward_post_json<T: Serialize>(
     response_to_json_response(response).await
 }
 
+/// Forward an upstream JSON response to the caller without buffering the
+/// body as `serde_json::Value`.
+///
+/// The dispatcher used to deserialize every runner response into a
+/// `Value` tree and re-serialize it back out.  That roughly tripled
+/// transient RSS per in-flight request (a 10 MiB file upload → ~40 MiB
+/// of Rust-side heap), and small memory limits (≤ 1 GiB) `OOMKilled` the
+/// pod during the `langchain-tests` standard suite.  Passing the raw
+/// bytes through keeps peak RSS close to the payload size plus
+/// tokio/reqwest buffers.  We only parse JSON on the error path to
+/// extract a human-readable `error` field.
 async fn response_to_json_response(
     response: reqwest::Response,
-) -> Result<(StatusCode, Json<Value>), ServiceError> {
+) -> Result<Response, ServiceError> {
     let raw_status = response.status().as_u16();
     let status = StatusCode::from_u16(raw_status).unwrap_or_else(|_| {
         warn!(
@@ -533,21 +547,25 @@ async fn response_to_json_response(
         );
         StatusCode::BAD_GATEWAY
     });
-    let value: Value = response
-        .json()
+    let body: Bytes = response
+        .bytes()
         .await
         .map_err(|error| ServiceError::Upstream(error.to_string()))?;
     if status.is_success() {
-        Ok((status, Json(value)))
-    } else {
-        Err(ServiceError::UpstreamStatus {
-            status,
-            message: value
-                .get("error")
-                .and_then(Value::as_str)
-                .map_or_else(|| value.to_string(), ToString::to_string),
-        })
+        let response = Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .map_err(|error| ServiceError::Upstream(error.to_string()))?;
+        return Ok(response);
     }
+    // Error path: parse just enough to surface a readable message.
+    let message = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("error").and_then(Value::as_str).map(ToString::to_string))
+        .unwrap_or_else(|| String::from_utf8_lossy(&body).into_owned());
+    Err(ServiceError::UpstreamStatus { status, message })
 }
 
 #[cfg(test)]

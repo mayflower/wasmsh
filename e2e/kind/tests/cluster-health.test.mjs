@@ -53,14 +53,36 @@ test("helm release exposes the expected dispatcher + runner deployments", async 
 });
 
 test("all runner pods report Ready condition", async () => {
-  const pods = await kubectl.getPods("app.kubernetes.io/component=runner");
-  assert.ok(pods.items.length > 0, "expected at least one runner pod");
-  for (const pod of pods.items) {
-    const ready = pod.status?.conditions?.find((c) => c.type === "Ready");
-    assert.equal(
-      ready?.status,
-      "True",
-      `runner pod ${pod.metadata.name} not Ready: ${JSON.stringify(pod.status?.conditions)}`,
+  // Runner pods can briefly flap out of Ready between the orchestrator's
+  // initial wait and this assertion — Pyodide snapshot restore can push a
+  // readiness probe past its first window on a busy laptop.  Poll with a
+  // generous budget (shorter than the probe's own failureThreshold*period
+  // of ~180s) and only fail if we never see all pods Ready together.
+  let lastConditions = null;
+  await waitUntil(
+    async () => {
+      const pods = await kubectl.getPods("app.kubernetes.io/component=runner");
+      if (pods.items.length === 0) return false;
+      for (const pod of pods.items) {
+        const ready = pod.status?.conditions?.find((c) => c.type === "Ready");
+        if (ready?.status !== "True") {
+          lastConditions = {
+            pod: pod.metadata.name,
+            conditions: pod.status?.conditions,
+          };
+          return false;
+        }
+      }
+      return true;
+    },
+    {
+      intervalMs: 2000,
+      timeoutMs: 120_000,
+      description: "all runner pods Ready",
+    },
+  ).catch((error) => {
+    throw new Error(
+      `${error.message}; last seen: ${JSON.stringify(lastConditions)}`,
     );
-  }
+  });
 });

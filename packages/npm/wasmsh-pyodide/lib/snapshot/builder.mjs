@@ -21,6 +21,15 @@ function captureTableState(module) {
 }
 
 async function runSelftest(runtimeBridge) {
+  // The runtime refuses Run commands before Init; without this the selftest
+  // silently reported a `Diagnostic: runtime not initialized` event, which
+  // made the runner's /readyz permanently 503 because `selftestPassed`
+  // looks for an `Exit: 0` marker.  The snapshot has already been taken at
+  // this point (see `pyodide._api.makeSnapshot()` above), so initializing
+  // now is safe — it doesn't leak into persisted bytes.
+  runtimeBridge.sendHostCommand({
+    Init: { step_budget: 0, allowed_hosts: [] },
+  });
   const echoEvents = runtimeBridge.sendHostCommand({ Run: { input: "echo hello" } });
   const pythonEvents = runtimeBridge.sendHostCommand({ Run: { input: "python3 -c \"print(1+1)\"" } });
   return {

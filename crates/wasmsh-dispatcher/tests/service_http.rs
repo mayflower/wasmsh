@@ -694,9 +694,9 @@ async fn delete_session_forwards_and_releases_affinity() {
 #[tokio::test]
 async fn request_body_size_cap_is_enforced() {
     let svc = dispatcher_for(vec![]);
-    // Exceed the 8 MiB cap.  The body must never reach any handler;
+    // Exceed the 32 MiB cap.  The body must never reach any handler;
     // axum's DefaultBodyLimit layer rejects it up front.
-    let oversized = vec![b'x'; 9 * 1024 * 1024];
+    let oversized = vec![b'x'; 33 * 1024 * 1024];
     let response = svc
         .router()
         .oneshot(
