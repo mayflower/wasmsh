@@ -10,6 +10,7 @@ use indexmap::IndexMap;
 use wasmsh_fs::BackendFs;
 use wasmsh_state::ShellState;
 
+mod net_multipart;
 mod net_ops;
 pub mod net_types;
 

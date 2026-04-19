@@ -8,7 +8,12 @@ use std::fmt;
 use url::Url;
 
 /// An HTTP request to be executed by the host.
-#[derive(Debug, Clone)]
+///
+/// The additional sandbox limit fields (`timeout_ms`, `connect_timeout_ms`,
+/// `max_redirs`, `max_response_bytes`) are advisory: backends that can enforce
+/// them should; the `wasmsh-utils` layer also enforces `max_response_bytes`
+/// after the fetch returns so the feature works with backends that ignore it.
+#[derive(Debug, Clone, Default)]
 pub struct HttpRequest {
     /// Fully-qualified URL (e.g. `https://api.example.com/data`).
     pub url: String,
@@ -20,10 +25,18 @@ pub struct HttpRequest {
     pub body: Option<Vec<u8>>,
     /// Whether to follow HTTP 3xx redirects.
     pub follow_redirects: bool,
+    /// Advisory overall timeout in milliseconds (None = backend default).
+    pub timeout_ms: Option<u64>,
+    /// Advisory connection timeout in milliseconds (None = backend default).
+    pub connect_timeout_ms: Option<u64>,
+    /// Cap on redirect chain length (None = backend default).
+    pub max_redirs: Option<u32>,
+    /// Cap on response body bytes (None = no cap).
+    pub max_response_bytes: Option<u64>,
 }
 
 /// An HTTP response returned by the host.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct HttpResponse {
     /// HTTP status code (e.g. 200, 404).
     pub status: u16,
@@ -44,6 +57,10 @@ pub enum NetworkError {
     Timeout(String),
     /// The URL could not be parsed.
     InvalidUrl(String),
+    /// The response exceeded the configured size cap.
+    ResponseTooLarge(String),
+    /// Redirect chain exceeded the configured limit.
+    TooManyRedirects(String),
     /// Any other network error.
     Other(String),
 }
@@ -55,6 +72,8 @@ impl fmt::Display for NetworkError {
             Self::ConnectionFailed(msg) => write!(f, "connection failed: {msg}"),
             Self::Timeout(msg) => write!(f, "timeout: {msg}"),
             Self::InvalidUrl(msg) => write!(f, "invalid URL: {msg}"),
+            Self::ResponseTooLarge(msg) => write!(f, "response too large: {msg}"),
+            Self::TooManyRedirects(msg) => write!(f, "too many redirects: {msg}"),
             Self::Other(msg) => write!(f, "network error: {msg}"),
         }
     }
