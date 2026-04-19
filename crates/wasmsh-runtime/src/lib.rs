@@ -1085,24 +1085,28 @@ impl BufferedPipeProcess {
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "command".to_string()),
-            BufferedPipelineCommand::Hir(cmd) => match cmd {
-                HirCommand::Exec(_) => "exec".to_string(),
-                HirCommand::Assign(_) => "assign".to_string(),
-                HirCommand::RedirectOnly(_) => "redirect".to_string(),
-                HirCommand::If(_) => "if".to_string(),
-                HirCommand::While(_) => "while".to_string(),
-                HirCommand::Until(_) => "until".to_string(),
-                HirCommand::For(_) => "for".to_string(),
-                HirCommand::Subshell(_) => "subshell".to_string(),
-                HirCommand::Group(_) => "group".to_string(),
-                HirCommand::FunctionDef(_) => "function".to_string(),
-                HirCommand::Case(_) => "case".to_string(),
-                HirCommand::DoubleBracket(_) => "[[".to_string(),
-                HirCommand::ArithFor(_) => "arith-for".to_string(),
-                HirCommand::ArithCommand(_) => "arith".to_string(),
-                HirCommand::Select(_) => "select".to_string(),
-                _ => "command".to_string(),
-            },
+            BufferedPipelineCommand::Hir(cmd) => Self::hir_command_label(cmd).to_string(),
+        }
+    }
+
+    fn hir_command_label(cmd: &HirCommand) -> &'static str {
+        match cmd {
+            HirCommand::Exec(_) => "exec",
+            HirCommand::Assign(_) => "assign",
+            HirCommand::RedirectOnly(_) => "redirect",
+            HirCommand::If(_) => "if",
+            HirCommand::While(_) => "while",
+            HirCommand::Until(_) => "until",
+            HirCommand::For(_) => "for",
+            HirCommand::Subshell(_) => "subshell",
+            HirCommand::Group(_) => "group",
+            HirCommand::FunctionDef(_) => "function",
+            HirCommand::Case(_) => "case",
+            HirCommand::DoubleBracket(_) => "[[",
+            HirCommand::ArithFor(_) => "arith-for",
+            HirCommand::ArithCommand(_) => "arith",
+            HirCommand::Select(_) => "select",
+            _ => "command",
         }
     }
 
@@ -1987,6 +1991,16 @@ struct StreamingCutParseState {
     output_delim: Option<String>,
 }
 
+#[derive(Default)]
+#[allow(clippy::struct_excessive_bools)]
+struct TypeFlags {
+    all: bool,
+    skip_functions: bool,
+    path_only: bool,
+    force_path: bool,
+    type_only: bool,
+}
+
 #[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 struct StreamingUniqFlags {
@@ -2423,38 +2437,46 @@ impl<R: Read> Read for BatStreamReader<R> {
             if self.finished {
                 return Ok(0);
             }
-
             self.emit_header();
             let copied =
                 take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
             if copied > 0 {
                 return Ok(copied);
             }
+            self.pump_next_bat_line()?;
+        }
+    }
+}
 
-            if let Some((line, _had_newline)) =
-                streaming_read_next_line(&mut self.inner, &mut self.input_pending)?
-            {
-                self.line_num += 1;
-                if !streaming_bat_in_range(self.line_num, self.stage.line_range) {
-                    continue;
-                }
-                let display_line = if self.stage.show_all {
-                    streaming_make_visible(&line)
-                } else {
-                    line
-                };
-                if self.stage.show_numbers {
-                    self.output_pending.extend_from_slice(
-                        format!("{:>5}   \u{2502} {display_line}\n", self.line_num).as_bytes(),
-                    );
-                } else {
-                    self.output_pending
-                        .extend_from_slice(format!("{display_line}\n").as_bytes());
-                }
-            } else {
-                self.emit_footer();
-                self.finished = true;
+impl<R: Read> BatStreamReader<R> {
+    fn pump_next_bat_line(&mut self) -> std::io::Result<()> {
+        if let Some((line, _had_newline)) =
+            streaming_read_next_line(&mut self.inner, &mut self.input_pending)?
+        {
+            self.line_num += 1;
+            if streaming_bat_in_range(self.line_num, self.stage.line_range) {
+                self.emit_bat_line(&line);
             }
+        } else {
+            self.emit_footer();
+            self.finished = true;
+        }
+        Ok(())
+    }
+
+    fn emit_bat_line(&mut self, line: &str) {
+        let display_line = if self.stage.show_all {
+            streaming_make_visible(line)
+        } else {
+            line.to_string()
+        };
+        if self.stage.show_numbers {
+            self.output_pending.extend_from_slice(
+                format!("{:>5}   \u{2502} {display_line}\n", self.line_num).as_bytes(),
+            );
+        } else {
+            self.output_pending
+                .extend_from_slice(format!("{display_line}\n").as_bytes());
         }
     }
 }
@@ -2785,61 +2807,73 @@ impl<R> SedStreamReader<R> {
     fn apply_instructions(&mut self, line: String, is_last: bool) -> StreamingSedLineResult {
         let mut current_text = line;
         let mut printed = false;
-
-        for (idx, instr) in self.stage.instructions.iter().enumerate() {
-            if !streaming_sed_addr_matches(
-                &instr.addr,
+        for idx in 0..self.stage.instructions.len() {
+            let matches_addr = streaming_sed_addr_matches(
+                &self.stage.instructions[idx].addr,
                 self.line_num,
                 is_last,
                 &current_text,
                 &mut self.range_states[idx],
-            ) {
+            );
+            if !matches_addr {
                 continue;
             }
-            match &instr.cmd {
-                StreamingSedCmd::Substitute(sub) => {
-                    current_text = streaming_sed_substitute(
-                        &current_text,
-                        &sub.pattern,
-                        &sub.replacement,
-                        sub.global,
-                    );
-                }
-                StreamingSedCmd::Delete => return StreamingSedLineResult::Delete,
-                StreamingSedCmd::Print => {
-                    streaming_sed_emit_line(&mut self.output_pending, &current_text);
-                    printed = true;
-                }
-                StreamingSedCmd::Transliterate(from, to) => {
-                    current_text = streaming_sed_transliterate(&current_text, from, to);
-                }
-                StreamingSedCmd::AppendText(text) => {
-                    if !self.stage.suppress_print && !printed {
-                        streaming_sed_emit_line(&mut self.output_pending, &current_text);
-                        printed = true;
-                    }
-                    streaming_sed_emit_line(&mut self.output_pending, text);
-                }
-                StreamingSedCmd::InsertText(text) => {
-                    streaming_sed_emit_line(&mut self.output_pending, text);
-                }
-                StreamingSedCmd::ChangeText(text) => {
-                    streaming_sed_emit_line(&mut self.output_pending, text);
-                    return StreamingSedLineResult::Delete;
-                }
-                StreamingSedCmd::Quit => {
-                    if !self.stage.suppress_print && !printed {
-                        streaming_sed_emit_line(&mut self.output_pending, &current_text);
-                    }
-                    return StreamingSedLineResult::Quit;
-                }
+            if let Some(result) = self.apply_sed_instruction(idx, &mut current_text, &mut printed) {
+                return result;
             }
         }
-
         if !self.stage.suppress_print && !printed {
             streaming_sed_emit_line(&mut self.output_pending, &current_text);
         }
         StreamingSedLineResult::Continue
+    }
+
+    fn apply_sed_instruction(
+        &mut self,
+        idx: usize,
+        current_text: &mut String,
+        printed: &mut bool,
+    ) -> Option<StreamingSedLineResult> {
+        let cmd = self.stage.instructions[idx].cmd.clone();
+        match cmd {
+            StreamingSedCmd::Substitute(sub) => {
+                *current_text = streaming_sed_substitute(
+                    current_text,
+                    &sub.pattern,
+                    &sub.replacement,
+                    sub.global,
+                );
+            }
+            StreamingSedCmd::Delete => return Some(StreamingSedLineResult::Delete),
+            StreamingSedCmd::Print => {
+                streaming_sed_emit_line(&mut self.output_pending, current_text);
+                *printed = true;
+            }
+            StreamingSedCmd::Transliterate(from, to) => {
+                *current_text = streaming_sed_transliterate(current_text, &from, &to);
+            }
+            StreamingSedCmd::AppendText(text) => {
+                if !self.stage.suppress_print && !*printed {
+                    streaming_sed_emit_line(&mut self.output_pending, current_text);
+                    *printed = true;
+                }
+                streaming_sed_emit_line(&mut self.output_pending, &text);
+            }
+            StreamingSedCmd::InsertText(text) => {
+                streaming_sed_emit_line(&mut self.output_pending, &text);
+            }
+            StreamingSedCmd::ChangeText(text) => {
+                streaming_sed_emit_line(&mut self.output_pending, &text);
+                return Some(StreamingSedLineResult::Delete);
+            }
+            StreamingSedCmd::Quit => {
+                if !self.stage.suppress_print && !*printed {
+                    streaming_sed_emit_line(&mut self.output_pending, current_text);
+                }
+                return Some(StreamingSedLineResult::Quit);
+            }
+        }
+        None
     }
 }
 
@@ -3577,40 +3611,47 @@ impl<R: Read> Read for UniqStreamReader<R> {
             if self.finished {
                 return Ok(0);
             }
+            self.pump_next_uniq_line()?;
+        }
+    }
+}
 
-            if let Some((line, _had_newline)) =
-                streaming_read_next_line(&mut self.inner, &mut self.input_pending)?
-            {
-                let key = streaming_uniq_compare_key(&line, &self.flags);
-                if self
-                    .prev
-                    .as_ref()
-                    .is_some_and(|(_, prev_key)| *prev_key == key)
-                {
-                    self.count += 1;
-                } else {
-                    if let Some((prev_line, _)) = self.prev.take() {
-                        emit_streaming_uniq_line(
-                            &mut self.output_pending,
-                            &prev_line,
-                            self.count,
-                            &self.flags,
-                        );
-                    }
-                    self.prev = Some((line, key));
-                    self.count = 1;
-                }
-            } else {
-                if let Some((prev_line, _)) = self.prev.take() {
-                    emit_streaming_uniq_line(
-                        &mut self.output_pending,
-                        &prev_line,
-                        self.count,
-                        &self.flags,
-                    );
-                }
-                self.finished = true;
-            }
+impl<R: Read> UniqStreamReader<R> {
+    fn pump_next_uniq_line(&mut self) -> std::io::Result<()> {
+        if let Some((line, _had_newline)) =
+            streaming_read_next_line(&mut self.inner, &mut self.input_pending)?
+        {
+            self.handle_uniq_line(line);
+        } else {
+            self.flush_uniq_prev();
+            self.finished = true;
+        }
+        Ok(())
+    }
+
+    fn handle_uniq_line(&mut self, line: String) {
+        let key = streaming_uniq_compare_key(&line, &self.flags);
+        if self
+            .prev
+            .as_ref()
+            .is_some_and(|(_, prev_key)| *prev_key == key)
+        {
+            self.count += 1;
+            return;
+        }
+        self.flush_uniq_prev();
+        self.prev = Some((line, key));
+        self.count = 1;
+    }
+
+    fn flush_uniq_prev(&mut self) {
+        if let Some((prev_line, _)) = self.prev.take() {
+            emit_streaming_uniq_line(
+                &mut self.output_pending,
+                &prev_line,
+                self.count,
+                &self.flags,
+            );
         }
     }
 }
@@ -5816,50 +5857,12 @@ impl WorkerRuntime {
         source_reader: Option<Box<dyn Read>>,
     ) {
         let pipefail = self.vm.state.get_var("SHOPT_o_pipefail").as_deref() == Some("1");
-        let stage_results: Vec<(StreamingPipelineStage, Option<String>)> = cmds
-            .iter()
-            .enumerate()
-            .map(|(idx, cmd)| {
-                self.compile_pipeline_stage_with_last_argument(
-                    cmd,
-                    idx == 0 && source_reader.is_none(),
-                )
-            })
-            .collect();
-        let (stages, stage_last_args): (Vec<_>, Vec<_>) = stage_results.into_iter().unzip();
+        let (stages, stage_last_args) = self.compile_pipeline_stages(cmds, source_reader.is_none());
         if source_reader.is_none() && stages.len() == 1 {
-            if self.command_needs_full_single_stage_execution(&cmds[0]) {
-                self.execute_command(&cmds[0]);
-                let status = self.vm.state.last_status;
-                self.set_pipestatus(&[status]);
-                return;
-            }
-            if !matches!(stages[0], StreamingPipelineStage::BufferedCommand(_))
-                && !Self::command_requires_runtime_expansion(&cmds[0])
-            {
-                if let Some(argv) = self.resolve_streaming_pipeline_argv(&cmds[0]) {
-                    self.trace_command(&argv);
-                }
-            }
-            let status = self.execute_scheduled_single_stage(&stages[0]);
-            if let Some(last_arg) = stage_last_args[0].as_deref() {
-                self.vm.state.set_last_argument(last_arg);
-            }
-            self.set_pipestatus(&[status]);
-            if !self.exec.resource_exhausted {
-                self.vm.state.last_status = status;
-            }
+            self.run_single_pipeline_stage(&cmds[0], &stages[0], stage_last_args[0].as_deref());
             return;
         }
-        let stage_statuses: Vec<Rc<RefCell<i32>>> = stages
-            .iter()
-            .map(|stage| {
-                Rc::new(RefCell::new(i32::from(matches!(
-                    stage,
-                    StreamingPipelineStage::Grep(_)
-                ))))
-            })
-            .collect();
+        let stage_statuses = Self::seed_stage_statuses(&stages);
         let stage_stderr: Vec<Rc<RefCell<Vec<u8>>>> = stages
             .iter()
             .map(|_| Rc::new(RefCell::new(Vec::new())))
@@ -5885,16 +5888,74 @@ impl WorkerRuntime {
         }
         self.set_pipestatus(&statuses);
         if !self.exec.resource_exhausted {
-            if pipefail {
-                self.vm.state.last_status = statuses
-                    .iter()
-                    .rev()
-                    .copied()
-                    .find(|status| *status != 0)
-                    .unwrap_or(0);
-            } else {
-                self.vm.state.last_status = statuses.last().copied().unwrap_or(0);
+            self.vm.state.last_status = Self::resolve_pipeline_exit_status(&statuses, pipefail);
+        }
+    }
+
+    fn compile_pipeline_stages(
+        &mut self,
+        cmds: &[HirCommand],
+        no_source_reader: bool,
+    ) -> (Vec<StreamingPipelineStage>, Vec<Option<String>>) {
+        cmds.iter()
+            .enumerate()
+            .map(|(idx, cmd)| {
+                self.compile_pipeline_stage_with_last_argument(cmd, idx == 0 && no_source_reader)
+            })
+            .unzip()
+    }
+
+    fn run_single_pipeline_stage(
+        &mut self,
+        cmd: &HirCommand,
+        stage: &StreamingPipelineStage,
+        last_arg: Option<&str>,
+    ) {
+        if self.command_needs_full_single_stage_execution(cmd) {
+            self.execute_command(cmd);
+            let status = self.vm.state.last_status;
+            self.set_pipestatus(&[status]);
+            return;
+        }
+        if !matches!(stage, StreamingPipelineStage::BufferedCommand(_))
+            && !Self::command_requires_runtime_expansion(cmd)
+        {
+            if let Some(argv) = self.resolve_streaming_pipeline_argv(cmd) {
+                self.trace_command(&argv);
             }
+        }
+        let status = self.execute_scheduled_single_stage(stage);
+        if let Some(last_arg) = last_arg {
+            self.vm.state.set_last_argument(last_arg);
+        }
+        self.set_pipestatus(&[status]);
+        if !self.exec.resource_exhausted {
+            self.vm.state.last_status = status;
+        }
+    }
+
+    fn seed_stage_statuses(stages: &[StreamingPipelineStage]) -> Vec<Rc<RefCell<i32>>> {
+        stages
+            .iter()
+            .map(|stage| {
+                Rc::new(RefCell::new(i32::from(matches!(
+                    stage,
+                    StreamingPipelineStage::Grep(_)
+                ))))
+            })
+            .collect()
+    }
+
+    fn resolve_pipeline_exit_status(statuses: &[i32], pipefail: bool) -> i32 {
+        if pipefail {
+            statuses
+                .iter()
+                .rev()
+                .copied()
+                .find(|status| *status != 0)
+                .unwrap_or(0)
+        } else {
+            statuses.last().copied().unwrap_or(0)
         }
     }
 
@@ -5904,40 +5965,8 @@ impl WorkerRuntime {
                 self.write_stdout(data);
                 0
             }
-            StreamingPipelineStage::File(path) => {
-                let resolved = self.resolve_cwd_path(path);
-                let Ok(mut reader) = self.open_streaming_file_reader(&resolved, "cat") else {
-                    return self.vm.state.last_status;
-                };
-                let mut buffer = [0u8; 4096];
-                loop {
-                    match reader.read(&mut buffer) {
-                        Ok(0) => break,
-                        Ok(read) => {
-                            self.write_stdout(&buffer[..read]);
-                            if self.exec.resource_exhausted {
-                                return 1;
-                            }
-                        }
-                        Err(err) => {
-                            self.write_stderr(
-                                format!("wasmsh: cat: stdin read error: {err}\n").as_bytes(),
-                            );
-                            return 1;
-                        }
-                    }
-                }
-                0
-            }
-            StreamingPipelineStage::Yes { line } => {
-                for _ in 0..STREAMING_YES_MAX_LINES {
-                    self.write_stdout(line);
-                    if self.exec.resource_exhausted {
-                        return 1;
-                    }
-                }
-                0
-            }
+            StreamingPipelineStage::File(path) => self.execute_single_stage_file(path),
+            StreamingPipelineStage::Yes { line } => self.execute_single_stage_yes(line),
             StreamingPipelineStage::BufferedCommand(BufferedPipelineCommand::Argv(argv)) => {
                 self.trace_command(argv);
                 self.execute_argv_command(argv);
@@ -5953,6 +5982,39 @@ impl WorkerRuntime {
                 1
             }
         }
+    }
+
+    fn execute_single_stage_file(&mut self, path: &str) -> i32 {
+        let resolved = self.resolve_cwd_path(path);
+        let Ok(mut reader) = self.open_streaming_file_reader(&resolved, "cat") else {
+            return self.vm.state.last_status;
+        };
+        let mut buffer = [0u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => return 0,
+                Ok(read) => {
+                    self.write_stdout(&buffer[..read]);
+                    if self.exec.resource_exhausted {
+                        return 1;
+                    }
+                }
+                Err(err) => {
+                    self.write_stderr(format!("wasmsh: cat: stdin read error: {err}\n").as_bytes());
+                    return 1;
+                }
+            }
+        }
+    }
+
+    fn execute_single_stage_yes(&mut self, line: &[u8]) -> i32 {
+        for _ in 0..STREAMING_YES_MAX_LINES {
+            self.write_stdout(line);
+            if self.exec.resource_exhausted {
+                return 1;
+            }
+        }
+        0
     }
 
     fn compile_pipeline_stage(
@@ -6468,11 +6530,33 @@ impl WorkerRuntime {
         is_first: bool,
     ) -> Option<StreamingPipelineStage> {
         let cmd_name = argv.first()?.as_str();
+        if let Some(stage) = Self::parse_streaming_first_stage(cmd_name, argv, is_first) {
+            return Some(stage);
+        }
+        if let Some(stage) = Self::parse_streaming_internal_stage(cmd_name, argv, is_first) {
+            return Some(stage);
+        }
+        if self.is_buffered_stage_candidate(cmd_name) {
+            return Some(StreamingPipelineStage::BufferedCommand(
+                BufferedPipelineCommand::Argv(argv.to_vec()),
+            ));
+        }
+        None
+    }
+
+    fn parse_streaming_first_stage(
+        cmd_name: &str,
+        argv: &[String],
+        is_first: bool,
+    ) -> Option<StreamingPipelineStage> {
+        if !is_first {
+            return None;
+        }
         match cmd_name {
-            "echo" if is_first => Some(StreamingPipelineStage::Literal(
-                Self::streaming_echo_bytes(&argv[1..]),
-            )),
-            "yes" if is_first => {
+            "echo" => Some(StreamingPipelineStage::Literal(Self::streaming_echo_bytes(
+                &argv[1..],
+            ))),
+            "yes" => {
                 let text = if argv.len() > 1 {
                     argv[1..].join(" ")
                 } else {
@@ -6482,34 +6566,47 @@ impl WorkerRuntime {
                     line: format!("{text}\n").into_bytes(),
                 })
             }
-            "cat" => Self::parse_streaming_cat_stage(&argv[1..], is_first),
-            "head" if !is_first => Self::parse_streaming_head_stage(&argv[1..]),
-            "tail" if !is_first => Self::parse_streaming_tail_stage(&argv[1..]),
-            "bat" if !is_first => Self::parse_streaming_bat_stage(&argv[1..]),
-            "sed" if !is_first => Self::parse_streaming_sed_stage(&argv[1..]),
-            "tee" if !is_first => Self::parse_streaming_tee_stage(&argv[1..]),
-            "paste" if !is_first => Self::parse_streaming_paste_stage(&argv[1..]),
-            "column" if !is_first => Self::parse_streaming_column_stage(&argv[1..]),
-            "grep" if !is_first => Self::parse_streaming_grep_stage(&argv[1..]),
-            "uniq" if !is_first => Self::parse_streaming_uniq_stage(&argv[1..]),
-            "rev" if !is_first => Self::parse_streaming_rev_stage(&argv[1..]),
-            "cut" if !is_first => Self::parse_streaming_cut_stage(&argv[1..]),
-            "tr" if !is_first => Self::parse_streaming_tr_stage(&argv[1..]),
-            "wc" if !is_first => Self::parse_streaming_wc_stage(&argv[1..]),
-            _ if cmd_name == "bash"
-                || cmd_name == "sh"
-                || cmd_name == "builtin"
-                || self.functions.contains_key(cmd_name)
-                || self.builtins.is_builtin(cmd_name)
-                || self.utils.is_utility(cmd_name)
-                || self.external_handler.is_some() =>
-            {
-                Some(StreamingPipelineStage::BufferedCommand(
-                    BufferedPipelineCommand::Argv(argv.to_vec()),
-                ))
-            }
             _ => None,
         }
+    }
+
+    fn parse_streaming_internal_stage(
+        cmd_name: &str,
+        argv: &[String],
+        is_first: bool,
+    ) -> Option<StreamingPipelineStage> {
+        if cmd_name == "cat" {
+            return Self::parse_streaming_cat_stage(&argv[1..], is_first);
+        }
+        if is_first {
+            return None;
+        }
+        match cmd_name {
+            "head" => Self::parse_streaming_head_stage(&argv[1..]),
+            "tail" => Self::parse_streaming_tail_stage(&argv[1..]),
+            "bat" => Self::parse_streaming_bat_stage(&argv[1..]),
+            "sed" => Self::parse_streaming_sed_stage(&argv[1..]),
+            "tee" => Self::parse_streaming_tee_stage(&argv[1..]),
+            "paste" => Self::parse_streaming_paste_stage(&argv[1..]),
+            "column" => Self::parse_streaming_column_stage(&argv[1..]),
+            "grep" => Self::parse_streaming_grep_stage(&argv[1..]),
+            "uniq" => Self::parse_streaming_uniq_stage(&argv[1..]),
+            "rev" => Self::parse_streaming_rev_stage(&argv[1..]),
+            "cut" => Self::parse_streaming_cut_stage(&argv[1..]),
+            "tr" => Self::parse_streaming_tr_stage(&argv[1..]),
+            "wc" => Self::parse_streaming_wc_stage(&argv[1..]),
+            _ => None,
+        }
+    }
+
+    fn is_buffered_stage_candidate(&self, cmd_name: &str) -> bool {
+        cmd_name == "bash"
+            || cmd_name == "sh"
+            || cmd_name == "builtin"
+            || self.functions.contains_key(cmd_name)
+            || self.builtins.is_builtin(cmd_name)
+            || self.utils.is_utility(cmd_name)
+            || self.external_handler.is_some()
     }
 
     fn streaming_echo_bytes(args: &[String]) -> Vec<u8> {
@@ -7390,33 +7487,46 @@ impl WorkerRuntime {
             max_line_length: false,
         };
         let mut parsing_flags = true;
-
         for arg in args {
-            if parsing_flags && arg == "--" {
-                parsing_flags = false;
-                continue;
+            if !Self::apply_streaming_wc_arg(arg, &mut flags, &mut parsing_flags)? {
+                return None;
             }
-            if parsing_flags && arg.starts_with('-') && arg.len() > 1 {
-                for ch in arg[1..].chars() {
-                    match ch {
-                        'l' => flags.lines = true,
-                        'w' => flags.words = true,
-                        'c' | 'm' => flags.bytes = true,
-                        'L' => flags.max_line_length = true,
-                        _ => return None,
-                    }
-                }
-                continue;
-            }
-            return None;
         }
-
         if !flags.lines && !flags.words && !flags.bytes && !flags.max_line_length {
             flags.lines = true;
             flags.words = true;
             flags.bytes = true;
         }
         Some(StreamingPipelineStage::Wc(flags))
+    }
+
+    fn apply_streaming_wc_arg(
+        arg: &str,
+        flags: &mut StreamingWcFlags,
+        parsing_flags: &mut bool,
+    ) -> Option<bool> {
+        if *parsing_flags && arg == "--" {
+            *parsing_flags = false;
+            return Some(true);
+        }
+        if *parsing_flags && arg.starts_with('-') && arg.len() > 1 {
+            Self::apply_streaming_wc_short_cluster(&arg[1..], flags)?;
+            return Some(true);
+        }
+        Some(false)
+    }
+
+    fn apply_streaming_wc_short_cluster(short: &str, flags: &mut StreamingWcFlags) -> Option<()> {
+        for ch in short.chars() {
+            match ch {
+                'l' => flags.lines = true,
+                'w' => flags.words = true,
+                'c' | 'm' => flags.bytes = true,
+                'L' => flags.max_line_length = true,
+                _ => return None,
+            }
+        }
+        Some(())
     }
 
     fn set_pipestatus(&mut self, statuses: &[i32]) {
@@ -7539,14 +7649,28 @@ impl WorkerRuntime {
         self.proc_subst_out_scopes = saved_proc_subst_out_scopes;
         self.proc_subst_in_scopes = saved_proc_subst_in_scopes;
 
+        let mut events = Self::seed_isolated_events_from_capture(captured);
+        Self::merge_isolated_inner_events(&mut events, inner_events.drain(..));
+        events.extend(inner_diagnostics);
+        events
+    }
+
+    fn seed_isolated_events_from_capture(capture: CapturedOutput) -> Vec<WorkerEvent> {
         let mut events = Vec::new();
-        if !captured.stdout.is_empty() {
-            events.push(WorkerEvent::Stdout(captured.stdout));
+        if !capture.stdout.is_empty() {
+            events.push(WorkerEvent::Stdout(capture.stdout));
         }
-        if !captured.stderr.is_empty() {
-            events.push(WorkerEvent::Stderr(captured.stderr));
+        if !capture.stderr.is_empty() {
+            events.push(WorkerEvent::Stderr(capture.stderr));
         }
-        for event in inner_events.drain(..) {
+        events
+    }
+
+    fn merge_isolated_inner_events(
+        events: &mut Vec<WorkerEvent>,
+        inner_events: impl IntoIterator<Item = WorkerEvent>,
+    ) {
+        for event in inner_events {
             match &event {
                 WorkerEvent::Stdout(_)
                     if !events.iter().any(|e| matches!(e, WorkerEvent::Stdout(_))) =>
@@ -7562,8 +7686,6 @@ impl WorkerRuntime {
                 _ => events.push(event),
             }
         }
-        events.extend(inner_diagnostics);
-        events
     }
 
     fn execute_isolated_scheduled_pipeline_events_from_reader(
@@ -8223,47 +8345,58 @@ impl WorkerRuntime {
         let saved_status = self.vm.state.last_status;
         match sink.mode {
             PendingProcessSubstOutMode::Buffered { data } => {
-                let events = if let Some(pipeline) = Self::parse_single_pipeline_input(&sink.inner)
-                {
-                    self.execute_isolated_scheduled_pipeline_events_from_reader(
-                        &pipeline,
-                        Box::new(Cursor::new(data.clone())),
-                    )
-                } else {
-                    self.execute_isolated_input_events(&sink.inner, Some(InputTarget::Bytes(data)))
-                };
-                for event in events {
-                    match event {
-                        WorkerEvent::Stdout(data) => self.write_stdout(&data),
-                        WorkerEvent::Stderr(data) => self.write_stderr(&data),
-                        WorkerEvent::Diagnostic(level, msg) => self.vm.emit_diagnostic(
-                            convert_diag_level(level),
-                            wasmsh_vm::DiagCategory::Runtime,
-                            msg,
-                        ),
-                        _ => {}
-                    }
-                }
+                self.flush_buffered_process_subst_out(&sink.inner, data);
             }
-            PendingProcessSubstOutMode::Live { mut runner } => {
-                if runner.isolated_runtime.is_some() {
-                    runner.finish_with_parent(self);
-                } else {
-                    runner.finish();
-                }
-                if !runner.captured_stdout.is_empty() {
-                    self.write_stdout(&runner.captured_stdout);
-                }
-                if !runner.captured_stderr.is_empty() {
-                    self.write_stderr(&runner.captured_stderr);
-                }
-                for diag in runner.captured_diagnostics {
-                    self.vm
-                        .emit_diagnostic(diag.level, diag.category, diag.message);
-                }
+            PendingProcessSubstOutMode::Live { runner } => {
+                self.flush_live_process_subst_out(runner);
             }
         }
         self.vm.state.last_status = saved_status;
+    }
+
+    fn flush_buffered_process_subst_out(&mut self, inner: &str, data: Vec<u8>) {
+        let events = if let Some(pipeline) = Self::parse_single_pipeline_input(inner) {
+            self.execute_isolated_scheduled_pipeline_events_from_reader(
+                &pipeline,
+                Box::new(Cursor::new(data.clone())),
+            )
+        } else {
+            self.execute_isolated_input_events(inner, Some(InputTarget::Bytes(data)))
+        };
+        for event in events {
+            self.apply_isolated_flush_event(event);
+        }
+    }
+
+    fn apply_isolated_flush_event(&mut self, event: WorkerEvent) {
+        match event {
+            WorkerEvent::Stdout(data) => self.write_stdout(&data),
+            WorkerEvent::Stderr(data) => self.write_stderr(&data),
+            WorkerEvent::Diagnostic(level, msg) => self.vm.emit_diagnostic(
+                convert_diag_level(level),
+                wasmsh_vm::DiagCategory::Runtime,
+                msg,
+            ),
+            _ => {}
+        }
+    }
+
+    fn flush_live_process_subst_out(&mut self, mut runner: LiveProcessSubstRunner) {
+        if runner.isolated_runtime.is_some() {
+            runner.finish_with_parent(self);
+        } else {
+            runner.finish();
+        }
+        if !runner.captured_stdout.is_empty() {
+            self.write_stdout(&runner.captured_stdout);
+        }
+        if !runner.captured_stderr.is_empty() {
+            self.write_stderr(&runner.captured_stderr);
+        }
+        for diag in runner.captured_diagnostics {
+            self.vm
+                .emit_diagnostic(diag.level, diag.category, diag.message);
+        }
     }
 
     /// Execute `>(cmd)` by creating a writable temp path and scheduling the
@@ -8446,49 +8579,64 @@ impl WorkerRuntime {
     /// an error occurred and execution should stop.
     fn collect_stdin_from_redirections(&mut self, redirections: &[HirRedirection]) -> bool {
         for redir in redirections {
-            match redir.op {
-                RedirectionOp::HereDoc | RedirectionOp::HereDocStrip => {
-                    if let Some(body) = &redir.here_doc_body {
-                        let expanded =
-                            wasmsh_expand::expand_string(&body.content, &mut self.vm.state);
-                        self.set_pending_input_bytes(expanded.into_bytes());
-                    }
-                }
-                RedirectionOp::HereString => {
-                    let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
-                    let resolved_target = resolved.first().unwrap_or(&redir.target);
-                    let content = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
-                    let mut data = content.into_bytes();
-                    data.push(b'\n');
-                    self.set_pending_input_bytes(data);
-                }
-                RedirectionOp::Input => {
-                    let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
-                    let resolved_target = resolved.first().unwrap_or(&redir.target);
-                    let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
-                    let path = self.resolve_cwd_path(&target);
-                    match self.fs.stat(&path) {
-                        Ok(metadata) if !metadata.is_dir => {
-                            self.set_pending_input_file(path, false);
-                        }
-                        Ok(_) => {
-                            let msg = format!("wasmsh: {target}: Is a directory\n");
-                            self.write_stderr(msg.as_bytes());
-                            self.vm.state.last_status = 1;
-                            return true;
-                        }
-                        Err(_) => {
-                            let msg = format!("wasmsh: {target}: No such file or directory\n");
-                            self.write_stderr(msg.as_bytes());
-                            self.vm.state.last_status = 1;
-                            return true;
-                        }
-                    }
-                }
-                _ => {}
+            if self.collect_stdin_from_redir(redir) {
+                return true;
             }
         }
         false
+    }
+
+    fn collect_stdin_from_redir(&mut self, redir: &HirRedirection) -> bool {
+        match redir.op {
+            RedirectionOp::HereDoc | RedirectionOp::HereDocStrip => {
+                self.collect_stdin_heredoc(redir);
+                false
+            }
+            RedirectionOp::HereString => {
+                self.collect_stdin_herestring(redir);
+                false
+            }
+            RedirectionOp::Input => self.collect_stdin_input(redir),
+            _ => false,
+        }
+    }
+
+    fn collect_stdin_heredoc(&mut self, redir: &HirRedirection) {
+        if let Some(body) = &redir.here_doc_body {
+            let expanded = wasmsh_expand::expand_string(&body.content, &mut self.vm.state);
+            self.set_pending_input_bytes(expanded.into_bytes());
+        }
+    }
+
+    fn collect_stdin_herestring(&mut self, redir: &HirRedirection) {
+        let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
+        let resolved_target = resolved.first().unwrap_or(&redir.target);
+        let content = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
+        let mut data = content.into_bytes();
+        data.push(b'\n');
+        self.set_pending_input_bytes(data);
+    }
+
+    fn collect_stdin_input(&mut self, redir: &HirRedirection) -> bool {
+        let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
+        let resolved_target = resolved.first().unwrap_or(&redir.target);
+        let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
+        let path = self.resolve_cwd_path(&target);
+        match self.fs.stat(&path) {
+            Ok(metadata) if !metadata.is_dir => {
+                self.set_pending_input_file(path, false);
+                false
+            }
+            Ok(_) => self.fail_stdin_input(&target, "Is a directory"),
+            Err(_) => self.fail_stdin_input(&target, "No such file or directory"),
+        }
+    }
+
+    fn fail_stdin_input(&mut self, target: &str, reason: &str) -> bool {
+        let msg = format!("wasmsh: {target}: {reason}\n");
+        self.write_stderr(msg.as_bytes());
+        self.vm.state.last_status = 1;
+        true
     }
 
     fn read_pending_input_bytes(&mut self, cmd_name: &str) -> Result<Option<Vec<u8>>, ()> {
@@ -9582,53 +9730,61 @@ impl WorkerRuntime {
     /// Execute `type name ...` — report how each name would be interpreted.
     /// Checks aliases, functions, builtins, and utilities in that order.
     fn execute_type(&mut self, argv: &[String]) {
-        let mut all = false;
-        let mut skip_functions = false;
-        let mut path_only = false;
-        let mut force_path = false;
-        let mut type_only = false;
-        let mut names = Vec::new();
+        let (flags, names) = Self::parse_type_args(&argv[1..]);
+        let mut status = 0;
+        for name in names {
+            if !self.render_type_name(name, &flags) {
+                status = 1;
+            }
+        }
+        self.vm.state.last_status = status;
+    }
 
-        for arg in &argv[1..] {
+    fn parse_type_args<'a>(args: &'a [String]) -> (TypeFlags, Vec<&'a str>) {
+        let mut flags = TypeFlags::default();
+        let mut names = Vec::new();
+        for arg in args {
             if arg.starts_with('-') && arg.len() > 1 {
-                for ch in arg[1..].chars() {
-                    match ch {
-                        'a' => all = true,
-                        'f' => skip_functions = true,
-                        'p' => path_only = true,
-                        'P' => {
-                            path_only = true;
-                            force_path = true;
-                        }
-                        't' => type_only = true,
-                        _ => {}
-                    }
-                }
+                Self::apply_type_short_flags(&arg[1..], &mut flags);
             } else {
                 names.push(arg.as_str());
             }
         }
+        (flags, names)
+    }
 
-        let mut status = 0;
-        for name in names {
-            let mut lookups = self.command_lookups(name, skip_functions, force_path);
-            if path_only {
-                lookups.retain(|lookup| matches!(lookup.kind, CommandLookupKind::File));
-            }
-            if lookups.is_empty() {
-                let msg = format!("wasmsh: type: {name}: not found\n");
-                self.write_stderr(msg.as_bytes());
-                status = 1;
-                continue;
-            }
-
-            let limit = if all { usize::MAX } else { 1 };
-            for lookup in lookups.into_iter().take(limit) {
-                let line = format_type_lookup(&lookup, type_only, path_only);
-                self.write_stdout(format!("{line}\n").as_bytes());
+    fn apply_type_short_flags(short: &str, flags: &mut TypeFlags) {
+        for ch in short.chars() {
+            match ch {
+                'a' => flags.all = true,
+                'f' => flags.skip_functions = true,
+                'p' => flags.path_only = true,
+                'P' => {
+                    flags.path_only = true;
+                    flags.force_path = true;
+                }
+                't' => flags.type_only = true,
+                _ => {}
             }
         }
-        self.vm.state.last_status = status;
+    }
+
+    fn render_type_name(&mut self, name: &str, flags: &TypeFlags) -> bool {
+        let mut lookups = self.command_lookups(name, flags.skip_functions, flags.force_path);
+        if flags.path_only {
+            lookups.retain(|lookup| matches!(lookup.kind, CommandLookupKind::File));
+        }
+        if lookups.is_empty() {
+            let msg = format!("wasmsh: type: {name}: not found\n");
+            self.write_stderr(msg.as_bytes());
+            return false;
+        }
+        let limit = if flags.all { usize::MAX } else { 1 };
+        for lookup in lookups.into_iter().take(limit) {
+            let line = format_type_lookup(&lookup, flags.type_only, flags.path_only);
+            self.write_stdout(format!("{line}\n").as_bytes());
+        }
+        true
     }
 
     /// Execute `builtin name [args...]` — skip alias and function lookup,
@@ -11277,48 +11433,65 @@ impl WorkerRuntime {
     /// Supports fd-specific redirections (2>, 2>>) and &> (both stdout and stderr).
     fn apply_redirections(&mut self, redirections: &[HirRedirection], stdout_before: usize) {
         for redir in redirections {
-            // Resolve command substitutions in redirect targets before expansion
-            let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
-            let resolved_target = resolved.first().unwrap_or(&redir.target);
-            let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
-            let path = self.resolve_cwd_path(&target);
-            let fd = redir.fd.unwrap_or(1);
-
-            match redir.op {
-                RedirectionOp::Output => {
-                    if self.noclobber_rejects(&path, &target) {
-                        return;
-                    }
-                    self.apply_output_redir(&path, &target, fd, stdout_before);
-                }
-                RedirectionOp::Clobber => {
-                    self.apply_output_redir(&path, &target, fd, stdout_before);
-                }
-                RedirectionOp::Append => {
-                    self.apply_append_redir(&path, &target, fd, stdout_before);
-                }
-                RedirectionOp::AppendBoth => {
-                    self.apply_append_redir(&path, &target, FD_BOTH, stdout_before);
-                }
-                RedirectionOp::DupOutput => {
-                    let source_fd = redir.fd.unwrap_or(1);
-                    if target == "-" {
-                        if source_fd == 2 {
-                            self.take_stderr();
-                        } else {
-                            self.capture_stdout(stdout_before);
-                        }
-                    } else if target.parse::<u32>().ok() == Some(1) && source_fd == 2 {
-                        let stderr_data = self.take_stderr();
-                        self.write_stdout(&stderr_data);
-                    } else if target.parse::<u32>().ok() == Some(2) && source_fd == 1 {
-                        let stdout_data = self.capture_stdout(stdout_before);
-                        self.write_stderr(&stdout_data);
-                    }
-                }
-                #[allow(unreachable_patterns)]
-                _ => {}
+            if !self.apply_single_redirection(redir, stdout_before) {
+                return;
             }
+        }
+    }
+
+    fn apply_single_redirection(&mut self, redir: &HirRedirection, stdout_before: usize) -> bool {
+        let resolved = self.resolve_command_subst(std::slice::from_ref(&redir.target));
+        let resolved_target = resolved.first().unwrap_or(&redir.target);
+        let target = wasmsh_expand::expand_word(resolved_target, &mut self.vm.state);
+        let path = self.resolve_cwd_path(&target);
+        let fd = redir.fd.unwrap_or(1);
+        match redir.op {
+            RedirectionOp::Output => {
+                if self.noclobber_rejects(&path, &target) {
+                    return false;
+                }
+                self.apply_output_redir(&path, &target, fd, stdout_before);
+            }
+            RedirectionOp::Clobber => {
+                self.apply_output_redir(&path, &target, fd, stdout_before);
+            }
+            RedirectionOp::Append => {
+                self.apply_append_redir(&path, &target, fd, stdout_before);
+            }
+            RedirectionOp::AppendBoth => {
+                self.apply_append_redir(&path, &target, FD_BOTH, stdout_before);
+            }
+            RedirectionOp::DupOutput => {
+                self.apply_dup_output_redir_inline(redir, &target, stdout_before);
+            }
+            #[allow(unreachable_patterns)]
+            _ => {}
+        }
+        true
+    }
+
+    fn apply_dup_output_redir_inline(
+        &mut self,
+        redir: &HirRedirection,
+        target: &str,
+        stdout_before: usize,
+    ) {
+        let source_fd = redir.fd.unwrap_or(1);
+        if target == "-" {
+            if source_fd == 2 {
+                self.take_stderr();
+            } else {
+                self.capture_stdout(stdout_before);
+            }
+            return;
+        }
+        let target_fd = target.parse::<u32>().ok();
+        if target_fd == Some(1) && source_fd == 2 {
+            let stderr_data = self.take_stderr();
+            self.write_stdout(&stderr_data);
+        } else if target_fd == Some(2) && source_fd == 1 {
+            let stdout_data = self.capture_stdout(stdout_before);
+            self.write_stderr(&stdout_data);
         }
     }
 
