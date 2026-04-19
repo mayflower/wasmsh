@@ -19,68 +19,24 @@ from deepagents.backends.protocol import (
     ExecuteResponse,
     FileData,
     FileDownloadResponse,
-    FileOperationError,
     FileUploadResponse,
     ReadResult,
 )
 from deepagents.backends.sandbox import BaseSandbox
 from wasmsh_pyodide_runtime import get_dist_dir, get_node_host_script
 
+from langchain_wasmsh._errors import extract_diagnostic, map_error
+from langchain_wasmsh._text import (
+    MAX_BINARY_PREVIEW_BYTES,
+    decode_content,
+    encode_content,
+    paginate_text,
+    to_initial_files,
+)
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_DIR = "/workspace"
-
-# Binary preview + text-output caps, kept identical to BaseSandbox so the
-# `langchain-tests` standard suite's exact-match assertions pass.
-_MAX_BINARY_PREVIEW_BYTES = 500 * 1024
-_MAX_TEXT_OUTPUT_BYTES = 500 * 1024
-_TEXT_TRUNCATION_NOTE = (
-    "\n\n[Output was truncated due to size limits. "
-    "This paginated read result exceeded the sandbox stdout limit. "
-    "Continue reading with a larger offset or smaller limit to inspect "
-    "the rest of the file.]"
-)
-
-
-def _encode_content(content: bytes) -> str:
-    return base64.b64encode(content).decode("ascii")
-
-
-def _decode_content(content: str) -> bytes:
-    return base64.b64decode(content.encode("ascii"))
-
-
-def _to_initial_files(
-    files: dict[str, str | bytes] | None,
-) -> list[dict[str, str]]:
-    if not files:
-        return []
-    encoded: list[dict[str, str]] = []
-    for path, content in files.items():
-        payload = content.encode("utf-8") if isinstance(content, str) else content
-        encoded.append({"path": path, "contentBase64": _encode_content(payload)})
-    return encoded
-
-
-def _extract_diagnostic(events: list[dict[str, Any]] | None) -> str | None:
-    if not events:
-        return None
-    for event in events:
-        diagnostic = event.get("Diagnostic")
-        if isinstance(diagnostic, list) and len(diagnostic) >= 2:  # noqa: PLR2004
-            return str(diagnostic[1])
-    return None
-
-
-def _map_error(message: str | None) -> FileOperationError:
-    normalized = (message or "").lower()
-    if "not found" in normalized:
-        return "file_not_found"
-    if "directory" in normalized:
-        return "is_directory"
-    if "permission" in normalized:
-        return "permission_denied"
-    return "invalid_path"
 
 
 class WasmshSandbox(BaseSandbox):
@@ -141,7 +97,7 @@ class WasmshSandbox(BaseSandbox):
                 "init",
                 {
                     "stepBudget": step_budget,
-                    "initialFiles": _to_initial_files(initial_files),
+                    "initialFiles": to_initial_files(initial_files),
                     "allowedHosts": self._allowed_hosts,
                 },
             )
@@ -337,11 +293,11 @@ class WasmshSandbox(BaseSandbox):
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
-            if len(raw) > _MAX_BINARY_PREVIEW_BYTES:
+            if len(raw) > MAX_BINARY_PREVIEW_BYTES:
                 return ReadResult(
                     error=(
                         f"File '{file_path}': Binary file exceeds maximum "
-                        f"preview size of {_MAX_BINARY_PREVIEW_BYTES} bytes"
+                        f"preview size of {MAX_BINARY_PREVIEW_BYTES} bytes"
                     ),
                 )
             return ReadResult(
@@ -351,48 +307,8 @@ class WasmshSandbox(BaseSandbox):
                 ),
             )
 
-        page = self._paginate_text(text, offset=int(offset), limit=int(limit))
+        page = paginate_text(text, offset=int(offset), limit=int(limit))
         return ReadResult(file_data=FileData(content=page, encoding="utf-8"))
-
-    @staticmethod
-    def _paginate_text(text: str, *, offset: int, limit: int) -> str:
-        """Apply (offset, limit) line-window + 500 KiB output cap.
-
-        Matches BaseSandbox's semantics: lines are 0-indexed starting from
-        `offset`, at most `limit` lines are returned, and the assembled
-        content is truncated at ~500 KiB with a user-facing note so agents
-        know to paginate further.
-        """
-        lines = text.split("\n")
-        window = lines[offset : offset + limit]
-        if not window:
-            return ""
-
-        parts: list[str] = []
-        current_bytes = 0
-        truncation_bytes = len(_TEXT_TRUNCATION_NOTE.encode("utf-8"))
-        effective_limit = _MAX_TEXT_OUTPUT_BYTES - truncation_bytes
-        truncated = False
-        for i, line in enumerate(window):
-            piece = line if i == 0 else "\n" + line
-            piece_bytes = len(piece.encode("utf-8"))
-            if current_bytes + piece_bytes > effective_limit:
-                truncated = True
-                remaining = effective_limit - current_bytes
-                if remaining > 0:
-                    prefix = piece.encode("utf-8")[:remaining].decode(
-                        "utf-8", errors="ignore"
-                    )
-                    if prefix:
-                        parts.append(prefix)
-                break
-            parts.append(piece)
-            current_bytes += piece_bytes
-
-        output = "".join(parts)
-        if truncated:
-            output += _TEXT_TRUNCATION_NOTE
-        return output
 
     def edit(  # noqa: C901, PLR0911
         self,
@@ -499,24 +415,24 @@ class WasmshSandbox(BaseSandbox):
                     FileDownloadResponse(
                         path=path,
                         content=None,
-                        error=_map_error(str(exc)),
+                        error=map_error(str(exc)),
                     )
                 )
                 continue
-            diagnostic = _extract_diagnostic(result.get("events"))
+            diagnostic = extract_diagnostic(result.get("events"))
             if diagnostic:
                 responses.append(
                     FileDownloadResponse(
                         path=path,
                         content=None,
-                        error=_map_error(diagnostic),
+                        error=map_error(diagnostic),
                     )
                 )
                 continue
             responses.append(
                 FileDownloadResponse(
                     path=path,
-                    content=_decode_content(str(result["contentBase64"])),
+                    content=decode_content(str(result["contentBase64"])),
                     error=None,
                 )
             )
@@ -534,19 +450,19 @@ class WasmshSandbox(BaseSandbox):
                     "writeFile",
                     {
                         "path": path,
-                        "contentBase64": _encode_content(content),
+                        "contentBase64": encode_content(content),
                     },
                 )
             except RuntimeError as exc:
                 responses.append(
-                    FileUploadResponse(path=path, error=_map_error(str(exc)))
+                    FileUploadResponse(path=path, error=map_error(str(exc)))
                 )
                 continue
-            diagnostic = _extract_diagnostic(result.get("events"))
+            diagnostic = extract_diagnostic(result.get("events"))
             responses.append(
                 FileUploadResponse(
                     path=path,
-                    error=_map_error(diagnostic) if diagnostic else None,
+                    error=map_error(diagnostic) if diagnostic else None,
                 )
             )
         return responses

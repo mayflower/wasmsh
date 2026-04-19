@@ -126,6 +126,34 @@ try {
 
 Main-thread execution is not supported in v1.
 
+## Remote / Kubernetes backend
+
+For production / Kubernetes deployments, use `WasmshRemoteSandbox` — it
+routes every call through the wasmsh dispatcher HTTP service + runner
+pool.  Same `BaseSandbox` surface as the in-process variant, one-line
+import change.  Deploy with
+[`deploy/helm/wasmsh`](https://github.com/mayflower/wasmsh/tree/main/deploy/helm/wasmsh);
+contract documented in
+[`docs/reference/dispatcher-api.md`](https://github.com/mayflower/wasmsh/blob/main/docs/reference/dispatcher-api.md).
+
+```ts
+import { WasmshRemoteSandbox } from "@mayflowergmbh/langchain-wasmsh";
+
+const sandbox = await WasmshRemoteSandbox.create({
+  dispatcherUrl: "http://wasmsh-dispatcher.wasmsh.svc.cluster.local:8080",
+});
+try {
+  const result = await sandbox.execute("python3 -c 'print(2 + 2)'");
+  console.log(result.output);
+} finally {
+  await sandbox.stop();
+}
+```
+
+See [`examples/deepagent-typescript/remote-basic.ts`](https://github.com/mayflower/wasmsh/blob/main/examples/deepagent-typescript/remote-basic.ts)
+and the [integration guide](https://github.com/mayflower/wasmsh/blob/main/docs/integrations/langchain-wasmsh.md#wasmshremotesandbox--docker--kubernetes-backend)
+for a runnable Docker Compose stack and full deployment notes.
+
 ## Reference
 
 ### `WasmshSandbox.createNode(options?): Promise<WasmshSandbox>`

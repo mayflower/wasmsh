@@ -45,6 +45,11 @@ sandbox = WasmshSandbox()
 agent = create_deep_agent(backend=sandbox)
 ```
 
+For Kubernetes / horizontally-scalable deployments, swap `WasmshSandbox`
+for `WasmshRemoteSandbox` (routes through the dispatcher +
+`deploy/helm/wasmsh` Helm chart) — same `BaseSandbox` surface, one-line
+import change.
+
 See [`docs/integrations/langchain-wasmsh.md`](docs/integrations/langchain-wasmsh.md) for the full integration guide.
 
 ## Use directly

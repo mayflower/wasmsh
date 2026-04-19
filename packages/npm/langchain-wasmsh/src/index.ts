@@ -15,3 +15,7 @@ export {
   type WasmshBrowserWorkerOptions,
   type WasmshNodeSandboxOptions,
 } from "./sandbox.js";
+export {
+  WasmshRemoteSandbox,
+  type WasmshRemoteSandboxOptions,
+} from "./remote.js";

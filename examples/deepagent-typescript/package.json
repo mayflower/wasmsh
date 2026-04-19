@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "basic": "tsx basic.ts",
+    "remote-basic": "tsx remote-basic.ts",
     "example": "tsx example.ts",
     "start": "tsx example.ts"
   },

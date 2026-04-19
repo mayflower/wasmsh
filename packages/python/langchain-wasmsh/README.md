@@ -128,6 +128,29 @@ backend = WasmshSandbox(step_budget=100_000)
 
 A budget of `0` (the default) means unlimited.
 
+## Remote / Kubernetes backend
+
+For production or scalable deployments, use `WasmshRemoteSandbox` — same
+`BaseSandbox` surface, routed through the wasmsh dispatcher + runner
+pool.  The dispatcher HTTP contract is documented in
+[`docs/reference/dispatcher-api.md`](https://github.com/mayflower/wasmsh/blob/main/docs/reference/dispatcher-api.md);
+the Helm chart lives in [`deploy/helm/wasmsh`](https://github.com/mayflower/wasmsh/tree/main/deploy/helm/wasmsh).
+
+```python
+from langchain_wasmsh import WasmshRemoteSandbox
+
+backend = WasmshRemoteSandbox("http://wasmsh-dispatcher.wasmsh.svc.cluster.local:8080")
+try:
+    result = backend.execute("python3 -c 'print(2 + 2)'")
+    print(result.output)
+finally:
+    backend.close()
+```
+
+See [`examples/deepagent-python/remote_basic.py`](https://github.com/mayflower/wasmsh/blob/main/examples/deepagent-python/remote_basic.py)
+and the [integration guide](https://github.com/mayflower/wasmsh/blob/main/docs/integrations/langchain-wasmsh.md#wasmshremotesandbox--docker--kubernetes-backend)
+for a runnable Docker Compose stack and full deployment notes.
+
 ## Reference
 
 ### `WasmshSandbox(*, runtime, dist_dir, working_directory, step_budget, initial_files, allowed_hosts)`
