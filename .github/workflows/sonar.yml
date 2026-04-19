@@ -28,7 +28,6 @@ jobs:
       github.event.workflow_run.conclusion == 'success'
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-    env:
       SONAR_TOKEN_SET: ${{ secrets.SONAR_TOKEN != '' }}
     steps:
       - name: Check SonarQube secrets availability
