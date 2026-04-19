@@ -563,6 +563,7 @@ impl Drop for PipeReader {
     }
 }
 
+#[derive(Clone, Copy)]
 enum PipeProcessPoll {
     Ready,
     PendingRead,
@@ -620,41 +621,59 @@ impl LiveProcessSubstInReader {
         if self.done {
             return false;
         }
-        let mut progressed = false;
-        if let Some(runtime) = self.isolated_runtime.as_mut() {
-            for idx in (0..self.processes.len()).rev() {
-                if self.finished[idx] {
-                    continue;
-                }
-                match self.processes[idx].poll(runtime.as_mut()) {
-                    PipeProcessPoll::Ready => progressed = true,
-                    PipeProcessPoll::PendingRead | PipeProcessPoll::PendingWrite => {}
-                    PipeProcessPoll::Exited => {
-                        self.finished[idx] = true;
-                        progressed = true;
-                    }
-                }
-            }
+        let progressed = if self.isolated_runtime.is_some() {
+            self.pump_with_isolated_runtime()
         } else {
-            for idx in (0..self.processes.len()).rev() {
-                if self.finished[idx] {
-                    continue;
-                }
-                match self.processes[idx].poll_without_runtime() {
-                    PipeProcessPoll::Ready => progressed = true,
-                    PipeProcessPoll::PendingRead | PipeProcessPoll::PendingWrite => {}
-                    PipeProcessPoll::Exited => {
-                        self.finished[idx] = true;
-                        progressed = true;
-                    }
-                }
-            }
-        }
+            self.pump_without_runtime_loop()
+        };
         if self.finished.iter().all(|done| *done) {
             self.finalize_stderr();
             self.done = true;
         }
         progressed
+    }
+
+    fn pump_with_isolated_runtime(&mut self) -> bool {
+        let runtime = self
+            .isolated_runtime
+            .as_mut()
+            .expect("isolated runtime present");
+        let mut progressed = false;
+        for idx in (0..self.processes.len()).rev() {
+            if self.finished[idx] {
+                continue;
+            }
+            let outcome = self.processes[idx].poll(runtime.as_mut());
+            if apply_process_poll_outcome(&mut self.finished[idx], outcome) {
+                progressed = true;
+            }
+        }
+        progressed
+    }
+
+    fn pump_without_runtime_loop(&mut self) -> bool {
+        let mut progressed = false;
+        for idx in (0..self.processes.len()).rev() {
+            if self.finished[idx] {
+                continue;
+            }
+            let outcome = self.processes[idx].poll_without_runtime();
+            if apply_process_poll_outcome(&mut self.finished[idx], outcome) {
+                progressed = true;
+            }
+        }
+        progressed
+    }
+}
+
+fn apply_process_poll_outcome(finished: &mut bool, outcome: PipeProcessPoll) -> bool {
+    match outcome {
+        PipeProcessPoll::Ready => true,
+        PipeProcessPoll::PendingRead | PipeProcessPoll::PendingWrite => false,
+        PipeProcessPoll::Exited => {
+            *finished = true;
+            true
+        }
     }
 }
 
@@ -769,57 +788,62 @@ impl LiveProcessSubstRunner {
         if self.done {
             return false;
         }
-        let mut parent = parent;
-        let mut progressed = false;
-        if self.isolated_runtime.is_some() {
-            if let Some(parent_rt) = parent.as_deref_mut() {
-                self.sync_isolated_runtime_with_parent(parent_rt);
-            }
-            let runtime = self
-                .isolated_runtime
-                .as_mut()
-                .expect("isolated process substitution runtime missing");
-            for idx in (0..self.processes.len()).rev() {
-                if self.finished[idx] {
-                    continue;
-                }
-                match self.processes[idx].poll(runtime.as_mut()) {
-                    PipeProcessPoll::Ready => progressed = true,
-                    PipeProcessPoll::PendingRead | PipeProcessPoll::PendingWrite => {}
-                    PipeProcessPoll::Exited => {
-                        self.finished[idx] = true;
-                        progressed = true;
-                    }
-                }
-            }
-            if let Some(parent_rt) = parent {
-                self.sync_isolated_runtime_with_parent(parent_rt);
-            }
+        let mut progressed = if self.isolated_runtime.is_some() {
+            self.pump_isolated_with_parent(parent)
         } else {
-            for idx in (0..self.processes.len()).rev() {
-                if self.finished[idx] {
-                    continue;
-                }
-                match self.processes[idx].poll_without_runtime() {
-                    PipeProcessPoll::Ready => progressed = true,
-                    PipeProcessPoll::PendingRead | PipeProcessPoll::PendingWrite => {}
-                    PipeProcessPoll::Exited => {
-                        self.finished[idx] = true;
-                        progressed = true;
-                    }
-                }
-            }
-        }
-
+            self.pump_without_runtime_pass()
+        };
         if self.drain_final_pipe() {
             progressed = true;
         }
-
         if self.finished.iter().all(|done| *done) {
             self.finalize_stderr();
             self.done = true;
         }
+        progressed
+    }
 
+    fn pump_isolated_with_parent(&mut self, parent: Option<&mut WorkerRuntime>) -> bool {
+        let mut parent = parent;
+        if let Some(parent_rt) = parent.as_deref_mut() {
+            self.sync_isolated_runtime_with_parent(parent_rt);
+        }
+        let progressed = self.pump_isolated_pass();
+        if let Some(parent_rt) = parent {
+            self.sync_isolated_runtime_with_parent(parent_rt);
+        }
+        progressed
+    }
+
+    fn pump_isolated_pass(&mut self) -> bool {
+        let runtime = self
+            .isolated_runtime
+            .as_mut()
+            .expect("isolated process substitution runtime missing");
+        let mut progressed = false;
+        for idx in (0..self.processes.len()).rev() {
+            if self.finished[idx] {
+                continue;
+            }
+            let outcome = self.processes[idx].poll(runtime.as_mut());
+            if apply_process_poll_outcome(&mut self.finished[idx], outcome) {
+                progressed = true;
+            }
+        }
+        progressed
+    }
+
+    fn pump_without_runtime_pass(&mut self) -> bool {
+        let mut progressed = false;
+        for idx in (0..self.processes.len()).rev() {
+            if self.finished[idx] {
+                continue;
+            }
+            let outcome = self.processes[idx].poll_without_runtime();
+            if apply_process_poll_outcome(&mut self.finished[idx], outcome) {
+                progressed = true;
+            }
+        }
         progressed
     }
 
@@ -1174,43 +1198,49 @@ impl BufferedPipeProcess {
             return PipeProcessPoll::Exited;
         }
         if self.pending_offset < self.pending_stdout.len() {
-            let write_result = {
-                let mut pipe = self.output.borrow_mut();
-                pipe.write(&self.pending_stdout[self.pending_offset..])
-            };
-            return match write_result {
-                WriteResult::Written(written) => {
-                    self.pending_offset += written;
-                    if self.pending_offset == self.pending_stdout.len() {
-                        self.pending_stdout.clear();
-                        self.pending_offset = 0;
-                        if self.command_ran {
-                            self.output.borrow_mut().close_write();
-                            self.finished = true;
-                            return PipeProcessPoll::Exited;
-                        }
-                    }
-                    PipeProcessPoll::Ready
-                }
-                WriteResult::WouldBlock(0) => PipeProcessPoll::PendingWrite,
-                WriteResult::WouldBlock(written) => {
-                    self.pending_offset += written;
-                    PipeProcessPoll::Ready
-                }
-                WriteResult::BrokenPipe => {
-                    self.output.borrow_mut().close_write();
-                    self.finished = true;
-                    PipeProcessPoll::Exited
-                }
-            };
+            return self.buffered_drain_pending();
         }
-
         if self.command_ran {
             self.output.borrow_mut().close_write();
             self.finished = true;
             return PipeProcessPoll::Exited;
         }
+        self.buffered_pump_input(runtime)
+    }
 
+    fn buffered_drain_pending(&mut self) -> PipeProcessPoll {
+        let write_result = {
+            let mut pipe = self.output.borrow_mut();
+            pipe.write(&self.pending_stdout[self.pending_offset..])
+        };
+        match write_result {
+            WriteResult::Written(written) => {
+                self.pending_offset += written;
+                if self.pending_offset == self.pending_stdout.len() {
+                    self.pending_stdout.clear();
+                    self.pending_offset = 0;
+                    if self.command_ran {
+                        self.output.borrow_mut().close_write();
+                        self.finished = true;
+                        return PipeProcessPoll::Exited;
+                    }
+                }
+                PipeProcessPoll::Ready
+            }
+            WriteResult::WouldBlock(0) => PipeProcessPoll::PendingWrite,
+            WriteResult::WouldBlock(written) => {
+                self.pending_offset += written;
+                PipeProcessPoll::Ready
+            }
+            WriteResult::BrokenPipe => {
+                self.output.borrow_mut().close_write();
+                self.finished = true;
+                PipeProcessPoll::Exited
+            }
+        }
+    }
+
+    fn buffered_pump_input(&mut self, runtime: &mut WorkerRuntime) -> PipeProcessPoll {
         let Some(input) = &self.input else {
             return self.run_command(runtime);
         };
@@ -1445,65 +1475,74 @@ impl<'a> PipeReadProcess<'a> {
             return PipeProcessPoll::Exited;
         }
         loop {
-            if self.pending_offset < self.pending.len() {
-                let write_result = {
-                    let mut pipe = self.output.borrow_mut();
-                    pipe.write(&self.pending[self.pending_offset..])
-                };
-                match write_result {
-                    WriteResult::Written(written) => {
-                        self.pending_offset += written;
-                        if self.pending_offset == self.pending.len() {
-                            self.pending.clear();
-                            self.pending_offset = 0;
-                        }
-                        return PipeProcessPoll::Ready;
-                    }
-                    WriteResult::WouldBlock(0) => return PipeProcessPoll::PendingWrite,
-                    WriteResult::WouldBlock(written) => {
-                        self.pending_offset += written;
-                        return PipeProcessPoll::Ready;
-                    }
-                    WriteResult::BrokenPipe => {
-                        return self.finish();
-                    }
-                }
+            if let Some(poll) = self.read_drain_pending() {
+                return poll;
             }
-
-            if let Some(result) = self.poll_stderr() {
-                return result;
+            if let Some(poll) = self.poll_stderr() {
+                return poll;
             }
-
             if self.reader_done {
                 return self.finish();
             }
+            if let Some(poll) = self.read_fill_from_reader() {
+                return poll;
+            }
+        }
+    }
 
-            let mut buffer = [0u8; 4096];
-            let reader = self
-                .reader
-                .as_mut()
-                .expect("pipe read process polled after reader finished");
-            match reader.read(&mut buffer) {
-                Ok(0) => {
-                    self.reader_done = true;
+    fn read_drain_pending(&mut self) -> Option<PipeProcessPoll> {
+        if self.pending_offset >= self.pending.len() {
+            return None;
+        }
+        let write_result = {
+            let mut pipe = self.output.borrow_mut();
+            pipe.write(&self.pending[self.pending_offset..])
+        };
+        Some(match write_result {
+            WriteResult::Written(written) => {
+                self.pending_offset += written;
+                if self.pending_offset == self.pending.len() {
+                    self.pending.clear();
+                    self.pending_offset = 0;
                 }
-                Ok(read) => {
-                    self.pending.extend_from_slice(&buffer[..read]);
-                }
-                Err(err) if err.kind() == ErrorKind::WouldBlock => {
-                    return PipeProcessPoll::PendingRead;
-                }
-                Err(err) => {
-                    *self.status.borrow_mut() = 1;
-                    self.stderr.borrow_mut().extend_from_slice(
-                        format!(
-                            "wasmsh: {}: streaming pipeline read error: {err}\n",
-                            self.label
-                        )
-                        .as_bytes(),
-                    );
-                    self.reader_done = true;
-                }
+                PipeProcessPoll::Ready
+            }
+            WriteResult::WouldBlock(0) => PipeProcessPoll::PendingWrite,
+            WriteResult::WouldBlock(written) => {
+                self.pending_offset += written;
+                PipeProcessPoll::Ready
+            }
+            WriteResult::BrokenPipe => self.finish(),
+        })
+    }
+
+    fn read_fill_from_reader(&mut self) -> Option<PipeProcessPoll> {
+        let mut buffer = [0u8; 4096];
+        let reader = self
+            .reader
+            .as_mut()
+            .expect("pipe read process polled after reader finished");
+        match reader.read(&mut buffer) {
+            Ok(0) => {
+                self.reader_done = true;
+                None
+            }
+            Ok(read) => {
+                self.pending.extend_from_slice(&buffer[..read]);
+                None
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => Some(PipeProcessPoll::PendingRead),
+            Err(err) => {
+                *self.status.borrow_mut() = 1;
+                self.stderr.borrow_mut().extend_from_slice(
+                    format!(
+                        "wasmsh: {}: streaming pipeline read error: {err}\n",
+                        self.label
+                    )
+                    .as_bytes(),
+                );
+                self.reader_done = true;
+                None
             }
         }
     }
@@ -1593,87 +1632,102 @@ impl<'a> TeePipeProcess<'a> {
             return PipeProcessPoll::Exited;
         }
         loop {
-            if self.pending_offset < self.pending.len() {
-                let write_result = {
-                    let mut pipe = self.output.borrow_mut();
-                    pipe.write(&self.pending[self.pending_offset..])
-                };
-                match write_result {
-                    WriteResult::Written(written) => {
-                        let end = self.pending_offset + written;
-                        let chunk = self.pending[self.pending_offset..end].to_vec();
-                        self.write_targets(&chunk);
-                        self.pending_offset += written;
-                        if self.pending_offset == self.pending.len() {
-                            self.pending.clear();
-                            self.pending_offset = 0;
-                        }
-                        return PipeProcessPoll::Ready;
-                    }
-                    WriteResult::WouldBlock(0) => return PipeProcessPoll::PendingWrite,
-                    WriteResult::WouldBlock(written) => {
-                        let end = self.pending_offset + written;
-                        let chunk = self.pending[self.pending_offset..end].to_vec();
-                        self.write_targets(&chunk);
-                        self.pending_offset += written;
-                        return PipeProcessPoll::Ready;
-                    }
-                    WriteResult::BrokenPipe => {
-                        return self.finish();
-                    }
-                }
+            if let Some(poll) = self.tee_drain_pending() {
+                return poll;
             }
-
-            if self.pipe_stderr {
-                let len = self.stderr.borrow().len();
-                if self.stderr_offset < len {
-                    let chunk = {
-                        let stderr = self.stderr.borrow();
-                        stderr[self.stderr_offset..].to_vec()
-                    };
-                    let write_result = {
-                        let mut output = self.output.borrow_mut();
-                        output.write(&chunk)
-                    };
-                    match write_result {
-                        WriteResult::Written(written) | WriteResult::WouldBlock(written)
-                            if written > 0 =>
-                        {
-                            self.stderr_offset += written;
-                            return PipeProcessPoll::Ready;
-                        }
-                        WriteResult::Written(_) | WriteResult::WouldBlock(_) => {
-                            return PipeProcessPoll::PendingWrite
-                        }
-                        WriteResult::BrokenPipe => return self.finish(),
-                    }
-                }
+            if let Some(poll) = self.tee_drain_stderr() {
+                return poll;
             }
-
             if self.reader_done {
                 return self.finish();
             }
+            if let Some(poll) = self.tee_fill_from_reader() {
+                return poll;
+            }
+        }
+    }
 
-            let mut buffer = [0u8; 4096];
-            let reader = self
-                .reader
-                .as_mut()
-                .expect("tee pipe process polled after reader finished");
-            match reader.read(&mut buffer) {
-                Ok(0) => {
-                    self.reader_done = true;
+    fn tee_drain_pending(&mut self) -> Option<PipeProcessPoll> {
+        if self.pending_offset >= self.pending.len() {
+            return None;
+        }
+        let write_result = {
+            let mut pipe = self.output.borrow_mut();
+            pipe.write(&self.pending[self.pending_offset..])
+        };
+        Some(match write_result {
+            WriteResult::Written(written) => {
+                let end = self.pending_offset + written;
+                let chunk = self.pending[self.pending_offset..end].to_vec();
+                self.write_targets(&chunk);
+                self.pending_offset += written;
+                if self.pending_offset == self.pending.len() {
+                    self.pending.clear();
+                    self.pending_offset = 0;
                 }
-                Ok(read) => self.pending.extend_from_slice(&buffer[..read]),
-                Err(err) if err.kind() == ErrorKind::WouldBlock => {
-                    return PipeProcessPoll::PendingRead;
-                }
-                Err(err) => {
-                    *self.status.borrow_mut() = 1;
-                    self.stderr.borrow_mut().extend_from_slice(
-                        format!("wasmsh: tee: streaming pipeline read error: {err}\n").as_bytes(),
-                    );
-                    self.reader_done = true;
-                }
+                PipeProcessPoll::Ready
+            }
+            WriteResult::WouldBlock(0) => PipeProcessPoll::PendingWrite,
+            WriteResult::WouldBlock(written) => {
+                let end = self.pending_offset + written;
+                let chunk = self.pending[self.pending_offset..end].to_vec();
+                self.write_targets(&chunk);
+                self.pending_offset += written;
+                PipeProcessPoll::Ready
+            }
+            WriteResult::BrokenPipe => self.finish(),
+        })
+    }
+
+    fn tee_drain_stderr(&mut self) -> Option<PipeProcessPoll> {
+        if !self.pipe_stderr {
+            return None;
+        }
+        let len = self.stderr.borrow().len();
+        if self.stderr_offset >= len {
+            return None;
+        }
+        let chunk = {
+            let stderr = self.stderr.borrow();
+            stderr[self.stderr_offset..].to_vec()
+        };
+        let write_result = {
+            let mut output = self.output.borrow_mut();
+            output.write(&chunk)
+        };
+        Some(match write_result {
+            WriteResult::Written(written) | WriteResult::WouldBlock(written) if written > 0 => {
+                self.stderr_offset += written;
+                PipeProcessPoll::Ready
+            }
+            WriteResult::Written(_) | WriteResult::WouldBlock(_) => PipeProcessPoll::PendingWrite,
+            WriteResult::BrokenPipe => self.finish(),
+        })
+    }
+
+    fn tee_fill_from_reader(&mut self) -> Option<PipeProcessPoll> {
+        let mut buffer = [0u8; 4096];
+        let reader = self
+            .reader
+            .as_mut()
+            .expect("tee pipe process polled after reader finished");
+        match reader.read(&mut buffer) {
+            Ok(0) => {
+                self.reader_done = true;
+                None
+            }
+            Ok(read) => {
+                self.pending.extend_from_slice(&buffer[..read]);
+                None
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => Some(PipeProcessPoll::PendingRead),
+            Err(err) => {
+                *self.status.borrow_mut() = 1;
+                self.stderr.borrow_mut().extend_from_slice(
+                    format!("wasmsh: tee: streaming pipeline read error: {err}\n").as_bytes(),
+                );
+                self.reader_done = true;
+                None
             }
         }
     }
@@ -1919,6 +1973,20 @@ enum StreamingGrepStep {
     NotMatched,
 }
 
+#[derive(Copy, Clone, Debug)]
+enum StreamingSedStep {
+    Advance(usize),
+    Break,
+}
+
+struct StreamingCutParseState {
+    delim: char,
+    mode: Option<StreamingCutMode>,
+    complement: bool,
+    only_delimited: bool,
+    output_delim: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 struct StreamingUniqFlags {
@@ -2084,54 +2152,77 @@ impl<R: Read> Read for HeadStreamReader<R> {
         if self.finished {
             return Ok(0);
         }
-
         match self.mode {
-            StreamingHeadMode::Bytes(ref mut remaining) => {
-                if *remaining == 0 {
-                    self.finished = true;
-                    return Ok(0);
-                }
-                let to_read = (*remaining).min(buf.len());
-                let read = self.inner.read(&mut buf[..to_read])?;
-                *remaining = remaining.saturating_sub(read);
-                if read == 0 || *remaining == 0 {
-                    self.finished = read == 0 || *remaining == 0;
-                }
-                Ok(read)
-            }
-            StreamingHeadMode::Lines(limit) => {
-                if self.lines_seen >= limit {
-                    self.finished = true;
-                    return Ok(0);
-                }
-                let mut produced = 0usize;
-                let mut one = [0u8; 1];
-                while produced < buf.len() && self.lines_seen < limit {
-                    let read = match self.inner.read(&mut one) {
-                        Ok(read) => read,
-                        Err(err) if err.kind() == ErrorKind::WouldBlock && produced > 0 => {
-                            return Ok(produced);
-                        }
-                        Err(err) => return Err(err),
-                    };
-                    if read == 0 {
-                        self.finished = true;
-                        break;
-                    }
-                    let byte = one[0];
-                    buf[produced] = byte;
-                    produced += 1;
-                    if byte == b'\n' {
-                        self.lines_seen += 1;
-                    }
-                }
-                if self.lines_seen >= limit {
-                    self.finished = true;
-                }
-                Ok(produced)
-            }
+            StreamingHeadMode::Bytes(_) => self.read_bytes_mode(buf),
+            StreamingHeadMode::Lines(limit) => self.read_lines_mode(buf, limit),
         }
     }
+}
+
+impl<R: Read> HeadStreamReader<R> {
+    fn read_bytes_mode(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let StreamingHeadMode::Bytes(ref mut remaining) = self.mode else {
+            unreachable!("read_bytes_mode called in non-Bytes mode")
+        };
+        if *remaining == 0 {
+            self.finished = true;
+            return Ok(0);
+        }
+        let to_read = (*remaining).min(buf.len());
+        let read = self.inner.read(&mut buf[..to_read])?;
+        *remaining = remaining.saturating_sub(read);
+        if read == 0 || *remaining == 0 {
+            self.finished = true;
+        }
+        Ok(read)
+    }
+
+    fn read_lines_mode(&mut self, buf: &mut [u8], limit: usize) -> std::io::Result<usize> {
+        if self.lines_seen >= limit {
+            self.finished = true;
+            return Ok(0);
+        }
+        let mut produced = 0usize;
+        while produced < buf.len() && self.lines_seen < limit {
+            match self.read_one_line_byte(&mut buf[produced..=produced], produced)? {
+                HeadLinesStep::Produced => produced += 1,
+                HeadLinesStep::EofBreak => break,
+                HeadLinesStep::WouldBlockYield => return Ok(produced),
+            }
+        }
+        if self.lines_seen >= limit {
+            self.finished = true;
+        }
+        Ok(produced)
+    }
+
+    fn read_one_line_byte(
+        &mut self,
+        slot: &mut [u8],
+        produced: usize,
+    ) -> std::io::Result<HeadLinesStep> {
+        let read = match self.inner.read(slot) {
+            Ok(n) => n,
+            Err(err) if err.kind() == ErrorKind::WouldBlock && produced > 0 => {
+                return Ok(HeadLinesStep::WouldBlockYield);
+            }
+            Err(err) => return Err(err),
+        };
+        if read == 0 {
+            self.finished = true;
+            return Ok(HeadLinesStep::EofBreak);
+        }
+        if slot[0] == b'\n' {
+            self.lines_seen += 1;
+        }
+        Ok(HeadLinesStep::Produced)
+    }
+}
+
+enum HeadLinesStep {
+    Produced,
+    EofBreak,
+    WouldBlockYield,
 }
 
 impl<R> TailStreamReader<R> {
@@ -2595,35 +2686,47 @@ fn streaming_sed_expand_replacement(
     let mut chars = template.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '\\' => {
-                let Some(&next) = chars.peek() else {
-                    out.push('\\');
-                    continue;
-                };
-                if let Some(digit) = next.to_digit(10) {
-                    chars.next();
-                    let idx = digit as usize;
-                    if let Some(Some((s, e))) = caps.get(idx).copied() {
-                        out.push_str(&subject[s..e]);
-                    }
-                    continue;
-                }
-                chars.next();
-                match next {
-                    '\\' => out.push('\\'),
-                    '&' => out.push('&'),
-                    'n' => out.push('\n'),
-                    't' => out.push('\t'),
-                    other => out.push(other),
-                }
-            }
-            '&' => {
-                if let Some(Some((s, e))) = caps.first().copied() {
-                    out.push_str(&subject[s..e]);
-                }
-            }
+            '\\' => streaming_sed_expand_escape(out, &mut chars, subject, caps),
+            '&' => streaming_sed_expand_whole_match(out, subject, caps),
             other => out.push(other),
         }
+    }
+}
+
+fn streaming_sed_expand_escape(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    subject: &str,
+    caps: &[Option<(usize, usize)>],
+) {
+    let Some(&next) = chars.peek() else {
+        out.push('\\');
+        return;
+    };
+    if let Some(digit) = next.to_digit(10) {
+        chars.next();
+        if let Some(Some((s, e))) = caps.get(digit as usize).copied() {
+            out.push_str(&subject[s..e]);
+        }
+        return;
+    }
+    chars.next();
+    match next {
+        '\\' => out.push('\\'),
+        '&' => out.push('&'),
+        'n' => out.push('\n'),
+        't' => out.push('\t'),
+        other => out.push(other),
+    }
+}
+
+fn streaming_sed_expand_whole_match(
+    out: &mut String,
+    subject: &str,
+    caps: &[Option<(usize, usize)>],
+) {
+    if let Some(Some((s, e))) = caps.first().copied() {
+        out.push_str(&subject[s..e]);
     }
 }
 
@@ -3588,37 +3691,48 @@ fn streaming_tr_unescape(iter: &mut std::iter::Peekable<std::str::Chars<'_>>) ->
 
 fn streaming_tr_process_utf8_chunk(pending: &mut Vec<u8>, chunk: &[u8], mut f: impl FnMut(char)) {
     pending.extend_from_slice(chunk);
-    loop {
-        match std::str::from_utf8(pending) {
-            Ok(text) => {
-                for ch in text.chars() {
-                    f(ch);
-                }
-                pending.clear();
-                return;
+    while streaming_tr_drain_once(pending, &mut f) {}
+}
+
+/// Consumes one contiguous UTF-8 slice (or one invalid byte) from `pending`.
+/// Returns true if more work may remain, false if `pending` is either empty,
+/// fully consumed, or ends in an incomplete UTF-8 sequence that must wait.
+fn streaming_tr_drain_once(pending: &mut Vec<u8>, f: &mut impl FnMut(char)) -> bool {
+    match std::str::from_utf8(pending) {
+        Ok(text) => {
+            for ch in text.chars() {
+                f(ch);
             }
-            Err(err) => {
-                let valid = err.valid_up_to();
-                if valid > 0 {
-                    let text = String::from_utf8_lossy(&pending[..valid]).to_string();
-                    for ch in text.chars() {
-                        f(ch);
-                    }
-                    pending.drain(..valid);
-                    continue;
-                }
-                if err.error_len().is_some() {
-                    let text = String::from_utf8_lossy(&pending[..1]).to_string();
-                    for ch in text.chars() {
-                        f(ch);
-                    }
-                    pending.drain(..1);
-                    continue;
-                }
-                return;
-            }
+            pending.clear();
+            false
         }
+        Err(err) => streaming_tr_consume_invalid_prefix(pending, &err, f),
     }
+}
+
+fn streaming_tr_consume_invalid_prefix(
+    pending: &mut Vec<u8>,
+    err: &std::str::Utf8Error,
+    f: &mut impl FnMut(char),
+) -> bool {
+    let valid = err.valid_up_to();
+    if valid > 0 {
+        let text = String::from_utf8_lossy(&pending[..valid]).to_string();
+        for ch in text.chars() {
+            f(ch);
+        }
+        pending.drain(..valid);
+        return true;
+    }
+    if err.error_len().is_some() {
+        let text = String::from_utf8_lossy(&pending[..1]).to_string();
+        for ch in text.chars() {
+            f(ch);
+        }
+        pending.drain(..1);
+        return true;
+    }
+    false
 }
 
 fn streaming_tr_flush_pending_lossy(pending: &mut Vec<u8>, mut f: impl FnMut(char)) {
@@ -4474,71 +4588,10 @@ impl WorkerRuntime {
             HostCommand::Init {
                 step_budget,
                 allowed_hosts,
-            } => {
-                self.config.step_budget = step_budget;
-                self.config.allowed_hosts = allowed_hosts;
-                self.vm = Vm::with_limits(
-                    ShellState::new(),
-                    ExecutionLimits {
-                        step_limit: step_budget,
-                        output_byte_limit: self.config.output_byte_limit,
-                        pipe_byte_limit: self.config.pipe_byte_limit,
-                        recursion_limit: self.config.recursion_limit,
-                    },
-                );
-                self.fs = BackendFs::new();
-                self.current_exec_io = None;
-                self.proc_subst_out_scopes.clear();
-                self.proc_subst_in_scopes.clear();
-                self.functions = IndexMap::new();
-                self.exec.reset();
-                self.aliases = IndexMap::new();
-                self.active_run = None;
-                self.pending_signals.clear();
-                self.initialized = true;
-                // Set default shopt options (bash defaults)
-                self.vm.state.set_var("SHOPT_extglob".into(), "1".into());
-                self.vm
-                    .state
-                    .set_var("SHOPT_expand_aliases".into(), "1".into());
-                self.vm.state.set_var("SHOPT_sourcepath".into(), "1".into());
-                vec![WorkerEvent::Version(PROTOCOL_VERSION.to_string())]
-            }
-            HostCommand::Run { input } => {
-                if !self.initialized {
-                    return vec![WorkerEvent::Diagnostic(
-                        DiagnosticLevel::Error,
-                        "runtime not initialized".into(),
-                    )];
-                }
-                match self.start_execution(input) {
-                    Ok(()) => self.poll_active_run_to_completion(),
-                    Err(events) => events,
-                }
-            }
-            HostCommand::StartRun { input } => {
-                if !self.initialized {
-                    return vec![WorkerEvent::Diagnostic(
-                        DiagnosticLevel::Error,
-                        "runtime not initialized".into(),
-                    )];
-                }
-                match self.start_execution(input) {
-                    Ok(()) => vec![WorkerEvent::Yielded],
-                    Err(events) => events,
-                }
-            }
-            HostCommand::PollRun => match self.poll_active_run() {
-                Some(ExecutionPoll::Yield(mut events)) => {
-                    events.push(WorkerEvent::Yielded);
-                    events
-                }
-                Some(ExecutionPoll::Done(events)) => events,
-                None => vec![WorkerEvent::Diagnostic(
-                    DiagnosticLevel::Error,
-                    "no active run".into(),
-                )],
-            },
+            } => self.handle_init_command(step_budget, allowed_hosts),
+            HostCommand::Run { input } => self.handle_run_command(input, true),
+            HostCommand::StartRun { input } => self.handle_run_command(input, false),
+            HostCommand::PollRun => self.handle_poll_run_command(),
             HostCommand::Signal { signal } => self.handle_signal_command(&signal),
             HostCommand::Cancel => {
                 self.cancel_active_execution();
@@ -4547,71 +4600,144 @@ impl WorkerRuntime {
                     "cancel received".into(),
                 )]
             }
-            HostCommand::ReadFile { path } => {
-                use wasmsh_fs::OpenOptions;
-                match self.fs.open(&path, OpenOptions::read()) {
-                    Ok(h) => match self.fs.read_file(h) {
-                        Ok(data) => {
-                            self.fs.close(h);
-                            vec![WorkerEvent::Stdout(data)]
-                        }
-                        Err(e) => {
-                            self.fs.close(h);
-                            vec![WorkerEvent::Diagnostic(
-                                DiagnosticLevel::Error,
-                                format!("read error: {path}: {e}"),
-                            )]
-                        }
-                    },
-                    Err(e) => vec![WorkerEvent::Diagnostic(
-                        DiagnosticLevel::Error,
-                        format!("read error: {e}"),
-                    )],
-                }
-            }
-            HostCommand::WriteFile { path, data } => {
-                use wasmsh_fs::OpenOptions;
-                match self.fs.open(&path, OpenOptions::write()) {
-                    Ok(h) => {
-                        if let Err(e) = self.fs.write_file(h, &data) {
-                            self.write_stderr(format!("wasmsh: write error: {e}\n").as_bytes());
-                        }
-                        self.fs.close(h);
-                        vec![WorkerEvent::FsChanged(path)]
-                    }
-                    Err(e) => vec![WorkerEvent::Diagnostic(
-                        DiagnosticLevel::Error,
-                        format!("write error: {e}"),
-                    )],
-                }
-            }
-            HostCommand::ListDir { path } => match self.fs.read_dir(&path) {
-                Ok(entries) => {
-                    let names: Vec<u8> = entries
-                        .iter()
-                        .map(|e| e.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                        .into_bytes();
-                    vec![WorkerEvent::Stdout(names)]
-                }
-                Err(e) => vec![WorkerEvent::Diagnostic(
-                    DiagnosticLevel::Error,
-                    format!("readdir error: {e}"),
-                )],
-            },
+            HostCommand::ReadFile { path } => self.handle_read_file_command(&path),
+            HostCommand::WriteFile { path, data } => self.handle_write_file_command(path, &data),
+            HostCommand::ListDir { path } => self.handle_list_dir_command(&path),
             HostCommand::Mount { .. } => {
                 vec![WorkerEvent::Diagnostic(
                     DiagnosticLevel::Warning,
                     "mount not yet implemented".into(),
                 )]
             }
-            _ => {
-                vec![WorkerEvent::Diagnostic(
-                    DiagnosticLevel::Warning,
-                    "unknown command".into(),
-                )]
+            _ => vec![WorkerEvent::Diagnostic(
+                DiagnosticLevel::Warning,
+                "unknown command".into(),
+            )],
+        }
+    }
+
+    fn handle_init_command(
+        &mut self,
+        step_budget: u64,
+        allowed_hosts: Vec<String>,
+    ) -> Vec<WorkerEvent> {
+        self.config.step_budget = step_budget;
+        self.config.allowed_hosts = allowed_hosts;
+        self.vm = Vm::with_limits(
+            ShellState::new(),
+            ExecutionLimits {
+                step_limit: step_budget,
+                output_byte_limit: self.config.output_byte_limit,
+                pipe_byte_limit: self.config.pipe_byte_limit,
+                recursion_limit: self.config.recursion_limit,
+            },
+        );
+        self.fs = BackendFs::new();
+        self.current_exec_io = None;
+        self.proc_subst_out_scopes.clear();
+        self.proc_subst_in_scopes.clear();
+        self.functions = IndexMap::new();
+        self.exec.reset();
+        self.aliases = IndexMap::new();
+        self.active_run = None;
+        self.pending_signals.clear();
+        self.initialized = true;
+        // Set default shopt options (bash defaults)
+        self.vm.state.set_var("SHOPT_extglob".into(), "1".into());
+        self.vm
+            .state
+            .set_var("SHOPT_expand_aliases".into(), "1".into());
+        self.vm.state.set_var("SHOPT_sourcepath".into(), "1".into());
+        vec![WorkerEvent::Version(PROTOCOL_VERSION.to_string())]
+    }
+
+    fn handle_run_command(&mut self, input: String, run_to_completion: bool) -> Vec<WorkerEvent> {
+        if !self.initialized {
+            return vec![WorkerEvent::Diagnostic(
+                DiagnosticLevel::Error,
+                "runtime not initialized".into(),
+            )];
+        }
+        match self.start_execution(input) {
+            Ok(()) => {
+                if run_to_completion {
+                    self.poll_active_run_to_completion()
+                } else {
+                    vec![WorkerEvent::Yielded]
+                }
             }
+            Err(events) => events,
+        }
+    }
+
+    fn handle_poll_run_command(&mut self) -> Vec<WorkerEvent> {
+        match self.poll_active_run() {
+            Some(ExecutionPoll::Yield(mut events)) => {
+                events.push(WorkerEvent::Yielded);
+                events
+            }
+            Some(ExecutionPoll::Done(events)) => events,
+            None => vec![WorkerEvent::Diagnostic(
+                DiagnosticLevel::Error,
+                "no active run".into(),
+            )],
+        }
+    }
+
+    fn handle_read_file_command(&mut self, path: &str) -> Vec<WorkerEvent> {
+        use wasmsh_fs::OpenOptions;
+        let handle = match self.fs.open(path, OpenOptions::read()) {
+            Ok(h) => h,
+            Err(e) => {
+                return vec![WorkerEvent::Diagnostic(
+                    DiagnosticLevel::Error,
+                    format!("read error: {e}"),
+                )];
+            }
+        };
+        let result = self.fs.read_file(handle);
+        self.fs.close(handle);
+        match result {
+            Ok(data) => vec![WorkerEvent::Stdout(data)],
+            Err(e) => vec![WorkerEvent::Diagnostic(
+                DiagnosticLevel::Error,
+                format!("read error: {path}: {e}"),
+            )],
+        }
+    }
+
+    fn handle_write_file_command(&mut self, path: String, data: &[u8]) -> Vec<WorkerEvent> {
+        use wasmsh_fs::OpenOptions;
+        match self.fs.open(&path, OpenOptions::write()) {
+            Ok(h) => {
+                if let Err(e) = self.fs.write_file(h, data) {
+                    self.write_stderr(format!("wasmsh: write error: {e}\n").as_bytes());
+                }
+                self.fs.close(h);
+                vec![WorkerEvent::FsChanged(path)]
+            }
+            Err(e) => vec![WorkerEvent::Diagnostic(
+                DiagnosticLevel::Error,
+                format!("write error: {e}"),
+            )],
+        }
+    }
+
+    fn handle_list_dir_command(&mut self, path: &str) -> Vec<WorkerEvent> {
+        match self.fs.read_dir(path) {
+            Ok(entries) => {
+                let names: Vec<u8> = entries
+                    .iter()
+                    .map(|e| e.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .into_bytes();
+                vec![WorkerEvent::Stdout(names)]
+            }
+            Err(e) => vec![WorkerEvent::Diagnostic(
+                DiagnosticLevel::Error,
+                format!("readdir error: {e}"),
+            )],
         }
     }
 
@@ -5057,67 +5183,72 @@ impl WorkerRuntime {
 
     fn validate_vm_subset_command(&self, cmd: &HirCommand) -> Result<(), VmSubsetFallbackReason> {
         match cmd {
-            HirCommand::Assign(assign) => {
-                if !assign.redirections.is_empty()
-                    || assign
-                        .assignments
-                        .iter()
-                        .any(|assignment| !Self::vm_supported_assignment_name(&assignment.name))
-                    || assign
-                        .assignments
-                        .iter()
-                        .filter_map(|assignment| assignment.value.as_ref())
-                        .any(|word| !Self::vm_supported_word(word))
-                {
-                    return Err(VmSubsetFallbackReason::AssignmentShape);
-                }
-                Ok(())
-            }
-            HirCommand::Exec(exec) => {
-                if !exec.env.is_empty() {
-                    return Err(VmSubsetFallbackReason::CommandEnvPrefixes);
-                }
-                if exec.argv.is_empty()
-                    || exec.argv.iter().any(|word| !Self::vm_supported_word(word))
-                {
-                    return Err(VmSubsetFallbackReason::UnsupportedWord);
-                }
-                if exec
-                    .redirections
-                    .iter()
-                    .any(|redir| !Self::vm_supported_redirection(redir))
-                {
-                    return Err(VmSubsetFallbackReason::UnsupportedRedirection);
-                }
-                if self.vm.state.get_var("SHOPT_x").as_deref() == Some("1")
-                    || exec
-                        .argv
-                        .iter()
-                        .any(Self::vm_word_requires_full_shell_execution)
-                {
-                    return Err(VmSubsetFallbackReason::ShellExpansion);
-                }
-                let Some(name) = Self::literal_word_text(&exec.argv[0]) else {
-                    return Err(VmSubsetFallbackReason::UnsupportedWord);
-                };
-                if self.get_shopt_value("expand_aliases")
-                    && self.aliases.contains_key(name.as_str())
-                {
-                    return Err(VmSubsetFallbackReason::AliasExpansion);
-                }
-                let argv = vec![name.to_string()];
-                if !matches!(
-                    self.resolve_command(name.as_str(), &argv),
-                    ResolvedCommand::Builtin
-                ) {
-                    return Err(VmSubsetFallbackReason::NonBuiltinCommand);
-                }
-                Ok(())
-            }
+            HirCommand::Assign(node) => Self::validate_vm_subset_assign(node),
+            HirCommand::Exec(node) => self.validate_vm_subset_exec(node),
             _ => Err(VmSubsetFallbackReason::Lowering(
                 LoweringError::Unsupported("command kind is outside the VM subset"),
             )),
         }
+    }
+
+    fn validate_vm_subset_assign(
+        node: &wasmsh_hir::HirAssign,
+    ) -> Result<(), VmSubsetFallbackReason> {
+        if !node.redirections.is_empty()
+            || node
+                .assignments
+                .iter()
+                .any(|a| !Self::vm_supported_assignment_name(&a.name))
+            || node
+                .assignments
+                .iter()
+                .filter_map(|a| a.value.as_ref())
+                .any(|word| !Self::vm_supported_word(word))
+        {
+            return Err(VmSubsetFallbackReason::AssignmentShape);
+        }
+        Ok(())
+    }
+
+    fn validate_vm_subset_exec(
+        &self,
+        node: &wasmsh_hir::HirExec,
+    ) -> Result<(), VmSubsetFallbackReason> {
+        if !node.env.is_empty() {
+            return Err(VmSubsetFallbackReason::CommandEnvPrefixes);
+        }
+        if node.argv.is_empty() || node.argv.iter().any(|word| !Self::vm_supported_word(word)) {
+            return Err(VmSubsetFallbackReason::UnsupportedWord);
+        }
+        if node
+            .redirections
+            .iter()
+            .any(|redir| !Self::vm_supported_redirection(redir))
+        {
+            return Err(VmSubsetFallbackReason::UnsupportedRedirection);
+        }
+        if self.vm.state.get_var("SHOPT_x").as_deref() == Some("1")
+            || node
+                .argv
+                .iter()
+                .any(Self::vm_word_requires_full_shell_execution)
+        {
+            return Err(VmSubsetFallbackReason::ShellExpansion);
+        }
+        let Some(name) = Self::literal_word_text(&node.argv[0]) else {
+            return Err(VmSubsetFallbackReason::UnsupportedWord);
+        };
+        if self.get_shopt_value("expand_aliases") && self.aliases.contains_key(name.as_str()) {
+            return Err(VmSubsetFallbackReason::AliasExpansion);
+        }
+        let argv = vec![name.to_string()];
+        if !matches!(
+            self.resolve_command(name.as_str(), &argv),
+            ResolvedCommand::Builtin
+        ) {
+            return Err(VmSubsetFallbackReason::NonBuiltinCommand);
+        }
+        Ok(())
     }
 
     fn vm_supported_assignment_name(name: &smol_str::SmolStr) -> bool {
@@ -6494,41 +6625,50 @@ impl WorkerRuntime {
 
     fn parse_streaming_tail_stage(args: &[String]) -> Option<StreamingPipelineStage> {
         let mut mode = StreamingTailMode::Lines(10);
-        let mut files = Vec::new();
+        let mut files: Vec<&str> = Vec::new();
         let mut i = 0usize;
         while i < args.len() {
-            let arg = args[i].as_str();
-            if arg == "-c" && i + 1 < args.len() {
-                mode = StreamingTailMode::Bytes(args[i + 1].parse().ok()?);
-                i += 2;
-            } else if arg == "-n" && i + 1 < args.len() {
-                let value = args[i + 1].as_str();
-                if value.starts_with('+') {
-                    return None;
-                }
-                mode = StreamingTailMode::Lines(value.parse().ok()?);
-                i += 2;
-            } else if arg == "-f" {
-                return None;
-            } else if arg.starts_with('-') && arg.len() > 1 && arg != "--" {
-                if let Ok(lines) = arg[1..].parse::<usize>() {
-                    mode = StreamingTailMode::Lines(lines);
-                } else {
-                    return None;
-                }
-                i += 1;
-            } else if arg == "--" {
-                i += 1;
-            } else {
-                files.push(arg);
-                i += 1;
-            }
+            i = Self::apply_streaming_tail_arg(args, i, &mut mode, &mut files)?;
         }
-        if files.is_empty() {
-            Some(StreamingPipelineStage::Tail(mode))
-        } else {
-            None
+        files
+            .is_empty()
+            .then_some(StreamingPipelineStage::Tail(mode))
+    }
+
+    fn apply_streaming_tail_arg<'a>(
+        args: &'a [String],
+        i: usize,
+        mode: &mut StreamingTailMode,
+        files: &mut Vec<&'a str>,
+    ) -> Option<usize> {
+        let arg = args[i].as_str();
+        if arg == "-f" {
+            return None;
         }
+        if arg == "--" {
+            return Some(i + 1);
+        }
+        if arg == "-c" && i + 1 < args.len() {
+            *mode = StreamingTailMode::Bytes(args[i + 1].parse().ok()?);
+            return Some(i + 2);
+        }
+        if arg == "-n" && i + 1 < args.len() {
+            *mode = Self::parse_streaming_tail_lines_value(&args[i + 1])?;
+            return Some(i + 2);
+        }
+        if arg.starts_with('-') && arg.len() > 1 {
+            *mode = StreamingTailMode::Lines(arg[1..].parse().ok()?);
+            return Some(i + 1);
+        }
+        files.push(arg);
+        Some(i + 1)
+    }
+
+    fn parse_streaming_tail_lines_value(value: &str) -> Option<StreamingTailMode> {
+        if value.starts_with('+') {
+            return None;
+        }
+        Some(StreamingTailMode::Lines(value.parse().ok()?))
     }
 
     fn parse_streaming_bat_stage(args: &[String]) -> Option<StreamingPipelineStage> {
@@ -6540,75 +6680,88 @@ impl WorkerRuntime {
         };
         let mut i = 0usize;
         while i < args.len() {
-            let arg = args[i].as_str();
-            match arg {
-                "-n" | "--number" => {
-                    stage.show_numbers = true;
-                    i += 1;
-                }
-                "-p" | "--plain" | "--style=plain" => {
+            let advance = Self::apply_streaming_bat_arg(args, i, &mut stage)?;
+            i += advance;
+        }
+        Some(StreamingPipelineStage::Bat(stage))
+    }
+
+    fn apply_streaming_bat_arg(
+        args: &[String],
+        i: usize,
+        stage: &mut StreamingBatStage,
+    ) -> Option<usize> {
+        let arg = args[i].as_str();
+        match arg {
+            "-n" | "--number" => {
+                stage.show_numbers = true;
+                Some(1)
+            }
+            "-p" | "--plain" | "--style=plain" => {
+                stage.show_numbers = false;
+                stage.show_header = false;
+                Some(1)
+            }
+            "-A" | "--show-all" => {
+                stage.show_all = true;
+                Some(1)
+            }
+            "-r" | "--line-range" if i + 1 < args.len() => {
+                stage.line_range = Self::parse_streaming_bat_range(&args[i + 1]);
+                Some(2)
+            }
+            "-l" | "--language" | "--paging" if i + 1 < args.len() => Some(2),
+            "--style=numbers" => {
+                stage.show_numbers = true;
+                stage.show_header = false;
+                Some(1)
+            }
+            "--style=header" => {
+                stage.show_numbers = false;
+                stage.show_header = true;
+                Some(1)
+            }
+            "--" => (i + 1 == args.len()).then_some(1),
+            _ => Self::apply_streaming_bat_long_or_short(arg, stage),
+        }
+    }
+
+    fn apply_streaming_bat_long_or_short(
+        value: &str,
+        stage: &mut StreamingBatStage,
+    ) -> Option<usize> {
+        if value.starts_with("--style=") {
+            stage.show_numbers = true;
+            stage.show_header = true;
+            return Some(1);
+        }
+        if let Some(range_spec) = value.strip_prefix("--line-range=") {
+            stage.line_range = Self::parse_streaming_bat_range(range_spec);
+            return Some(1);
+        }
+        if value.starts_with("--paging=") || value.starts_with("--language=") {
+            return Some(1);
+        }
+        if value.starts_with('-') && value.len() > 1 && !value.starts_with("--") {
+            Self::apply_streaming_bat_short_cluster(&value[1..], stage)?;
+            return Some(1);
+        }
+        None
+    }
+
+    fn apply_streaming_bat_short_cluster(flags: &str, stage: &mut StreamingBatStage) -> Option<()> {
+        for ch in flags.chars() {
+            match ch {
+                'n' => stage.show_numbers = true,
+                'p' => {
                     stage.show_numbers = false;
                     stage.show_header = false;
-                    i += 1;
                 }
-                "-A" | "--show-all" => {
-                    stage.show_all = true;
-                    i += 1;
-                }
-                "-r" | "--line-range" if i + 1 < args.len() => {
-                    stage.line_range = Self::parse_streaming_bat_range(&args[i + 1]);
-                    i += 2;
-                }
-                "-l" | "--language" | "--paging" if i + 1 < args.len() => {
-                    i += 2;
-                }
-                "--style=numbers" => {
-                    stage.show_numbers = true;
-                    stage.show_header = false;
-                    i += 1;
-                }
-                "--style=header" => {
-                    stage.show_numbers = false;
-                    stage.show_header = true;
-                    i += 1;
-                }
-                value if value.starts_with("--style=") => {
-                    stage.show_numbers = true;
-                    stage.show_header = true;
-                    i += 1;
-                }
-                value if value.starts_with("--line-range=") => {
-                    stage.line_range =
-                        Self::parse_streaming_bat_range(&value["--line-range=".len()..]);
-                    i += 1;
-                }
-                value if value.starts_with("--paging=") || value.starts_with("--language=") => {
-                    i += 1;
-                }
-                value if value.starts_with('-') && value.len() > 1 && !value.starts_with("--") => {
-                    for ch in value[1..].chars() {
-                        match ch {
-                            'n' => stage.show_numbers = true,
-                            'p' => {
-                                stage.show_numbers = false;
-                                stage.show_header = false;
-                            }
-                            'A' => stage.show_all = true,
-                            _ => return None,
-                        }
-                    }
-                    i += 1;
-                }
-                "--" => {
-                    if i + 1 != args.len() {
-                        return None;
-                    }
-                    i += 1;
-                }
+                'A' => stage.show_all = true,
                 _ => return None,
             }
         }
-        Some(StreamingPipelineStage::Bat(stage))
+        Some(())
     }
 
     fn parse_streaming_bat_range(s: &str) -> Option<(Option<usize>, Option<usize>)> {
@@ -6635,36 +6788,11 @@ impl WorkerRuntime {
         let mut expressions = Vec::new();
         let mut i = 0usize;
         while i < args.len() {
-            let arg = args[i].as_str();
-            if arg == "-n" {
-                suppress_print = true;
-                i += 1;
-            } else if arg == "-e" && i + 1 < args.len() {
-                expressions.push(args[i + 1].clone());
-                i += 2;
-            } else if arg == "-E" || arg == "-r" {
-                i += 1;
-            } else if arg == "-f"
-                || arg == "-i"
-                || arg.starts_with("-i")
-                || (arg.starts_with('-') && arg.len() > 1 && arg != "--")
-            {
-                return None;
-            } else if arg == "--" {
-                if i + 1 >= args.len() {
-                    break;
-                }
-                if expressions.is_empty() {
-                    expressions.push(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    return None;
-                }
-            } else if expressions.is_empty() {
-                expressions.push(args[i].clone());
-                i += 1;
-            } else {
-                return None;
+            let step =
+                Self::apply_streaming_sed_arg(args, i, &mut suppress_print, &mut expressions)?;
+            match step {
+                StreamingSedStep::Advance(n) => i += n,
+                StreamingSedStep::Break => break,
             }
         }
         if expressions.is_empty() {
@@ -6681,43 +6809,117 @@ impl WorkerRuntime {
         }))
     }
 
+    fn apply_streaming_sed_arg(
+        args: &[String],
+        i: usize,
+        suppress_print: &mut bool,
+        expressions: &mut Vec<String>,
+    ) -> Option<StreamingSedStep> {
+        let arg = args[i].as_str();
+        if arg == "-n" {
+            *suppress_print = true;
+            return Some(StreamingSedStep::Advance(1));
+        }
+        if arg == "-e" && i + 1 < args.len() {
+            expressions.push(args[i + 1].clone());
+            return Some(StreamingSedStep::Advance(2));
+        }
+        if arg == "-E" || arg == "-r" {
+            return Some(StreamingSedStep::Advance(1));
+        }
+        if Self::streaming_sed_arg_rejected(arg) {
+            return None;
+        }
+        if arg == "--" {
+            return Self::streaming_sed_handle_doubledash(args, i, expressions);
+        }
+        if expressions.is_empty() {
+            expressions.push(args[i].clone());
+            Some(StreamingSedStep::Advance(1))
+        } else {
+            None
+        }
+    }
+
+    fn streaming_sed_arg_rejected(arg: &str) -> bool {
+        arg == "-f"
+            || arg == "-i"
+            || arg.starts_with("-i")
+            || (arg.starts_with('-') && arg.len() > 1 && arg != "--")
+    }
+
+    fn streaming_sed_handle_doubledash(
+        args: &[String],
+        i: usize,
+        expressions: &mut Vec<String>,
+    ) -> Option<StreamingSedStep> {
+        if i + 1 >= args.len() {
+            return Some(StreamingSedStep::Break);
+        }
+        if !expressions.is_empty() {
+            return None;
+        }
+        expressions.push(args[i + 1].clone());
+        Some(StreamingSedStep::Advance(2))
+    }
+
     fn parse_streaming_paste_stage(args: &[String]) -> Option<StreamingPipelineStage> {
         let mut delimiter = "\t".to_string();
         let mut serial = false;
         let mut i = 0usize;
         while i < args.len() {
-            let arg = args[i].as_str();
-            if arg == "-d" && i + 1 < args.len() {
-                delimiter.clone_from(&args[i + 1]);
-                i += 2;
-            } else if arg == "-s" {
-                serial = true;
-                i += 1;
-            } else if arg.starts_with('-') && arg.len() > 1 {
-                for ch in arg[1..].chars() {
-                    match ch {
-                        's' => serial = true,
-                        'd' if i + 1 < args.len() => {
-                            delimiter.clone_from(&args[i + 1]);
-                            i += 1;
-                        }
-                        _ => return None,
-                    }
-                }
-                i += 1;
-            } else if arg == "--" {
-                if i + 1 != args.len() {
-                    return None;
-                }
-                i += 1;
-            } else {
-                return None;
-            }
+            i = Self::apply_streaming_paste_arg(args, i, &mut delimiter, &mut serial)?;
         }
         Some(StreamingPipelineStage::Paste(StreamingPasteStage {
             delimiter,
             serial,
         }))
+    }
+
+    fn apply_streaming_paste_arg(
+        args: &[String],
+        i: usize,
+        delimiter: &mut String,
+        serial: &mut bool,
+    ) -> Option<usize> {
+        let arg = args[i].as_str();
+        if arg == "-d" && i + 1 < args.len() {
+            delimiter.clone_from(&args[i + 1]);
+            return Some(i + 2);
+        }
+        if arg == "-s" {
+            *serial = true;
+            return Some(i + 1);
+        }
+        if arg == "--" {
+            return (i + 1 == args.len()).then_some(i + 1);
+        }
+        if arg.starts_with('-') && arg.len() > 1 {
+            let extra = Self::apply_streaming_paste_short_cluster(args, i, delimiter, serial)?;
+            return Some(i + 1 + extra);
+        }
+        None
+    }
+
+    fn apply_streaming_paste_short_cluster(
+        args: &[String],
+        i: usize,
+        delimiter: &mut String,
+        serial: &mut bool,
+    ) -> Option<usize> {
+        let arg = args[i].as_str();
+        let mut extra = 0usize;
+        for ch in arg[1..].chars() {
+            match ch {
+                's' => *serial = true,
+                'd' if i + 1 < args.len() => {
+                    delimiter.clone_from(&args[i + 1]);
+                    extra = 1;
+                }
+                _ => return None,
+            }
+        }
+        Some(extra)
     }
 
     fn parse_streaming_tee_stage(args: &[String]) -> Option<StreamingPipelineStage> {
@@ -6932,35 +7134,59 @@ impl WorkerRuntime {
         };
         let mut i = 0usize;
         while i < args.len() {
-            let arg = args[i].as_str();
-            if arg == "-f" && i + 1 < args.len() {
-                flags.skip_fields = args[i + 1].parse().ok()?;
-                i += 2;
-            } else if arg == "-s" && i + 1 < args.len() {
-                flags.skip_chars = args[i + 1].parse().ok()?;
-                i += 2;
-            } else if arg == "-w" && i + 1 < args.len() {
-                flags.compare_chars = args[i + 1].parse().ok();
-                i += 2;
-            } else if arg.starts_with('-') && arg.len() > 1 && arg != "--" {
-                for ch in arg[1..].chars() {
-                    match ch {
-                        'c' => flags.count = true,
-                        'd' => flags.duplicates_only = true,
-                        'u' => flags.unique_only = true,
-                        'i' => flags.ignore_case = true,
-                        'z' => {}
-                        _ => return None,
-                    }
-                }
-                i += 1;
-            } else if arg == "--" {
-                i += 1;
-            } else {
-                return None;
-            }
+            i = Self::apply_streaming_uniq_arg(args, i, &mut flags)?;
         }
         Some(StreamingPipelineStage::Uniq(flags))
+    }
+
+    fn apply_streaming_uniq_arg(
+        args: &[String],
+        i: usize,
+        flags: &mut StreamingUniqFlags,
+    ) -> Option<usize> {
+        let arg = args[i].as_str();
+        if arg == "--" {
+            return Some(i + 1);
+        }
+        if i + 1 < args.len() {
+            match arg {
+                "-f" => {
+                    flags.skip_fields = args[i + 1].parse().ok()?;
+                    return Some(i + 2);
+                }
+                "-s" => {
+                    flags.skip_chars = args[i + 1].parse().ok()?;
+                    return Some(i + 2);
+                }
+                "-w" => {
+                    flags.compare_chars = args[i + 1].parse().ok();
+                    return Some(i + 2);
+                }
+                _ => {}
+            }
+        }
+        if arg.starts_with('-') && arg.len() > 1 {
+            Self::apply_streaming_uniq_short_cluster(&arg[1..], flags)?;
+            return Some(i + 1);
+        }
+        None
+    }
+
+    fn apply_streaming_uniq_short_cluster(
+        short_flags: &str,
+        flags: &mut StreamingUniqFlags,
+    ) -> Option<()> {
+        for ch in short_flags.chars() {
+            match ch {
+                'c' => flags.count = true,
+                'd' => flags.duplicates_only = true,
+                'u' => flags.unique_only = true,
+                'i' => flags.ignore_case = true,
+                'z' => {}
+                _ => return None,
+            }
+        }
+        Some(())
     }
 
     fn parse_streaming_cut_ranges(spec: &str) -> Vec<StreamingCutRange> {
@@ -6991,74 +7217,101 @@ impl WorkerRuntime {
     }
 
     fn parse_streaming_cut_stage(args: &[String]) -> Option<StreamingPipelineStage> {
-        let mut delim = '\t';
-        let mut mode = None;
-        let mut complement = false;
-        let mut only_delimited = false;
-        let mut output_delim = None;
+        let mut state = StreamingCutParseState {
+            delim: '\t',
+            mode: None,
+            complement: false,
+            only_delimited: false,
+            output_delim: None,
+        };
         let mut i = 0usize;
-
         while i < args.len() {
-            let arg = args[i].as_str();
-            if arg == "-d" && i + 1 < args.len() {
-                delim = args[i + 1].chars().next().unwrap_or('\t');
-                i += 2;
-            } else if arg.starts_with("-d") && arg.len() > 2 {
-                delim = arg[2..].chars().next().unwrap_or('\t');
-                i += 1;
-            } else if arg == "-f" && i + 1 < args.len() {
-                mode = Some(StreamingCutMode::Fields(Self::parse_streaming_cut_ranges(
-                    &args[i + 1],
-                )));
-                i += 2;
-            } else if let Some(spec) = arg.strip_prefix("-f") {
-                mode = Some(StreamingCutMode::Fields(Self::parse_streaming_cut_ranges(
-                    spec,
-                )));
-                i += 1;
-            } else if arg == "-c" && i + 1 < args.len() {
-                mode = Some(StreamingCutMode::Chars(Self::parse_streaming_cut_ranges(
-                    &args[i + 1],
-                )));
-                i += 2;
-            } else if let Some(spec) = arg.strip_prefix("-c") {
-                mode = Some(StreamingCutMode::Chars(Self::parse_streaming_cut_ranges(
-                    spec,
-                )));
-                i += 1;
-            } else if arg == "-b" && i + 1 < args.len() {
-                mode = Some(StreamingCutMode::Bytes(Self::parse_streaming_cut_ranges(
-                    &args[i + 1],
-                )));
-                i += 2;
-            } else if let Some(spec) = arg.strip_prefix("-b") {
-                mode = Some(StreamingCutMode::Bytes(Self::parse_streaming_cut_ranges(
-                    spec,
-                )));
-                i += 1;
-            } else if arg == "--complement" {
-                complement = true;
-                i += 1;
-            } else if arg == "-s" {
-                only_delimited = true;
-                i += 1;
-            } else if let Some(out) = arg.strip_prefix("--output-delimiter=") {
-                output_delim = Some(out.to_string());
-                i += 1;
-            } else if arg == "-z" || arg == "--" {
-                i += 1;
-            } else {
-                return None;
+            i = Self::apply_streaming_cut_arg(args, i, &mut state)?;
+        }
+        Some(StreamingPipelineStage::Cut(StreamingCutStage {
+            mode: state.mode?,
+            delim: state.delim,
+            complement: state.complement,
+            only_delimited: state.only_delimited,
+            output_delim: state
+                .output_delim
+                .unwrap_or_else(|| state.delim.to_string()),
+        }))
+    }
+
+    fn apply_streaming_cut_arg(
+        args: &[String],
+        i: usize,
+        state: &mut StreamingCutParseState,
+    ) -> Option<usize> {
+        let arg = args[i].as_str();
+        if let Some(advance) = Self::streaming_cut_try_mode_flag(args, i, &mut state.mode) {
+            return Some(advance);
+        }
+        if let Some(advance) = Self::streaming_cut_try_delim_flag(args, i, &mut state.delim) {
+            return Some(advance);
+        }
+        match arg {
+            "--complement" => {
+                state.complement = true;
+                Some(i + 1)
+            }
+            "-s" => {
+                state.only_delimited = true;
+                Some(i + 1)
+            }
+            "-z" | "--" => Some(i + 1),
+            _ => {
+                if let Some(out) = arg.strip_prefix("--output-delimiter=") {
+                    state.output_delim = Some(out.to_string());
+                    Some(i + 1)
+                } else {
+                    None
+                }
             }
         }
+    }
 
-        Some(StreamingPipelineStage::Cut(StreamingCutStage {
-            mode: mode?,
-            delim,
-            complement,
-            only_delimited,
-            output_delim: output_delim.unwrap_or_else(|| delim.to_string()),
-        }))
+    fn streaming_cut_try_mode_flag(
+        args: &[String],
+        i: usize,
+        mode: &mut Option<StreamingCutMode>,
+    ) -> Option<usize> {
+        let arg = args[i].as_str();
+        let (flag, wrap): (&str, fn(Vec<StreamingCutRange>) -> StreamingCutMode) =
+            if arg == "-f" || arg.starts_with("-f") {
+                ("-f", StreamingCutMode::Fields)
+            } else if arg == "-c" || arg.starts_with("-c") {
+                ("-c", StreamingCutMode::Chars)
+            } else if arg == "-b" || arg.starts_with("-b") {
+                ("-b", StreamingCutMode::Bytes)
+            } else {
+                return None;
+            };
+        if arg == flag && i + 1 < args.len() {
+            *mode = Some(wrap(Self::parse_streaming_cut_ranges(&args[i + 1])));
+            return Some(i + 2);
+        }
+        if let Some(spec) = arg.strip_prefix(flag) {
+            if !spec.is_empty() {
+                *mode = Some(wrap(Self::parse_streaming_cut_ranges(spec)));
+                return Some(i + 1);
+            }
+        }
+        None
+    }
+
+    fn streaming_cut_try_delim_flag(args: &[String], i: usize, delim: &mut char) -> Option<usize> {
+        let arg = args[i].as_str();
+        if arg == "-d" && i + 1 < args.len() {
+            *delim = args[i + 1].chars().next().unwrap_or('\t');
+            return Some(i + 2);
+        }
+        if arg.starts_with("-d") && arg.len() > 2 {
+            *delim = arg[2..].chars().next().unwrap_or('\t');
+            return Some(i + 1);
+        }
+        None
     }
 
     fn parse_streaming_tr_stage(args: &[String]) -> Option<StreamingPipelineStage> {
@@ -7066,60 +7319,67 @@ impl WorkerRuntime {
         let mut squeeze = false;
         let mut complement = false;
         let mut set_args = Vec::new();
-
         for arg in args {
             if arg.starts_with('-') && arg.len() > 1 {
-                for ch in arg[1..].chars() {
-                    match ch {
-                        'd' => delete = true,
-                        's' => squeeze = true,
-                        'c' | 'C' => complement = true,
-                        't' => {}
-                        _ => return None,
-                    }
-                }
+                Self::apply_streaming_tr_flags(
+                    &arg[1..],
+                    &mut delete,
+                    &mut squeeze,
+                    &mut complement,
+                )?;
             } else {
                 set_args.push(arg.as_str());
             }
         }
-
-        if set_args.is_empty() {
-            return None;
-        }
-        let from_chars = streaming_tr_expand_set(set_args[0]);
-        if delete {
-            let to_chars = if squeeze && set_args.len() >= 2 {
-                streaming_tr_expand_set(set_args[1])
-            } else {
-                Vec::new()
-            };
-            return Some(StreamingPipelineStage::Tr(StreamingTrStage {
-                delete,
-                squeeze,
-                complement,
-                from_chars,
-                to_chars,
-            }));
-        }
-        if squeeze && set_args.len() < 2 {
-            return Some(StreamingPipelineStage::Tr(StreamingTrStage {
-                delete,
-                squeeze,
-                complement,
-                from_chars,
-                to_chars: Vec::new(),
-            }));
-        }
-        if set_args.len() < 2 {
-            return None;
-        }
+        let from_chars = streaming_tr_expand_set(set_args.first()?);
+        let to_chars = Self::streaming_tr_resolve_to_chars(&set_args, delete, squeeze)?;
         Some(StreamingPipelineStage::Tr(StreamingTrStage {
             delete,
             squeeze,
             complement,
             from_chars,
-            to_chars: streaming_tr_expand_set(set_args[1]),
+            to_chars,
         }))
+    }
+
+    fn apply_streaming_tr_flags(
+        flags: &str,
+        delete: &mut bool,
+        squeeze: &mut bool,
+        complement: &mut bool,
+    ) -> Option<()> {
+        for ch in flags.chars() {
+            match ch {
+                'd' => *delete = true,
+                's' => *squeeze = true,
+                'c' | 'C' => *complement = true,
+                't' => {}
+                _ => return None,
+            }
+        }
+        Some(())
+    }
+
+    fn streaming_tr_resolve_to_chars(
+        set_args: &[&str],
+        delete: bool,
+        squeeze: bool,
+    ) -> Option<Vec<char>> {
+        if delete {
+            let to = if squeeze && set_args.len() >= 2 {
+                streaming_tr_expand_set(set_args[1])
+            } else {
+                Vec::new()
+            };
+            return Some(to);
+        }
+        if squeeze && set_args.len() < 2 {
+            return Some(Vec::new());
+        }
+        if set_args.len() < 2 {
+            return None;
+        }
+        Some(streaming_tr_expand_set(set_args[1]))
     }
 
     fn parse_streaming_wc_stage(args: &[String]) -> Option<StreamingPipelineStage> {
