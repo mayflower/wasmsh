@@ -193,13 +193,20 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: |
+          # Publish order must respect the workspace dep graph so each
+          # `cargo publish` call resolves its deps against what already
+          # landed on crates.io earlier in the loop.  Leaves first,
+          # wasmsh-runtime mid-graph, then its consumers and the
+          # top-level service crates at the end.
           CRATES=(
             wasmsh-ast wasmsh-ir wasmsh-state wasmsh-fs wasmsh-protocol
             wasmsh-lex wasmsh-parse wasmsh-hir
             wasmsh-builtins wasmsh-utils wasmsh-expand
             wasmsh-vm
             wasmsh-runtime
+            wasmsh-json-bridge
             wasmsh-browser wasmsh-testkit
+            wasmsh-dispatcher
           )
           publish_crate() {
             local crate=$1

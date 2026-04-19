@@ -62,6 +62,22 @@ describe("version sync across all packages", () => {
     assert.equal(v, cargoWorkspace, "python package version mismatch");
   });
 
+  it("helm chart appVersion matches workspace", () => {
+    // Chart.yaml has two version fields with intentionally different
+    // semantics: `version:` is the chart API version (bumped when the
+    // values schema or template surface changes), `appVersion:` tracks
+    // the app the chart deploys.  Only the latter needs to stay in
+    // lockstep with the workspace — `tools/bump-version.sh` handles it.
+    const chart = readToml("deploy/helm/wasmsh/Chart.yaml");
+    const m = chart.match(/^appVersion:\s*"([^"]+)"/m);
+    assert.ok(m, "Chart.yaml should have an appVersion field");
+    assert.equal(
+      m[1],
+      cargoWorkspace,
+      "Chart.yaml appVersion drifted from workspace (run tools/bump-version.sh)",
+    );
+  });
+
   it("workspace internal dep pins match workspace version", () => {
     // `[workspace.dependencies]` has one entry per internal crate in
     // the form `wasmsh-foo = { version = "X.Y.Z", path = "..." }`.

@@ -11,6 +11,9 @@ set -euo pipefail
 #   - crates/wasmsh-pyodide/Cargo.toml (excluded from workspace)
 #   - packages/npm/wasmsh-pyodide/package.json
 #   - packages/python/wasmsh-pyodide-runtime/pyproject.toml
+#   - deploy/helm/wasmsh/Chart.yaml (appVersion; chart version stays
+#     independent because the chart's lifecycle is not tied 1:1 to the
+#     app version — bump it deliberately when the chart API changes)
 
 if [ $# -ne 1 ]; then
     echo "Usage: $0 <version>"
@@ -63,6 +66,12 @@ echo "  packages/npm/wasmsh-pyodide/package.json"
 # Python package
 sedi "s/^version = \".*\"/version = \"$VERSION\"/" "$REPO_ROOT/packages/python/wasmsh-pyodide-runtime/pyproject.toml"
 echo "  packages/python/wasmsh-pyodide-runtime/pyproject.toml"
+
+# Helm chart appVersion.  The chart's own `version:` is left alone — chart
+# versioning is semver over the chart API, not over the app it deploys,
+# and is bumped deliberately when values schema or template surface moves.
+sedi -E "s/^(appVersion: )\"[^\"]+\"/\1\"$VERSION\"/" "$REPO_ROOT/deploy/helm/wasmsh/Chart.yaml"
+echo "  deploy/helm/wasmsh/Chart.yaml (appVersion only)"
 
 # Regenerate Cargo.lock files
 echo "  Regenerating lockfiles..."
