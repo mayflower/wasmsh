@@ -236,6 +236,18 @@ test-e2e-dispatcher-compose-keep:
 test-e2e-dispatcher-compose-reuse:
     node e2e/dispatcher-compose/scripts/run.mjs --skip-build
 
+# ── Scalable-setup benchmark ───────────────────────────────
+# Drives `WasmshRemoteSandbox` through the dispatcher + runner compose
+# stack and reports client-observable performance (session create p50/p95,
+# execute latency, concurrent throughput, file round-trip) plus the
+# runner's Prometheus snapshot.  Reuses the same images as the e2e path.
+bench-dispatcher-compose:
+    node e2e/dispatcher-compose/scripts/benchmark.mjs --skip-build
+
+# Reuse an already-running compose stack (faster iteration).
+bench-dispatcher-compose-reuse:
+    node e2e/dispatcher-compose/scripts/benchmark.mjs --reuse
+
 # ── Wasm Post-processing ──────────────────────────────────────
 
 # Build optimized wasm with wasm-opt post-processing
