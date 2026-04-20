@@ -34,7 +34,7 @@ ARG APP_GID=10001
 
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates tini; \
+    apt-get install -y --no-install-recommends ca-certificates tini curl; \
     rm -rf /var/lib/apt/lists/*; \
     groupadd --system --gid "${APP_GID}" wasmsh; \
     useradd --system --uid "${APP_UID}" --gid wasmsh --home-dir /nonexistent \

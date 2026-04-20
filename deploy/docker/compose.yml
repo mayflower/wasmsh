@@ -1,0 +1,104 @@
+# wasmsh scalable stack — production-oriented docker-compose.
+#
+# Dispatcher (Rust/axum) + one or more runner pods (Node + Pyodide).
+# Clients connect to the dispatcher's HTTP control plane via
+# WasmshRemoteSandbox (or plain JSON/HTTP).
+#
+# Quickstart (from repo root):
+#   docker compose -f deploy/docker/compose.yml up -d --wait
+#   curl -s http://127.0.0.1:8080/readyz   # dispatcher + ≥1 runner ready
+#   docker compose -f deploy/docker/compose.yml down
+#
+# Scale horizontally — the dispatcher expands `runner` via Docker DNS and
+# load-balances by free restore capacity:
+#   docker compose -f deploy/docker/compose.yml up -d --wait --scale runner=4
+#
+# Add auth + TLS with the Caddy overlay:
+#   docker compose -f deploy/docker/compose.yml -f deploy/docker/compose.caddy.yml up -d --wait
+#
+# See deploy/docker/README.md for the full surface (env vars, pinning by
+# digest, reverse-proxy options, teardown).  `compose.dispatcher-test.yml`
+# next to this file is a test-tuned variant used by `just test-e2e-
+# dispatcher-compose`; prefer this file for anything outside that loop.
+
+services:
+  runner:
+    image: ghcr.io/mayflower/wasmsh-runner:${WASMSH_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8787"
+      WASMSH_RESTORE_SLOTS: "${WASMSH_RESTORE_SLOTS:-4}"
+      WASMSH_STARTUP_WARM_RESTORES: "${WASMSH_STARTUP_WARM_RESTORES:-2}"
+      # V8 envelope per session worker.  48 MiB old-gen is the production
+      # default from the Helm chart — session density is memory-bound, not
+      # heap-bound, so raising this buys little.  Override via .env if a
+      # specific workload needs headroom.
+      WASMSH_WORKER_MAX_OLD_GENERATION_MB: "${WASMSH_WORKER_MAX_OLD_GENERATION_MB:-48}"
+      WASMSH_WORKER_MAX_YOUNG_GENERATION_MB: "${WASMSH_WORKER_MAX_YOUNG_GENERATION_MB:-8}"
+      WASMSH_FETCH_BROKER_REQUEST_BYTES: "${WASMSH_FETCH_BROKER_REQUEST_BYTES:-65536}"
+      WASMSH_FETCH_BROKER_RESPONSE_BYTES: "${WASMSH_FETCH_BROKER_RESPONSE_BYTES:-1048576}"
+    healthcheck:
+      # The runner image is `node:22-slim`; use Node itself to probe
+      # /readyz since neither curl nor wget is installed by default.
+      test:
+        - "CMD-SHELL"
+        - >-
+          node -e "require('http').get('http://127.0.0.1:8787/readyz',
+          r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: ${WASMSH_RUNNER_MEMORY_LIMIT:-2G}
+          cpus: "${WASMSH_RUNNER_CPU_LIMIT:-2}"
+        reservations:
+          memory: ${WASMSH_RUNNER_MEMORY_RESERVATION:-768M}
+          cpus: "${WASMSH_RUNNER_CPU_RESERVATION:-0.25}"
+
+  dispatcher:
+    image: ghcr.io/mayflower/wasmsh-dispatcher:${WASMSH_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      RUST_LOG: "${RUST_LOG:-info}"
+      # Docker's embedded DNS returns one A record per replica for the
+      # `runner` service name, and the dispatcher expands those via
+      # tokio::net::lookup_host — so `--scale runner=N` just works.
+      RUNNER_SERVICE_URLS: "${WASMSH_RUNNER_SERVICE_URLS:-http://runner:8787}"
+    ports:
+      # Bind to loopback by default so nothing is exposed on the public
+      # interface.  Put a reverse proxy (see compose.caddy.yml) or an
+      # SSH tunnel in front for remote access.
+      - "${WASMSH_DISPATCHER_BIND:-127.0.0.1:8080}:8080"
+    depends_on:
+      runner:
+        condition: service_healthy
+    healthcheck:
+      # /readyz returns 503 until at least one runner has free restore
+      # capacity, so this gates compose `up --wait` on end-to-end
+      # routability, not just the axum socket bind.  curl was added to
+      # the dispatcher image specifically to back this probe.
+      test:
+        - "CMD"
+        - "curl"
+        - "-fsS"
+        - "-o"
+        - "/dev/null"
+        - "http://127.0.0.1:8080/readyz"
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: ${WASMSH_DISPATCHER_MEMORY_LIMIT:-512M}
+          cpus: "${WASMSH_DISPATCHER_CPU_LIMIT:-1}"
+        reservations:
+          memory: ${WASMSH_DISPATCHER_MEMORY_RESERVATION:-128M}
+          cpus: "${WASMSH_DISPATCHER_CPU_RESERVATION:-0.1}"

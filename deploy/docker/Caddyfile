@@ -1,0 +1,34 @@
+# Caddy config for the wasmsh dispatcher.  Consumed by compose.caddy.yml.
+#
+# `{env.WASMSH_PUBLIC_DOMAIN}` controls TLS behaviour:
+#   - a real hostname (e.g. wasmsh.example.com) triggers automatic
+#     Let's Encrypt provisioning
+#   - `localhost` (the default) activates Caddy's internal CA — trust
+#     its root cert if you want browsers / curl to accept the chain
+#     without --insecure
+#
+# Basic-auth credentials come from the environment; see README.md for
+# how to generate the bcrypt hash.
+
+{env.WASMSH_PUBLIC_DOMAIN} {
+    encode gzip
+
+    # Every dispatcher route sits behind basic auth.  There is no
+    # unauthenticated public surface — /readyz included — because
+    # exposing session-create to the internet without a gate is never
+    # what you want.
+    basic_auth {
+        {env.WASMSH_BASIC_AUTH_USER} {env.WASMSH_BASIC_AUTH_HASH}
+    }
+
+    reverse_proxy dispatcher:8080 {
+        # wasmsh uploads/downloads can include multi-MiB JSON bodies;
+        # keep the proxy timeout generous so the base64-encoded
+        # 10 MiB-ish limits in the standard suite don't get cut off.
+        transport http {
+            response_header_timeout 60s
+            read_timeout 120s
+            dial_timeout 5s
+        }
+    }
+}

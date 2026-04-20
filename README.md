@@ -87,7 +87,7 @@ Pre-built tarballs and image digests: [GitHub Releases](https://github.com/mayfl
 |-|-|
 | **Start here** | [Tutorials](docs/tutorials/index.md): [Rust](docs/tutorials/getting-started.md), [JavaScript](docs/tutorials/javascript-quickstart.md), [Python](docs/tutorials/python-quickstart.md) |
 | **Deep Agents** | [Integration guide](docs/integrations/langchain-wasmsh.md) (in-process + remote, both languages) |
-| **Deploy** | [Helm chart](deploy/helm/wasmsh/README.md), [snapshot-runner architecture](docs/explanation/snapshot-runner.md), [runner runbook](docs/how-to/runner-runbook.md) |
+| **Deploy** | [Docker Compose](deploy/docker/README.md) (single-host), [Helm chart](deploy/helm/wasmsh/README.md) (Kubernetes), [snapshot-runner architecture](docs/explanation/snapshot-runner.md), [runner runbook](docs/how-to/runner-runbook.md) |
 | **Tune** | [Performance testing & sizing](docs/guides/performance-testing.md), [dispatcher API](docs/reference/dispatcher-api.md), [runner metrics](docs/reference/runner-metrics.md) |
 | **How-to** | [Embedding](docs/guides/embedding.md), [Pyodide integration](docs/guides/pyodide-integration.md), [Adding a command](docs/guides/adding-commands.md), [Troubleshooting](docs/guides/troubleshooting.md) |
 | **Reference** | [Shell syntax](docs/reference/shell-syntax.md), [builtins](docs/reference/builtins.md), [utilities](docs/reference/utilities.md), [protocol](docs/reference/protocol.md), [sandbox & capabilities](docs/reference/sandbox-and-capabilities.md), [supported features](SUPPORTED.md) |

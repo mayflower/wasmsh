@@ -1,0 +1,62 @@
+# Caddy reverse proxy overlay for the wasmsh scalable stack.
+#
+# Layers onto compose.yml to provide:
+#   - TLS termination (Let's Encrypt if WASMSH_PUBLIC_DOMAIN is set,
+#     Caddy's internal CA otherwise — fine for a dev box, not for
+#     real users)
+#   - HTTP basic auth gating every dispatcher route
+#   - Clean 127.0.0.1 binding of the dispatcher so nothing hits the
+#     public interface except through Caddy
+#
+# Usage:
+#   # 1. generate a bcrypt hash for your basic-auth password:
+#   docker run --rm caddy:2 caddy hash-password --plaintext 'your-password'
+#
+#   # 2. fill out .env (copy from .env.example) with at minimum:
+#   #    WASMSH_BASIC_AUTH_USER=alice
+#   #    WASMSH_BASIC_AUTH_HASH='$2a$14$...'   # single-quoted!
+#   #    WASMSH_PUBLIC_DOMAIN=wasmsh.example.com   # optional, enables ACME
+#
+#   # 3. bring up the stack:
+#   docker compose \
+#     -f deploy/docker/compose.yml \
+#     -f deploy/docker/compose.caddy.yml \
+#     up -d --wait
+#
+# Without WASMSH_PUBLIC_DOMAIN Caddy serves on https://localhost with an
+# internal CA — add Caddy's root cert to your trust store (see
+# https://caddyserver.com/docs/running#local-https-with-docker) or hit
+# the dispatcher at http://127.0.0.1:8080 directly for local testing.
+#
+# For anything more complex (rate limiting, IP allowlists, mTLS, an
+# OIDC gateway) use this as a starting point and edit the Caddyfile.
+
+services:
+  # No override for `dispatcher` — its default bind in compose.yml is
+  # `127.0.0.1:8080:8080`, which is already safe; Caddy reaches it over
+  # the compose network via the `dispatcher` DNS name regardless of
+  # whether the port is published to the host.  Override
+  # WASMSH_DISPATCHER_BIND in .env if you want to remove the host
+  # binding entirely once Caddy is in place.
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      dispatcher:
+        condition: service_healthy
+    environment:
+      WASMSH_PUBLIC_DOMAIN: "${WASMSH_PUBLIC_DOMAIN:-localhost}"
+      WASMSH_BASIC_AUTH_USER: "${WASMSH_BASIC_AUTH_USER:?set WASMSH_BASIC_AUTH_USER in .env}"
+      WASMSH_BASIC_AUTH_HASH: "${WASMSH_BASIC_AUTH_HASH:?set WASMSH_BASIC_AUTH_HASH in .env (caddy hash-password)}"
+    ports:
+      - "${WASMSH_HTTPS_BIND:-0.0.0.0:443}:443"
+      - "${WASMSH_HTTP_BIND:-0.0.0.0:80}:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
