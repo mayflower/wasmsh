@@ -195,17 +195,27 @@ jobs:
         run: |
           # Publish order must respect the workspace dep graph so each
           # `cargo publish` call resolves its deps against what already
-          # landed on crates.io earlier in the loop.  Leaves first,
-          # wasmsh-runtime mid-graph, then its consumers and the
-          # top-level service crates at the end.
+          # landed on crates.io earlier in the loop.  Layered by
+          # dependency depth — never reorder without re-running
+          # `cargo tree` / the graph check against the workspace:
+          #   L0 (no intra-workspace deps): ast, state, fs, protocol
+          #   L1 (deps -> L0):              lex, builtins, utils
+          #   L2 (deps -> L0..L1):          parse, expand
+          #   L3 (deps -> L0..L2):          hir
+          #   L4 (deps -> L0..L3):          ir  ← depends on hir since b8d98b2
+          #   L5:                           vm
+          #   L6:                           runtime
+          #   L7:                           json-bridge, browser, testkit
+          #   tail (no workspace deps):     dispatcher
           CRATES=(
-            wasmsh-ast wasmsh-ir wasmsh-state wasmsh-fs wasmsh-protocol
-            wasmsh-lex wasmsh-parse wasmsh-hir
-            wasmsh-builtins wasmsh-utils wasmsh-expand
+            wasmsh-ast wasmsh-state wasmsh-fs wasmsh-protocol
+            wasmsh-lex wasmsh-builtins wasmsh-utils
+            wasmsh-parse wasmsh-expand
+            wasmsh-hir
+            wasmsh-ir
             wasmsh-vm
             wasmsh-runtime
-            wasmsh-json-bridge
-            wasmsh-browser wasmsh-testkit
+            wasmsh-json-bridge wasmsh-browser wasmsh-testkit
             wasmsh-dispatcher
           )
           publish_crate() {
