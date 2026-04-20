@@ -874,14 +874,14 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-ast"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "smol_str",
 ]
 
 [[package]]
 name = "wasmsh-builtins"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "indexmap",
  "smol_str",
@@ -891,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-expand"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "smol_str",
  "wasmsh-ast",
@@ -900,7 +900,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-fs"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "libc",
  "thiserror",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-hir"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "smol_str",
  "wasmsh-ast",
@@ -916,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-ir"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "smol_str",
  "wasmsh-ast",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-json-bridge"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "libc",
  "serde_json",
@@ -936,14 +936,14 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-lex"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "wasmsh-ast",
 ]
 
 [[package]]
 name = "wasmsh-parse"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "wasmsh-ast",
  "wasmsh-lex",
@@ -951,14 +951,14 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-protocol"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "wasmsh-pyodide"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "libc",
  "serde",
@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-runtime"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "indexmap",
  "posix-regex",
@@ -992,7 +992,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-state"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "indexmap",
  "smol_str",
@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-utils"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64",
  "digest",
@@ -1025,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-vm"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "wasmsh-ast",
  "wasmsh-builtins",
