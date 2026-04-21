@@ -187,18 +187,23 @@ try {
 
 ### Try it locally
 
-The repo ships a minimal docker-compose stack (dispatcher + one runner)
-for smoke testing:
+The repo ships a production-oriented docker-compose stack (dispatcher
+plus one or more runners, tunable via `--scale runner=N`) in
+[`deploy/docker/`](../../deploy/docker/README.md):
 
 ```bash
-docker compose -f deploy/docker/compose.dispatcher-test.yml up -d --wait
-WASMSH_DISPATCHER_URL=http://localhost:8080 \
+docker compose -f deploy/docker/compose.yml up -d --wait
+WASMSH_DISPATCHER_URL=http://127.0.0.1:8080 \
   uv --project packages/python/langchain-wasmsh \
   run python examples/deepagent-python/remote_basic.py
-WASMSH_DISPATCHER_URL=http://localhost:8080 \
+WASMSH_DISPATCHER_URL=http://127.0.0.1:8080 \
   pnpm --filter wasmsh-deepagent-typescript-example run remote-basic
-docker compose -f deploy/docker/compose.dispatcher-test.yml down
+docker compose -f deploy/docker/compose.yml down
 ```
+
+The thinner `compose.dispatcher-test.yml` next to it is used by the
+dispatcher-compose e2e suite; prefer `compose.yml` for anything
+outside that loop.
 
 ### End-to-end tests
 
@@ -223,6 +228,7 @@ Runnable examples:
 
 - [`examples/deepagent-python/remote_basic.py`](../../examples/deepagent-python/remote_basic.py) — minimal Python usage, no LLM.
 - [`examples/deepagent-typescript/remote-basic.ts`](../../examples/deepagent-typescript/remote-basic.ts) — minimal TypeScript usage, no LLM.
+- [`examples/deepagent-kubernetes/`](../../examples/deepagent-kubernetes/) — Helm install + three ways to reach the dispatcher (port-forward, ingress, in-cluster DNS), reusing the two scripts above.
 
 ### In production
 

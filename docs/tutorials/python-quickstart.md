@@ -203,10 +203,16 @@ package, which wraps this protocol with the LangChain Deep Agents
 - `WasmshSandbox()` — in-process, same single-subprocess model as this
   tutorial.
 - `WasmshRemoteSandbox(dispatcher_url)` — talks HTTP to the scalable
-  dispatcher + runner pool ([Helm chart](../../deploy/helm/wasmsh/))
-  for Kubernetes deployments.  Same surface as the in-process variant;
-  a one-line import change lets an agent scale from laptop to cluster.
+  dispatcher + runner pool ([Helm chart](../../deploy/helm/wasmsh/) /
+  [Docker Compose](../../deploy/docker/README.md)) for Kubernetes and
+  Docker deployments.  Same surface as the in-process variant; a
+  one-line import change lets an agent scale from laptop to cluster.
 
+Runnable examples: in-process at
+[`examples/deepagent-python/`](../../examples/deepagent-python/),
+remote-via-compose in the same directory's `remote_basic.py`, and a
+Kubernetes walkthrough at
+[`examples/deepagent-kubernetes/`](../../examples/deepagent-kubernetes/).
 See [`docs/integrations/langchain-wasmsh.md`](../integrations/langchain-wasmsh.md)
 for the full guide.
 

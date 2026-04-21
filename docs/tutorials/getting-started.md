@@ -183,10 +183,16 @@ You have:
 That is the full embedding lifecycle. Everything else is variation on
 this theme.
 
+A runnable version of the same shape lives at
+[`examples/rust/`](../../examples/rust/) — `cargo run` from that
+directory builds against the local workspace and prints the output
+shown above.
+
 ## Where to go next
 
 | If you want to … | Read |
 |------------------|------|
+| See this as a standalone cargo package | [`examples/rust/`](../../examples/rust/) |
 | Drive wasmsh from JS or Python instead | [JavaScript quickstart](javascript-quickstart.md) / [Python quickstart](python-quickstart.md) |
 | Build the standalone Web Worker bundle | [Embedding wasmsh](../guides/embedding.md) and `just build-standalone` |
 | Build the Pyodide target | [Pyodide integration](../guides/pyodide-integration.md) and `just build-pyodide` |

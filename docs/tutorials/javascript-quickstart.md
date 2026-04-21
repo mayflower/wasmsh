@@ -176,10 +176,17 @@ package. It wraps this protocol with the LangChain Deep Agents
 - `WasmshSandbox.createNode()` / `.createBrowserWorker()` — in-process,
   same boot as this tutorial under the hood.
 - `WasmshRemoteSandbox.create({ dispatcherUrl })` — talks HTTP to the
-  scalable dispatcher + runner pool ([Helm chart](../../deploy/helm/wasmsh/))
-  for Kubernetes deployments. One-line import change to scale an agent
-  from laptop to cluster.
+  scalable dispatcher + runner pool ([Helm chart](../../deploy/helm/wasmsh/) /
+  [Docker Compose](../../deploy/docker/README.md)) for Kubernetes and
+  Docker deployments. One-line import change to scale an agent from
+  laptop to cluster.
 
+Runnable examples: in-process at
+[`examples/deepagent-typescript/`](../../examples/deepagent-typescript/)
+and [`examples/deepagent-browser/`](../../examples/deepagent-browser/),
+remote-via-compose in the typescript example's `remote-basic.ts`, and
+a Kubernetes walkthrough at
+[`examples/deepagent-kubernetes/`](../../examples/deepagent-kubernetes/).
 See [`docs/integrations/langchain-wasmsh.md`](../integrations/langchain-wasmsh.md)
 for the full guide.
 
