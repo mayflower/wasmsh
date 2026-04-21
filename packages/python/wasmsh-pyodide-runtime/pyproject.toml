@@ -19,5 +19,18 @@ classifiers = [
 ]
 
 [tool.setuptools.package-data]
-"wasmsh_pyodide_runtime" = ["assets/*", "assets/lib/*", "py.typed"]
+# Each `assets/foo/*` entry is one directory deep only; setuptools' fnmatch-
+# based package_data does not recurse.  Every subdirectory of assets/ must
+# be listed explicitly or its files will be missing from the published
+# wheel / sdist (that's how `assets/lib/baseline/boot-plan.mjs` went
+# missing in 0.5.10-0.6.2 — the adapter unit tests import it at runtime
+# and fail with ERR_MODULE_NOT_FOUND).  When a new subdirectory is added,
+# add its glob here.
+"wasmsh_pyodide_runtime" = [
+    "assets/*",
+    "assets/lib/*",
+    "assets/lib/baseline/*",
+    "assets/lib/snapshot/*",
+    "py.typed",
+]
 

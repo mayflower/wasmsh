@@ -45,10 +45,12 @@ permissions:
   contents: read
 
 env:
-  # Kept in sync with packages/npm/wasmsh-pyodide/package.json — CI stages
-  # pre-built Pyodide assets from the published tarball so runner image
-  # builds don't have to rebuild Pyodide (~30min).
-  WASMSH_PYODIDE_NPM_VERSION: "0.5.10"
+  # Version is derived at runtime from packages/npm/wasmsh-pyodide/package.json
+  # by the "Stage Pyodide assets" step below.  CI stages pre-built Pyodide
+  # assets from the published tarball so runner image builds don't have
+  # to rebuild Pyodide (~30min).  We used to hardcode the version here
+  # and it silently drifted from the workspace every release — deriving
+  # it from package.json removes the bump-two-places coupling.
 
 jobs:
   # ── Docker-compose: WasmshRemoteSandbox (TS + Python) ──────
@@ -79,10 +81,10 @@ jobs:
           version: "0.11.7"
 
       - name: Stage Pyodide assets (for runner image)
-        env:
-          VERSION: ${{ env.WASMSH_PYODIDE_NPM_VERSION }}
         run: |
           set -euo pipefail
+          VERSION="$(node -p "require('./packages/npm/wasmsh-pyodide/package.json').version")"
+          echo "Using @mayflowergmbh/wasmsh-pyodide@$VERSION"
           tmp="$(mktemp -d)"
           url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
           echo "Fetching $url"
@@ -161,10 +163,10 @@ jobs:
           version: v3.16.2
 
       - name: Stage Pyodide assets (for runner image)
-        env:
-          VERSION: ${{ env.WASMSH_PYODIDE_NPM_VERSION }}
         run: |
           set -euo pipefail
+          VERSION="$(node -p "require('./packages/npm/wasmsh-pyodide/package.json').version")"
+          echo "Using @mayflowergmbh/wasmsh-pyodide@$VERSION"
           tmp="$(mktemp -d)"
           url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
           echo "Fetching $url"

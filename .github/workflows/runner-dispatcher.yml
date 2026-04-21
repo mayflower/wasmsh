@@ -26,7 +26,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Use the in-repo composite action — the `mayflower-k8s-runners` image
+      # ships without build-essential, so `dtolnay/rust-toolchain@stable`
+      # on its own leaves `cc` missing and every Rust build script fails
+      # with "linker `cc` not found".  The composite installs
+      # build-essential + pkg-config + the toolchain in one step.
+      - uses: ./.github/actions/setup-rust
 
       - uses: actions/setup-node@v4
         with:

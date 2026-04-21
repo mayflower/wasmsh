@@ -31,9 +31,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  WASMSH_PYODIDE_NPM_VERSION: "0.5.10"
-
 jobs:
   # ── Python LLM agent tests ─────────────────────────────────
   python:
@@ -96,10 +93,10 @@ jobs:
           cache: "pnpm"
 
       - name: Stage Pyodide assets from published npm tarball
-        env:
-          VERSION: ${{ env.WASMSH_PYODIDE_NPM_VERSION }}
         run: |
           set -euo pipefail
+          VERSION="$(node -p "require('./packages/npm/wasmsh-pyodide/package.json').version")"
+          echo "Using @mayflowergmbh/wasmsh-pyodide@$VERSION"
           tmp="$(mktemp -d)"
           url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
           curl -fsSL "$url" -o "$tmp/pkg.tgz"
@@ -146,10 +143,10 @@ jobs:
 
       - name: Stage Pyodide assets from published npm tarball
         working-directory: .
-        env:
-          VERSION: ${{ env.WASMSH_PYODIDE_NPM_VERSION }}
         run: |
           set -euo pipefail
+          VERSION="$(node -p "require('./packages/npm/wasmsh-pyodide/package.json').version")"
+          echo "Using @mayflowergmbh/wasmsh-pyodide@$VERSION"
           tmp="$(mktemp -d)"
           url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
           curl -fsSL "$url" -o "$tmp/pkg.tgz"

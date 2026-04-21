@@ -28,6 +28,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The mayflower-k8s-runners image ships without build-essential or
+      # xz-utils, so `just build-pyodide` (which cargo-builds the wasmsh
+      # staticlib and then emsdk-untars node-vX.Y.Z.tar.xz) fails with
+      # "linker `cc` not found" or "tar: xz compression not available".
+      # Match pyodide.yml's setup.
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential wget ccache pkg-config xz-utils autoconf automake libtool
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-emscripten
