@@ -28,9 +28,9 @@ Code, comments, and documentation are in English.
 
 The repository has multi-layer coverage across crate tests, runtime/protocol tests, TOML suite cases, and E2E adapters. The runtime/protocol crates are expected to stay green; the broad TOML suite still contains known conformance gaps in areas like arrays, brace expansion, globbing, and `xtrace`. See `SUPPORTED.md` for syntax/command coverage.
 
-**Standalone path**: `wasmsh-browser` wraps `wasmsh-runtime` with wasm-bindgen glue. 6 Playwright E2E tests.
+**Standalone path**: `wasmsh-browser` wraps `wasmsh-runtime` with wasm-bindgen glue. 15 Playwright E2E tests.
 
-**Pyodide path**: `wasmsh-pyodide` wraps `wasmsh-runtime` with C ABI + JSON protocol. `EmscriptenFs` backend routes VFS through libc (shared with Python). `python`/`python3` commands run in-process via `PyRun_SimpleString`. `pip install` is intercepted at the JS host and routed through micropip. Both Node and browser use `loadPyodide()` for boot. 19 Node E2E + 12 Playwright browser E2E tests.
+**Pyodide path**: `wasmsh-pyodide` wraps `wasmsh-runtime` with C ABI + JSON protocol. `EmscriptenFs` backend routes VFS through libc (shared with Python). `python`/`python3` commands run in-process via `PyRun_SimpleString`. `pip install` is intercepted at the JS host and routed through micropip. Both Node and browser use `loadPyodide()` for boot. 76 Node E2E tests (15 suites) + 21 Playwright browser E2E tests.
 
 **Scalable path**: `crates/wasmsh-dispatcher` is an Axum HTTP control plane with session affinity, restore-capacity routing, drain, and Prometheus metrics. Runner pods run `tools/runner-node/src/server.mjs` (Node + the Pyodide path above) and expose `/readyz`, `/runner/snapshot`, `/sessions/...`. Deployment lives in `deploy/helm/wasmsh` (HPA, PDB, NetworkPolicy, headless service) with production images `ghcr.io/mayflower/wasmsh-{dispatcher,runner}`. End-to-end coverage: `e2e/dispatcher-compose` (docker-compose, fast) and `e2e/kind` (full Helm install in kind).
 
@@ -55,12 +55,12 @@ just test-crate wasmsh-lex  # single crate
 
 # ── Standalone ──────────────────────────────────────
 just build-standalone       # wasm-pack → e2e/standalone/fixture/pkg/
-just test-e2e-standalone    # Playwright browser E2E (6 tests)
+just test-e2e-standalone    # Playwright browser E2E (15 tests)
 
 # ── Pyodide (requires emcc) ────────────────────────
 just build-pyodide          # custom Pyodide → dist/pyodide-custom/
 just test-e2e-pyodide-node  # Node E2E (19 tests)
-just test-e2e-pyodide-browser # Playwright browser E2E (4 tests)
+just test-e2e-pyodide-browser # Playwright browser E2E (21 tests)
 just build-emscripten-probe # emscripten staticlib probe
 
 # ── Scalable dispatcher + runner ────────────────────
@@ -93,7 +93,7 @@ just doc                    # docs with warnings-as-errors
 
 ## Cargo Workspace Structure
 
-18 workspace crates under `crates/`: `wasmsh-ast`, `wasmsh-lex`, `wasmsh-parse`, `wasmsh-expand`, `wasmsh-hir`, `wasmsh-ir`, `wasmsh-vm`, `wasmsh-state`, `wasmsh-fs`, `wasmsh-builtins`, `wasmsh-utils`, `wasmsh-runtime`, `wasmsh-browser`, `wasmsh-json-bridge`, `wasmsh-protocol`, `wasmsh-dispatcher`, `wasmsh-testkit`.
+17 workspace crates under `crates/`: `wasmsh-ast`, `wasmsh-lex`, `wasmsh-parse`, `wasmsh-expand`, `wasmsh-hir`, `wasmsh-ir`, `wasmsh-vm`, `wasmsh-state`, `wasmsh-fs`, `wasmsh-builtins`, `wasmsh-utils`, `wasmsh-runtime`, `wasmsh-browser`, `wasmsh-json-bridge`, `wasmsh-protocol`, `wasmsh-dispatcher`, `wasmsh-testkit`.
 
 2 excluded crates (require emcc): `wasmsh-pyodide-probe`, `wasmsh-pyodide`.
 
@@ -155,9 +155,12 @@ Pyodide/Emscripten versions are pinned in `tools/pyodide/versions.env` (single s
 
 ```
 e2e/
-├── standalone/       # Playwright: standalone browser worker (6 tests)
-├── build-contract/   # node:test: emscripten probe build (2 tests)
-├── pyodide-node/     # node:test: Pyodide Node E2E (19 tests)
-├── pyodide-browser/  # Playwright: Pyodide browser worker (4 tests)
-└── repo-checks/      # node:test: repo structure checks (12 tests)
+├── standalone/            # Playwright: standalone browser worker (15 tests)
+├── build-contract/        # node:test: emscripten probe build (2 tests)
+├── pyodide-node/          # node:test: Pyodide Node E2E (76 tests, 15 suites)
+├── pyodide-browser/       # Playwright: Pyodide browser worker (21 tests)
+├── runner-node/           # node:test: scalable runner contract (39 tests)
+├── dispatcher-compose/    # node:test + pytest: WasmshRemoteSandbox via docker-compose
+├── kind/                  # node:test + pytest: WasmshRemoteSandbox via kind + Helm
+└── repo-checks/           # node:test: repo structure checks (94 tests, 20 suites)
 ```

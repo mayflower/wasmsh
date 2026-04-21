@@ -12,8 +12,9 @@ For exact surfaces see [Reference](../reference/index.md).
 
 | Page | Contents |
 |------|----------|
-| [Architecture](architecture.md) | Pipeline, crate map, dual-target structure, execution flow, key implementation choices |
+| [Architecture](architecture.md) | Pipeline, crate map, the three deployment shapes (standalone, Pyodide, scalable), execution flow, key implementation choices |
 | [Design decisions](design-decisions.md) | The "why" behind each major choice, with links to the corresponding ADRs |
+| [Snapshot runner](snapshot-runner.md) | The scalable deployment path: dispatcher + runner pool, session affinity, restore-capacity routing, graceful drain, the client surface shared by both adapters |
 
 ## Going Deeper
 

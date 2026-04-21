@@ -23,7 +23,7 @@ cd wasmsh
 cargo build --workspace
 ```
 
-The workspace contains 15 crates (plus 2 emcc-only crates excluded from the
+The workspace contains 17 crates (plus 2 emcc-only crates excluded from the
 default workspace). All should compile without errors.
 
 ## Step 2: Run the Tests

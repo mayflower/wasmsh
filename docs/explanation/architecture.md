@@ -289,7 +289,42 @@ When `WorkerRuntime::handle_command(HostCommand::Run { input })` is invoked
 7. **Set `$PIPESTATUS`** after pipeline execution
 8. **Fire traps**: EXIT trap if exit was requested
 
-## Dual-Target Architecture
+## Deployment Architecture
+
+wasmsh ships three deployment shapes from the one `wasmsh-runtime`
+core.  Two are **in-process targets** (the wasm module runs in the
+same process as the embedder) and one is a **server-side deployment**
+(the wasm module runs in a runner pod, clients speak HTTP).
+
+```mermaid
+graph TB
+    runtime[(wasmsh-runtime<br/>platform-agnostic core)]
+
+    subgraph inproc[In-process — two wasm targets]
+        standalone[Standalone wasm32-unknown-unknown<br/>wasmsh-browser → Web Worker]
+        pyodide[Pyodide wasm32-unknown-emscripten<br/>wasmsh-pyodide → Node / browser]
+    end
+
+    subgraph server[Scalable — Kubernetes / Docker]
+        dispatcher[wasmsh-dispatcher<br/>Axum HTTP, session routing]
+        runnerPool[Runner pod pool<br/>Node host + Pyodide]
+        bridge[wasmsh-json-bridge<br/>shared JSON transport]
+    end
+
+    standalone --> runtime
+    pyodide --> runtime
+    runnerPool --> bridge --> runtime
+    client[HTTP client<br/>WasmshRemoteSandbox] --> dispatcher --> runnerPool
+
+    classDef core fill:#eef,stroke:#557
+    classDef inproc fill:#fff,stroke:#999
+    classDef server fill:#ffe,stroke:#a82
+    class runtime core
+    class standalone,pyodide inproc
+    class dispatcher,runnerPool,bridge server
+```
+
+### The two in-process targets
 
 ```mermaid
 graph TB
@@ -356,6 +391,39 @@ in-process interpreter; the browser adapter leaves it unset.
 The `BackendFs` swap is feature-gated: `wasmsh-runtime/emscripten` forwards
 to `wasmsh-fs/emscripten`, which switches the type alias from `MemoryFs` to
 `EmscriptenFs`. This avoids making `WorkerRuntime` generic over the FS type.
+
+### The scalable target
+
+The two in-process targets are single-host by construction.  Multi-user
+agent platforms need more: session affinity, restore-capacity-aware
+scheduling, autoscaling, and graceful drain on rolling deployments.
+The scalable target packages the Pyodide in-process embedding behind
+an HTTP control plane:
+
+| Component | Lives in | Purpose |
+|-|-|-|
+| `wasmsh-dispatcher` | [`crates/wasmsh-dispatcher/`](../../crates/wasmsh-dispatcher) | Axum HTTP service. Routes `POST /sessions` etc. across the runner pool by free restore capacity; caches session affinity so follow-on requests land on the same pod. |
+| Runner pod | [`tools/runner-node/`](../../tools/runner-node) | Node host running the Pyodide embedding, one template worker + a pool of per-session workers. Exposes `/healthz`, `/readyz`, `/metrics`, `/runner/snapshot`. |
+| `wasmsh-json-bridge` | [`crates/wasmsh-json-bridge/`](../../crates/wasmsh-json-bridge) | The JSON serialisation shared between the Pyodide embedding and the runner's wire format — so dispatcher ↔ runner sees the same `HostCommand` / `WorkerEvent` shapes the in-process targets do. |
+
+Clients speak plain JSON/HTTP to the dispatcher.  Inside a runner pod
+the stack is byte-identical to the Pyodide in-process target — same
+`wasmsh-runtime`, same `EmscriptenFs`, same snapshot restore.  This is
+deliberate: it means anything that works in an `examples/deepagent-*`
+run works through the dispatcher without protocol translation.
+
+The Helm chart in [`deploy/helm/wasmsh/`](../../deploy/helm/wasmsh)
+provisions dispatcher + runner Deployments, a `HorizontalPodAutoscaler`
+on the `wasmsh_inflight_restores` custom metric, a `PodDisruptionBudget`,
+and an optional egress `NetworkPolicy`.  The production image repos are
+`ghcr.io/mayflower/wasmsh-{dispatcher,runner}`.
+
+See [`docs/explanation/snapshot-runner.md`](snapshot-runner.md) for the
+full dispatcher + runner architecture,
+[`docs/reference/dispatcher-api.md`](../reference/dispatcher-api.md) for
+the HTTP contract, and
+[`docs/reference/runner-metrics.md`](../reference/runner-metrics.md)
+for the Prometheus surface.
 
 See ADR-0017 (shared runtime extraction), ADR-0018 (Pyodide same-module
 architecture), ADR-0019 (dual-target packaging), and ADR-0021 (network

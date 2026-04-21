@@ -23,6 +23,13 @@ recipe for a specific task, see [How-to Guides](../guides/index.md).
 | [Worker protocol](protocol.md) | `HostCommand` / `WorkerEvent` definitions, JSON wire format, sequence diagram |
 | [Sandbox and capabilities](sandbox-and-capabilities.md) | Step budgets, output limits, network allowlist, deterministic system commands, environment variables |
 
+## Scalable deployment
+
+| Page | Contents |
+|------|----------|
+| [Dispatcher API](dispatcher-api.md) | HTTP contract spoken by `WasmshRemoteSandbox` — session create, run, read/write/list-file, close, plus the health endpoints |
+| [Runner metrics](runner-metrics.md) | Prometheus surface exposed by each runner pod: restore latency, inflight restores, queue depth, broker denials |
+
 ## See Also
 
 - [`SUPPORTED.md`](../../SUPPORTED.md) for the canonical "what works / what

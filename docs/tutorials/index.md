@@ -18,6 +18,7 @@ Pick the tutorial that matches the way you will use wasmsh:
 | Run wasmsh from a Node.js program | [JavaScript / Node.js quick start](javascript-quickstart.md) |
 | Run wasmsh from a Python program | [Python quick start](python-quickstart.md) |
 | Embed wasmsh as a Rust library | [Getting Started (Rust)](getting-started.md) |
+| Deploy wasmsh as a scalable sandbox pool (multi-user, Docker or K8s) | [Docker Compose](../../deploy/docker/README.md) or [Helm chart](../../deploy/helm/wasmsh/README.md); client side in the [LangChain integration guide](../integrations/langchain-wasmsh.md#wasmshremotesandbox--docker--kubernetes-backend) |
 | Add new test cases to the suite | [Writing shell tests](writing-tests.md) |
 
 If you are not sure which adapter you need, the JavaScript / Node.js

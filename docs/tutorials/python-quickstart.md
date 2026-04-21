@@ -13,7 +13,7 @@ first Node.js subprocess to boot Pyodide).
 
 ## Prerequisites
 
-- **Python 3.11 or later.**
+- **Python 3.11 or later** for the host script (any 3.11+ interpreter works; Pyodide inside the sandbox runs Python 3.13).
 - **Node.js 20 or later.** wasmsh runs inside a Node host process; the
   Python side talks to it over a JSON-on-stdio bridge.
 - **A package manager** (`pip` or `uv`).
