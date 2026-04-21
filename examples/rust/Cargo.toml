@@ -1,0 +1,14 @@
+[package]
+name = "wasmsh-rust-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Minimal example showing direct embedding of wasmsh-runtime from Rust"
+
+# In-tree the example builds against the local workspace crates so running
+# `cargo run` from this directory always uses the checked-out code.
+# Downstream users should swap these to the crates.io versions — see
+# README.md for the copy-paste block.
+[dependencies]
+wasmsh-runtime = { path = "../../crates/wasmsh-runtime" }
+wasmsh-protocol = { path = "../../crates/wasmsh-protocol" }

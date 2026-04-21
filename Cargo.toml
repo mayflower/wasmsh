@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["fuzz", "crates/wasmsh-pyodide-probe", "crates/wasmsh-pyodide"]
+exclude = ["fuzz", "crates/wasmsh-pyodide-probe", "crates/wasmsh-pyodide", "examples/rust"]
 members = [
     "crates/wasmsh-ast",
     "crates/wasmsh-lex",

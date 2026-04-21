@@ -68,7 +68,19 @@ from langchain_wasmsh import WasmshSandbox
 agent = create_deep_agent(backend=WasmshSandbox())
 ```
 
-Full integration guide (remote variant, deployment topology, operational knobs): [docs/integrations/langchain-wasmsh.md](docs/integrations/langchain-wasmsh.md). Runnable examples: [`examples/deepagent-typescript/`](examples/deepagent-typescript/), [`examples/deepagent-python/`](examples/deepagent-python/).
+Full integration guide (remote variant, deployment topology, operational knobs): [docs/integrations/langchain-wasmsh.md](docs/integrations/langchain-wasmsh.md).
+
+Runnable examples covering every deployment shape:
+
+| Variant | Directory |
+|-|-|
+| In-browser agent (Pyodide + LLM all client-side) | [`examples/deepagent-browser/`](examples/deepagent-browser/) |
+| In-process Node agent | [`examples/deepagent-typescript/`](examples/deepagent-typescript/) |
+| In-process Python agent | [`examples/deepagent-python/`](examples/deepagent-python/) |
+| Scalable Docker Compose (remote sandbox) | [`examples/deepagent-typescript/`](examples/deepagent-typescript/#remote-setup-docker-compose) + [`examples/deepagent-python/`](examples/deepagent-python/#remote-setup-docker-compose) |
+| Scalable Kubernetes (Helm) | [`examples/deepagent-kubernetes/`](examples/deepagent-kubernetes/) |
+| Direct Rust embedding (no sandbox layer) | [`examples/rust/`](examples/rust/) |
+| Raw wasm-pack (JS/TS, no LLM) | [`examples/web/`](examples/web/), [`examples/typescript/`](examples/typescript/), [`examples/python/`](examples/python/) |
 
 ## Install
 
