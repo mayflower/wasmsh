@@ -3,4 +3,4 @@ name: wasmsh
 description: Helm chart for the internal dispatcher + runner sandbox control plane.
 type: application
 version: 0.1.0
-appVersion: "0.6.2"
+appVersion: "0.6.3"
