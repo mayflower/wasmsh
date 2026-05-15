@@ -141,6 +141,7 @@ ADRs are in `docs/adr/`. Key decisions:
 - ADR-0021: Network capability model (curl/wget with host allowlist)
 - ADR-0029: Dual-path executor (runtime interpreter + VM subset)
 - ADR-0030: Superseded — the WASI P2 Component transport was an early wasmCloud seam; the scalable dispatcher + runner path supersedes it.
+- ADR-0031: PTC suspend/resume over the wasmsh-pyodide JSON-RPC channel
 
 ## Feature Flags
 

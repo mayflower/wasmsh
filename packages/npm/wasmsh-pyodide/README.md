@@ -231,6 +231,49 @@ Returned by both `createNodeSession` and `createBrowserWorkerSession`.
 |--------|-------|-------------|
 | `DEFAULT_WORKSPACE_DIR` | `"/workspace"` | The fixed sandbox root |
 
+### `runPtc` — host-mediated tool calls from inside Python
+
+The Node host advertises a `host_call: "v1"` capability on boot and
+accepts a `runPtc` JSON-RPC method that lets user Python `await`
+host-registered tools mid-execution. **This is not yet exposed on
+`WasmshSession`** — npm consumers wanting programmatic tool calling
+must speak the wire protocol directly (or use the Python
+`langchain-wasmsh` adapter's `WasmshSandbox.run_ptc` until the TS
+client surface lands).
+
+Wire protocol (newline-delimited JSON over stdin/stdout):
+
+```jsonc
+// Boot
+{"type": "ack", "capabilities": {"host_call": "v1"}}
+
+// Client → host
+{"id": 1, "method": "init", "params": {...}}
+{"id": 2, "method": "runPtc", "params": {
+  "code": "await tools.search(q='foo')",
+  "tools": ["search"]
+}}
+
+// Host → client, mid-runPtc (interleaved with the eventual response)
+{"type": "host_call", "id": "hc_<seq>", "tool": "search", "args": {"q": "foo"}}
+
+// Client → host
+{"type": "host_call_result", "id": "hc_<seq>", "ok": true, "value": "hit:foo"}
+
+// Host → client, terminal
+{"id": 2, "ok": true, "result": {"envelope": {
+  "ok": true, "stdout": "", "stderr": "", "value": "hit:foo"
+}}}
+```
+
+The host emits `host_call` messages as the user's `await tools.<name>(...)`
+calls resolve into the JS bridge; each must be replied to with a
+matching `host_call_result` exactly once. Multiple host calls may be
+in flight concurrently (e.g. `await asyncio.gather(...)`).
+
+Design notes: [ADR-0031](https://github.com/mayflower/wasmsh/blob/main/docs/adr/adr-0031-ptc-suspend-resume.md)
+and the [full spec](https://github.com/mayflower/wasmsh/blob/main/docs/explanation/ptc-suspend-resume.md).
+
 ### Helper functions
 
 | Function | Returns | Description |

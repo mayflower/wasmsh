@@ -115,6 +115,118 @@ Runnable examples:
 This is not a Linux container.  If you need a full OS, use a container-based
 backend such as `langchain-modal` or `langchain-daytona`.
 
+## `WasmshInterpreterMiddleware` — persistent Python REPL as an agent tool
+
+The Python package also ships an `AgentMiddleware` that exposes the
+sandbox as a single `py_eval` tool, mirroring the shape of
+[`langchain-quickjs`'s `CodeInterpreterMiddleware`](https://docs.langchain.com/oss/python/deepagents/interpreters)
+but with a real WebAssembly-isolated sandbox underneath. State —
+variables, imports, defined functions — persists across calls and
+across agent turns via a globals-pickle snapshot stored in private
+agent state.
+
+```python
+from deepagents import create_deep_agent
+from langchain_wasmsh import WasmshInterpreterMiddleware
+
+agent = create_deep_agent(
+    model="claude-sonnet-4-6",
+    middleware=[WasmshInterpreterMiddleware()],
+)
+```
+
+### Programmatic tool calling (PTC)
+
+Selected agent tools can be exposed inside the sandbox as
+`tools.<snake_name>` awaitables, so user Python can fan out, loop,
+branch, and chain tool calls within one `py_eval` invocation — without
+extra LLM turns:
+
+```python
+from langchain_core.tools import tool
+
+@tool
+def lookup_user(user_id: int) -> dict:
+    """Return a small user record."""
+    return {"id": user_id, "name": "alice"}
+
+agent = create_deep_agent(
+    model="claude-sonnet-4-6",
+    tools=[lookup_user],
+    middleware=[WasmshInterpreterMiddleware(ptc=["lookup_user"])],
+)
+```
+
+The model may then emit:
+
+```python
+import asyncio
+users = await asyncio.gather(*[
+    tools.lookup_user(user_id=i) for i in [1, 2, 3]
+])
+print(users)
+```
+
+PTC calls round-trip through the sandbox's `host_call` /
+`host_call_result` protocol (see [ADR-0031](../adr/adr-0031-ptc-suspend-resume.md))
+and dispatch through the LangChain `BaseTool.invoke` path on the host.
+**Note:** PTC bypasses the regular `ToolNode` path, so per-tool
+`interrupt_on` approval hooks are *not* enforced — treat the
+allowlist as your permission boundary. PTC currently requires the
+**in-process** backend; `WasmshRemoteSandbox.run_ptc` raises
+`NotImplementedError` until the dispatcher SSE channel ships.
+
+### Python skills
+
+Pair `WasmshInterpreterMiddleware` with a `SkillsMiddleware` and a shared
+`BackendProtocol`, and Python sources under each skill directory become
+importable inside the REPL as `import skills.<name>`:
+
+```python
+from deepagents import create_deep_agent
+from deepagents.backends import StateBackend
+from deepagents.middleware import SkillsMiddleware
+from langchain_wasmsh import WasmshInterpreterMiddleware
+
+backend = StateBackend()
+agent = create_deep_agent(
+    model="claude-sonnet-4-6",
+    backend=backend,
+    middleware=[
+        SkillsMiddleware(backend=backend, sources=["/skills/user/"]),
+        WasmshInterpreterMiddleware(skills_backend=backend),
+    ],
+)
+```
+
+The middleware scans the user's code for `import skills.<name>` /
+`from skills.<name> import …` references and stages the matching skill
+directory into the sandbox VFS on first use. An `__init__.py` is
+synthesised when the skill author didn't ship one.
+
+## `WasmshFilesystemBackend` — memory backend over a wasmsh VFS
+
+For DeepAgents [Memory](https://docs.langchain.com/oss/python/deepagents/memory),
+`WasmshFilesystemBackend` adapts a `WasmshSandbox` as a
+`BackendProtocol`. A `namespace=` prefix lets several memory routes share
+one sandbox VFS without colliding:
+
+```python
+from deepagents.backends import CompositeBackend, StateBackend
+from langchain_wasmsh import WasmshFilesystemBackend, WasmshSandbox
+
+memory_sandbox = WasmshSandbox()  # long-lived; owns the persistent memory
+backend = CompositeBackend(
+    default=StateBackend(),
+    routes={
+        "/memories/": WasmshFilesystemBackend(memory_sandbox, namespace="/memories"),
+    },
+)
+```
+
+Unlike using the sandbox directly, the filesystem backend does not
+expose `execute()` — it is a memory store, not a code-runner.
+
 ## Reference
 
 Both packages expose the same public surface.  See the per-ecosystem READMEs
@@ -122,6 +234,11 @@ for the full API:
 
 - [`packages/python/langchain-wasmsh/README.md`](../../packages/python/langchain-wasmsh/README.md)
 - [`packages/npm/langchain-wasmsh/README.md`](../../packages/npm/langchain-wasmsh/README.md)
+
+Deeper material on the PTC channel:
+
+- [ADR-0031: PTC suspend/resume over the wasmsh-pyodide JSON-RPC channel](../adr/adr-0031-ptc-suspend-resume.md)
+- [`docs/explanation/ptc-suspend-resume.md`](../explanation/ptc-suspend-resume.md) — full wire spec and phasing.
 
 ## `WasmshRemoteSandbox` — Docker / Kubernetes backend
 

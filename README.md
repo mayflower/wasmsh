@@ -68,6 +68,27 @@ from langchain_wasmsh import WasmshSandbox
 agent = create_deep_agent(backend=WasmshSandbox())
 ```
 
+The Python adapter also ships a **persistent Python REPL middleware**
+(`WasmshInterpreterMiddleware`) with optional programmatic tool calling
+(PTC) — the model can `await tools.<name>(...)` inside one `py_eval`
+invocation to fan out, branch, and chain LangChain tools without
+extra LLM turns:
+
+```python
+from langchain_wasmsh import WasmshInterpreterMiddleware
+
+agent = create_deep_agent(
+    model="claude-sonnet-4-6",
+    tools=[my_search_tool],
+    middleware=[WasmshInterpreterMiddleware(ptc=["my_search_tool"])],
+)
+```
+
+A `WasmshFilesystemBackend` exposes the same sandbox VFS as a DeepAgents
+[Memory](https://docs.langchain.com/oss/python/deepagents/memory)
+backend; pair with `SkillsMiddleware` for `import skills.<name>` support
+inside the REPL.
+
 Full integration guide (remote variant, deployment topology, operational knobs): [docs/integrations/langchain-wasmsh.md](docs/integrations/langchain-wasmsh.md).
 
 Runnable examples covering every deployment shape:

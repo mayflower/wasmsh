@@ -128,6 +128,100 @@ backend = WasmshSandbox(step_budget=100_000)
 
 A budget of `0` (the default) means unlimited.
 
+## Use the sandbox as a Python REPL middleware
+
+`WasmshInterpreterMiddleware` exposes the sandbox as a single `py_eval`
+agent tool with state that persists across calls and across agent turns
+(via a globals-pickle snapshot stored in private agent state). Shape
+matches [`langchain-quickjs`'s `CodeInterpreterMiddleware`](https://docs.langchain.com/oss/python/deepagents/interpreters)
+but with a real WebAssembly-isolated sandbox underneath.
+
+```python
+from deepagents import create_deep_agent
+from langchain_wasmsh import WasmshInterpreterMiddleware
+
+agent = create_deep_agent(
+    model="claude-sonnet-4-6",
+    middleware=[WasmshInterpreterMiddleware()],
+)
+```
+
+### Programmatic tool calling (PTC)
+
+Pass `ptc=[...]` to expose selected agent tools inside the sandbox as
+`tools.<snake_name>` awaitables. The model can then fan out, branch,
+and chain tool calls within one `py_eval` invocation without extra LLM
+turns:
+
+```python
+from langchain_core.tools import tool
+
+@tool
+def lookup_user(user_id: int) -> dict:
+    """Return a small user record."""
+    return {"id": user_id, "name": "alice"}
+
+agent = create_deep_agent(
+    model="claude-sonnet-4-6",
+    tools=[lookup_user],
+    middleware=[WasmshInterpreterMiddleware(ptc=["lookup_user"])],
+)
+```
+
+User code may then write `await asyncio.gather(*[tools.lookup_user(user_id=i)
+for i in [1, 2, 3]])`. PTC calls bypass the regular `ToolNode` path, so
+per-tool `interrupt_on` approval hooks are *not* enforced — treat the
+allowlist as your permission boundary. PTC currently requires the
+in-process backend; `WasmshRemoteSandbox.run_ptc` raises
+`NotImplementedError` until the dispatcher SSE channel ships. Protocol
+details: [ADR-0031](https://github.com/mayflower/wasmsh/blob/main/docs/adr/adr-0031-ptc-suspend-resume.md).
+
+### Python skills (`import skills.<name>`)
+
+Pair the middleware with a `SkillsMiddleware` and a shared
+`BackendProtocol`. Python sources under each skill directory become
+importable inside the REPL:
+
+```python
+from deepagents.backends import StateBackend
+from deepagents.middleware import SkillsMiddleware
+
+backend = StateBackend()
+middleware = [
+    SkillsMiddleware(backend=backend, sources=["/skills/user/"]),
+    WasmshInterpreterMiddleware(skills_backend=backend),
+]
+```
+
+The middleware scans user code for `import skills.<name>` / `from
+skills.<name> import …` references and stages the matching skill
+directory into the sandbox VFS on first use. An `__init__.py` is
+synthesised when the skill author didn't ship one.
+
+## Use the sandbox as a Memory backend
+
+`WasmshFilesystemBackend` adapts a `WasmshSandbox` (or `WasmshRemoteSandbox`)
+as a DeepAgents `BackendProtocol`, suitable as a `CompositeBackend` route
+for [Memory](https://docs.langchain.com/oss/python/deepagents/memory). A
+`namespace=` prefix lets several memory routes share one sandbox VFS
+without colliding:
+
+```python
+from deepagents.backends import CompositeBackend, StateBackend
+from langchain_wasmsh import WasmshFilesystemBackend, WasmshSandbox
+
+memory_sandbox = WasmshSandbox()  # long-lived; owns the persistent memory
+backend = CompositeBackend(
+    default=StateBackend(),
+    routes={
+        "/memories/": WasmshFilesystemBackend(memory_sandbox, namespace="/memories"),
+    },
+)
+```
+
+Unlike using the sandbox directly, the filesystem backend does **not**
+expose `execute()` — it's a memory store, not a code-runner.
+
 ## Remote / Kubernetes backend
 
 For production or scalable deployments, use `WasmshRemoteSandbox` — same
