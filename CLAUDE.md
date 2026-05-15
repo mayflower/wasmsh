@@ -59,7 +59,7 @@ just test-e2e-standalone    # Playwright browser E2E (15 tests)
 
 # ── Pyodide (requires emcc) ────────────────────────
 just build-pyodide          # custom Pyodide → dist/pyodide-custom/
-just test-e2e-pyodide-node  # Node E2E (19 tests)
+just test-e2e-pyodide-node  # Node E2E (76 tests, 15 suites)
 just test-e2e-pyodide-browser # Playwright browser E2E (21 tests)
 just build-emscripten-probe # emscripten staticlib probe
 
@@ -90,6 +90,9 @@ just doc                    # docs with warnings-as-errors
 3. **No host `exec` in the browser profile.** No `std::fs` in browser-targeted code.
 4. **Clean-room provenance.** Tests are original, not copied from GPL projects.
 5. **ADR-conformant changes.** Architectural decisions are documented in `docs/adr/`.
+6. **No `unsafe` in Rust.** Enforced by clippy config.
+7. **Behavioral changes need a TOML case in `tests/suite/`.** That's the differential-oracle harness driven by `wasmsh-testkit` (`just test-suite`). See `docs/tutorials/writing-tests.md`. New runtime capabilities additionally need an E2E test first (ADR-0020).
+8. **Stage files explicitly.** Never `git add -A` / `git add .` — name files individually.
 
 ## Cargo Workspace Structure
 
@@ -151,6 +154,16 @@ ADRs are in `docs/adr/`. Key decisions:
 
 Pyodide/Emscripten versions are pinned in `tools/pyodide/versions.env` (single source of truth). All build scripts source this file.
 
+## Adding a Feature: Where Things Live
+
+- **New shell syntax** → `wasmsh-lex` (token mode) → `wasmsh-parse` (recursive descent) → `wasmsh-ast` → `wasmsh-hir` (normalization) → `wasmsh-runtime` (interpretation, and optionally `wasmsh-ir`/`wasmsh-vm` for the VM subset). Add a TOML case in `tests/suite/`.
+- **New builtin** → `wasmsh-builtins` + dispatch wiring in `wasmsh-runtime`. See `docs/guides/adding-builtins.md`.
+- **New utility** (grep, sed, jq, …) → `wasmsh-utils`. See `docs/guides/adding-utilities.md`.
+- **Browser surface change** → `wasmsh-browser` (`WasmShell` JS API) + an E2E test under `e2e/standalone/`.
+- **Pyodide protocol change** → `wasmsh-pyodide` C ABI + `wasmsh-json-bridge` (the same `HostCommand`/`WorkerEvent` protocol that the scalable runner speaks) + E2E under `e2e/pyodide-node/` and/or `e2e/pyodide-browser/`.
+- **Dispatcher/runner change** → `wasmsh-dispatcher` (Axum control plane) + `tools/runner-node/src/server.mjs` (Node host) + Helm chart in `deploy/helm/wasmsh/` + E2E under `e2e/dispatcher-compose/` (fast) and `e2e/kind/` (full).
+- **Runnable examples** live in `examples/` (one directory per deployment shape).
+
 ## E2E Test Layout
 
 ```
@@ -162,5 +175,7 @@ e2e/
 ├── runner-node/           # node:test: scalable runner contract (39 tests)
 ├── dispatcher-compose/    # node:test + pytest: WasmshRemoteSandbox via docker-compose
 ├── kind/                  # node:test + pytest: WasmshRemoteSandbox via kind + Helm
+├── agent-harness/         # LLM-driven randomized DeepAgent compat harness (requires ANTHROPIC_API_KEY)
+├── fixtures/              # shared fixture artifacts (e.g. wasmsh_test_fixture wheel)
 └── repo-checks/           # node:test: repo structure checks (94 tests, 20 suites)
 ```
