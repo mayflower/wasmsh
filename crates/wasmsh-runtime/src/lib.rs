@@ -12,6 +12,19 @@ mod dbl_bracket;
 mod fd_table;
 mod pattern;
 mod signals;
+mod streaming_cut;
+mod streaming_grep;
+mod streaming_sed;
+mod streaming_tr;
+mod streaming_uniq;
+
+use streaming_cut::{
+    CutStreamReader, StreamingCutMode, StreamingCutParseState, StreamingCutRange, StreamingCutStage,
+};
+use streaming_grep::{GrepStreamReader, StreamingGrepFlags, StreamingGrepStage, StreamingGrepStep};
+use streaming_sed::{parse_streaming_sed_script, SedStreamReader, StreamingSedStage};
+use streaming_tr::{streaming_tr_expand_set, StreamingTrStage, TrStreamReader};
+use streaming_uniq::{StreamingUniqFlags, UniqStreamReader};
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -1639,61 +1652,6 @@ struct BatStreamReader<R> {
 }
 
 #[derive(Clone, Debug)]
-struct StreamingSedSubstitute {
-    pattern: String,
-    replacement: String,
-    global: bool,
-}
-
-#[derive(Clone, Debug)]
-enum StreamingSedAddr {
-    None,
-    Line(usize),
-    Last,
-    Regex(String),
-    Range(Box<StreamingSedAddr>, Box<StreamingSedAddr>),
-}
-
-#[derive(Clone, Debug)]
-enum StreamingSedCmd {
-    Substitute(StreamingSedSubstitute),
-    Delete,
-    Print,
-    Transliterate(Vec<char>, Vec<char>),
-    AppendText(String),
-    InsertText(String),
-    ChangeText(String),
-    Quit,
-}
-
-#[derive(Clone, Debug)]
-struct StreamingSedInstruction {
-    addr: StreamingSedAddr,
-    cmd: StreamingSedCmd,
-}
-
-#[derive(Clone, Debug)]
-struct StreamingSedStage {
-    suppress_print: bool,
-    instructions: Vec<StreamingSedInstruction>,
-}
-
-struct SedStreamReader<R> {
-    inner: R,
-    stage: StreamingSedStage,
-    input_pending: Vec<u8>,
-    output_pending: Vec<u8>,
-    output_offset: usize,
-    initialized: bool,
-    finished: bool,
-    current: Option<(String, bool)>,
-    next: Option<(String, bool)>,
-    line_num: usize,
-    range_states: Vec<bool>,
-    input_eof: bool,
-}
-
-#[derive(Clone, Debug)]
 struct StreamingPasteStage {
     delimiter: String,
     serial: bool,
@@ -1758,49 +1716,10 @@ struct WcStreamReader<R> {
     ended_with_newline: bool,
 }
 
-#[derive(Clone, Debug)]
-#[allow(clippy::struct_excessive_bools)]
-struct StreamingGrepFlags {
-    ignore_case: bool,
-    invert: bool,
-    count_only: bool,
-    show_line_numbers: bool,
-    files_only: bool,
-    word_match: bool,
-    only_matching: bool,
-    quiet: bool,
-    extended: bool,
-    fixed: bool,
-    after_context: usize,
-    before_context: usize,
-    max_count: Option<usize>,
-    show_filename: Option<bool>,
-}
-
-#[derive(Clone, Debug)]
-struct StreamingGrepStage {
-    flags: StreamingGrepFlags,
-    patterns: Vec<String>,
-}
-
-#[derive(Copy, Clone, Debug)]
-enum StreamingGrepStep {
-    Advance(usize),
-    NotMatched,
-}
-
 #[derive(Copy, Clone, Debug)]
 enum StreamingSedStep {
     Advance(usize),
     Break,
-}
-
-struct StreamingCutParseState {
-    delim: char,
-    mode: Option<StreamingCutMode>,
-    complement: bool,
-    only_delimited: bool,
-    output_delim: Option<String>,
 }
 
 #[derive(Default)]
@@ -1811,18 +1730,6 @@ struct TypeFlags {
     path_only: bool,
     force_path: bool,
     type_only: bool,
-}
-
-#[derive(Clone, Debug)]
-#[allow(clippy::struct_excessive_bools)]
-struct StreamingUniqFlags {
-    count: bool,
-    duplicates_only: bool,
-    unique_only: bool,
-    ignore_case: bool,
-    skip_fields: usize,
-    skip_chars: usize,
-    compare_chars: Option<usize>,
 }
 
 impl<R> WcStreamReader<R> {
@@ -2293,7 +2200,7 @@ impl<R: Read> BatStreamReader<R> {
     }
 }
 
-fn streaming_simple_grep_match(line: &str, pattern: &str) -> bool {
+pub(crate) fn streaming_simple_grep_match(line: &str, pattern: &str) -> bool {
     if let Some(rest) = pattern.strip_prefix('^') {
         if let Some(mid) = rest.strip_suffix('$') {
             line == mid
@@ -2304,445 +2211,6 @@ fn streaming_simple_grep_match(line: &str, pattern: &str) -> bool {
         line.ends_with(rest)
     } else {
         line.contains(pattern)
-    }
-}
-
-fn parse_streaming_sed_substitute(expr: &str) -> Option<StreamingSedSubstitute> {
-    if !expr.starts_with('s') || expr.len() < 4 {
-        return None;
-    }
-    let delim = expr.as_bytes()[1] as char;
-    let rest = &expr[2..];
-    let parts: Vec<&str> = rest.split(delim).collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    Some(StreamingSedSubstitute {
-        pattern: parts[0].to_string(),
-        replacement: parts[1].to_string(),
-        global: parts.get(2).is_some_and(|flags| flags.contains('g')),
-    })
-}
-
-fn parse_streaming_sed_addr(s: &str) -> (StreamingSedAddr, &str) {
-    if let Some(stripped) = s.strip_prefix('/') {
-        if let Some(end) = stripped.find('/') {
-            let pat = &stripped[..end];
-            let rest = &stripped[end + 1..];
-            if let Some(after_comma) = rest.strip_prefix(',') {
-                let (addr2, rest2) = parse_streaming_sed_addr(after_comma);
-                return (
-                    StreamingSedAddr::Range(
-                        Box::new(StreamingSedAddr::Regex(pat.to_string())),
-                        Box::new(addr2),
-                    ),
-                    rest2,
-                );
-            }
-            return (StreamingSedAddr::Regex(pat.to_string()), rest);
-        }
-    }
-    if let Some(rest) = s.strip_prefix('$') {
-        if let Some(after_comma) = rest.strip_prefix(',') {
-            let (addr2, rest2) = parse_streaming_sed_addr(after_comma);
-            return (
-                StreamingSedAddr::Range(Box::new(StreamingSedAddr::Last), Box::new(addr2)),
-                rest2,
-            );
-        }
-        return (StreamingSedAddr::Last, rest);
-    }
-    let num_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
-    if num_end > 0 {
-        if let Ok(n) = s[..num_end].parse::<usize>() {
-            let rest = &s[num_end..];
-            if let Some(after_comma) = rest.strip_prefix(',') {
-                let (addr2, rest2) = parse_streaming_sed_addr(after_comma);
-                return (
-                    StreamingSedAddr::Range(Box::new(StreamingSedAddr::Line(n)), Box::new(addr2)),
-                    rest2,
-                );
-            }
-            return (StreamingSedAddr::Line(n), rest);
-        }
-    }
-    (StreamingSedAddr::None, s)
-}
-
-fn parse_streaming_sed_cmd(rest: &str) -> Option<StreamingSedCmd> {
-    if rest.starts_with('s') {
-        return parse_streaming_sed_substitute(rest).map(StreamingSedCmd::Substitute);
-    }
-    match rest {
-        "d" => return Some(StreamingSedCmd::Delete),
-        "p" => return Some(StreamingSedCmd::Print),
-        "q" => return Some(StreamingSedCmd::Quit),
-        _ => {}
-    }
-    if rest.starts_with("y/") || rest.starts_with("y|") {
-        let delim = rest.as_bytes()[1] as char;
-        let parts: Vec<&str> = rest[2..].split(delim).collect();
-        return (parts.len() >= 2).then(|| {
-            StreamingSedCmd::Transliterate(parts[0].chars().collect(), parts[1].chars().collect())
-        });
-    }
-    if let Some(text) = rest.strip_prefix("a\\") {
-        return Some(StreamingSedCmd::AppendText(text.trim_start().to_string()));
-    }
-    if let Some(text) = rest.strip_prefix("i\\") {
-        return Some(StreamingSedCmd::InsertText(text.trim_start().to_string()));
-    }
-    if let Some(text) = rest.strip_prefix("c\\") {
-        return Some(StreamingSedCmd::ChangeText(text.trim_start().to_string()));
-    }
-    None
-}
-
-fn parse_streaming_sed_script(script: &str) -> Vec<StreamingSedInstruction> {
-    let mut instructions = Vec::new();
-    for part in script.split(';') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let (addr, rest) = parse_streaming_sed_addr(part);
-        if let Some(cmd) = parse_streaming_sed_cmd(rest.trim()) {
-            instructions.push(StreamingSedInstruction { addr, cmd });
-        }
-    }
-    instructions
-}
-
-fn streaming_sed_addr_matches(
-    addr: &StreamingSedAddr,
-    line_num: usize,
-    is_last: bool,
-    line: &str,
-    in_range: &mut bool,
-) -> bool {
-    match addr {
-        StreamingSedAddr::None => true,
-        StreamingSedAddr::Line(n) => line_num == *n,
-        StreamingSedAddr::Last => is_last,
-        StreamingSedAddr::Regex(pat) => {
-            use posix_regex::compile::PosixRegexBuilder;
-            PosixRegexBuilder::new(pat.as_bytes())
-                .with_default_classes()
-                .compile()
-                .map_or_else(
-                    |_| streaming_simple_grep_match(line, pat),
-                    |re| !re.matches(line.as_bytes(), Some(1)).is_empty(),
-                )
-        }
-        StreamingSedAddr::Range(start, end) => {
-            if *in_range {
-                if streaming_sed_addr_matches(end, line_num, is_last, line, &mut false) {
-                    *in_range = false;
-                }
-                true
-            } else if streaming_sed_addr_matches(start, line_num, is_last, line, &mut false) {
-                *in_range = true;
-                true
-            } else {
-                false
-            }
-        }
-    }
-}
-
-/// Perform a sed `s///` substitution with POSIX BRE regex support.
-/// Falls back to literal replacement if the pattern fails to compile.
-///
-/// For global (`g`) replacements we iterate one match at a time because
-/// `posix-regex`'s `matches()` may return fewer results than expected
-/// for simple patterns — the safe approach is to find-then-advance in
-/// a loop.
-fn streaming_sed_substitute(text: &str, pattern: &str, replacement: &str, global: bool) -> String {
-    use posix_regex::compile::PosixRegexBuilder;
-
-    let compiled = PosixRegexBuilder::new(pattern.as_bytes())
-        .with_default_classes()
-        .compile();
-
-    let Ok(re) = compiled else {
-        // Fall back to literal replacement.
-        return if global {
-            text.replace(pattern, replacement)
-        } else {
-            text.replacen(pattern, replacement, 1)
-        };
-    };
-
-    let mut out = String::with_capacity(text.len());
-    let mut cursor = 0usize;
-
-    loop {
-        if cursor > text.len() {
-            break;
-        }
-        let remaining = &text.as_bytes()[cursor..];
-        let matches = re.matches(remaining, Some(1));
-        let Some(caps) = matches.into_iter().next() else {
-            break;
-        };
-        let Some(Some((rel_start, rel_end))) = caps.first().copied() else {
-            break;
-        };
-        let abs_start = cursor + rel_start;
-        let abs_end = cursor + rel_end;
-
-        out.push_str(&text[cursor..abs_start]);
-        // Expand replacement template with captures relative to `remaining`.
-        streaming_sed_expand_replacement(&mut out, replacement, &text[cursor..], &caps);
-        cursor = if abs_end == abs_start {
-            abs_end + 1
-        } else {
-            abs_end
-        };
-
-        if !global {
-            break;
-        }
-    }
-
-    if cursor <= text.len() {
-        out.push_str(&text[cursor..]);
-    }
-    out
-}
-
-fn streaming_sed_expand_replacement(
-    out: &mut String,
-    template: &str,
-    subject: &str,
-    caps: &[Option<(usize, usize)>],
-) {
-    let mut chars = template.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => streaming_sed_expand_escape(out, &mut chars, subject, caps),
-            '&' => streaming_sed_expand_whole_match(out, subject, caps),
-            other => out.push(other),
-        }
-    }
-}
-
-fn streaming_sed_expand_escape(
-    out: &mut String,
-    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-    subject: &str,
-    caps: &[Option<(usize, usize)>],
-) {
-    let Some(&next) = chars.peek() else {
-        out.push('\\');
-        return;
-    };
-    if let Some(digit) = next.to_digit(10) {
-        chars.next();
-        if let Some(Some((s, e))) = caps.get(digit as usize).copied() {
-            out.push_str(&subject[s..e]);
-        }
-        return;
-    }
-    chars.next();
-    match next {
-        '\\' => out.push('\\'),
-        '&' => out.push('&'),
-        'n' => out.push('\n'),
-        't' => out.push('\t'),
-        other => out.push(other),
-    }
-}
-
-fn streaming_sed_expand_whole_match(
-    out: &mut String,
-    subject: &str,
-    caps: &[Option<(usize, usize)>],
-) {
-    if let Some(Some((s, e))) = caps.first().copied() {
-        out.push_str(&subject[s..e]);
-    }
-}
-
-fn streaming_sed_emit_line(output: &mut Vec<u8>, line: &str) {
-    output.extend_from_slice(line.as_bytes());
-    output.push(b'\n');
-}
-
-impl<R> SedStreamReader<R> {
-    fn new(inner: R, stage: StreamingSedStage) -> Self {
-        let range_states = vec![false; stage.instructions.len()];
-        Self {
-            inner,
-            stage,
-            input_pending: Vec::new(),
-            output_pending: Vec::new(),
-            output_offset: 0,
-            initialized: false,
-            finished: false,
-            current: None,
-            next: None,
-            line_num: 1,
-            range_states,
-            input_eof: false,
-        }
-    }
-
-    fn fill_lookahead(&mut self) -> std::io::Result<()>
-    where
-        R: Read,
-    {
-        if self.current.is_none() {
-            self.current = streaming_read_next_line(&mut self.inner, &mut self.input_pending)?;
-        }
-        if self.current.is_some() && self.next.is_none() && !self.input_eof {
-            match streaming_read_next_line(&mut self.inner, &mut self.input_pending)? {
-                Some(line) => self.next = Some(line),
-                None => self.input_eof = true,
-            }
-        }
-        Ok(())
-    }
-
-    fn initialize(&mut self) -> std::io::Result<()>
-    where
-        R: Read,
-    {
-        if self.initialized {
-            return Ok(());
-        }
-        self.fill_lookahead()?;
-        self.initialized = true;
-        Ok(())
-    }
-
-    fn apply_instructions(&mut self, line: String, is_last: bool) -> StreamingSedLineResult {
-        let mut current_text = line;
-        let mut printed = false;
-        for idx in 0..self.stage.instructions.len() {
-            let matches_addr = streaming_sed_addr_matches(
-                &self.stage.instructions[idx].addr,
-                self.line_num,
-                is_last,
-                &current_text,
-                &mut self.range_states[idx],
-            );
-            if !matches_addr {
-                continue;
-            }
-            if let Some(result) = self.apply_sed_instruction(idx, &mut current_text, &mut printed) {
-                return result;
-            }
-        }
-        if !self.stage.suppress_print && !printed {
-            streaming_sed_emit_line(&mut self.output_pending, &current_text);
-        }
-        StreamingSedLineResult::Continue
-    }
-
-    fn apply_sed_instruction(
-        &mut self,
-        idx: usize,
-        current_text: &mut String,
-        printed: &mut bool,
-    ) -> Option<StreamingSedLineResult> {
-        let cmd = self.stage.instructions[idx].cmd.clone();
-        match cmd {
-            StreamingSedCmd::Substitute(sub) => {
-                *current_text = streaming_sed_substitute(
-                    current_text,
-                    &sub.pattern,
-                    &sub.replacement,
-                    sub.global,
-                );
-            }
-            StreamingSedCmd::Delete => return Some(StreamingSedLineResult::Delete),
-            StreamingSedCmd::Print => {
-                streaming_sed_emit_line(&mut self.output_pending, current_text);
-                *printed = true;
-            }
-            StreamingSedCmd::Transliterate(from, to) => {
-                *current_text = streaming_sed_transliterate(current_text, &from, &to);
-            }
-            StreamingSedCmd::AppendText(text) => {
-                if !self.stage.suppress_print && !*printed {
-                    streaming_sed_emit_line(&mut self.output_pending, current_text);
-                    *printed = true;
-                }
-                streaming_sed_emit_line(&mut self.output_pending, &text);
-            }
-            StreamingSedCmd::InsertText(text) => {
-                streaming_sed_emit_line(&mut self.output_pending, &text);
-            }
-            StreamingSedCmd::ChangeText(text) => {
-                streaming_sed_emit_line(&mut self.output_pending, &text);
-                return Some(StreamingSedLineResult::Delete);
-            }
-            StreamingSedCmd::Quit => {
-                if !self.stage.suppress_print && !*printed {
-                    streaming_sed_emit_line(&mut self.output_pending, current_text);
-                }
-                return Some(StreamingSedLineResult::Quit);
-            }
-        }
-        None
-    }
-}
-
-enum StreamingSedLineResult {
-    Continue,
-    Delete,
-    Quit,
-}
-
-fn streaming_sed_transliterate(text: &str, from: &[char], to: &[char]) -> String {
-    text.chars()
-        .map(|c| {
-            if let Some(pos) = from.iter().position(|&fc| fc == c) {
-                to.get(pos).or(to.last()).copied().unwrap_or(c)
-            } else {
-                c
-            }
-        })
-        .collect()
-}
-
-impl<R: Read> Read for SedStreamReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        loop {
-            let copied =
-                take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
-            if copied > 0 {
-                return Ok(copied);
-            }
-            if self.finished {
-                return Ok(0);
-            }
-
-            self.initialize()?;
-            self.fill_lookahead()?;
-            let Some((line, _had_newline)) = self.current.take() else {
-                self.finished = true;
-                continue;
-            };
-
-            let is_last = self.input_eof && self.next.is_none();
-            match self.apply_instructions(line, is_last) {
-                StreamingSedLineResult::Quit => self.finished = true,
-                StreamingSedLineResult::Delete | StreamingSedLineResult::Continue => {
-                    self.current = self.next.take();
-                    if self.current.is_some() {
-                        self.line_num += 1;
-                        self.fill_lookahead()?;
-                    } else {
-                        self.finished = true;
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -2857,7 +2325,11 @@ impl<R: Read> Read for ColumnStreamReader<R> {
     }
 }
 
-fn take_pending_output(pending: &mut Vec<u8>, pending_offset: &mut usize, buf: &mut [u8]) -> usize {
+pub(crate) fn take_pending_output(
+    pending: &mut Vec<u8>,
+    pending_offset: &mut usize,
+    buf: &mut [u8],
+) -> usize {
     if *pending_offset >= pending.len() {
         pending.clear();
         *pending_offset = 0;
@@ -2874,7 +2346,7 @@ fn take_pending_output(pending: &mut Vec<u8>, pending_offset: &mut usize, buf: &
     to_copy
 }
 
-fn streaming_read_next_line(
+pub(crate) fn streaming_read_next_line(
     reader: &mut dyn Read,
     pending: &mut Vec<u8>,
 ) -> std::io::Result<Option<(String, bool)>> {
@@ -2947,787 +2419,6 @@ impl<R: Read> Read for RevStreamReader<R> {
         } else {
             self.finished = true;
             Ok(0)
-        }
-    }
-}
-
-fn streaming_cut_range_includes(ranges: &[StreamingCutRange], idx: usize) -> bool {
-    ranges.iter().any(|range| {
-        let start = range.start.unwrap_or(1);
-        let end = range.end.unwrap_or(usize::MAX);
-        idx >= start && idx <= end
-    })
-}
-
-fn apply_streaming_cut(line: &str, stage: &StreamingCutStage) -> Option<Vec<u8>> {
-    match &stage.mode {
-        StreamingCutMode::Fields(ranges) => {
-            if stage.only_delimited && !line.contains(stage.delim) {
-                return None;
-            }
-            let parts: Vec<&str> = line.split(stage.delim).collect();
-            let selected: Vec<&str> = parts
-                .iter()
-                .enumerate()
-                .filter(|(idx, _)| {
-                    let included = streaming_cut_range_includes(ranges, idx + 1);
-                    if stage.complement {
-                        !included
-                    } else {
-                        included
-                    }
-                })
-                .map(|(_, part)| *part)
-                .collect();
-            Some(selected.join(&stage.output_delim).into_bytes())
-        }
-        StreamingCutMode::Chars(ranges) | StreamingCutMode::Bytes(ranges) => {
-            let chars: Vec<char> = line.chars().collect();
-            let selected: String = chars
-                .iter()
-                .enumerate()
-                .filter(|(idx, _)| {
-                    let included = streaming_cut_range_includes(ranges, idx + 1);
-                    if stage.complement {
-                        !included
-                    } else {
-                        included
-                    }
-                })
-                .map(|(_, ch)| *ch)
-                .collect();
-            Some(selected.into_bytes())
-        }
-    }
-}
-
-struct CutStreamReader<R> {
-    inner: R,
-    stage: StreamingCutStage,
-    input_pending: Vec<u8>,
-    output_pending: Vec<u8>,
-    output_offset: usize,
-    finished: bool,
-}
-
-impl<R> CutStreamReader<R> {
-    fn new(inner: R, stage: StreamingCutStage) -> Self {
-        Self {
-            inner,
-            stage,
-            input_pending: Vec::new(),
-            output_pending: Vec::new(),
-            output_offset: 0,
-            finished: false,
-        }
-    }
-}
-
-impl<R: Read> Read for CutStreamReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        loop {
-            let copied =
-                take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
-            if copied > 0 {
-                return Ok(copied);
-            }
-            if self.finished {
-                return Ok(0);
-            }
-
-            match streaming_read_next_line(&mut self.inner, &mut self.input_pending)? {
-                Some((line, _had_newline)) => {
-                    if let Some(mut out) = apply_streaming_cut(&line, &self.stage) {
-                        out.push(b'\n');
-                        self.output_pending.extend_from_slice(&out);
-                    }
-                }
-                None => {
-                    self.finished = true;
-                }
-            }
-        }
-    }
-}
-
-fn streaming_grep_match_single(line: &str, pattern: &str, flags: &StreamingGrepFlags) -> bool {
-    use posix_regex::compile::PosixRegexBuilder;
-
-    if flags.word_match {
-        return line
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .any(|word| word == pattern);
-    }
-    if flags.fixed {
-        return line.contains(pattern);
-    }
-    // Try POSIX regex first; fall back to literal substring on compile error.
-    match PosixRegexBuilder::new(pattern.as_bytes())
-        .with_default_classes()
-        .compile()
-    {
-        Ok(re) => !re.matches(line.as_bytes(), Some(1)).is_empty(),
-        Err(_) => line.contains(pattern),
-    }
-}
-
-fn streaming_grep_match_pattern(line: &str, pattern: &str, flags: &StreamingGrepFlags) -> bool {
-    let (line_cmp, pattern_cmp) = if flags.ignore_case {
-        (line.to_lowercase(), pattern.to_lowercase())
-    } else {
-        (line.to_string(), pattern.to_string())
-    };
-    if flags.extended && pattern_cmp.contains('|') {
-        return pattern_cmp
-            .split('|')
-            .any(|alt| streaming_grep_match_single(&line_cmp, alt.trim(), flags));
-    }
-    streaming_grep_match_single(&line_cmp, &pattern_cmp, flags)
-}
-
-fn streaming_grep_find_match<'a>(
-    line: &'a str,
-    pattern: &str,
-    flags: &StreamingGrepFlags,
-) -> Option<&'a str> {
-    let (line_cmp, pattern_cmp) = if flags.ignore_case {
-        (line.to_lowercase(), pattern.to_lowercase())
-    } else {
-        (line.to_string(), pattern.to_string())
-    };
-    if flags.word_match {
-        let start = line_cmp.find(&pattern_cmp)?;
-        if start > 0 && line_cmp.as_bytes()[start - 1].is_ascii_alphanumeric() {
-            return None;
-        }
-        let end = start + pattern_cmp.len();
-        if end < line_cmp.len() && line_cmp.as_bytes()[end].is_ascii_alphanumeric() {
-            return None;
-        }
-        Some(&line[start..start + pattern_cmp.len()])
-    } else {
-        let idx = line_cmp.find(&pattern_cmp)?;
-        Some(&line[idx..idx + pattern_cmp.len()])
-    }
-}
-
-fn streaming_grep_line_matches(
-    line: &str,
-    flags: &StreamingGrepFlags,
-    patterns: &[String],
-) -> bool {
-    let matched = patterns
-        .iter()
-        .any(|pattern| streaming_grep_match_pattern(line, pattern, flags));
-    matched != flags.invert
-}
-
-fn emit_streaming_grep_one(
-    output: &mut Vec<u8>,
-    line: &str,
-    line_num: usize,
-    flags: &StreamingGrepFlags,
-    patterns: &[String],
-) {
-    let mut prefix = String::new();
-    if flags.show_filename == Some(true) {
-        prefix.push_str("(standard input):");
-    }
-    if flags.show_line_numbers {
-        use std::fmt::Write;
-        let _ = write!(prefix, "{line_num}:");
-    }
-    if flags.only_matching {
-        for pattern in patterns {
-            if let Some(matched) = streaming_grep_find_match(line, pattern, flags) {
-                output.extend_from_slice(prefix.as_bytes());
-                output.extend_from_slice(matched.as_bytes());
-                output.push(b'\n');
-            }
-        }
-    } else {
-        output.extend_from_slice(prefix.as_bytes());
-        output.extend_from_slice(line.as_bytes());
-        output.push(b'\n');
-    }
-}
-
-#[allow(clippy::struct_excessive_bools)]
-struct GrepStreamReader<R> {
-    inner: R,
-    stage: StreamingGrepStage,
-    status: Rc<RefCell<i32>>,
-    input_pending: Vec<u8>,
-    output_pending: Vec<u8>,
-    output_offset: usize,
-    finished: bool,
-    match_count: u64,
-    found: bool,
-    remaining_after: usize,
-    printed_separator: bool,
-    before_buf: VecDeque<(usize, String)>,
-    line_num: usize,
-    emitted_count_summary: bool,
-}
-
-impl<R> GrepStreamReader<R> {
-    fn new(inner: R, stage: StreamingGrepStage, status: Rc<RefCell<i32>>) -> Self {
-        Self {
-            inner,
-            stage,
-            status,
-            input_pending: Vec::new(),
-            output_pending: Vec::new(),
-            output_offset: 0,
-            finished: false,
-            match_count: 0,
-            found: false,
-            remaining_after: 0,
-            printed_separator: false,
-            before_buf: VecDeque::new(),
-            line_num: 0,
-            emitted_count_summary: false,
-        }
-    }
-
-    fn emit_count_summary(&mut self) {
-        if self.stage.flags.count_only && !self.stage.flags.quiet && !self.emitted_count_summary {
-            if self.stage.flags.show_filename == Some(true) {
-                self.output_pending.extend_from_slice(
-                    format!("(standard input):{}\n", self.match_count).as_bytes(),
-                );
-            } else {
-                self.output_pending
-                    .extend_from_slice(format!("{}\n", self.match_count).as_bytes());
-            }
-            self.emitted_count_summary = true;
-        }
-    }
-}
-
-impl<R: Read> Read for GrepStreamReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        loop {
-            let copied =
-                take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
-            if copied > 0 {
-                return Ok(copied);
-            }
-            if self.finished {
-                return Ok(0);
-            }
-            self.pump_one_line()?;
-        }
-    }
-}
-
-impl<R: Read> GrepStreamReader<R> {
-    fn pump_one_line(&mut self) -> std::io::Result<()> {
-        let Some((line, _had_newline)) =
-            streaming_read_next_line(&mut self.inner, &mut self.input_pending)?
-        else {
-            self.emit_count_summary();
-            if !self.found {
-                *self.status.borrow_mut() = 1;
-            }
-            self.finished = true;
-            return Ok(());
-        };
-        self.line_num += 1;
-        if streaming_grep_line_matches(&line, &self.stage.flags, &self.stage.patterns) {
-            self.on_match(&line);
-        } else {
-            self.on_nonmatch(line);
-        }
-        Ok(())
-    }
-
-    fn on_match(&mut self, line: &str) {
-        self.found = true;
-        *self.status.borrow_mut() = 0;
-        self.match_count += 1;
-
-        if self.stage.flags.quiet || self.stage.flags.files_only {
-            self.check_max_count();
-            return;
-        }
-
-        if !self.stage.flags.count_only {
-            self.flush_before_context();
-            emit_streaming_grep_one(
-                &mut self.output_pending,
-                line,
-                self.line_num,
-                &self.stage.flags,
-                &self.stage.patterns,
-            );
-            self.remaining_after = self.stage.flags.after_context;
-            self.printed_separator = true;
-        }
-
-        if self.should_stop_for_max_count() {
-            self.emit_count_summary();
-            self.finished = true;
-        }
-    }
-
-    fn on_nonmatch(&mut self, line: String) {
-        if self.remaining_after > 0 && !self.stage.flags.count_only {
-            emit_streaming_grep_one(
-                &mut self.output_pending,
-                &line,
-                self.line_num,
-                &self.stage.flags,
-                &self.stage.patterns,
-            );
-            self.remaining_after -= 1;
-            return;
-        }
-        if self.stage.flags.before_context > 0 {
-            self.before_buf.push_back((self.line_num, line));
-            if self.before_buf.len() > self.stage.flags.before_context {
-                self.before_buf.pop_front();
-            }
-        }
-    }
-
-    fn flush_before_context(&mut self) {
-        if self.stage.flags.before_context == 0 || self.before_buf.is_empty() {
-            self.before_buf.clear();
-            return;
-        }
-        if self.printed_separator {
-            self.output_pending.extend_from_slice(b"--\n");
-        }
-        for (before_line_num, before_line) in &self.before_buf {
-            emit_streaming_grep_one(
-                &mut self.output_pending,
-                before_line,
-                *before_line_num,
-                &self.stage.flags,
-                &self.stage.patterns,
-            );
-        }
-        self.before_buf.clear();
-    }
-
-    fn should_stop_for_max_count(&self) -> bool {
-        self.stage
-            .flags
-            .max_count
-            .is_some_and(|m| self.match_count >= m as u64)
-    }
-
-    fn check_max_count(&mut self) {
-        if self.should_stop_for_max_count() {
-            self.finished = true;
-        }
-    }
-}
-
-fn streaming_uniq_compare_key(line: &str, flags: &StreamingUniqFlags) -> String {
-    let mut slice = line;
-    for _ in 0..flags.skip_fields {
-        slice = slice.trim_start();
-        if let Some(pos) = slice.find(char::is_whitespace) {
-            slice = &slice[pos..];
-        } else {
-            slice = "";
-            break;
-        }
-    }
-    if flags.skip_chars > 0 {
-        let chars: Vec<char> = slice.chars().collect();
-        slice = if flags.skip_chars < chars.len() {
-            &slice[chars[..flags.skip_chars]
-                .iter()
-                .map(|ch| ch.len_utf8())
-                .sum::<usize>()..]
-        } else {
-            ""
-        };
-    }
-    let mut key = slice.to_string();
-    if let Some(limit) = flags.compare_chars {
-        key = key.chars().take(limit).collect();
-    }
-    if flags.ignore_case {
-        key = key.to_lowercase();
-    }
-    key
-}
-
-fn emit_streaming_uniq_line(
-    output: &mut Vec<u8>,
-    line: &str,
-    count: usize,
-    flags: &StreamingUniqFlags,
-) {
-    if flags.duplicates_only && count < 2 {
-        return;
-    }
-    if flags.unique_only && count > 1 {
-        return;
-    }
-    if flags.count {
-        output.extend_from_slice(format!("{count:>7} {line}\n").as_bytes());
-    } else {
-        output.extend_from_slice(line.as_bytes());
-        output.push(b'\n');
-    }
-}
-
-struct UniqStreamReader<R> {
-    inner: R,
-    flags: StreamingUniqFlags,
-    input_pending: Vec<u8>,
-    output_pending: Vec<u8>,
-    output_offset: usize,
-    finished: bool,
-    prev: Option<(String, String)>,
-    count: usize,
-}
-
-impl<R> UniqStreamReader<R> {
-    fn new(inner: R, flags: StreamingUniqFlags) -> Self {
-        Self {
-            inner,
-            flags,
-            input_pending: Vec::new(),
-            output_pending: Vec::new(),
-            output_offset: 0,
-            finished: false,
-            prev: None,
-            count: 0,
-        }
-    }
-}
-
-impl<R: Read> Read for UniqStreamReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        loop {
-            let copied =
-                take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
-            if copied > 0 {
-                return Ok(copied);
-            }
-            if self.finished {
-                return Ok(0);
-            }
-            self.pump_next_uniq_line()?;
-        }
-    }
-}
-
-impl<R: Read> UniqStreamReader<R> {
-    fn pump_next_uniq_line(&mut self) -> std::io::Result<()> {
-        if let Some((line, _had_newline)) =
-            streaming_read_next_line(&mut self.inner, &mut self.input_pending)?
-        {
-            self.handle_uniq_line(line);
-        } else {
-            self.flush_uniq_prev();
-            self.finished = true;
-        }
-        Ok(())
-    }
-
-    fn handle_uniq_line(&mut self, line: String) {
-        let key = streaming_uniq_compare_key(&line, &self.flags);
-        if self
-            .prev
-            .as_ref()
-            .is_some_and(|(_, prev_key)| *prev_key == key)
-        {
-            self.count += 1;
-            return;
-        }
-        self.flush_uniq_prev();
-        self.prev = Some((line, key));
-        self.count = 1;
-    }
-
-    fn flush_uniq_prev(&mut self) {
-        if let Some((prev_line, _)) = self.prev.take() {
-            emit_streaming_uniq_line(
-                &mut self.output_pending,
-                &prev_line,
-                self.count,
-                &self.flags,
-            );
-        }
-    }
-}
-
-fn streaming_tr_expand_posix_class(class_name: &str, chars: &mut Vec<char>) {
-    match class_name {
-        "upper" => chars.extend('A'..='Z'),
-        "lower" => chars.extend('a'..='z'),
-        "digit" => chars.extend('0'..='9'),
-        "alpha" => {
-            chars.extend('A'..='Z');
-            chars.extend('a'..='z');
-        }
-        "alnum" => {
-            chars.extend('0'..='9');
-            chars.extend('A'..='Z');
-            chars.extend('a'..='z');
-        }
-        "space" => chars.extend([' ', '\t', '\n', '\r', '\x0b', '\x0c']),
-        "blank" => chars.extend([' ', '\t']),
-        "punct" => chars.extend("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~".chars()),
-        _ => {}
-    }
-}
-
-fn streaming_tr_expand_set(s: &str) -> Vec<char> {
-    let mut chars = Vec::new();
-    let mut iter = s.chars().peekable();
-    while let Some(ch) = iter.next() {
-        if ch == '[' && iter.peek() == Some(&':') {
-            iter.next();
-            let class_name: String = iter.by_ref().take_while(|&c| c != ':').collect();
-            let _ = iter.next();
-            streaming_tr_expand_posix_class(&class_name, &mut chars);
-        } else if iter.peek() == Some(&'-') {
-            streaming_tr_expand_range(ch, &mut iter, &mut chars);
-        } else if ch == '\\' {
-            chars.push(streaming_tr_unescape(&mut iter));
-        } else {
-            chars.push(ch);
-        }
-    }
-    chars
-}
-
-fn streaming_tr_expand_range(
-    ch: char,
-    iter: &mut std::iter::Peekable<std::str::Chars<'_>>,
-    chars: &mut Vec<char>,
-) {
-    let saved = iter.clone();
-    iter.next(); // consume '-'
-    if let Some(&end_ch) = iter.peek() {
-        if end_ch > ch {
-            chars.extend(ch..=end_ch);
-            iter.next();
-        } else {
-            chars.push(ch);
-            *iter = saved;
-            iter.next();
-            chars.push('-');
-        }
-    } else {
-        chars.push(ch);
-        chars.push('-');
-    }
-}
-
-fn streaming_tr_unescape(iter: &mut std::iter::Peekable<std::str::Chars<'_>>) -> char {
-    match iter.next() {
-        Some('n') => '\n',
-        Some('t') => '\t',
-        Some('r') => '\r',
-        Some('\\') | None => '\\',
-        Some(other) => other,
-    }
-}
-
-fn streaming_tr_process_utf8_chunk(pending: &mut Vec<u8>, chunk: &[u8], mut f: impl FnMut(char)) {
-    pending.extend_from_slice(chunk);
-    while streaming_tr_drain_once(pending, &mut f) {}
-}
-
-/// Consumes one contiguous UTF-8 slice (or one invalid byte) from `pending`.
-/// Returns true if more work may remain, false if `pending` is either empty,
-/// fully consumed, or ends in an incomplete UTF-8 sequence that must wait.
-fn streaming_tr_drain_once(pending: &mut Vec<u8>, f: &mut impl FnMut(char)) -> bool {
-    match std::str::from_utf8(pending) {
-        Ok(text) => {
-            for ch in text.chars() {
-                f(ch);
-            }
-            pending.clear();
-            false
-        }
-        Err(err) => streaming_tr_consume_invalid_prefix(pending, &err, f),
-    }
-}
-
-fn streaming_tr_consume_invalid_prefix(
-    pending: &mut Vec<u8>,
-    err: &std::str::Utf8Error,
-    f: &mut impl FnMut(char),
-) -> bool {
-    let valid = err.valid_up_to();
-    if valid > 0 {
-        let text = String::from_utf8_lossy(&pending[..valid]).to_string();
-        for ch in text.chars() {
-            f(ch);
-        }
-        pending.drain(..valid);
-        return true;
-    }
-    if err.error_len().is_some() {
-        let text = String::from_utf8_lossy(&pending[..1]).to_string();
-        for ch in text.chars() {
-            f(ch);
-        }
-        pending.drain(..1);
-        return true;
-    }
-    false
-}
-
-fn streaming_tr_flush_pending_lossy(pending: &mut Vec<u8>, mut f: impl FnMut(char)) {
-    if pending.is_empty() {
-        return;
-    }
-    let text = String::from_utf8_lossy(pending).to_string();
-    pending.clear();
-    for ch in text.chars() {
-        f(ch);
-    }
-}
-
-struct TrStreamReader<R> {
-    inner: R,
-    stage: StreamingTrStage,
-    input_pending: Vec<u8>,
-    output_pending: Vec<u8>,
-    output_offset: usize,
-    finished: bool,
-    prev: Option<char>,
-}
-
-impl<R> TrStreamReader<R> {
-    fn new(inner: R, stage: StreamingTrStage) -> Self {
-        Self {
-            inner,
-            stage,
-            input_pending: Vec::new(),
-            output_pending: Vec::new(),
-            output_offset: 0,
-            finished: false,
-            prev: None,
-        }
-    }
-
-    fn emit_char(&mut self, ch: char) {
-        let mut buffer = [0u8; 4];
-        self.output_pending
-            .extend_from_slice(ch.encode_utf8(&mut buffer).as_bytes());
-        self.prev = Some(ch);
-    }
-
-    fn is_in_from_set(&self, ch: char) -> bool {
-        let in_set = self.stage.from_chars.contains(&ch);
-        if self.stage.complement {
-            !in_set
-        } else {
-            in_set
-        }
-    }
-
-    fn process_char(&mut self, ch: char) {
-        if self.stage.delete {
-            self.process_char_delete(ch);
-            return;
-        }
-        if self.stage.squeeze && self.stage.to_chars.is_empty() {
-            if self.stage.from_chars.contains(&ch) && self.prev == Some(ch) {
-                return;
-            }
-            self.emit_char(ch);
-            return;
-        }
-        self.process_char_translate(ch);
-    }
-
-    fn process_char_delete(&mut self, ch: char) {
-        if self.is_in_from_set(ch) {
-            return;
-        }
-        if self.stage.squeeze && self.stage.to_chars.contains(&ch) && self.prev == Some(ch) {
-            return;
-        }
-        self.emit_char(ch);
-    }
-
-    fn process_char_translate(&mut self, ch: char) {
-        let from_set = if self.stage.complement {
-            (0u8..=127)
-                .map(|b| b as char)
-                .filter(|candidate| !self.stage.from_chars.contains(candidate))
-                .collect::<Vec<_>>()
-        } else {
-            self.stage.from_chars.clone()
-        };
-        let translated = from_set
-            .iter()
-            .position(|&source| source == ch)
-            .and_then(|pos| {
-                self.stage
-                    .to_chars
-                    .get(pos)
-                    .or(self.stage.to_chars.last())
-                    .copied()
-            })
-            .unwrap_or(ch);
-        if self.stage.squeeze
-            && self.stage.to_chars.contains(&translated)
-            && self.prev == Some(translated)
-        {
-            return;
-        }
-        self.emit_char(translated);
-    }
-}
-
-impl<R: Read> Read for TrStreamReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        loop {
-            let copied =
-                take_pending_output(&mut self.output_pending, &mut self.output_offset, buf);
-            if copied > 0 {
-                return Ok(copied);
-            }
-            if self.finished {
-                return Ok(0);
-            }
-
-            let mut scratch = [0u8; 4096];
-            let read = self.inner.read(&mut scratch)?;
-            if read == 0 {
-                let mut pending = std::mem::take(&mut self.input_pending);
-                let mut chars = Vec::new();
-                streaming_tr_flush_pending_lossy(&mut pending, |ch| chars.push(ch));
-                self.input_pending = pending;
-                for ch in chars {
-                    self.process_char(ch);
-                }
-                self.finished = true;
-                continue;
-            }
-            let mut pending = std::mem::take(&mut self.input_pending);
-            let mut chars = Vec::new();
-            streaming_tr_process_utf8_chunk(&mut pending, &scratch[..read], |ch| chars.push(ch));
-            self.input_pending = pending;
-            for ch in chars {
-                self.process_char(ch);
-            }
         }
     }
 }
@@ -3833,8 +2524,8 @@ enum ResolvedCommand {
     /// A file with `#!/bin/bash` or similar shebang, executed directly by path.
     ShebangScript,
     Function(HirCommand),
-    Builtin,
-    Utility(UtilityCommandKind),
+    Builtin(wasmsh_builtins::BuiltinFn),
+    Utility(UtilityCommandKind, wasmsh_utils::UtilFn),
     External,
 }
 
@@ -4216,37 +2907,6 @@ struct StreamingStageCtx<'a> {
     stage_statuses: &'a [Rc<RefCell<i32>>],
     stage_stderr: &'a [Rc<RefCell<Vec<u8>>>],
     output_pipes: &'a [Rc<RefCell<PipeBuffer>>],
-}
-
-#[derive(Clone, Debug)]
-enum StreamingCutMode {
-    Fields(Vec<StreamingCutRange>),
-    Chars(Vec<StreamingCutRange>),
-    Bytes(Vec<StreamingCutRange>),
-}
-
-#[derive(Clone, Debug)]
-struct StreamingCutStage {
-    mode: StreamingCutMode,
-    delim: char,
-    complement: bool,
-    only_delimited: bool,
-    output_delim: String,
-}
-
-#[derive(Clone, Debug)]
-struct StreamingCutRange {
-    start: Option<usize>,
-    end: Option<usize>,
-}
-
-#[derive(Clone, Debug)]
-struct StreamingTrStage {
-    delete: bool,
-    squeeze: bool,
-    complement: bool,
-    from_chars: Vec<char>,
-    to_chars: Vec<char>,
 }
 
 /// Quoting state for parsing array elements.
@@ -5097,7 +3757,7 @@ impl WorkerRuntime {
         let argv = vec![name.to_string()];
         if !matches!(
             self.resolve_command(name.as_str(), &argv),
-            ResolvedCommand::Builtin
+            ResolvedCommand::Builtin(_)
         ) {
             return Err(VmSubsetFallbackReason::NonBuiltinCommand);
         }
@@ -7839,157 +6499,188 @@ impl WorkerRuntime {
             .collect();
         let mut processes = Vec::new();
 
+        let ctx = StreamingStageCtx {
+            stages: &stages,
+            stage_pipe_stderr: &stage_pipe_stderr,
+            stage_statuses: &stage_statuses,
+            stage_stderr: &stage_stderr,
+            output_pipes: &output_pipes,
+        };
+
         if let Some(source_pipe) = source_pipe {
-            match &stages[0] {
-                StreamingPipelineStage::Tee(stage) => {
-                    let reader = Box::new(PipeReader::new(source_pipe)) as Box<dyn Read>;
-                    processes.push(StreamingPipeProcess::Tee(TeePipeProcess::new(
-                        reader,
-                        output_pipes[0].clone(),
-                        &mut self.fs,
-                        self.vm.state.cwd.as_str(),
-                        stage,
-                        stage_stderr[0].clone(),
-                        stage_statuses[0].clone(),
-                        false,
-                    )));
-                }
-                StreamingPipelineStage::BufferedCommand(argv) => {
-                    processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
-                        Some(source_pipe),
-                        output_pipes[0].clone(),
-                        argv.clone(),
-                        false,
-                        stage_stderr[0].clone(),
-                        stage_statuses[0].clone(),
-                    )));
-                }
-                _ => {
-                    let reader = Box::new(PipeReader::new(source_pipe)) as Box<dyn Read>;
-                    let stage_reader =
-                        Self::wrap_non_tee_streaming_stage(reader, &stages[0], 0, &stage_statuses)?;
-                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
-                        stage_reader,
-                        output_pipes[0].clone(),
-                        stage_stderr[0].clone(),
-                        stage_statuses[0].clone(),
-                        "process-subst",
-                        false,
-                    )));
-                }
-            }
+            self.setup_process_subst_first_stage_from_pipe(source_pipe, &ctx, &mut processes)?;
         } else {
-            match &stages[0] {
-                StreamingPipelineStage::Literal(data) => {
-                    let reader: Box<dyn Read> = Box::new(Cursor::new(data.clone()));
-                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
-                        reader,
-                        output_pipes[0].clone(),
-                        stage_stderr[0].clone(),
-                        stage_statuses[0].clone(),
-                        "process-subst",
-                        false,
-                    )));
-                }
-                StreamingPipelineStage::File(path) => {
-                    let resolved = self.resolve_cwd_path(path);
-                    let reader = self.open_streaming_file_reader(&resolved, "cat").ok()?;
-                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
-                        reader,
-                        output_pipes[0].clone(),
-                        stage_stderr[0].clone(),
-                        stage_statuses[0].clone(),
-                        "process-subst",
-                        false,
-                    )));
-                }
-                StreamingPipelineStage::Yes { line } => {
-                    let reader: Box<dyn Read> =
-                        Box::new(YesStreamReader::new(line.clone(), STREAMING_YES_MAX_LINES));
-                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
-                        reader,
-                        output_pipes[0].clone(),
-                        stage_stderr[0].clone(),
-                        stage_statuses[0].clone(),
-                        "process-subst",
-                        false,
-                    )));
-                }
-                StreamingPipelineStage::BufferedCommand(argv) => {
-                    processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
-                        None,
-                        output_pipes[0].clone(),
-                        argv.clone(),
-                        false,
-                        stage_stderr[0].clone(),
-                        stage_statuses[0].clone(),
-                    )));
-                }
-                _ => return None,
-            }
+            self.setup_process_subst_first_stage_standalone(&ctx, &mut processes)?;
         }
-
         for idx in 1..stages.len() {
-            match &stages[idx] {
-                StreamingPipelineStage::Head(mode) => {
-                    processes.push(StreamingPipeProcess::Head(HeadPipeProcess::new(
-                        output_pipes[idx - 1].clone(),
-                        output_pipes[idx].clone(),
-                        *mode,
-                    )));
-                }
-                StreamingPipelineStage::Tee(stage) => {
-                    let reader =
-                        Box::new(PipeReader::new(output_pipes[idx - 1].clone())) as Box<dyn Read>;
-                    processes.push(StreamingPipeProcess::Tee(TeePipeProcess::new(
-                        reader,
-                        output_pipes[idx].clone(),
-                        &mut self.fs,
-                        self.vm.state.cwd.as_str(),
-                        stage,
-                        stage_stderr[idx].clone(),
-                        stage_statuses[idx].clone(),
-                        false,
-                    )));
-                }
-                StreamingPipelineStage::BufferedCommand(argv) => {
-                    processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
-                        Some(output_pipes[idx - 1].clone()),
-                        output_pipes[idx].clone(),
-                        argv.clone(),
-                        false,
-                        stage_stderr[idx].clone(),
-                        stage_statuses[idx].clone(),
-                    )));
-                }
-                _ => {
-                    let reader =
-                        Box::new(PipeReader::new(output_pipes[idx - 1].clone())) as Box<dyn Read>;
-                    let stage_reader = Self::wrap_non_tee_streaming_stage(
-                        reader,
-                        &stages[idx],
-                        idx,
-                        &stage_statuses,
-                    )?;
-                    processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
-                        stage_reader,
-                        output_pipes[idx].clone(),
-                        stage_stderr[idx].clone(),
-                        stage_statuses[idx].clone(),
-                        "process-subst",
-                        false,
-                    )));
-                }
-            }
+            self.setup_process_subst_later_stage(idx, &ctx, &mut processes)?;
         }
 
+        let final_pipe = output_pipes.last().cloned()?;
         Some((
             processes,
             stage_stderr,
             stage_pipe_stderr,
-            output_pipes.last().cloned()?,
+            final_pipe,
             stage_statuses,
         ))
+    }
+
+    /// First stage of a process-substitution pipeline when there is an upstream
+    /// pipe feeding it. Returns `None` if wrapping is required but fails, which
+    /// aborts pipeline construction.
+    fn setup_process_subst_first_stage_from_pipe(
+        &mut self,
+        source_pipe: Rc<RefCell<PipeBuffer>>,
+        ctx: &StreamingStageCtx<'_>,
+        processes: &mut Vec<StreamingPipeProcess<'static>>,
+    ) -> Option<()> {
+        match &ctx.stages[0] {
+            StreamingPipelineStage::Tee(stage) => {
+                let reader = Box::new(PipeReader::new(source_pipe)) as Box<dyn Read>;
+                processes.push(StreamingPipeProcess::Tee(TeePipeProcess::new(
+                    reader,
+                    ctx.output_pipes[0].clone(),
+                    &mut self.fs,
+                    self.vm.state.cwd.as_str(),
+                    stage,
+                    ctx.stage_stderr[0].clone(),
+                    ctx.stage_statuses[0].clone(),
+                    false,
+                )));
+            }
+            StreamingPipelineStage::BufferedCommand(argv) => {
+                processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
+                    Some(source_pipe),
+                    ctx.output_pipes[0].clone(),
+                    argv.clone(),
+                    false,
+                    ctx.stage_stderr[0].clone(),
+                    ctx.stage_statuses[0].clone(),
+                )));
+            }
+            _ => {
+                let reader = Box::new(PipeReader::new(source_pipe)) as Box<dyn Read>;
+                let stage_reader = Self::wrap_non_tee_streaming_stage(
+                    reader,
+                    &ctx.stages[0],
+                    0,
+                    ctx.stage_statuses,
+                )?;
+                processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                    stage_reader,
+                    ctx.output_pipes[0].clone(),
+                    ctx.stage_stderr[0].clone(),
+                    ctx.stage_statuses[0].clone(),
+                    "process-subst",
+                    false,
+                )));
+            }
+        }
+        Some(())
+    }
+
+    /// First stage of a process-substitution pipeline with no upstream pipe —
+    /// the stage itself supplies the initial data. Returns `None` for stages
+    /// that cannot produce output without an input pipe.
+    fn setup_process_subst_first_stage_standalone(
+        &mut self,
+        ctx: &StreamingStageCtx<'_>,
+        processes: &mut Vec<StreamingPipeProcess<'static>>,
+    ) -> Option<()> {
+        let reader: Box<dyn Read> = match &ctx.stages[0] {
+            StreamingPipelineStage::Literal(data) => Box::new(Cursor::new(data.clone())),
+            StreamingPipelineStage::File(path) => {
+                let resolved = self.resolve_cwd_path(path);
+                self.open_streaming_file_reader(&resolved, "cat").ok()?
+            }
+            StreamingPipelineStage::Yes { line } => {
+                Box::new(YesStreamReader::new(line.clone(), STREAMING_YES_MAX_LINES))
+            }
+            StreamingPipelineStage::BufferedCommand(argv) => {
+                processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
+                    None,
+                    ctx.output_pipes[0].clone(),
+                    argv.clone(),
+                    false,
+                    ctx.stage_stderr[0].clone(),
+                    ctx.stage_statuses[0].clone(),
+                )));
+                return Some(());
+            }
+            _ => return None,
+        };
+        processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+            reader,
+            ctx.output_pipes[0].clone(),
+            ctx.stage_stderr[0].clone(),
+            ctx.stage_statuses[0].clone(),
+            "process-subst",
+            false,
+        )));
+        Some(())
+    }
+
+    /// Subsequent stage (idx > 0) of a process-substitution pipeline. Each
+    /// stage reads from the previous stage's output pipe.
+    fn setup_process_subst_later_stage(
+        &mut self,
+        idx: usize,
+        ctx: &StreamingStageCtx<'_>,
+        processes: &mut Vec<StreamingPipeProcess<'static>>,
+    ) -> Option<()> {
+        match &ctx.stages[idx] {
+            StreamingPipelineStage::Head(mode) => {
+                processes.push(StreamingPipeProcess::Head(HeadPipeProcess::new(
+                    ctx.output_pipes[idx - 1].clone(),
+                    ctx.output_pipes[idx].clone(),
+                    *mode,
+                )));
+            }
+            StreamingPipelineStage::Tee(stage) => {
+                let reader =
+                    Box::new(PipeReader::new(ctx.output_pipes[idx - 1].clone())) as Box<dyn Read>;
+                processes.push(StreamingPipeProcess::Tee(TeePipeProcess::new(
+                    reader,
+                    ctx.output_pipes[idx].clone(),
+                    &mut self.fs,
+                    self.vm.state.cwd.as_str(),
+                    stage,
+                    ctx.stage_stderr[idx].clone(),
+                    ctx.stage_statuses[idx].clone(),
+                    false,
+                )));
+            }
+            StreamingPipelineStage::BufferedCommand(argv) => {
+                processes.push(StreamingPipeProcess::Buffered(BufferedPipeProcess::new(
+                    Some(ctx.output_pipes[idx - 1].clone()),
+                    ctx.output_pipes[idx].clone(),
+                    argv.clone(),
+                    false,
+                    ctx.stage_stderr[idx].clone(),
+                    ctx.stage_statuses[idx].clone(),
+                )));
+            }
+            _ => {
+                let reader =
+                    Box::new(PipeReader::new(ctx.output_pipes[idx - 1].clone())) as Box<dyn Read>;
+                let stage_reader = Self::wrap_non_tee_streaming_stage(
+                    reader,
+                    &ctx.stages[idx],
+                    idx,
+                    ctx.stage_statuses,
+                )?;
+                processes.push(StreamingPipeProcess::Read(PipeReadProcess::new(
+                    stage_reader,
+                    ctx.output_pipes[idx].clone(),
+                    ctx.stage_stderr[idx].clone(),
+                    ctx.stage_statuses[idx].clone(),
+                    "process-subst",
+                    false,
+                )));
+            }
+        }
+        Some(())
     }
 
     fn try_build_live_process_subst_in_reader(
@@ -8539,18 +7230,11 @@ impl WorkerRuntime {
         if let Some(body) = self.functions.get(cmd_name).cloned() {
             return ResolvedCommand::Function(body);
         }
-        if self.builtins.is_builtin(cmd_name) {
-            return ResolvedCommand::Builtin;
+        if let Some(builtin_fn) = self.builtins.get(cmd_name) {
+            return ResolvedCommand::Builtin(builtin_fn);
         }
-        if self.utils.is_utility(cmd_name) {
-            let kind = if cmd_name == "find" && argv.iter().any(|arg| arg == "-exec") {
-                UtilityCommandKind::FindWithExec
-            } else if cmd_name == "xargs" {
-                UtilityCommandKind::Xargs
-            } else {
-                UtilityCommandKind::Plain
-            };
-            return ResolvedCommand::Utility(kind);
+        if let Some(util_fn) = self.utils.get(cmd_name) {
+            return ResolvedCommand::Utility(Self::utility_kind(cmd_name, argv), util_fn);
         }
         ResolvedCommand::External
     }
@@ -8566,20 +7250,23 @@ impl WorkerRuntime {
         if cmd_name == "bash" || cmd_name == "sh" {
             return ResolvedCommand::ShellScript;
         }
-        if self.builtins.is_builtin(cmd_name) {
-            return ResolvedCommand::Builtin;
+        if let Some(builtin_fn) = self.builtins.get(cmd_name) {
+            return ResolvedCommand::Builtin(builtin_fn);
         }
-        if self.utils.is_utility(cmd_name) {
-            let kind = if cmd_name == "find" && argv.iter().any(|arg| arg == "-exec") {
-                UtilityCommandKind::FindWithExec
-            } else if cmd_name == "xargs" {
-                UtilityCommandKind::Xargs
-            } else {
-                UtilityCommandKind::Plain
-            };
-            return ResolvedCommand::Utility(kind);
+        if let Some(util_fn) = self.utils.get(cmd_name) {
+            return ResolvedCommand::Utility(Self::utility_kind(cmd_name, argv), util_fn);
         }
         ResolvedCommand::External
+    }
+
+    fn utility_kind(cmd_name: &str, argv: &[String]) -> UtilityCommandKind {
+        if cmd_name == "find" && argv.iter().any(|arg| arg == "-exec") {
+            UtilityCommandKind::FindWithExec
+        } else if cmd_name == "xargs" {
+            UtilityCommandKind::Xargs
+        } else {
+            UtilityCommandKind::Plain
+        }
     }
 
     fn find_command_path(&self, name: &str) -> Option<String> {
@@ -8668,11 +7355,11 @@ impl WorkerRuntime {
             ResolvedCommand::ShellScript => self.call_shell_script(argv),
             ResolvedCommand::ShebangScript => self.call_shebang_script(argv),
             ResolvedCommand::Function(body) => self.call_shell_function(&argv[0], argv, &body),
-            ResolvedCommand::Builtin => self.call_builtin(&argv[0], argv),
-            ResolvedCommand::Utility(kind) => match kind {
-                UtilityCommandKind::Plain => self.call_utility(&argv[0], argv),
-                UtilityCommandKind::FindWithExec => self.call_find_with_exec(argv),
-                UtilityCommandKind::Xargs => self.call_xargs_with_exec(argv),
+            ResolvedCommand::Builtin(builtin_fn) => self.call_builtin(&argv[0], builtin_fn, argv),
+            ResolvedCommand::Utility(kind, util_fn) => match kind {
+                UtilityCommandKind::Plain => self.call_utility(&argv[0], util_fn, argv),
+                UtilityCommandKind::FindWithExec => self.call_find_with_exec(util_fn, argv),
+                UtilityCommandKind::Xargs => self.call_xargs_with_exec(util_fn, argv),
             },
             ResolvedCommand::External => self.call_external(argv),
         }
@@ -9021,8 +7708,12 @@ impl WorkerRuntime {
     }
 
     /// Invoke a builtin command.
-    fn call_builtin(&mut self, cmd_name: &str, argv: &[String]) {
-        let builtin_fn = self.builtins.get(cmd_name).unwrap();
+    fn call_builtin(
+        &mut self,
+        cmd_name: &str,
+        builtin_fn: wasmsh_builtins::BuiltinFn,
+        argv: &[String],
+    ) {
         let Ok(stdin) = self.take_builtin_stdin(cmd_name) else {
             return;
         };
@@ -9083,16 +7774,16 @@ impl WorkerRuntime {
 
     /// Handle `find ... -exec CMD {} \;` by running find for paths, then executing
     /// the command for each matched path via the shell.
-    fn call_find_with_exec(&mut self, argv: &[String]) {
+    fn call_find_with_exec(&mut self, find_fn: wasmsh_utils::UtilFn, argv: &[String]) {
         let Some((template, cleaned_argv)) = Self::extract_find_exec(argv) else {
             // Malformed -exec (missing \;), fall through to normal find
-            self.call_utility("find", argv);
+            self.call_utility("find", find_fn, argv);
             return;
         };
 
         // Phase 1: run find with cleaned argv, capturing stdout
         let ((), captured) = self.with_output_capture(true, false, |runtime| {
-            runtime.call_utility("find", &cleaned_argv);
+            runtime.call_utility("find", find_fn, &cleaned_argv);
         });
         let find_output = captured.stdout;
 
@@ -9126,7 +7817,7 @@ impl WorkerRuntime {
     /// Handle `xargs` with actual command execution for non-echo commands.
     /// The existing xargs utility already formats correct command lines for
     /// non-echo; we capture those and execute them via the shell.
-    fn call_xargs_with_exec(&mut self, argv: &[String]) {
+    fn call_xargs_with_exec(&mut self, xargs_fn: wasmsh_utils::UtilFn, argv: &[String]) {
         // Determine if xargs has a non-echo command by scanning past flags
         let mut has_non_echo = false;
         let mut i = 1;
@@ -9147,13 +7838,13 @@ impl WorkerRuntime {
         }
 
         if !has_non_echo {
-            self.call_utility("xargs", argv);
+            self.call_utility("xargs", xargs_fn, argv);
             return;
         }
 
         // Run xargs utility — it outputs formatted command lines for non-echo
         let ((), captured) = self.with_output_capture(true, false, |runtime| {
-            runtime.call_utility("xargs", argv);
+            runtime.call_utility("xargs", xargs_fn, argv);
         });
         let xargs_output = captured.stdout;
 
@@ -9171,7 +7862,7 @@ impl WorkerRuntime {
     }
 
     /// Invoke a utility command.
-    fn call_utility(&mut self, cmd_name: &str, argv: &[String]) {
+    fn call_utility(&mut self, cmd_name: &str, util_fn: wasmsh_utils::UtilFn, argv: &[String]) {
         let Ok(stdin) = self.take_util_stdin(cmd_name) else {
             return;
         };
@@ -9191,7 +7882,6 @@ impl WorkerRuntime {
             let mut output = RuntimeUtilSink {
                 router: &mut router,
             };
-            let util_fn = self.utils.get(cmd_name).unwrap();
             let mut ctx = UtilContext {
                 fs: &mut self.fs,
                 output: &mut output,
@@ -9608,8 +8298,8 @@ impl WorkerRuntime {
         }
         let builtin_argv: Vec<String> = argv[1..].to_vec();
         let cmd_name = &builtin_argv[0];
-        if self.builtins.is_builtin(cmd_name) {
-            self.execute_resolved_command(ResolvedCommand::Builtin, &builtin_argv);
+        if let Some(builtin_fn) = self.builtins.get(cmd_name) {
+            self.execute_resolved_command(ResolvedCommand::Builtin(builtin_fn), &builtin_argv);
         } else {
             let msg = format!("builtin: {cmd_name}: not a shell builtin\n");
             self.write_stderr(msg.as_bytes());
