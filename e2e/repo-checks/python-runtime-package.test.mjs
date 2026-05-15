@@ -142,6 +142,7 @@ describe("python package: generated asset parity", () => {
     "lib/node-module.mjs",
     "lib/protocol.mjs",
     "lib/runtime-bridge.mjs",
+    "lib/ptc-helper.mjs",
   ];
   const packagedArtifacts = [
     "pyodide-lock.json",

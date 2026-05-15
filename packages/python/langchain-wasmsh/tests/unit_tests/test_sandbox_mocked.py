@@ -16,33 +16,56 @@ from langchain_wasmsh.sandbox import WasmshSandbox
 def _make_mock_process(
     responses: list[dict[str, Any]] | None = None,
 ) -> MagicMock:
-    """Create a mock subprocess.Popen that responds to JSON-RPC requests."""
+    """Create a mock subprocess.Popen that responds to JSON-RPC requests.
+
+    Production sandboxes now require ``id`` on the response to match the
+    request, so the mock rewrites every dequeued response's ``id`` to match
+    the most recent stdin write. Tests can keep using fixed-id placeholders.
+    """
     process = MagicMock()
     process.poll.return_value = None  # process is alive
     process.stdin = MagicMock()
     process.stderr = MagicMock()
     process.stderr.read.return_value = ""
 
-    # Build response queue: init first, then configured responses.
-    # After the queue is exhausted, return a generic "ok" for close() calls.
-    init_response = {"id": 1, "ok": True, "result": {"events": []}}
-    queue: list[dict[str, Any]] = [init_response]
+    queue: list[dict[str, Any]] = []
     if responses:
         queue.extend(responses)
+
+    # Track the last id seen on stdin so dequeued responses can echo it.
+    last_request_id: list[int | None] = [None]
+
+    def _capture_stdin(line: str) -> int:
+        try:
+            parsed = json.loads(line.strip() or "{}")
+        except json.JSONDecodeError:
+            return len(line)
+        if isinstance(parsed, dict) and "id" in parsed:
+            last_request_id[0] = parsed["id"]
+        return len(line)
+
+    process.stdin.write.side_effect = _capture_stdin
 
     call_index = 0
 
     def _readline() -> str:
         nonlocal call_index
         if call_index < len(queue):
-            line = json.dumps(queue[call_index]) + "\n"
+            response = dict(queue[call_index])  # shallow copy
             call_index += 1
-            return line
-        # Fallback: return a generic ok for close() and any extra calls
-        return json.dumps({"id": 999, "ok": True, "result": {"closed": True}}) + "\n"
+            response["id"] = last_request_id[0] if last_request_id[0] is not None else response.get("id")
+            return json.dumps(response) + "\n"
+        # Fallback: empty string signals EOF to the sandbox reader, which
+        # surfaces as RuntimeError("wasmsh host terminated unexpectedly").
+        # Tests that need to keep the host alive across many calls should
+        # extend `responses=` instead of relying on a sentinel reply here.
+        return ""
 
     process.stdout = MagicMock()
     process.stdout.readline = MagicMock(side_effect=_readline)
+
+    # Implicit init response — every WasmshSandbox sends init() at boot.
+    queue.insert(0, {"ok": True, "result": {"events": []}})
 
     return process
 
@@ -218,11 +241,9 @@ class TestUploadFiles:
 
     def test_maps_exception_to_invalid_path(self) -> None:
         sandbox, process = _create_sandbox()
-        # Make the next readline return empty (simulating a crash on the write call)
-        close_ok = (
-            json.dumps({"id": 999, "ok": True, "result": {"closed": True}}) + "\n"
-        )
-        process.stdout.readline.side_effect = ["", close_ok]
+        # readline returns "" for the upload (simulating host crash) then "" again
+        # so close() also sees EOF and exits cleanly.
+        process.stdout.readline.side_effect = ["", ""]
         result = sandbox.upload_files([("/workspace/a.txt", b"")])
         assert result[0].error is not None
         sandbox.close()
@@ -304,11 +325,8 @@ class TestDownloadFiles:
 
     def test_maps_exception_to_error(self) -> None:
         sandbox, process = _create_sandbox()
-        close_ok = (
-            json.dumps({"id": 999, "ok": True, "result": {"closed": True}}) + "\n"
-        )
-        # Pre-check + readFile both fail (empty responses)
-        process.stdout.readline.side_effect = ["", "", close_ok]
+        # Pre-check + readFile both fail; close() also sees EOF.
+        process.stdout.readline.side_effect = ["", "", ""]
         result = sandbox.download_files(["/workspace/a.txt"])
         assert result[0].error is not None
         assert result[0].content is None
@@ -355,27 +373,20 @@ class TestClose:
 class TestErrorHandling:
     def test_host_unexpected_termination(self) -> None:
         sandbox, process = _create_sandbox()
-        close_ok = (
-            json.dumps({"id": 999, "ok": True, "result": {"closed": True}}) + "\n"
-        )
-        process.stdout.readline.side_effect = ["", close_ok]
+        # Empty readline for execute(); another empty for close() to no-op.
+        process.stdout.readline.side_effect = ["", ""]
         with pytest.raises(RuntimeError):
             sandbox.execute("echo")
         sandbox.close()
 
     def test_host_error_response(self) -> None:
-        error_response = {
-            "id": 2,
-            "ok": False,
-            "error": "something went wrong",
-        }
-        close_ok = (
-            json.dumps({"id": 999, "ok": True, "result": {"closed": True}}) + "\n"
-        )
         sandbox, process = _create_sandbox()
+        # execute() request gets id=2 (init was 1). Echo that id back so the
+        # error response matches the read loop's expected id.
+        error_response = {"id": 2, "ok": False, "error": "something went wrong"}
         process.stdout.readline.side_effect = [
             json.dumps(error_response) + "\n",
-            close_ok,
+            "",  # close() sees EOF and exits cleanly
         ]
         with pytest.raises(RuntimeError, match="something went wrong"):
             sandbox.execute("echo")

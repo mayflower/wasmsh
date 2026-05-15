@@ -200,6 +200,28 @@ class WasmshRemoteSandbox(BaseSandbox):
             truncated=False,
         )
 
+    def run_ptc(
+        self,
+        code: str,
+        *,
+        tools: list[str],
+        on_host_call: Any,  # noqa: ARG002 -- Phase 2 implementation
+    ) -> dict[str, Any]:
+        """Run ``code`` with PTC bridging via the dispatcher.
+
+        Not yet implemented for the remote path — Phase 2 of the
+        ``ptc_suspend_resume.md`` spec adds an SSE response stream and a
+        ``POST /sessions/<id>/host_result`` companion endpoint. Today the
+        dispatcher only supports the single-shot ``run`` round-trip.
+        """
+        del code, tools
+        msg = (
+            "WasmshRemoteSandbox.run_ptc is not yet implemented; "
+            "the dispatcher SSE channel (Phase 2 of ptc_suspend_resume.md) "
+            "must land first"
+        )
+        raise NotImplementedError(msg)
+
     def read(
         self,
         file_path: str,

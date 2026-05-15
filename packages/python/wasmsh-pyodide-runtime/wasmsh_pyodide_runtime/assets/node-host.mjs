@@ -12,6 +12,7 @@ import {
   getVersion,
 } from "./lib/protocol.mjs";
 import { createRuntimeBridge } from "./lib/runtime-bridge.mjs";
+import { PTC_HELPER_SOURCE } from "./lib/ptc-helper.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -73,6 +74,87 @@ class WasmshNodeHost {
     this.module = null;
     this.runtimeBridge = null;
     this._allowedHosts = [];
+    // PTC bridge state. Keyed by host_call id; entries hold the deferred
+    // promise that resolves when the host posts a matching host_call_result.
+    this._pendingHostCalls = new Map();
+    this._ptcHelperLoaded = false;
+    this._hostCallSeq = 0;
+    this._writeLine = null; // installed by main()
+  }
+
+  /** Capabilities the host advertises. Bumped when the wire shape changes. */
+  capabilities() {
+    return { host_call: "v1" };
+  }
+
+  setWriter(writeLine) {
+    this._writeLine = writeLine;
+  }
+
+  _emit(message) {
+    if (!this._writeLine) {
+      throw new Error("WasmshNodeHost writer not installed");
+    }
+    this._writeLine(message);
+  }
+
+  handleHostCallResult(message) {
+    const pending = this._pendingHostCalls.get(message.id);
+    if (!pending) {
+      process.stderr.write(
+        `[wasmsh] host_call_result for unknown id ${message.id}\n`,
+      );
+      return;
+    }
+    this._pendingHostCalls.delete(message.id);
+    if (message.ok) {
+      pending.resolve(message.value);
+    } else {
+      const err = new Error(message.message || "host tool error");
+      err.name = message.error || "ToolError";
+      err.stack = message.stack || err.stack;
+      pending.reject(err);
+    }
+  }
+
+  _toPlainArgs(jsValue) {
+    if (jsValue == null) return {};
+    // pyodide PyProxy (dict) → plain object.
+    if (typeof jsValue.toJs === "function") {
+      const converted = jsValue.toJs({ dict_converter: Object.fromEntries });
+      // Do NOT destroy: Pyodide still tracks the proxy via its own GC
+      // and a manual destroy here races with gc_register_proxies on the
+      // awaiting coroutine's resume path. Let Pyodide reclaim it.
+      return converted;
+    }
+    return jsValue;
+  }
+
+  _makeHostCallBridge() {
+    const self = this;
+    return (toolName, argsJsObj) => new Promise((resolve, reject) => {
+      const id = `hc_${process.pid}_${++self._hostCallSeq}`;
+      self._pendingHostCalls.set(id, { resolve, reject });
+      let args;
+      try {
+        args = self._toPlainArgs(argsJsObj);
+      } catch (err) {
+        self._pendingHostCalls.delete(id);
+        reject(err);
+        return;
+      }
+      self._emit({ type: "host_call", id, tool: String(toolName), args });
+    });
+  }
+
+  async _ensurePtcHelper() {
+    if (this._ptcHelperLoaded) return;
+    const pyodide = this.module?._pyodide;
+    if (!pyodide) {
+      throw new Error("Pyodide API not available — runPtc requires booted runtime");
+    }
+    pyodide.runPython(PTC_HELPER_SOURCE);
+    this._ptcHelperLoaded = true;
   }
 
   async ensureBooted() {
@@ -111,6 +193,53 @@ class WasmshNodeHost {
       });
     }
     return { events, version: getVersion(events) };
+  }
+
+  async runPtc({ code, tools = [] } = {}) {
+    if (typeof code !== "string") {
+      throw new Error("runPtc requires `code` (string)");
+    }
+    if (!Array.isArray(tools)) {
+      throw new Error("runPtc `tools` must be an array of names");
+    }
+    await this.ensureBooted();
+    const pyodide = this.module?._pyodide;
+    if (!pyodide) {
+      throw new Error("Pyodide API not available — cannot runPtc");
+    }
+    await this._ensurePtcHelper();
+    // Install bridge + tools namespace into pyodide module globals so the
+    // helper picks them up via globals(). We deliberately do NOT call
+    // .destroy() on PyProxies obtained via globals.get; Pyodide manages
+    // their lifecycle through its own GC, and manual destroy races with
+    // gc_register_proxies during/after the awaited coroutine.
+    pyodide.globals.set("__wasmsh_host_call", this._makeHostCallBridge());
+    pyodide.runPython(
+      `_wasmsh_install_tools(${JSON.stringify(tools)})`,
+    );
+    try {
+      const envelopeJson = await pyodide.runPythonAsync(
+        `await _wasmsh_run_ptc_block(${JSON.stringify(code)})`,
+      );
+      let envelope;
+      try {
+        envelope = JSON.parse(envelopeJson);
+      } catch (parseErr) {
+        throw new Error(`runPtc envelope parse error: ${parseErr.message}`);
+      }
+      return { envelope };
+    } finally {
+      pyodide.globals.delete("__wasmsh_host_call");
+      pyodide.globals.delete("tools");
+      // Fail any still-pending host calls so a future runPtc doesn't try to
+      // resolve into a dead Python coroutine.
+      for (const [id, pending] of this._pendingHostCalls) {
+        const err = new Error("runPtc completed with unresolved host_call");
+        err.name = "PTCAbandonedError";
+        pending.reject(err);
+        this._pendingHostCalls.delete(id);
+      }
+    }
   }
 
   async run({ command }) {
@@ -186,37 +315,87 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const host = new WasmshNodeHost(args.assetDir ?? resolveDefaultAssetDir());
 
+  const writeLine = (obj) => {
+    process.stdout.write(`${JSON.stringify(obj)}\n`);
+  };
+  host.setWriter(writeLine);
+
+  // Advertise capabilities on boot so the host adapter can gate PTC on it.
+  writeLine({ type: "ack", capabilities: host.capabilities() });
+
   const rl = readline.createInterface({
     input: process.stdin,
     crlfDelay: Infinity,
   });
 
+  const ALLOWED = new Set([
+    "init",
+    "run",
+    "runPtc",
+    "writeFile",
+    "readFile",
+    "listDir",
+    "installPythonPackages",
+    "close",
+  ]);
+
+  // Dispatch each request without blocking the readline loop; otherwise a
+  // long-running `runPtc` (which itself depends on inbound `host_call_result`
+  // lines being read) would deadlock the host on its own stdin.
+  const dispatch = (request) => {
+    const method = request?.method;
+    if (!ALLOWED.has(method)) {
+      writeLine({
+        id: request?.id ?? null,
+        ok: false,
+        error: `unknown method: ${method}`,
+      });
+      return;
+    }
+    Promise.resolve()
+      .then(() => host[method](request.params ?? {}))
+      .then(
+        (result) => {
+          writeLine({ id: request.id, ok: true, result });
+          if (method === "close") {
+            rl.close();
+          }
+        },
+        (error) => {
+          writeLine({
+            id: request?.id ?? null,
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        },
+      );
+  };
+
   for await (const line of rl) {
     if (!line.trim()) {
       continue;
     }
-    let request;
+    let message;
     try {
-      request = JSON.parse(line);
-      const ALLOWED = new Set(["init", "run", "writeFile", "readFile", "listDir", "installPythonPackages", "close"]);
-      const method = request.method;
-      if (!ALLOWED.has(method)) {
-        throw new Error(`unknown method: ${method}`);
-      }
-      const result = await host[method](request.params ?? {});
-      process.stdout.write(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
-      if (method === "close") {
-        rl.close();
-        break;
-      }
-    } catch (error) {
-      process.stdout.write(
-        `${JSON.stringify({
-          id: request?.id ?? null,
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        })}\n`,
-      );
+      message = JSON.parse(line);
+    } catch (parseError) {
+      writeLine({
+        id: null,
+        ok: false,
+        error: `invalid JSON on stdin: ${parseError.message}`,
+      });
+      continue;
+    }
+
+    // Out-of-band PTC response. No id/method shape; route directly.
+    if (message && message.type === "host_call_result") {
+      host.handleHostCallResult(message);
+      continue;
+    }
+
+    dispatch(message);
+    if (message?.method === "close") {
+      break;
     }
   }
 

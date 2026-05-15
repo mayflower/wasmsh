@@ -23,6 +23,11 @@ requires-python = ">=3.11,<4.0"
 dependencies = [
     "httpx>=0.27",
     "wasmsh-pyodide-runtime>=0.5.0",
+    "deepagents>=0.5.0a2",
+    "langchain>=1.0.0",
+    "langchain-core>=1.0.0",
+    "langgraph>=1.0.0",
+    "pydantic>=2.6",
 ]
 
 [project.optional-dependencies]
@@ -88,6 +93,10 @@ ban-relative-imports = "all"
     "PLR2004",  # magic numbers in assertions are fine
     "ANN201", "ANN202",  # missing return annotations on test funcs
     "INP001",  # implicit namespace packages
+    "ARG005",  # unused lambda args are common in test stubs
+    "EM101", "EM102", "TRY003",  # raise patterns inside stub helpers
+    "FBT003",  # bool positional arg in assertions on primitives
+    "E501",  # long expectation lines in scripted dialogues
 ]
 
 [tool.pytest.ini_options]

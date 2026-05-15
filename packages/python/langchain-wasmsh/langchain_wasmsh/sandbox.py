@@ -11,8 +11,11 @@ import shutil
 import subprocess
 import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from deepagents.backends.protocol import (
     EditResult,
@@ -89,6 +92,8 @@ class WasmshSandbox(BaseSandbox):
             text=True,
         )
         self._next_request_id = 0
+        self._capabilities: dict[str, str] = {}
+        self._lock_owner: int | None = None  # thread id while _request runs
         self._stderr_buffer = io.StringIO()
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
@@ -102,6 +107,7 @@ class WasmshSandbox(BaseSandbox):
                 },
             )
         except Exception:
+            logger.exception("wasmsh host init failed; terminating subprocess")
             self._kill_process()
             raise
 
@@ -186,13 +192,46 @@ class WasmshSandbox(BaseSandbox):
                 self._stderr_buffer.write(line)
 
     _MAX_NON_JSON_LINES = 100
+    # Defensive cap: protects against a host that emits valid-JSON but
+    # wrong-id responses forever (e.g. a hung worker, or a misbehaving
+    # test mock). 100 is well above any plausible legitimate out-of-band
+    # burst from `ack` / late `host_call_result` events, so a real spec-
+    # compliant host will never trip it.
+    _MAX_STALE_RESPONSES = 100
 
-    def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    def _request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        on_host_call: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Send one JSON-RPC request and read its response.
+
+        Out-of-band messages (capability ack from boot, PTC ``host_call``
+        events) are filtered from the response stream. When ``on_host_call``
+        is provided, the dispatcher is invoked synchronously per host call
+        and a ``host_call_result`` message is sent back inline.
+        """
         if not self._process.stdin or not self._process.stdout:
             msg = "wasmsh host is not available"
             raise RuntimeError(msg)
 
-        with self._lock:
+        # Reentry guard: a PTC tool that calls back into the same sandbox
+        # while we're mid-request would deadlock on _lock and corrupt the
+        # JSON-RPC stream. Surface a clean error instead.
+        current_thread = threading.get_ident()
+        if self._lock_owner == current_thread:
+            msg = (
+                f"reentrant wasmsh sandbox call: {method!r} invoked from a "
+                "PTC tool dispatch. PTC tools must not call back into the "
+                "sandbox; wrap their side effects in a separate sandbox."
+            )
+            raise RuntimeError(msg)
+
+        self._lock.acquire()
+        try:
+            self._lock_owner = current_thread
             self._next_request_id += 1
             request_id = self._next_request_id
             payload = {"id": request_id, "method": method, "params": params}
@@ -206,36 +245,130 @@ class WasmshSandbox(BaseSandbox):
                     msg += f"\nHost stderr: {stderr}"
                 raise RuntimeError(msg) from exc
 
-            response = None
-            response_line = ""
-            skipped = 0
-            while True:
-                response_line = self._process.stdout.readline()
-                if not response_line:
-                    break
-                try:
-                    response = json.loads(response_line)
-                    break
-                except json.JSONDecodeError:
-                    skipped += 1
-                    logger.debug(
-                        "Skipping non-JSON host output: %s", response_line.rstrip()
+            return self._read_response(request_id, method, on_host_call=on_host_call)
+        finally:
+            self._lock_owner = None
+            self._lock.release()
+
+    def _read_response(  # noqa: C901 -- multi-branch reader by design
+        self,
+        request_id: int,
+        method: str,
+        *,
+        on_host_call: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        skipped_non_json = 0
+        skipped_stale = 0
+        while True:
+            line = self._process.stdout.readline() if self._process.stdout else ""
+            if not line:
+                stderr = self._stderr_buffer.getvalue().strip()
+                msg = stderr or "wasmsh host terminated unexpectedly"
+                raise RuntimeError(msg)
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                skipped_non_json += 1
+                logger.debug("Skipping non-JSON host output: %s", line.rstrip())
+                if skipped_non_json >= self._MAX_NON_JSON_LINES:
+                    msg = (
+                        f"wasmsh host emitted {skipped_non_json} consecutive "
+                        f"non-JSON lines without a response"
                     )
-                    if skipped >= self._MAX_NON_JSON_LINES:
-                        msg = (
-                            f"wasmsh host emitted {skipped} consecutive "
-                            f"non-JSON lines without a response"
-                        )
-                        raise RuntimeError(msg) from None
+                    raise RuntimeError(msg) from None
+                continue
 
-        if not response_line or response is None:
-            stderr = self._stderr_buffer.getvalue().strip()
-            msg = stderr or "wasmsh host terminated unexpectedly"
+            kind = message.get("type") if isinstance(message, dict) else None
+            if kind == "ack":
+                caps = message.get("capabilities", {})
+                if isinstance(caps, dict):
+                    self._capabilities = caps
+                continue
+            if kind == "host_call":
+                self._handle_host_call(message, on_host_call, method)
+                continue
+            if kind == "host_call_result":
+                # Sandbox shouldn't be sending these to us, but tolerate.
+                continue
+
+            if not isinstance(message, dict) or "id" not in message:
+                logger.debug("Ignoring host message without id: %s", message)
+                continue
+
+            if message["id"] != request_id:
+                skipped_stale += 1
+                logger.debug(
+                    "Ignoring response for stale id=%s while waiting for %s",
+                    message.get("id"),
+                    request_id,
+                )
+                if skipped_stale >= self._MAX_STALE_RESPONSES:
+                    msg = (
+                        f"wasmsh host emitted {skipped_stale} responses with "
+                        f"mismatched ids while waiting for id={request_id}; "
+                        "assuming the host process is stuck"
+                    )
+                    raise RuntimeError(msg)
+                continue
+
+            if not message.get("ok"):
+                raise RuntimeError(
+                    str(message.get("error", "unknown wasmsh host error")),
+                )
+            return message["result"]
+
+    def _handle_host_call(
+        self,
+        message: dict[str, Any],
+        on_host_call: Callable[[dict[str, Any]], dict[str, Any]] | None,
+        method: str,
+    ) -> None:
+        call_id = message.get("id")
+        if not isinstance(call_id, str):
+            logger.warning("Dropping host_call with missing id: %s", message)
+            return
+        if on_host_call is None:
+            self._send_host_call_result(
+                {
+                    "id": call_id,
+                    "ok": False,
+                    "error": "PTCNotEnabled",
+                    "message": (
+                        f"host emitted host_call during {method}(...) but "
+                        "no dispatcher was registered"
+                    ),
+                },
+            )
+            return
+        try:
+            envelope = on_host_call(message)
+        except Exception as exc:  # noqa: BLE001 -- isolate one tool failure
+            envelope = {
+                "id": call_id,
+                "ok": False,
+                "error": type(exc).__name__,
+                "message": str(exc),
+            }
+        # Ensure the dispatcher's envelope carries the correlation id.
+        envelope.setdefault("id", call_id)
+        self._send_host_call_result(envelope)
+
+    def _send_host_call_result(self, envelope: dict[str, Any]) -> None:
+        envelope = {"type": "host_call_result", **envelope}
+        stdin = self._process.stdin
+        if stdin is None:
+            msg = "wasmsh host stdin is closed"
             raise RuntimeError(msg)
+        try:
+            stdin.write(json.dumps(envelope) + "\n")
+            stdin.flush()
+        except OSError as exc:
+            msg = f"Failed to send host_call_result: {exc}"
+            raise RuntimeError(msg) from exc
 
-        if not response.get("ok"):
-            raise RuntimeError(str(response.get("error", "unknown wasmsh host error")))
-        return response["result"]
+    def host_capabilities(self) -> dict[str, str]:
+        """Return capabilities the running host advertised on boot."""
+        return dict(self._capabilities)
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         """Execute a shell command inside the sandbox."""
@@ -255,6 +388,46 @@ class WasmshSandbox(BaseSandbox):
             exit_code=result.get("exitCode"),
             truncated=False,
         )
+
+    def run_ptc(
+        self,
+        code: str,
+        *,
+        tools: list[str],
+        on_host_call: Callable[[dict[str, Any]], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Run ``code`` in the Pyodide REPL with PTC bridging.
+
+        ``tools`` is the list of snake-case names the in-sandbox ``tools``
+        namespace will expose to user code. ``on_host_call`` is invoked
+        synchronously for each ``host_call`` event from the sandbox and must
+        return a JSON-serialisable envelope::
+
+            {"ok": True, "value": <native value>}
+            {"ok": False, "error": "ToolError", "message": "...", "stack": "..."}
+
+        The ``id`` is injected automatically.
+
+        Returns the launcher's JSON envelope (``{"ok": ..., "stdout": ...,
+        "stderr": ..., "value": ..., "error": ..., "message": ..., ...}``).
+        """
+        caps = self._capabilities.get("host_call")
+        if caps is None:
+            msg = (
+                "wasmsh host did not advertise host_call capability; "
+                "PTC is not supported by this runtime build"
+            )
+            raise RuntimeError(msg)
+        result = self._request(
+            "runPtc",
+            {"code": code, "tools": list(tools)},
+            on_host_call=on_host_call,
+        )
+        envelope = result.get("envelope")
+        if not isinstance(envelope, dict):
+            msg = "runPtc returned no envelope; host adapter is out of sync"
+            raise RuntimeError(msg)  # noqa: TRY004 -- protocol misuse, not a type error
+        return envelope
 
     def read(
         self,
