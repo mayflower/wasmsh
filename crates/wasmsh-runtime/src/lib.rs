@@ -101,8 +101,13 @@ impl Default for BrowserConfig {
         Self {
             step_budget: 100_000,
             allowed_hosts: Vec::new(),
-            output_byte_limit: 0,
-            pipe_byte_limit: 0,
+            // Secure defaults (B4 from external audit). Set to nonzero so a
+            // caller who forgets to configure limits still gets a 64 MiB
+            // visible cap rather than unlimited memory growth. The previous
+            // 0 == unlimited sentinel is still honored by the runtime path
+            // when callers opt in explicitly via set_output_byte_limit(0).
+            output_byte_limit: 64 * 1024 * 1024,
+            pipe_byte_limit: 64 * 1024 * 1024,
             recursion_limit: MAX_RECURSION_DEPTH,
             vm_subset_enabled: true,
         }

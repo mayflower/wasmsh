@@ -11,6 +11,19 @@ use crate::{DirEntry, FileHandle, FsError, Metadata, OpenOptions, Vfs, VfsWriteS
 /// Maximum file size (64 MiB).
 const MAX_FILE_SIZE: usize = 64 * 1024 * 1024;
 
+/// Total VFS quota across all files (256 MiB).
+///
+/// Enforced on writes; without this, a sandboxed agent could create many
+/// files at the per-file cap and exhaust the host's RAM. The number is
+/// 4× the per-file cap so legitimate workloads with a handful of files
+/// don't trip it.
+const MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
+
+/// Hard cap on the number of inodes (files + directories) the VFS will
+/// hold. Defends against fork-bombs-of-tiny-files that wouldn't trip the
+/// byte quota but still exhaust HashMap memory and slow read_dir scans.
+const MAX_INODES: usize = 100_000;
+
 /// An entry in the memory filesystem.
 #[derive(Debug, Clone)]
 enum FsNode {
@@ -61,6 +74,10 @@ struct MemoryFsInner {
     virtual_readers: HashMap<String, Rc<RefCell<Box<dyn Read>>>>,
     handles: HashMap<u64, OpenFile>,
     next_handle: u64,
+    /// Cached sum of all `FsNode::File` byte sizes. Kept in sync with the
+    /// `nodes` map by every write/remove path so quota enforcement does not
+    /// need to walk the entire map on each operation.
+    total_bytes: usize,
 }
 
 impl std::fmt::Debug for MemoryFsInner {
@@ -70,6 +87,7 @@ impl std::fmt::Debug for MemoryFsInner {
             .field("virtual_reader_count", &self.virtual_readers.len())
             .field("handles", &self.handles)
             .field("next_handle", &self.next_handle)
+            .field("total_bytes", &self.total_bytes)
             .finish()
     }
 }
@@ -98,6 +116,7 @@ impl MemoryFs {
                 virtual_readers: HashMap::new(),
                 handles: HashMap::new(),
                 next_handle: 1,
+                total_bytes: 0,
             })),
         }
     }
@@ -113,30 +132,62 @@ impl MemoryFs {
     }
 
     /// Ensure all parent directories exist for a given path.
-    fn ensure_parents(&mut self, path: &str) {
+    fn ensure_parents(&mut self, path: &str) -> Result<(), FsError> {
         let mut inner = self.inner.borrow_mut();
         let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
         let mut current = String::new();
         for part in &parts[..parts.len().saturating_sub(1)] {
             current.push('/');
             current.push_str(part);
-            inner.nodes.entry(current.clone()).or_insert(FsNode::Dir);
+            if inner.nodes.contains_key(&current) {
+                continue;
+            }
+            if inner.nodes.len() >= MAX_INODES {
+                return Err(FsError::Io(
+                    "filesystem inode limit exceeded".into(),
+                ));
+            }
+            inner.nodes.insert(current.clone(), FsNode::Dir);
         }
+        Ok(())
+    }
+}
+
+/// Check whether the VFS has room for one more inode. Centralised so we can
+/// keep the check inline at each insertion site without duplicating the cap.
+fn check_inode_room(inner: &MemoryFsInner) -> Result<(), FsError> {
+    if inner.nodes.len() >= MAX_INODES {
+        Err(FsError::Io("filesystem inode limit exceeded".into()))
+    } else {
+        Ok(())
     }
 }
 
 impl MemoryWriteSink {
     fn write_chunk(&mut self, data: &[u8]) -> Result<(), FsError> {
         let mut inner = self.inner.borrow_mut();
+        let total_before = inner.total_bytes;
         match inner.nodes.get_mut(&self.path) {
             Some(FsNode::File(contents)) => {
+                let old_size = contents.len();
                 let new_size = if self.append {
-                    contents.len() + data.len()
+                    old_size + data.len()
                 } else {
                     data.len()
                 };
                 if new_size > MAX_FILE_SIZE {
                     return Err(FsError::Io("file size limit exceeded".into()));
+                }
+                // Total VFS quota: subtract old, add new. Without this check
+                // an attacker can stay under the per-file cap while still
+                // exhausting host memory across many files.
+                let projected_total = total_before
+                    .saturating_sub(old_size)
+                    .saturating_add(new_size);
+                if projected_total > MAX_TOTAL_BYTES {
+                    return Err(FsError::Io(
+                        "filesystem quota exceeded".into(),
+                    ));
                 }
                 if self.append {
                     let mut combined = contents.as_ref().to_vec();
@@ -146,6 +197,7 @@ impl MemoryWriteSink {
                     *contents = Arc::from(data.to_vec());
                     self.append = true;
                 }
+                inner.total_bytes = projected_total;
                 Ok(())
             }
             _ => Err(FsError::NotFound(self.path.clone())),
@@ -190,18 +242,21 @@ impl Vfs for MemoryFs {
             Some(FsNode::Dir) => {
                 return Err(FsError::IsADirectory(norm));
             }
-            Some(FsNode::File(_)) => {
+            Some(FsNode::File(contents)) => {
                 if opts.write && opts.truncate && !opts.append {
+                    let old_size = contents.len();
                     inner
                         .nodes
                         .insert(norm.clone(), FsNode::File(Arc::from([])));
+                    inner.total_bytes = inner.total_bytes.saturating_sub(old_size);
                 }
             }
             None => {
                 if opts.create {
                     drop(inner);
-                    self.ensure_parents(&norm);
+                    self.ensure_parents(&norm)?;
                     inner = self.inner.borrow_mut();
+                    check_inode_room(&inner)?;
                     inner
                         .nodes
                         .insert(norm.clone(), FsNode::File(Arc::from([])));
@@ -326,17 +381,22 @@ impl Vfs for MemoryFs {
                 Some(FsNode::File(_)) => {}
                 None => {
                     drop(inner);
-                    self.ensure_parents(&norm);
-                    self.inner
-                        .borrow_mut()
+                    self.ensure_parents(&norm)?;
+                    let mut inner2 = self.inner.borrow_mut();
+                    check_inode_room(&inner2)?;
+                    inner2
                         .nodes
                         .insert(norm.clone(), FsNode::File(Arc::from([])));
                 }
             }
         }
         if !append {
-            self.inner
-                .borrow_mut()
+            let mut inner = self.inner.borrow_mut();
+            if let Some(FsNode::File(old)) = inner.nodes.get(&norm) {
+                let old_size = old.len();
+                inner.total_bytes = inner.total_bytes.saturating_sub(old_size);
+            }
+            inner
                 .nodes
                 .insert(norm.clone(), FsNode::File(Arc::from([])));
         }
@@ -349,14 +409,22 @@ impl Vfs for MemoryFs {
 
     fn install_stream_reader(&mut self, path: &str, reader: Box<dyn Read>) -> Result<(), FsError> {
         let norm = crate::normalize_path(path);
-        {
+        let pre_exists = {
             let inner = self.inner.borrow();
             if matches!(inner.nodes.get(&norm), Some(FsNode::Dir)) {
                 return Err(FsError::IsADirectory(norm));
             }
-        }
-        self.ensure_parents(&norm);
+            inner.nodes.contains_key(&norm)
+        };
+        self.ensure_parents(&norm)?;
         let mut inner = self.inner.borrow_mut();
+        if !pre_exists {
+            check_inode_room(&inner)?;
+        }
+        if let Some(FsNode::File(old)) = inner.nodes.get(&norm) {
+            let old_size = old.len();
+            inner.total_bytes = inner.total_bytes.saturating_sub(old_size);
+        }
         inner
             .nodes
             .insert(norm.clone(), FsNode::File(Arc::from([])));
@@ -420,8 +488,10 @@ impl Vfs for MemoryFs {
         if self.inner.borrow().nodes.contains_key(&norm) {
             return Err(FsError::AlreadyExists(norm));
         }
-        self.ensure_parents(&norm);
-        self.inner.borrow_mut().nodes.insert(norm, FsNode::Dir);
+        self.ensure_parents(&norm)?;
+        let mut inner = self.inner.borrow_mut();
+        check_inode_room(&inner)?;
+        inner.nodes.insert(norm, FsNode::Dir);
         Ok(())
     }
 
@@ -433,10 +503,12 @@ impl Vfs for MemoryFs {
         };
         match kind {
             Some(FsNode::Dir) => Err(FsError::IsADirectory(norm)),
-            Some(FsNode::File(_)) => {
+            Some(FsNode::File(contents)) => {
+                let size = contents.len();
                 let mut inner = self.inner.borrow_mut();
                 inner.nodes.remove(&norm);
                 inner.virtual_readers.remove(&norm);
+                inner.total_bytes = inner.total_bytes.saturating_sub(size);
                 Ok(())
             }
             None => Err(FsError::NotFound(norm)),
@@ -611,6 +683,76 @@ mod tests {
         assert!(fs.stat("/a").unwrap().is_dir);
         assert!(fs.stat("/a/b").unwrap().is_dir);
         assert!(fs.stat("/a/b/c").unwrap().is_dir);
+    }
+
+    #[test]
+    fn total_quota_blocks_aggregate_growth() {
+        // Each file is well under MAX_FILE_SIZE; together they exceed
+        // MAX_TOTAL_BYTES. Without the total cap, this loop would happily
+        // exhaust host memory. We expect a quota error well before that.
+        let mut fs = MemoryFs::new();
+        let chunk = vec![0u8; 8 * 1024 * 1024];
+        let mut got_quota_err = false;
+        for i in 0..64 {
+            let h = fs.open(&format!("/f{i}"), OpenOptions::write()).unwrap();
+            match fs.write_file(h, &chunk) {
+                Ok(()) => fs.close(h),
+                Err(FsError::Io(msg)) if msg.contains("quota") => {
+                    got_quota_err = true;
+                    break;
+                }
+                Err(e) => panic!("unexpected error on file {i}: {e:?}"),
+            }
+        }
+        assert!(got_quota_err, "total quota was never enforced");
+    }
+
+    #[test]
+    fn inode_limit_blocks_explosive_creation() {
+        // Many tiny files; bytes stay near zero but inode count climbs.
+        // The cap (MAX_INODES) must trip before the HashMap blows up.
+        let mut fs = MemoryFs::new();
+        let mut hit = false;
+        for i in 0..200_000 {
+            match fs.open(&format!("/d{i}"), OpenOptions::write()) {
+                Ok(h) => fs.close(h),
+                Err(FsError::Io(msg)) if msg.contains("inode") => {
+                    hit = true;
+                    break;
+                }
+                Err(e) => panic!("unexpected error on file {i}: {e:?}"),
+            }
+        }
+        assert!(hit, "inode limit was never enforced");
+    }
+
+    #[test]
+    fn remove_file_returns_quota_room() {
+        let mut fs = MemoryFs::new();
+        let chunk = vec![0u8; 32 * 1024 * 1024];
+        // Fill ~192 MiB across 6 files; quota is 256 MiB.
+        for i in 0..6 {
+            let h = fs.open(&format!("/f{i}"), OpenOptions::write()).unwrap();
+            fs.write_file(h, &chunk).unwrap();
+            fs.close(h);
+        }
+        // The 9th 32 MiB file would push past 256 MiB — must fail.
+        for i in 6..9 {
+            let h = fs.open(&format!("/f{i}"), OpenOptions::write()).unwrap();
+            if fs.write_file(h, &chunk).is_err() {
+                fs.close(h);
+                // Remove an earlier file and prove the freed bytes can be
+                // reused: writing to "/f0" again (after deletion) must
+                // succeed because total_bytes was decremented.
+                fs.remove_file(&format!("/f{}", i - 6)).unwrap();
+                let h2 = fs.open(&format!("/f{i}"), OpenOptions::write()).unwrap();
+                fs.write_file(h2, &chunk).unwrap();
+                fs.close(h2);
+                return;
+            }
+            fs.close(h);
+        }
+        panic!("quota never tripped under expected sequence");
     }
 
     #[test]

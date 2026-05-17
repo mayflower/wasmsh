@@ -213,15 +213,34 @@ export async function restoreSessionWorker({
   restore.endStage("sandbox_restore");
   const restoreResult = restore.finish();
 
-  function sendRequest(method, params) {
+  // Per-command wall-clock timeout: a runaway worker (infinite Python loop,
+  // wedged broker fetch) must not pin a session forever. Bound every
+  // sendRequest by this ceiling, then terminate() the worker and reject the
+  // pending promise. Callers that legitimately need longer must opt in by
+  // passing `timeoutMs` explicitly.
+  const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+  function sendRequest(method, params, options = {}) {
     ensureWorkerActive();
     const id = nextRequestId;
     nextRequestId += 1;
+    const timeoutMs = typeof options.timeoutMs === "number" && options.timeoutMs > 0
+      ? options.timeoutMs
+      : DEFAULT_REQUEST_TIMEOUT_MS;
     return new Promise((resolveResult, rejectResult) => {
       ensureWorkerActive();
+      const timer = setTimeout(() => {
+        if (!pending.has(id)) return;
+        pending.delete(id);
+        const err = new Error(
+          `request '${method}' exceeded ${timeoutMs}ms timeout; worker terminated`,
+        );
+        err.code = "WASMSH_REQUEST_TIMEOUT";
+        try { worker.terminate(); } catch { /* already exited */ }
+        rejectResult(err);
+      }, timeoutMs);
       pending.set(id, {
-        resolve: resolveResult,
-        reject: rejectResult,
+        resolve: (value) => { clearTimeout(timer); resolveResult(value); },
+        reject: (e) => { clearTimeout(timer); rejectResult(e); },
       });
       worker.postMessage({
         type: "request",
