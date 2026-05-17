@@ -17,6 +17,7 @@ axum = { version = "0.7", features = ["http1", "json", "tokio"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+subtle = "2"
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
 tracing = "0.1"

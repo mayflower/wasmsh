@@ -628,6 +628,75 @@ async fn session_route_with_wrong_auth_token_returns_401() {
 }
 
 #[tokio::test]
+async fn same_length_wrong_bearer_token_returns_401() {
+    // Regression for the bitwise-NOT precedence bug in require_auth: a
+    // hand-rolled `!diff == 0` check let most same-length wrong tokens
+    // through because `!diff` is u8 bitwise-NOT, true == 0 only when
+    // diff was exactly 0xff. We now use subtle::ConstantTimeEq; this
+    // test covers a one-byte change at the start, middle, and end of
+    // the expected token plus a random scramble.
+    let svc = dispatcher_with_auth(vec![], "secret-token");
+    for supplied in [
+        "secret-tokee",
+        "secreu-token",
+        "aecret-token",
+        "rstcee-tokes",
+    ] {
+        let response = svc
+            .router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sessions")
+                    .header("authorization", format!("Bearer {supplied}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "same-length wrong token {supplied:?} must be rejected",
+        );
+    }
+}
+
+#[tokio::test]
+async fn one_byte_change_at_every_position_returns_401() {
+    // Exhaustively flip a single byte at every position; each variant
+    // must 401. Catches off-by-one mistakes in any future comparison
+    // rewrite.
+    let expected = "secret-token";
+    let svc = dispatcher_with_auth(vec![], expected);
+    for i in 0..expected.len() {
+        let mut bytes = expected.as_bytes().to_vec();
+        // Flip the low bit so the mutation stays printable.
+        bytes[i] ^= 0x01;
+        let supplied = String::from_utf8(bytes).unwrap();
+        let response = svc
+            .router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sessions")
+                    .header("authorization", format!("Bearer {supplied}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "mutation at position {i} (token {supplied:?}) must be rejected",
+        );
+    }
+}
+
+#[tokio::test]
 async fn healthz_does_not_require_auth() {
     let svc = dispatcher_with_auth(vec![], "secret-token");
     let response = svc

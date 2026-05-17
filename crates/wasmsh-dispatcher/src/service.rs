@@ -12,6 +12,7 @@ use axum::{Json, Router};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use subtle::ConstantTimeEq;
 use tokio::net::lookup_host;
 use tokio::sync::Mutex;
 use tracing::warn;
@@ -259,16 +260,17 @@ async fn require_auth(
         .strip_prefix("Bearer ")
         .or_else(|| header_value.strip_prefix("bearer "))
         .unwrap_or("");
-    // Constant-time compare to avoid timing oracles. The token is small;
-    // straight comparison is fine in practice but the explicit pattern
-    // also documents intent.
-    if supplied.len() != expected.len()
-        || !supplied
-            .as_bytes()
-            .iter()
-            .zip(expected.as_bytes())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0
+    // Constant-time compare via subtle::ConstantTimeEq. The previous
+    // hand-rolled version had a bitwise-NOT precedence bug that let most
+    // same-length wrong tokens pass — the `!diff == 0` parsed as
+    // `(!diff) == 0` (bitwise NOT on u8), true only when diff was exactly
+    // 0xff. Using a vetted constant-time primitive removes both that bug
+    // class and the timing-oracle risk in one step.
+    if supplied
+        .as_bytes()
+        .ct_eq(expected.as_bytes())
+        .unwrap_u8()
+        != 1
     {
         return Err(ServiceError::Unauthorized);
     }
