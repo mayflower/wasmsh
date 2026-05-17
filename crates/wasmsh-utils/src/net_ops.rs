@@ -1494,7 +1494,7 @@ fn redact_url_userinfo(url: &str) -> String {
     let authority_start = scheme_end + 3;
     let rest = &url[authority_start..];
     let authority_end = rest
-        .find(|c: char| matches!(c, '/' | '?' | '#'))
+        .find(['/', '?', '#'])
         .unwrap_or(rest.len());
     let authority = &rest[..authority_end];
     let Some(at_pos) = authority.rfind('@') else {
@@ -1628,7 +1628,7 @@ fn fetch_with_redirects(
         backend.check_url(&next_url)?;
         // Method downgrade rules: 301/302/303 demote non-GET/HEAD to GET and
         // drop the body; 307/308 preserve method and body.
-        if matches!(response.status, 301 | 302 | 303)
+        if matches!(response.status, 301..=303)
             && !matches!(request.method.as_str(), "GET" | "HEAD")
         {
             request.method = "GET".into();
@@ -1836,8 +1836,8 @@ fn sanitize_filename(name: &str) -> String {
     // Leading dash is hostile: many command-line tools (curl/wget/rm
     // included) treat `-foo` as an option, so a saved file named `-rf`
     // turns the next `rm *` into a foot-cannon. Replace with `_`.
-    let cleaned = if cleaned.starts_with('-') {
-        format!("_{}", &cleaned[1..])
+    let cleaned = if let Some(rest) = cleaned.strip_prefix('-') {
+        format!("_{rest}")
     } else {
         cleaned
     };

@@ -602,7 +602,7 @@ async fn session_route_without_auth_token_returns_401() {
                 .method("POST")
                 .uri("/sessions")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{}"#))
+                .body(Body::from("{}"))
                 .unwrap(),
         )
         .await
@@ -621,7 +621,7 @@ async fn session_route_with_wrong_auth_token_returns_401() {
                 .uri("/sessions")
                 .header("authorization", "Bearer wrong-token")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{}"#))
+                .body(Body::from("{}"))
                 .unwrap(),
         )
         .await
@@ -728,7 +728,7 @@ async fn session_route_with_correct_auth_passes_middleware() {
                 .uri("/sessions")
                 .header("authorization", "Bearer secret-token")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{}"#))
+                .body(Body::from("{}"))
                 .unwrap(),
         )
         .await

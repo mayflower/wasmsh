@@ -321,10 +321,9 @@ async fn create_session(
     // attempt to fixate sessions or squat predictable names. In open-
     // mode dev (no auth token), keep the legacy behavior so existing
     // local tests that pre-allocate IDs still work.
-    let session_id = match (state.config.auth_token.as_deref(), payload.session_id) {
-        (Some(_), _) => Uuid::new_v4().to_string(),
-        (None, Some(id)) => id,
-        (None, None) => Uuid::new_v4().to_string(),
+    let session_id = match payload.session_id {
+        Some(id) if state.config.auth_token.is_none() => id,
+        _ => Uuid::new_v4().to_string(),
     };
     let runner_url = select_runner_url(&state, &session_id).await?;
 
@@ -622,15 +621,6 @@ async fn forward_existing_session_delete(
         .await
         .map_err(|error| ServiceError::Upstream(error.to_string()))?;
     response_to_json_response(response).await
-}
-
-async fn forward_post_json<T: Serialize>(
-    client: &Client,
-    base_url: &str,
-    path: &str,
-    payload: &T,
-) -> Result<Response, ServiceError> {
-    forward_post_json_with_token(client, base_url, path, payload, None).await
 }
 
 async fn forward_post_json_with_token<T: Serialize>(

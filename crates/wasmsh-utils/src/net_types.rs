@@ -304,7 +304,7 @@ mod tests {
         ] {
             let r = al.check(url);
             assert!(
-                matches!(r, Err(NetworkError::HostDenied(_)) | Err(NetworkError::InvalidUrl(_))),
+                matches!(r, Err(NetworkError::HostDenied(_) | NetworkError::InvalidUrl(_))),
                 "expected denial for {url}, got {r:?}"
             );
         }
