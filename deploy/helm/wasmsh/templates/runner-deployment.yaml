@@ -86,6 +86,16 @@ spec:
               value: {{ .Values.runner.fetchBroker.requestBytes | quote }}
             - name: WASMSH_FETCH_BROKER_RESPONSE_BYTES
               value: {{ .Values.runner.fetchBroker.responseBytes | quote }}
+            {{- if .Values.runner.auth.existingSecretName }}
+            - name: WASMSH_RUNNER_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.runner.auth.existingSecretName }}
+                  key: {{ .Values.runner.auth.existingSecretKey | default "token" }}
+            {{- else if .Values.runner.auth.token }}
+            - name: WASMSH_RUNNER_AUTH_TOKEN
+              value: {{ .Values.runner.auth.token | quote }}
+            {{- end }}
             {{- with .Values.runner.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

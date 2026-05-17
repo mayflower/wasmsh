@@ -89,6 +89,14 @@ runner:
     - tools/runner-node/src/server.mjs
   host: "0.0.0.0"
   port: 8787
+  # Bearer-token auth on every runner endpoint except /healthz and
+  # /readyz. When configured, the dispatcher injects the same token on
+  # every outbound request so cross-pod traffic continues to work. Empty
+  # = no auth (legacy; relies on the NetworkPolicy to gate ingress).
+  auth:
+    token: ""
+    existingSecretName: ""
+    existingSecretKey: token
   restoreSlots: 4
   startupWarmRestores: 2
   fetchBroker:

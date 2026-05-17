@@ -161,6 +161,7 @@ fn dispatcher_for(urls: Vec<String>) -> DispatcherService {
     DispatcherService::new(ServiceConfig {
         runner_urls: urls,
         auth_token: None,
+        runner_auth_token: None,
     })
     .expect("build dispatcher")
 }
@@ -169,6 +170,7 @@ fn dispatcher_with_auth(urls: Vec<String>, token: &str) -> DispatcherService {
     DispatcherService::new(ServiceConfig {
         runner_urls: urls,
         auth_token: Some(token.to_string()),
+        runner_auth_token: None,
     })
     .expect("build dispatcher")
 }

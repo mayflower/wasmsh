@@ -47,6 +47,11 @@ pub struct ServiceConfig {
     /// safe behind a trusted mesh / on loopback. Set via the
     /// `WASMSH_AUTH_TOKEN` env var in the binary.
     pub auth_token: Option<String>,
+    /// Optional bearer token presented to runners on every dispatcher →
+    /// runner request. Configured separately from `auth_token` so the
+    /// dispatcher↔runner mesh credential can rotate independently of the
+    /// client-facing one. Source: `WASMSH_RUNNER_AUTH_TOKEN`.
+    pub runner_auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -320,7 +325,14 @@ async fn create_session(
         initial_files: &payload.initial_files,
     };
 
-    let result = forward_post_json(&state.client, &runner_url, "/sessions", &request).await;
+    let result = forward_post_json_with_token(
+        &state.client,
+        &runner_url,
+        "/sessions",
+        &request,
+        state.config.runner_auth_token.as_deref(),
+    )
+    .await;
     if let Err(ref error) = result {
         warn!(
             session_id = %session_id,
@@ -407,8 +419,9 @@ async fn list_dir(
 
 async fn refresh_runners(state: &Arc<AppState>) -> Result<usize, ServiceError> {
     let mut discovered = Vec::new();
+    let runner_token = state.config.runner_auth_token.as_deref();
     for base_url in expand_runner_urls(&state.config.runner_urls).await? {
-        match fetch_runner_snapshot(&state.client, &base_url).await {
+        match fetch_runner_snapshot(&state.client, &base_url, runner_token).await {
             Ok(snapshot) => {
                 discovered.push((snapshot.runner_id.clone(), snapshot, base_url));
             }
@@ -487,9 +500,13 @@ async fn expand_runner_urls(configured_urls: &[String]) -> Result<Vec<String>, S
 async fn fetch_runner_snapshot(
     client: &Client,
     base_url: &str,
+    runner_token: Option<&str>,
 ) -> Result<RunnerSnapshot, ServiceError> {
-    let response = client
-        .get(format!("{base_url}/runner/snapshot"))
+    let mut builder = client.get(format!("{base_url}/runner/snapshot"));
+    if let Some(t) = runner_token {
+        builder = builder.bearer_auth(t);
+    }
+    let response = builder
         .send()
         .await
         .map_err(|error| ServiceError::Discovery(error.to_string()))?;
@@ -561,7 +578,15 @@ async fn forward_existing_session_post<T: Serialize>(
 ) -> Result<impl IntoResponse, ServiceError> {
     let base_url = runner_url_for_existing_session(state, session_id).await?;
     let path = format!("/sessions/{session_id}{suffix}");
-    match forward_post_json(&state.client, &base_url, &path, payload).await {
+    match forward_post_json_with_token(
+        &state.client,
+        &base_url,
+        &path,
+        payload,
+        state.config.runner_auth_token.as_deref(),
+    )
+    .await
+    {
         Ok(response) => Ok(response),
         Err(ServiceError::UpstreamStatus { status, .. }) if status == StatusCode::NOT_FOUND => {
             release_session_affinity(state, session_id).await;
@@ -576,9 +601,13 @@ async fn forward_existing_session_delete(
     session_id: &str,
 ) -> Result<impl IntoResponse, ServiceError> {
     let base_url = runner_url_for_existing_session(state, session_id).await?;
-    let response = state
+    let mut builder = state
         .client
-        .delete(format!("{base_url}/sessions/{session_id}"))
+        .delete(format!("{base_url}/sessions/{session_id}"));
+    if let Some(t) = state.config.runner_auth_token.as_deref() {
+        builder = builder.bearer_auth(t);
+    }
+    let response = builder
         .send()
         .await
         .map_err(|error| ServiceError::Upstream(error.to_string()))?;
@@ -591,9 +620,21 @@ async fn forward_post_json<T: Serialize>(
     path: &str,
     payload: &T,
 ) -> Result<Response, ServiceError> {
-    let response = client
-        .post(format!("{base_url}{path}"))
-        .json(payload)
+    forward_post_json_with_token(client, base_url, path, payload, None).await
+}
+
+async fn forward_post_json_with_token<T: Serialize>(
+    client: &Client,
+    base_url: &str,
+    path: &str,
+    payload: &T,
+    runner_token: Option<&str>,
+) -> Result<Response, ServiceError> {
+    let mut builder = client.post(format!("{base_url}{path}")).json(payload);
+    if let Some(t) = runner_token {
+        builder = builder.bearer_auth(t);
+    }
+    let response = builder
         .send()
         .await
         .map_err(|error| ServiceError::Upstream(error.to_string()))?;

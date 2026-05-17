@@ -80,6 +80,16 @@ spec:
             - name: WASMSH_AUTH_TOKEN
               value: {{ .Values.dispatcher.auth.token | quote }}
             {{- end }}
+            {{- if .Values.runner.auth.existingSecretName }}
+            - name: WASMSH_RUNNER_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.runner.auth.existingSecretName }}
+                  key: {{ .Values.runner.auth.existingSecretKey | default "token" }}
+            {{- else if .Values.runner.auth.token }}
+            - name: WASMSH_RUNNER_AUTH_TOKEN
+              value: {{ .Values.runner.auth.token | quote }}
+            {{- end }}
             {{- with .Values.dispatcher.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

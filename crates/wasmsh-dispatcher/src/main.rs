@@ -84,6 +84,9 @@ async fn main() -> Result<()> {
     // address, emit a warning so a misconfigured deployment is visible in
     // logs rather than silently routable from the network.
     let auth_token = env::var("WASMSH_AUTH_TOKEN").ok().filter(|s| !s.is_empty());
+    let runner_auth_token = env::var("WASMSH_RUNNER_AUTH_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
     let is_loopback = host == "127.0.0.1" || host == "::1" || host == "localhost";
     match (auth_token.as_ref(), is_loopback) {
         (None, false) => warn!(
@@ -101,6 +104,7 @@ async fn main() -> Result<()> {
     let service = DispatcherService::new(ServiceConfig {
         runner_urls,
         auth_token,
+        runner_auth_token,
     })
     .context("failed to build dispatcher service")?;
 
