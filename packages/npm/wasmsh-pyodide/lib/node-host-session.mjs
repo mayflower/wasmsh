@@ -25,6 +25,23 @@ export class RequestClient {
     this._timeoutMs = timeoutMs;
   }
 
+  /** Return capabilities the host advertised on boot (subclass-populated). */
+  get capabilities() {
+    return { ...(this._capabilities ?? {}) };
+  }
+
+  /**
+   * Run a code block with programmatic tool calling enabled. Optional surface
+   * implemented by transports that can demultiplex `host_call` events from
+   * the response stream.
+   */
+  async runPtc(_params) {
+    throw new Error(
+      "this transport does not support runPtc; " +
+        "use NodeSession or a runPtc-capable subclass",
+    );
+  }
+
   _sendRequest(method, params) {
     const promise = this._sendRaw(method, params);
     if (!this._timeoutMs || this._timeoutMs <= 0) {
@@ -86,12 +103,18 @@ export class NodeSession extends RequestClient {
   constructor(child, timeoutMs) {
     let nextId = 1;
     const pending = new Map();
+    const ptcDispatchers = new Map(); // active per-runPtc onHostCall callbacks
+    const capabilities = {};
     const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     let exited = false;
     let exitResolve;
     const exitPromise = new Promise((resolve) => {
       exitResolve = resolve;
     });
+
+    const writeLine = (msg) => {
+      child.stdin.write(`${JSON.stringify(msg)}\n`);
+    };
 
     rl.on("line", (line) => {
       if (!line.trim()) {
@@ -101,6 +124,26 @@ export class NodeSession extends RequestClient {
       try {
         response = JSON.parse(line);
       } catch {
+        return;
+      }
+      // Out-of-band envelopes from the host. None carry a JSON-RPC id.
+      if (response && typeof response === "object" && response.type) {
+        if (response.type === "ack" && response.capabilities) {
+          Object.assign(capabilities, response.capabilities);
+          return;
+        }
+        if (response.type === "host_call") {
+          // Route to every active dispatcher; only the request whose code
+          // emitted the call has a matching dispatcher entry. Since runPtc
+          // is serialised per session (host runs one async eval at a time),
+          // there is typically only one entry. Each dispatcher itself
+          // writes back the host_call_result.
+          for (const dispatch of ptcDispatchers.values()) {
+            dispatch(response);
+          }
+          return;
+        }
+        // host_call_result is client→host; ignore if the host ever echoes one.
         return;
       }
       const entry = pending.get(response.id);
@@ -146,9 +189,12 @@ export class NodeSession extends RequestClient {
       nextId += 1;
       return new Promise((resolve, reject) => {
         pending.set(id, { resolve, reject });
-        child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+        writeLine({ id, method, params });
       });
     }, timeoutMs);
+    this._capabilities = capabilities;
+    this._writeLine = writeLine;
+    this._ptcDispatchers = ptcDispatchers;
 
     this._child = child;
     this._rl = rl;
@@ -161,6 +207,58 @@ export class NodeSession extends RequestClient {
       closePromise = promise;
     };
     this._getClosePromise = () => closePromise;
+  }
+
+  async runPtc({ code, tools = [], onHostCall }) {
+    if (typeof code !== "string") {
+      throw new TypeError("runPtc requires `code` (string)");
+    }
+    if (!Array.isArray(tools)) {
+      throw new TypeError("runPtc `tools` must be an array of names");
+    }
+    if (typeof onHostCall !== "function") {
+      throw new TypeError("runPtc requires `onHostCall` (async function)");
+    }
+    if (!this._capabilities.host_call) {
+      throw new Error(
+        "wasmsh host did not advertise host_call capability; " +
+          "PTC is not supported by this runtime build",
+      );
+    }
+    const dispatch = (hostCall) => {
+      Promise.resolve()
+        .then(() => onHostCall(hostCall))
+        .catch((error) => ({
+          ok: false,
+          error: error?.name ?? "Error",
+          message: error?.message ?? String(error),
+        }))
+        .then((envelope) => {
+          this._writeLine({
+            type: "host_call_result",
+            id: hostCall.id,
+            ...envelope,
+          });
+        });
+    };
+    // Register before sending so an early `host_call` is routed correctly.
+    const key = Symbol("ptc");
+    this._ptcDispatchers.set(key, dispatch);
+    try {
+      const result = await this._sendRequest("runPtc", {
+        code,
+        tools: [...tools],
+      });
+      const envelope = result?.envelope;
+      if (!envelope || typeof envelope !== "object") {
+        throw new Error(
+          "runPtc returned no envelope; host adapter is out of sync",
+        );
+      }
+      return envelope;
+    } finally {
+      this._ptcDispatchers.delete(key);
+    }
   }
 
   async close() {
