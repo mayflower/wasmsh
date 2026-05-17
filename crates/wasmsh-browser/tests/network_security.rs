@@ -30,6 +30,10 @@ impl NativeNetworkBackend {
 }
 
 impl NetworkBackend for NativeNetworkBackend {
+    fn check_url(&self, url: &str) -> Result<(), NetworkError> {
+        self.allowlist.check(url)
+    }
+
     fn fetch(&self, request: &HttpRequest) -> Result<HttpResponse, NetworkError> {
         self.allowlist.check(&request.url)?;
 

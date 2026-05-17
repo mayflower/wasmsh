@@ -1509,7 +1509,7 @@ fn fetch_with_retries(
 ) -> Result<HttpResponse, NetworkError> {
     let mut attempt: u32 = 0;
     loop {
-        let result = backend.fetch(request);
+        let result = fetch_with_redirects(backend, request);
         if opts.retry == 0 || attempt >= opts.retry {
             return result;
         }
@@ -1519,6 +1519,74 @@ fn fetch_with_retries(
             other => return other,
         }
     }
+}
+
+/// Drive the redirect chain in Rust rather than delegating to the backend's
+/// own `redirect: "follow"` mode. Per-hop re-validation through
+/// `NetworkBackend::check_url` keeps the host allowlist applied even when an
+/// allowed server returns `Location:` pointing at a different host. Without
+/// this, a compromised allowed host could redirect to `127.0.0.1`,
+/// `169.254.169.254` (cloud metadata), or an internal service the agent had
+/// no business reaching.
+fn fetch_with_redirects(
+    backend: &dyn NetworkBackend,
+    initial: &HttpRequest,
+) -> Result<HttpResponse, NetworkError> {
+    // If the caller didn't want redirects followed, the backend sees the raw
+    // request and the loop short-circuits after one fetch.
+    if !initial.follow_redirects {
+        return backend.fetch(initial);
+    }
+    let max = initial.max_redirs.unwrap_or(50);
+    let mut request = initial.clone();
+    // From here on we drive the chain; backend must not follow on its own.
+    request.follow_redirects = false;
+    let mut hops: u32 = 0;
+    loop {
+        let response = backend.fetch(&request)?;
+        if !is_redirect_status(response.status) {
+            return Ok(response);
+        }
+        let Some(location) = extract_location_header(&response) else {
+            return Ok(response);
+        };
+        if hops >= max {
+            return Err(NetworkError::TooManyRedirects(format!(
+                "exceeded {max} redirects"
+            )));
+        }
+        let next_url = resolve_redirect_url(&request.url, &location)
+            .map_err(|e| NetworkError::Other(format!("invalid redirect target: {e}")))?;
+        backend.check_url(&next_url)?;
+        // Method downgrade rules: 301/302/303 demote non-GET/HEAD to GET and
+        // drop the body; 307/308 preserve method and body.
+        if matches!(response.status, 301 | 302 | 303)
+            && !matches!(request.method.as_str(), "GET" | "HEAD")
+        {
+            request.method = "GET".into();
+            request.body = None;
+        }
+        request.url = next_url;
+        hops += 1;
+    }
+}
+
+fn is_redirect_status(status: u16) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+fn extract_location_header(response: &HttpResponse) -> Option<String> {
+    response
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+        .map(|(_, v)| v.clone())
+}
+
+fn resolve_redirect_url(base: &str, location: &str) -> Result<String, url::ParseError> {
+    let base_url = url::Url::parse(base)?;
+    let resolved = base_url.join(location)?;
+    Ok(resolved.into())
 }
 
 // ── Response writing ────────────────────────────────────────────
@@ -2476,7 +2544,7 @@ fn wget_fetch_one(
     let attempts = opts.tries.max(1);
     let mut last_err = None;
     for _ in 0..attempts {
-        match backend.fetch(&request) {
+        match fetch_with_redirects(backend, &request) {
             Ok(r) => return Ok(r),
             Err(e) => last_err = Some(e),
         }
@@ -2582,14 +2650,29 @@ mod tests {
         /// call returns `response`.  Used to test retry behavior.
         error_queue: RefCell<Vec<NetworkError>>,
         captured: RefCell<Vec<HttpRequest>>,
+        /// Per-URL canned responses (e.g. a 302 with `Location`). Each entry
+        /// is single-shot: it fires once, then the URL falls back to
+        /// `response`. Used to exercise the redirect chain.
+        redirect_responses: RefCell<Vec<(String, HttpResponse)>>,
     }
 
     impl NetworkBackend for MockNetworkBackend {
+        fn check_url(&self, url: &str) -> Result<(), NetworkError> {
+            self.allowlist.check(url)
+        }
+
         fn fetch(&self, request: &HttpRequest) -> Result<HttpResponse, NetworkError> {
             self.captured.borrow_mut().push(request.clone());
             self.allowlist.check(&request.url)?;
             if let Some(e) = self.error_queue.borrow_mut().pop() {
                 return Err(e);
+            }
+            // If a redirect_response was queued for THIS url, return that
+            // (single-shot per match). Otherwise fall back to `response`.
+            let mut q = self.redirect_responses.borrow_mut();
+            if let Some(idx) = q.iter().position(|(u, _)| u == &request.url) {
+                let (_, r) = q.remove(idx);
+                return Ok(r);
             }
             Ok(self.response.clone())
         }
@@ -2608,6 +2691,7 @@ mod tests {
             },
             error_queue: RefCell::new(Vec::new()),
             captured: RefCell::new(Vec::new()),
+            redirect_responses: RefCell::new(Vec::new()),
         }
     }
 
@@ -3934,6 +4018,103 @@ mod tests {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("> GET http://example.com/api"));
         assert!(stderr.contains("< HTTP/1.1 200 OK"));
+    }
+
+    // ── Per-hop redirect re-validation ──────────────────────────
+
+    fn redirect_response(target: &str) -> HttpResponse {
+        HttpResponse {
+            status: 302,
+            headers: vec![
+                ("Location".into(), target.into()),
+                ("Content-Length".into(), "0".into()),
+            ],
+            body: vec![],
+        }
+    }
+
+    #[test]
+    fn redirect_to_denied_host_is_rejected() {
+        let backend = mock_backend(b"final body");
+        backend.redirect_responses.borrow_mut().push((
+            "http://example.com/start".into(),
+            redirect_response("http://evil.com/loot"),
+        ));
+        let (status, output) = run_curl(
+            &["curl", "-L", "http://example.com/start"],
+            &backend,
+        );
+        // The first hop returned 302, the redirect target is not allowlisted,
+        // so curl must fail with a HostDenied error rather than fetching it.
+        assert_ne!(status, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("host denied") || stderr.contains("not in allowlist"),
+            "expected HostDenied for evil.com redirect, got: {stderr}"
+        );
+        // The backend must NOT have been called for evil.com.
+        for req in backend.captured.borrow().iter() {
+            assert!(
+                !req.url.contains("evil.com"),
+                "broker reached evil.com via redirect: {}",
+                req.url
+            );
+        }
+    }
+
+    #[test]
+    fn redirect_to_loopback_via_allowed_host_is_rejected() {
+        // Allowed host returns Location: http://127.0.0.1:8080/private.
+        // 127.0.0.1 is not in the allowlist, so the redirect must be denied
+        // and the broker must never reach loopback.
+        let backend = mock_backend(b"final body");
+        backend.redirect_responses.borrow_mut().push((
+            "http://example.com/redir".into(),
+            redirect_response("http://127.0.0.1:8080/private"),
+        ));
+        let (status, output) = run_curl(
+            &["curl", "-L", "http://example.com/redir"],
+            &backend,
+        );
+        assert_ne!(status, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("host denied") || stderr.contains("not in allowlist"),
+            "expected HostDenied for loopback redirect, got: {stderr}"
+        );
+        for req in backend.captured.borrow().iter() {
+            assert!(
+                !req.url.contains("127.0.0.1"),
+                "broker reached 127.0.0.1: {}",
+                req.url
+            );
+        }
+    }
+
+    #[test]
+    fn redirect_to_allowed_subdomain_is_followed() {
+        // mock_backend's allowlist includes *.test.co — redirect from
+        // example.com to api.test.co should succeed.
+        let backend = mock_backend(b"final body");
+        backend.redirect_responses.borrow_mut().push((
+            "http://example.com/redir".into(),
+            redirect_response("http://api.test.co/data"),
+        ));
+        let (status, output) = run_curl(
+            &["curl", "-L", "http://example.com/redir"],
+            &backend,
+        );
+        assert_eq!(status, 0, "stderr: {:?}", output.stderr);
+        // The backend must have been called twice: once for the redirect,
+        // once for the target.
+        let captured = backend.captured.borrow();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].url, "http://example.com/redir");
+        assert_eq!(captured[1].url, "http://api.test.co/data");
+        // Each individual fetch must have follow_redirects=false: the Rust
+        // layer drives the chain, not the backend.
+        assert!(!captured[0].follow_redirects);
+        assert!(!captured[1].follow_redirects);
     }
 
     // ── Verbose redacts credentials ─────────────────────────────

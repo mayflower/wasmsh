@@ -93,6 +93,16 @@ pub trait NetworkBackend {
     /// Implementations must validate the URL against the host allowlist
     /// before performing any network I/O.
     fn fetch(&self, request: &HttpRequest) -> Result<HttpResponse, NetworkError>;
+
+    /// Validate a URL against the backend's policy without performing I/O.
+    ///
+    /// Used by the redirect-following loop so each hop of a 3xx chain is
+    /// re-validated against the same allowlist as the initial request. The
+    /// default implementation accepts everything so backends without an
+    /// allowlist (test mocks) still compile.
+    fn check_url(&self, _url: &str) -> Result<(), NetworkError> {
+        Ok(())
+    }
 }
 
 /// Validated set of allowed hosts for network access.
@@ -150,6 +160,15 @@ impl HostAllowlist {
 
     /// Check if a URL's host is allowed. Returns `Ok(())` on success,
     /// or `Err(NetworkError::HostDenied)` if the host is not in the list.
+    ///
+    /// Also enforces:
+    /// - Scheme allowlist: only `http` and `https` are accepted. `file:`,
+    ///   `data:`, `javascript:`, `ws:`, `ftp:`, etc. are rejected even when
+    ///   they would otherwise parse cleanly, because the network broker
+    ///   has no business proxying those.
+    /// - Trailing-dot normalization: `example.com.` is treated as
+    ///   `example.com`. Without this, an attacker can grant access to the
+    ///   same host under a slightly different name and bypass the allowlist.
     pub fn check(&self, url: &str) -> Result<(), NetworkError> {
         if self.patterns.is_empty() {
             return Err(NetworkError::HostDenied(
@@ -159,10 +178,21 @@ impl HostAllowlist {
 
         let parsed = Url::parse(url).map_err(|e| NetworkError::InvalidUrl(e.to_string()))?;
 
-        let host = parsed
+        match parsed.scheme() {
+            "http" | "https" => {}
+            other => {
+                return Err(NetworkError::HostDenied(format!(
+                    "scheme '{other}' not allowed (only http/https)"
+                )));
+            }
+        }
+
+        let raw_host = parsed
             .host_str()
             .ok_or_else(|| NetworkError::InvalidUrl("URL has no host".into()))?
             .to_ascii_lowercase();
+        // Strip the FQDN trailing dot so `example.com.` matches `example.com`.
+        let host = raw_host.strip_suffix('.').unwrap_or(&raw_host).to_string();
         let port = parsed.port();
 
         for pattern in &self.patterns {
@@ -258,6 +288,39 @@ mod tests {
         let al = HostAllowlist::new(vec!["example.com".into(), "*.example.com".into()]);
         assert!(al.check("https://example.com").is_ok());
         assert!(al.check("https://api.example.com").is_ok());
+    }
+
+    #[test]
+    fn rejects_non_http_schemes() {
+        let al = HostAllowlist::new(vec!["example.com".into()]);
+        for url in [
+            "file:///etc/passwd",
+            "data:text/plain,abc",
+            "javascript:alert(1)",
+            "ws://example.com",
+            "wss://example.com",
+            "ftp://example.com",
+            "blob:example.com",
+        ] {
+            let r = al.check(url);
+            assert!(
+                matches!(r, Err(NetworkError::HostDenied(_)) | Err(NetworkError::InvalidUrl(_))),
+                "expected denial for {url}, got {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn trailing_dot_normalised() {
+        let al = HostAllowlist::new(vec!["example.com".into()]);
+        // FQDN with trailing dot must be treated identically to the bare name.
+        assert!(al.check("https://example.com./path").is_ok());
+    }
+
+    #[test]
+    fn trailing_dot_normalised_under_wildcard() {
+        let al = HostAllowlist::new(vec!["*.example.com".into()]);
+        assert!(al.check("https://api.example.com./path").is_ok());
     }
 
     #[test]

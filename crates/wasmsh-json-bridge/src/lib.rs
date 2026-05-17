@@ -120,6 +120,10 @@ impl DenyingNetworkBackend {
 }
 
 impl NetworkBackend for DenyingNetworkBackend {
+    fn check_url(&self, url: &str) -> Result<(), NetworkError> {
+        self.allowlist.check(url)
+    }
+
     fn fetch(&self, request: &HttpRequest) -> Result<HttpResponse, NetworkError> {
         self.allowlist.check(&request.url)?;
         Err(NetworkError::Other(
