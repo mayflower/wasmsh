@@ -32,6 +32,7 @@ from langchain_wasmsh._skills import (
     load_skill,
     scan_skill_references,
 )
+from langchain_wasmsh.filesystem import WasmshNamespaceEscapeError
 
 # ── Sandbox stub ─────────────────────────────────────────────────────────────
 
@@ -73,6 +74,53 @@ class _StubSandbox:
 
     def close(self) -> None:
         self.closed = True
+
+    # Stubbed file-protocol methods so the WasmshFilesystemBackend traversal
+    # tests can resolve the attribute lookup; they should never be reached
+    # because `_scope` raises on out-of-namespace paths before dispatch.
+    def ls(self, path: str) -> Any:
+        msg = f"ls should not run for traversal path {path!r}"
+        raise AssertionError(msg)
+
+    def glob(self, pattern: str, path: str = "/") -> Any:
+        msg = f"glob should not run for traversal pattern={pattern!r} path={path!r}"
+        raise AssertionError(msg)
+
+    def grep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+    ) -> Any:
+        del path, glob
+        msg = f"grep should not run for traversal pattern={pattern!r}"
+        raise AssertionError(msg)
+
+    def write(self, file_path: str, content: str) -> Any:
+        del content
+        msg = f"write should not run for traversal path {file_path!r}"
+        raise AssertionError(msg)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,  # noqa: FBT001, FBT002 -- mirrors BackendProtocol
+    ) -> Any:
+        del old_string, new_string, replace_all
+        msg = f"edit should not run for traversal path {file_path!r}"
+        raise AssertionError(msg)
+
+    def read(
+        self,
+        file_path: str,
+        offset: int = 0,
+        limit: int = 2000,
+    ) -> Any:
+        del offset, limit
+        msg = f"read should not run for traversal path {file_path!r}"
+        raise AssertionError(msg)
 
 
 def _marker(envelope: dict[str, Any]) -> str:
@@ -319,6 +367,64 @@ class TestFilesystemBackend:
         backend.upload_files([("/note.txt", b"hi")])
         uploaded_paths = [path for path, _ in sandbox.upload_log]
         assert uploaded_paths == ["/note.txt"]
+
+
+class TestFilesystemBackendTraversalContainment:
+    """Pyodide's POSIX VFS resolves `..` segments; the namespace must hold."""
+
+    def test_direct_dotdot_escape_is_rejected_on_every_method(self) -> None:
+
+        sandbox = _StubSandbox()
+        backend = WasmshFilesystemBackend(sandbox, namespace="/mem")
+        escape = "/../skills/secret.py"
+        with pytest.raises(WasmshNamespaceEscapeError):
+            backend.read(escape)
+        with pytest.raises(WasmshNamespaceEscapeError):
+            backend.write(escape, "x")
+        with pytest.raises(WasmshNamespaceEscapeError):
+            backend.edit(escape, "a", "b")
+        with pytest.raises(WasmshNamespaceEscapeError):
+            backend.upload_files([(escape, b"x")])
+        with pytest.raises(WasmshNamespaceEscapeError):
+            backend.download_files([escape])
+        with pytest.raises(WasmshNamespaceEscapeError):
+            backend.ls(escape)
+        with pytest.raises(WasmshNamespaceEscapeError):
+            backend.glob("*.py", escape)
+        with pytest.raises(WasmshNamespaceEscapeError):
+            backend.grep("TODO", escape)
+
+    def test_multi_segment_dotdot_payload_rejected(self) -> None:
+
+        backend = WasmshFilesystemBackend(_StubSandbox(), namespace="/mem")
+        with pytest.raises(WasmshNamespaceEscapeError, match="escapes namespace"):
+            backend.read("../../skills/secret.py")
+
+    def test_interior_dotdot_landing_outside_namespace_rejected(self) -> None:
+
+        backend = WasmshFilesystemBackend(_StubSandbox(), namespace="/mem")
+        with pytest.raises(WasmshNamespaceEscapeError):
+            backend.read("/x/../../etc/passwd")
+
+    def test_sibling_prefix_attack_rejected(self) -> None:
+        """/memstore shares the prefix /mem but is a different sibling."""
+        backend = WasmshFilesystemBackend(_StubSandbox(), namespace="/mem")
+        with pytest.raises(WasmshNamespaceEscapeError):
+            backend.read("/../memstore/x")
+
+    def test_interior_dotdot_staying_inside_namespace_allowed(self) -> None:
+        sandbox = _StubSandbox()
+        backend = WasmshFilesystemBackend(sandbox, namespace="/mem")
+        backend.upload_files([("/a/../b/x", b"hi")])
+        uploaded = [p for p, _ in sandbox.upload_log]
+        assert uploaded == ["/mem/b/x"]
+
+    def test_dot_and_dot_slash_paths_allowed(self) -> None:
+        sandbox = _StubSandbox()
+        backend = WasmshFilesystemBackend(sandbox, namespace="/mem")
+        backend.upload_files([("/./sub/x", b"hi")])
+        uploaded = [p for p, _ in sandbox.upload_log]
+        assert uploaded == ["/mem/sub/x"]
 
 
 # ── Middleware construction ─────────────────────────────────────────────────

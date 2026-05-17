@@ -13,10 +13,25 @@ using the sandbox directly, this backend:
 Use it on its own for laptop-scale persistent memory, or wire it behind a
 ``CompositeBackend`` route for production setups where memory lives in a
 long-running dedicated wasmsh session.
+
+Path traversal containment
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``namespace`` is a security boundary. The wasmsh sandbox VFS resolves
+``..`` segments at the POSIX layer, so a naive ``f"{namespace}{path}"``
+join would let any caller — including an LLM-driven agent that controls
+``file_path`` on the standard ``read_file`` / ``write_file`` / ``edit_file``
+tools — escape the namespace with payloads like ``../../skills/secret.py``.
+
+``_scope`` resolves the joined path with :func:`posixpath.normpath` and
+rejects any input that, after normalisation, leaves the namespace root.
+``_unscope`` applies the matching containment check on inbound result
+paths so an upstream bug elsewhere can't leak non-namespaced paths.
 """
 
 from __future__ import annotations
 
+import posixpath
 from typing import TYPE_CHECKING
 
 from deepagents.backends.protocol import (
@@ -30,6 +45,20 @@ from deepagents.backends.protocol import (
     ReadResult,
     WriteResult,
 )
+
+
+class WasmshNamespaceEscapeError(PermissionError):
+    """Raised when a caller-supplied path would escape the configured namespace.
+
+    Subclasses ``PermissionError`` so existing error-handlers that map OS
+    permission errors to ``"permission_denied"`` continue to do the right
+    thing without any additional catch.
+    """
+
+    def __init__(self, attempted_path: str, namespace: str) -> None:
+        super().__init__(
+            f"path {attempted_path!r} escapes namespace {namespace!r}",
+        )
 
 if TYPE_CHECKING:
     from deepagents.backends.sandbox import BaseSandbox
@@ -95,15 +124,37 @@ class WasmshFilesystemBackend(BackendProtocol):
             path = "/" + path
         if path == "/":
             return self._namespace or "/"
-        return f"{self._namespace}{path}"
+        # ``posixpath.normpath`` collapses ``.`` and ``..`` segments. The
+        # subsequent containment check rejects any payload that, after
+        # normalisation, leaves the namespace root — including spellings
+        # that bypass a naive ``"../" in path`` substring guard.
+        joined = f"{self._namespace}{path}"
+        resolved = posixpath.normpath(joined)
+        if not self._is_contained(resolved):
+            raise WasmshNamespaceEscapeError(path, self._namespace)
+        return resolved
 
     def _unscope(self, path: str) -> str:
         if not self._namespace:
             return path
-        if path.startswith(self._namespace):
-            stripped = path[len(self._namespace) :]
-            return stripped or "/"
-        return path
+        # Containment check on the way back: an upstream bug (or a
+        # misbehaving sandbox) should never leak paths from outside the
+        # namespace into the caller's view.
+        if not self._is_contained(path):
+            raise WasmshNamespaceEscapeError(path, self._namespace)
+        stripped = path[len(self._namespace) :]
+        return stripped or "/"
+
+    def _is_contained(self, resolved: str) -> bool:
+        """``True`` iff ``resolved`` sits at the namespace root or below.
+
+        A plain ``startswith(self._namespace)`` would accept a sibling
+        directory whose name shares the prefix (e.g. ``/memstore`` vs.
+        ``/mem``); we anchor with the trailing separator explicitly.
+        """
+        if resolved == self._namespace:
+            return True
+        return resolved.startswith(self._namespace + "/")
 
     # ---- BackendProtocol surface ----------------------------------------
 
