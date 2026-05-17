@@ -15,7 +15,18 @@ export function isHostAllowed(url, allowedHosts) {
     return false;
   }
 
-  const host = parsed.hostname.toLowerCase();
+  // Scheme allowlist parity with the Rust HostAllowlist (audit F9).
+  // file:, javascript:, data:, ws:, wss:, ftp:, blob: are rejected before
+  // the host lookup so policy stays identical across the three
+  // implementations (Rust, JS membrane, JS allowlist).
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return false;
+  }
+
+  // Strip the FQDN trailing dot so `example.com.` matches `example.com`,
+  // matching the Rust implementation.
+  let host = parsed.hostname.toLowerCase();
+  if (host.endsWith(".")) host = host.slice(0, -1);
   const port = parsed.port ? Number(parsed.port) : null;
 
   for (const pattern of allowedHosts) {

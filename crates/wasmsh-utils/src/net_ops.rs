@@ -381,10 +381,21 @@ fn parse_short_option(opts: &mut CurlOpts, arg: &str, cur: &mut ArgCursor<'_>) -
             'J' => opts.remote_header_name = true,
             'G' => opts.get_via_url = true,
             'n' => opts.netrc_enabled = true,
-            // `-k` (insecure), `-Z` (parallel → we run sequentially), and
-            // `-4/-6/-#/-0/-1/-2/-3` (IP/protocol version pins and
-            // progress-bar UI) are all silent no-ops in the sandbox.
-            'k' | 'Z' | '4' | '6' | '#' | '0' | '1' | '2' | '3' => {}
+            // `-Z` (parallel → we run sequentially) and `-#` (progress
+            // bar) are purely cosmetic: silently consumed.
+            'Z' | '#' => {}
+            // Security-relevant short flags (audit F8): TLS verification
+            // bypass, IP-family pinning, HTTP-version pinning. We can't
+            // honor them in the sandbox, so route them through the same
+            // diagnostic mechanism as their long-form equivalents.
+            'k' | '4' | '6' | '0' | '1' | '2' | '3' => {
+                if strict_curl_mode() {
+                    return Err(format!(
+                        "-{ch}: not supported in sandbox (WASMSH_CURL_STRICT)"
+                    ));
+                }
+                opts.dropped_security_flags.push(format!("-{ch}"));
+            }
             'X' | 'H' | 'd' | 'o' | 'w' | 'u' | 'A' | 'e' | 'D' | 'F' | 'T' | 'b' | 'r' | 'z' => {
                 let rest: String = flags[idx + 1..].to_string();
                 consume_short_with_arg(opts, ch, &rest, cur)?;
@@ -1843,11 +1854,27 @@ fn sanitize_filename(name: &str) -> String {
         return String::new();
     }
 
-    // Cap at 255 bytes (POSIX NAME_MAX on most filesystems).
-    if cleaned.len() > 255 {
-        return cleaned[..255].to_string();
+    // Cap at 255 bytes (POSIX NAME_MAX on most filesystems). Slicing on
+    // a raw byte boundary would panic if byte 255 falls inside a
+    // multibyte UTF-8 codepoint (audit F7) — a server can craft a
+    // filename of 300 é characters and turn `curl -OJ` into a crash.
+    // Truncate at the nearest char boundary instead.
+    truncate_utf8_bytes(&cleaned, 255)
+}
+
+/// Truncate `s` so the returned slice is at most `max` BYTES long AND
+/// ends on a UTF-8 char boundary. Slicing arbitrary `[..max]` panics on
+/// multibyte content; this helper falls back to the highest valid
+/// boundary at or below `max`.
+fn truncate_utf8_bytes(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
     }
-    cleaned
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
 }
 
 fn resolve_output_path(ctx: &UtilContext<'_>, opts: &CurlOpts, filename: &str) -> String {
@@ -4398,6 +4425,22 @@ mod tests {
         assert_eq!(sanitize_filename("data.json"), "data.json");
     }
 
+    #[test]
+    fn sanitize_filename_truncates_multibyte_safely() {
+        // Regression for F7: slicing on a raw byte index used to panic
+        // when byte 255 fell inside a multibyte UTF-8 char. 300 `é`s is
+        // 600 bytes; the truncation must land on a char boundary and
+        // return a still-valid UTF-8 string.
+        let huge = "é".repeat(300);
+        let cleaned = sanitize_filename(&huge);
+        assert!(cleaned.len() <= 255);
+        // Round-tripping through String guarantees the result is valid
+        // UTF-8 — but assert explicitly so a future bug screams loudly.
+        assert!(std::str::from_utf8(cleaned.as_bytes()).is_ok());
+        // No partial codepoint at the tail.
+        assert!(cleaned.chars().count() > 0);
+    }
+
     // ── Security-relevant flag diagnostics ─────────────────────
 
     #[test]
@@ -4432,6 +4475,40 @@ mod tests {
         assert!(
             stderr.contains("--resolve is not enforced"),
             "expected diagnostic for --resolve, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn curl_warns_when_short_insecure_flag_is_dropped() {
+        // Regression for F8: `-k` was previously a silent no-op so a
+        // script that asked for cert-validation bypass kept running
+        // with whatever the sandbox transport decided. Now it warns
+        // (and hard-fails under WASMSH_CURL_STRICT).
+        let backend = mock_backend(b"data");
+        let (status, output) = run_curl(
+            &["curl", "-k", "http://example.com/"],
+            &backend,
+        );
+        assert_eq!(status, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("-k is not enforced"),
+            "expected diagnostic for -k, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn curl_warns_when_short_ip_family_flag_is_dropped() {
+        let backend = mock_backend(b"data");
+        let (status, output) = run_curl(
+            &["curl", "-4", "http://example.com/"],
+            &backend,
+        );
+        assert_eq!(status, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("-4 is not enforced"),
+            "expected diagnostic for -4, got: {stderr}"
         );
     }
 

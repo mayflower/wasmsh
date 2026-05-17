@@ -37,6 +37,16 @@ const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// TCP connect timeout for upstream calls to a runner.
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Hard cap on the byte size of a runner response that we will forward.
+///
+/// Audit F10: the dispatcher previously called `response.bytes().await`
+/// without a ceiling. A misbehaving runner (or one returning a large
+/// `readFile` payload) could buffer arbitrarily many bytes per
+/// in-flight request. 64 MiB matches the runner's per-file VFS cap and
+/// the membrane's per-response cap — clients should not legitimately
+/// see anything bigger.
+const UPSTREAM_RESPONSE_BYTE_CAP: u64 = 64 * 1024 * 1024;
+
 #[derive(Debug, Clone, Default)]
 /// Static configuration for the dispatcher service.
 pub struct ServiceConfig {
@@ -661,10 +671,27 @@ async fn response_to_json_response(response: reqwest::Response) -> Result<Respon
         );
         StatusCode::BAD_GATEWAY
     });
+    // Honor Content-Length when present so we can reject before reading
+    // even one byte. Defends the dispatcher against a misbehaving runner
+    // that returns a multi-gigabyte body (audit F10).
+    if let Some(cl) = response.content_length() {
+        if cl > UPSTREAM_RESPONSE_BYTE_CAP {
+            return Err(ServiceError::Upstream(format!(
+                "upstream response too large ({cl} bytes > {UPSTREAM_RESPONSE_BYTE_CAP})"
+            )));
+        }
+    }
     let body: Bytes = response
         .bytes()
         .await
         .map_err(|error| ServiceError::Upstream(error.to_string()))?;
+    // Backstop in case Content-Length lied / was missing.
+    if (body.len() as u64) > UPSTREAM_RESPONSE_BYTE_CAP {
+        return Err(ServiceError::Upstream(format!(
+            "upstream response too large ({} bytes > {UPSTREAM_RESPONSE_BYTE_CAP})",
+            body.len()
+        )));
+    }
     if status.is_success() {
         let response = Response::builder()
             .status(status)
