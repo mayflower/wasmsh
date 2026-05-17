@@ -391,3 +391,52 @@ class TestErrorHandling:
         with pytest.raises(RuntimeError, match="something went wrong"):
             sandbox.execute("echo")
         sandbox.close()
+
+
+class TestAssetPathResolution:
+    """Symlinked checkouts must still produce a sandbox Deno will allow.
+
+    Deno prefix-matches ``--allow-read`` against the canonical realpath the
+    filesystem returns, so the sandbox has to resolve symlinks before
+    handing the directory to Deno. Otherwise the first read of
+    ``pyodide.asm.js`` raises a permission error — see the regression on
+    venvs installed via a symlinked source tree.
+    """
+
+    def test_dist_dir_is_canonicalised(self, tmp_path: Any) -> None:
+        from pathlib import Path
+
+        # Create a real asset dir and a symlinked alias.
+        real_assets = tmp_path / "real" / "assets"
+        real_assets.mkdir(parents=True)
+        (real_assets / "pyodide.asm.js").write_text("// stub\n")
+        (real_assets / "node-host.mjs").write_text("// stub\n")
+        link_root = tmp_path / "link"
+        link_root.symlink_to(tmp_path / "real")
+        symlinked_assets = link_root / "assets"
+
+        with patch("langchain_wasmsh.sandbox.subprocess.Popen") as popen:
+            process = _make_mock_process(
+                responses=[{"id": 1, "ok": True, "result": {"events": []}}],
+            )
+            popen.return_value = process
+            # Don't let the integration go further than constructor —
+            # close() reads the EOF and exits cleanly.
+            process.stdout.readline.side_effect = [
+                json.dumps({"id": 1, "ok": True, "result": {"events": []}})
+                + "\n",
+                "",
+            ]
+            sandbox = WasmshSandbox(dist_dir=symlinked_assets, runtime="deno")
+            sandbox.close()
+
+        cmd = popen.call_args.args[0]
+        # The --allow-read prefix and --asset-dir must point to the
+        # canonical path, not the symlinked input. Otherwise Deno would
+        # deny when pyodide.asm.js loads.
+        canonical = str(Path(real_assets).resolve())
+        allow_read = next(arg for arg in cmd if arg.startswith("--allow-read="))
+        assert allow_read == f"--allow-read={canonical}"
+        # --asset-dir is the value after the literal flag.
+        asset_dir_idx = cmd.index("--asset-dir")
+        assert cmd[asset_dir_idx + 1] == canonical

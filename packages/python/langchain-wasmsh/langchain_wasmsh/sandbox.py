@@ -77,7 +77,13 @@ class WasmshSandbox(BaseSandbox):
         """
         resolved = self._resolve_runtime(runtime)
         self._runtime = resolved
-        self._dist_dir = Path(dist_dir) if dist_dir is not None else get_dist_dir()
+        # Resolve symlinks: Deno's --allow-read prefix-matches the canonical
+        # path the filesystem returns, not the symlinked path we hand it.
+        # Without this, a venv installed via a symlinked checkout (or any
+        # site-packages reached through a symlink) hits a permission denial
+        # the first time Pyodide's loader reads pyodide.asm.js.
+        raw_dist = Path(dist_dir) if dist_dir is not None else Path(get_dist_dir())
+        self._dist_dir = raw_dist.resolve()
         self._working_directory = working_directory
         self._allowed_hosts = allowed_hosts or []
         self._id = f"wasmsh-python-{uuid4()}"
@@ -150,7 +156,10 @@ class WasmshSandbox(BaseSandbox):
         raise FileNotFoundError(msg)
 
     def _build_cmd(self) -> list[str]:
-        host_script = str(get_node_host_script())
+        # Resolve the host script through the same realpath the asset dir
+        # already went through. Deno's reads of node-host.mjs (and any
+        # `lib/*.mjs` it imports) match against the canonical path.
+        host_script = str(Path(get_node_host_script()).resolve())
         asset_dir = str(self._dist_dir)
         if self._use_deno:
             cmd = [
