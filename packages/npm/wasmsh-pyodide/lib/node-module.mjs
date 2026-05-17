@@ -8,6 +8,7 @@ import { buildBaselineBootPlan } from "./baseline/boot-plan.mjs";
 import { composeWasmImports } from "./baseline/import-composer.mjs";
 import { assertOfflineBaselineBootPlan } from "./baseline/offline-guard.mjs";
 import { captureScopedGlobals, restoreScopedGlobals } from "./baseline/sandbox-globals.mjs";
+import { installFsMembrane } from "./fs-membrane.mjs";
 
 const fetchHelperPath = resolve(
   new URL(".", import.meta.url).pathname,
@@ -222,6 +223,14 @@ async function loadModuleWithBaseline(distDir, {
 
   moduleRef = module;
   module.FS.mkdirTree("/workspace");
+
+  // Install the FS membrane immediately after the workspace mountpoint
+  // exists. The membrane wraps Emscripten FS.write / FS.writeFile /
+  // FS.create / FS.mkdir / FS.unlink / FS.rmdir / FS.truncate so both
+  // shell-via-EmscriptenFs and direct Python `open()` writes share a
+  // single chokepoint for the per-file + total-bytes + inode quotas.
+  // Audit F6.
+  installFsMembrane(module.FS);
 
   module._pyodide = pyodide;
   return module;

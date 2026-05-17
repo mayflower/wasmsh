@@ -261,6 +261,17 @@ async function boot(baseUrl) {
   pyodideRef = pyodide;
   module.FS.mkdirTree("/workspace");
 
+  // Hook Emscripten FS for the per-file / total-bytes / inode quotas.
+  // Shell-via-EmscriptenFs and direct Python `open()` both reach this
+  // FS object, so the membrane catches both. Audit F6.
+  if (fetchMembraneHelpers) {
+    // fetch-membrane and fs-membrane are imported by the same
+    // ensureHelperModules promise (both in `./lib/`); load fs-membrane
+    // lazily here so the import surface stays small.
+    const { installFsMembrane } = await import(resolveHelperUrl("./lib/fs-membrane.mjs"));
+    installFsMembrane(module.FS);
+  }
+
   module._pyodide = pyodide;
   runtimeBridge = runtimeBridgeModule().createRuntimeBridge(module);
 }
