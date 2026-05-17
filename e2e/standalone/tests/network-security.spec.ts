@@ -185,26 +185,36 @@ test("curl to similar-looking hostnames is blocked", async ({ page }) => {
 
 // ── Wildcard pattern ────────────────────────────────────────────
 
-test("wildcard pattern allows base domain and blocks others", async ({
+test("wildcard pattern blocks the apex (subdomains-only semantics)", async ({
   page,
 }) => {
   await page.goto("/");
-  // `*.localhost:3100` should match the bare host `localhost:3100`
-  // (HostAllowlist treats `*.X` as "X or any subdomain of X").
+  // `*.localhost:3100` matches strict subdomains only; the apex
+  // `localhost:3100` is NOT covered. Callers wanting the apex must list it
+  // explicitly. See docs/reference/sandbox-and-capabilities.md.
   const r = await initAndRun(
     page,
     [`*.${FIXTURE_HOST}`],
-    `curl -sL ${FIXTURE_URL}`,
+    `curl ${FIXTURE_URL}`,
   );
-  expect(r.exitCode).toBe(0);
+  expect(r.exitCode).not.toBe(0);
 
-  // But example.com is still blocked
   const r2 = await initAndRun(
     page,
     [`*.${FIXTURE_HOST}`],
     "curl https://example.com",
   );
   expect(r2.exitCode).not.toBe(0);
+});
+
+test("explicit apex + wildcard together allow the apex", async ({ page }) => {
+  await page.goto("/");
+  const r = await initAndRun(
+    page,
+    [FIXTURE_HOST, `*.${FIXTURE_HOST}`],
+    `curl -sL ${FIXTURE_URL}`,
+  );
+  expect(r.exitCode).toBe(0);
 });
 
 // ── Empty allowlist ─────────────────────────────────────────────

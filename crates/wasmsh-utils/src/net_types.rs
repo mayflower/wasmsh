@@ -179,7 +179,13 @@ impl HostAllowlist {
                     suffix,
                     port: allowed_port,
                 } => {
-                    let matches_suffix = host == *suffix || host.ends_with(&format!(".{suffix}"));
+                    // `*.example.com` matches strict subdomains only; the apex
+                    // domain `example.com` is NOT covered. Callers wanting the
+                    // apex must list it explicitly. This deliberately diverges
+                    // from earlier behavior so the implementation matches the
+                    // documented contract in
+                    // docs/reference/sandbox-and-capabilities.md.
+                    let matches_suffix = host.ends_with(&format!(".{suffix}"));
                     if matches_suffix && Self::port_matches(*allowed_port, port) {
                         return Ok(());
                     }
@@ -230,8 +236,28 @@ mod tests {
         let al = HostAllowlist::new(vec!["*.example.com".into()]);
         assert!(al.check("https://api.example.com/path").is_ok());
         assert!(al.check("https://deep.sub.example.com").is_ok());
-        assert!(al.check("https://example.com").is_ok()); // bare domain also matches
+        // Apex domain is NOT covered by `*.example.com`; callers must list it
+        // explicitly. This matches the documented contract in
+        // docs/reference/sandbox-and-capabilities.md.
+        assert!(al.check("https://example.com").is_err());
         assert!(al.check("https://notexample.com").is_err());
+    }
+
+    #[test]
+    fn wildcard_does_not_match_lookalike_suffix() {
+        let al = HostAllowlist::new(vec!["*.example.com".into()]);
+        // foo.evil-example.com must not match *.example.com because the
+        // ".example.com" boundary requires a literal subdomain separator.
+        assert!(al.check("https://evilexample.com").is_err());
+        assert!(al.check("https://foo.notexample.com").is_err());
+    }
+
+    #[test]
+    fn apex_listed_explicitly_alongside_wildcard() {
+        // The supported way to allow both apex and subdomains.
+        let al = HostAllowlist::new(vec!["example.com".into(), "*.example.com".into()]);
+        assert!(al.check("https://example.com").is_ok());
+        assert!(al.check("https://api.example.com").is_ok());
     }
 
     #[test]

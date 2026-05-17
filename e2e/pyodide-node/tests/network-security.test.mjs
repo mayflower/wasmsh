@@ -187,17 +187,29 @@ describe("network allowlist security (Pyodide Node)", () => {
   // ── Wildcard pattern ──────────────────────────────────────────
 
   it(
-    "wildcard *.mayflower.de allows base domain but blocks others",
+    "wildcard *.mayflower.de matches subdomains but blocks the apex",
     { skip: SKIP, timeout: 60_000 },
     async (t) => {
-      if (!(await ensureExternalHttpsReachable(t, "https://mayflower.de"))) {
+      if (!(await ensureExternalHttpsReachable(t, "https://www.mayflower.de"))) {
         return;
       }
       const adapter = await createAdapter(["*.mayflower.de"]);
-      const events = await adapter.send({
-        Run: { input: "curl -sL https://mayflower.de" },
+      // Subdomain is allowed.
+      const subEvents = await adapter.send({
+        Run: { input: "curl -sL https://www.mayflower.de" },
       });
-      assert.equal(findExitCode(events), 0, "base domain should be allowed");
+      assert.equal(findExitCode(subEvents), 0, "subdomain should be allowed");
+
+      // Apex domain is NOT covered by `*.mayflower.de`; callers must list
+      // it explicitly. This matches docs/reference/sandbox-and-capabilities.md.
+      const apexEvents = await adapter.send({
+        Run: { input: "curl https://mayflower.de" },
+      });
+      assert.notEqual(
+        findExitCode(apexEvents),
+        0,
+        "apex must NOT be covered by *.mayflower.de",
+      );
 
       const events2 = await adapter.send({
         Run: { input: "curl https://example.com" },
@@ -207,6 +219,28 @@ describe("network allowlist security (Pyodide Node)", () => {
         0,
         "example.com must still be blocked",
       );
+    },
+  );
+
+  it(
+    "explicit apex + wildcard together allow both apex and subdomains",
+    { skip: SKIP, timeout: 60_000 },
+    async (t) => {
+      if (!(await ensureExternalHttpsReachable(t, "https://mayflower.de"))) {
+        return;
+      }
+      const adapter = await createAdapter([
+        "mayflower.de",
+        "*.mayflower.de",
+      ]);
+      const apexEvents = await adapter.send({
+        Run: { input: "curl -sL https://mayflower.de" },
+      });
+      assert.equal(findExitCode(apexEvents), 0, "explicit apex should pass");
+      const subEvents = await adapter.send({
+        Run: { input: "curl -sL https://www.mayflower.de" },
+      });
+      assert.equal(findExitCode(subEvents), 0, "subdomain should pass");
     },
   );
 

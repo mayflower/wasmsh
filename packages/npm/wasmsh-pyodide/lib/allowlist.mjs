@@ -36,7 +36,10 @@ export function isHostAllowed(url, allowedHosts) {
 
     if (patHost.startsWith("*.")) {
       const suffix = patHost.slice(2);
-      if (host === suffix || host.endsWith(`.${suffix}`)) {
+      // `*.example.com` matches strict subdomains only; the apex `example.com`
+      // is NOT covered. Callers wanting the apex must list it explicitly.
+      // Mirrors crates/wasmsh-utils/src/net_types.rs.
+      if (host.endsWith(`.${suffix}`)) {
         return true;
       }
       continue;
