@@ -1386,13 +1386,69 @@ fn format_status_line(status: u16) -> String {
     }
 }
 
+/// Header names whose values are redacted in verbose curl output.
+///
+/// Matched case-insensitively against the full header name. The list covers
+/// the credentials and cookies that commonly appear in shell history and
+/// agent transcripts; agents log stderr, so leaking these to stderr is
+/// equivalent to leaking them to disk and to the model.
+const REDACTED_HEADER_NAMES: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "x-amz-security-token",
+];
+
+fn is_redacted_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    REDACTED_HEADER_NAMES.iter().any(|n| *n == lower)
+}
+
+fn redact_header_value(name: &str, value: &str) -> String {
+    if is_redacted_header(name) {
+        "<redacted>".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+/// Strip `user:pass@` userinfo from URLs before printing.
+///
+/// Only operates on the substring between `://` and the next `/`, `?`, `#`,
+/// or end-of-string, and only if a literal `@` is present in that span.
+/// Falls back to the original URL on any malformed input.
+fn redact_url_userinfo(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let authority_start = scheme_end + 3;
+    let rest = &url[authority_start..];
+    let authority_end = rest
+        .find(|c: char| matches!(c, '/' | '?' | '#'))
+        .unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let Some(at_pos) = authority.rfind('@') else {
+        return url.to_string();
+    };
+    let mut out = String::with_capacity(url.len());
+    out.push_str(&url[..authority_start]);
+    out.push_str("<redacted>@");
+    out.push_str(&authority[at_pos + 1..]);
+    out.push_str(&rest[authority_end..]);
+    out
+}
+
 fn curl_log_request(ctx: &mut UtilContext<'_>, request: &HttpRequest) {
+    let safe_url = redact_url_userinfo(&request.url);
     ctx.output
-        .stderr(format!("* Trying {} in sandbox...\n", request.url).as_bytes());
+        .stderr(format!("* Trying {safe_url} in sandbox...\n").as_bytes());
     ctx.output
-        .stderr(format!("> {} {}\n", request.method, request.url).as_bytes());
+        .stderr(format!("> {} {}\n", request.method, safe_url).as_bytes());
     for (k, v) in &request.headers {
-        ctx.output.stderr(format!("> {k}: {v}\n").as_bytes());
+        let safe_v = redact_header_value(k, v);
+        ctx.output.stderr(format!("> {k}: {safe_v}\n").as_bytes());
     }
     ctx.output.stderr(b">\n");
 }
@@ -1401,7 +1457,8 @@ fn curl_log_response(ctx: &mut UtilContext<'_>, response: &HttpResponse) {
     ctx.output
         .stderr(format!("< {}\n", format_status_line(response.status)).as_bytes());
     for (k, v) in &response.headers {
-        ctx.output.stderr(format!("< {k}: {v}\n").as_bytes());
+        let safe_v = redact_header_value(k, v);
+        ctx.output.stderr(format!("< {k}: {safe_v}\n").as_bytes());
     }
     ctx.output.stderr(b"<\n");
 }
@@ -3825,6 +3882,109 @@ mod tests {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("> GET http://example.com/api"));
         assert!(stderr.contains("< HTTP/1.1 200 OK"));
+    }
+
+    // ── Verbose redacts credentials ─────────────────────────────
+
+    #[test]
+    fn curl_verbose_redacts_authorization_header() {
+        let backend = mock_backend(b"data");
+        let (status, output) = run_curl(
+            &[
+                "curl",
+                "-v",
+                "-H",
+                "Authorization: Bearer sk-abc123secret",
+                "http://example.com/api",
+            ],
+            &backend,
+        );
+        assert_eq!(status, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("sk-abc123secret"),
+            "stderr leaked bearer token: {stderr}"
+        );
+        assert!(stderr.contains("> Authorization: <redacted>"));
+    }
+
+    #[test]
+    fn curl_verbose_redacts_cookie_header() {
+        let backend = mock_backend(b"data");
+        let (status, output) = run_curl(
+            &[
+                "curl",
+                "-v",
+                "-H",
+                "Cookie: session=topsecret",
+                "http://example.com/api",
+            ],
+            &backend,
+        );
+        assert_eq!(status, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("topsecret"));
+        assert!(stderr.contains("> Cookie: <redacted>"));
+    }
+
+    #[test]
+    fn curl_verbose_redacts_api_key_case_insensitive() {
+        let backend = mock_backend(b"data");
+        let (status, output) = run_curl(
+            &[
+                "curl",
+                "-v",
+                "-H",
+                "X-Api-Key: keysecret",
+                "http://example.com/api",
+            ],
+            &backend,
+        );
+        assert_eq!(status, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("keysecret"));
+    }
+
+    #[test]
+    fn curl_verbose_redacts_url_userinfo() {
+        let backend = mock_backend(b"data");
+        let (status, output) = run_curl(
+            &["curl", "-v", "http://alice:hunter2@example.com/api"],
+            &backend,
+        );
+        assert_eq!(status, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("hunter2"),
+            "url userinfo leaked: {stderr}"
+        );
+        assert!(!stderr.contains("alice:"));
+        assert!(stderr.contains("<redacted>@example.com"));
+    }
+
+    #[test]
+    fn url_userinfo_redaction_preserves_path_and_query() {
+        assert_eq!(
+            redact_url_userinfo("https://u:p@example.com/path?q=1#frag"),
+            "https://<redacted>@example.com/path?q=1#frag"
+        );
+    }
+
+    #[test]
+    fn url_userinfo_redaction_passthrough_without_userinfo() {
+        assert_eq!(
+            redact_url_userinfo("https://example.com/x"),
+            "https://example.com/x"
+        );
+        assert_eq!(redact_url_userinfo("not a url"), "not a url");
+    }
+
+    #[test]
+    fn url_userinfo_redaction_does_not_touch_at_in_path() {
+        assert_eq!(
+            redact_url_userinfo("https://example.com/path@thing"),
+            "https://example.com/path@thing"
+        );
     }
 
     // ── wget still works ────────────────────────────────────────
