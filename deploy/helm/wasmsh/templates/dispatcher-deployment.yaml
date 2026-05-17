@@ -1,4 +1,12 @@
 {{- if .Values.dispatcher.enabled }}
+{{- if .Values.dispatcher.auth.required }}
+{{- if and (not .Values.dispatcher.auth.token) (not .Values.dispatcher.auth.existingSecretName) }}
+{{- fail (printf "%s%s%s"
+  "dispatcher.auth.required=true but neither dispatcher.auth.token nor "
+  "dispatcher.auth.existingSecretName is set. Provide one or set "
+  "dispatcher.auth.required=false (loopback/dev only).") }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

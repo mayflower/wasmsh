@@ -29,7 +29,13 @@ dispatcher:
   # demos or point at a pre-existing Secret (`existingSecretName`) for
   # anything resembling production. Leave both unset to run open — only
   # safe inside a private mesh with the NetworkPolicy gating ingress.
+  #
+  # `required: true` is a chart-side guard: it makes `helm install/upgrade`
+  # FAIL if neither `token` nor `existingSecretName` is set. Set it on
+  # any non-loopback production deployment so an unattended chart
+  # rollout cannot silently expose an open API.
   auth:
+    required: false
     token: ""
     existingSecretName: ""
     existingSecretKey: token
