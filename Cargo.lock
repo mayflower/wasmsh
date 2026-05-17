@@ -2300,14 +2300,14 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-ast"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "smol_str",
 ]
 
 [[package]]
 name = "wasmsh-browser"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "console_error_panic_hook",
  "criterion",
@@ -2324,7 +2324,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-builtins"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "indexmap",
  "smol_str",
@@ -2334,7 +2334,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-dispatcher"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -2353,7 +2353,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-expand"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "criterion",
  "smol_str",
@@ -2363,7 +2363,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-fs"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "libc",
  "thiserror",
@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-hir"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "smol_str",
  "wasmsh-ast",
@@ -2380,7 +2380,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-ir"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "smol_str",
  "wasmsh-ast",
@@ -2390,7 +2390,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-json-bridge"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "libc",
  "serde_json",
@@ -2401,14 +2401,14 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-lex"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "wasmsh-ast",
 ]
 
 [[package]]
 name = "wasmsh-parse"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "criterion",
  "proptest",
@@ -2418,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-protocol"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -2427,7 +2427,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-runtime"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "indexmap",
  "posix-regex",
@@ -2447,7 +2447,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-state"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "indexmap",
  "smol_str",
@@ -2455,7 +2455,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-testkit"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "serde",
  "toml",
@@ -2467,7 +2467,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-utils"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "base64",
  "digest",
@@ -2492,7 +2492,7 @@ dependencies = [
 
 [[package]]
 name = "wasmsh-vm"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "wasmsh-ast",
  "wasmsh-builtins",
