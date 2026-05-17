@@ -418,7 +418,10 @@ class TestAssetPathResolution:
         link_root.symlink_to(tmp_path / "real")
         symlinked_assets = link_root / "assets"
 
-        with patch("langchain_wasmsh.sandbox.subprocess.Popen") as popen:
+        with (
+            patch("shutil.which", return_value="/usr/bin/deno"),
+            patch("langchain_wasmsh.sandbox.subprocess.Popen") as popen,
+        ):
             process = _make_mock_process(
                 responses=[{"id": 1, "ok": True, "result": {"events": []}}],
             )

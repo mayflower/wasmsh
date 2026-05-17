@@ -264,9 +264,13 @@ fn curl_wildcard_allows_subdomains_but_not_apex() {
     // and the matching e2e tests in e2e/pyodide-node/tests/network-security.test.mjs.
     let mut rt = init_runtime_with_network(vec!["*.mayflower.de".into()]);
 
-    // www subdomain: must succeed.
+    // www subdomain: must succeed. NOTE: no `-L` here — many sites
+    // redirect www → apex, and B3's per-hop allowlist re-check
+    // correctly denies the apex (which `*.mayflower.de` does not
+    // cover). The test asserts initial host policy, so we stop at the
+    // first hop.
     let events = rt.handle_command(HostCommand::Run {
-        input: "curl -sL https://www.mayflower.de".into(),
+        input: "curl -s -o /dev/null -w '%{http_code}' https://www.mayflower.de".into(),
     });
     assert_eq!(
         extract_exit_code(&events).unwrap(),

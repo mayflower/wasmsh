@@ -194,9 +194,13 @@ describe("network allowlist security (Pyodide Node)", () => {
         return;
       }
       const adapter = await createAdapter(["*.mayflower.de"]);
-      // Subdomain is allowed.
+      // Subdomain is allowed. NOTE: no `-L` here — many sites redirect
+      // www → apex, which B3 (per-hop allowlist re-check) correctly
+      // denies because the apex is NOT covered by `*.example.com`. The
+      // test wants to assert *initial* host policy, so we keep the
+      // single hop and let curl exit 0 on the 200/30x.
       const subEvents = await adapter.send({
-        Run: { input: "curl -sL https://www.mayflower.de" },
+        Run: { input: "curl -s -o /dev/null -w '%{http_code}' https://www.mayflower.de" },
       });
       assert.equal(findExitCode(subEvents), 0, "subdomain should be allowed");
 

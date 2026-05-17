@@ -43,10 +43,18 @@ test("values yields the original session objects in insertion order", () => {
   assert.strictEqual(values[1], b);
 });
 
-test("add overwrites an existing session with the same id", () => {
+test("add rejects a second session with an existing id (D1)", () => {
+  // F-series D1 changed SessionRegistry.add from "silently overwrite" to
+  // "reject duplicates" so caller-supplied IDs can't squat or hijack
+  // another session. The previous behavior is unsafe under any auth
+  // model that lets a client choose its session id.
   const registry = createSessionRegistry();
   registry.add({ id: "x", workerId: "first" });
-  registry.add({ id: "x", workerId: "second" });
+  assert.throws(
+    () => registry.add({ id: "x", workerId: "second" }),
+    (e) => e.code === "WASMSH_SESSION_EXISTS",
+  );
+  // The first session is still there and unchanged.
   assert.equal(registry.values().length, 1);
-  assert.equal(registry.get("x").workerId, "second");
+  assert.equal(registry.get("x").workerId, "first");
 });

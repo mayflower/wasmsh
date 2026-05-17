@@ -44,13 +44,13 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  # Version is derived at runtime from packages/npm/wasmsh-pyodide/package.json
-  # by the "Stage Pyodide assets" step below.  CI stages pre-built Pyodide
-  # assets from the published tarball so runner image builds don't have
-  # to rebuild Pyodide (~30min).  We used to hardcode the version here
-  # and it silently drifted from the workspace every release — deriving
-  # it from package.json removes the bump-two-places coupling.
+# Version of @mayflowergmbh/wasmsh-pyodide is derived at runtime from
+# packages/npm/wasmsh-pyodide/package.json by the "Stage Pyodide assets"
+# step below.  CI stages pre-built Pyodide assets from the published
+# tarball so runner image builds don't have to rebuild Pyodide (~30min).
+# We used to hardcode the version here and it silently drifted from the
+# workspace every release — deriving it from package.json removes the
+# bump-two-places coupling.
 
 jobs:
   # ── Docker-compose: WasmshRemoteSandbox (TS + Python) ──────
