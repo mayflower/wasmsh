@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -164,6 +165,33 @@ class TestPtcDispatcher:
         assert env["ok"] is False
         assert env["error"] == "RuntimeError"
         assert env["message"] == "nope"
+
+    def test_invoke_raises_emits_warning_log(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # The envelope still round-trips to the sandbox so the model can
+        # recover; the structured log is the host's only window into the
+        # original stack and call context.
+        def boom(_: dict[str, Any]) -> None:
+            err = RuntimeError("kaboom")
+            raise err
+
+        dispatch = _make_ptc_dispatcher({"search": _StubTool(boom)})
+        with caplog.at_level(logging.WARNING, logger="langchain_wasmsh._repl"):
+            env = dispatch({"id": "hc_log", "tool": "search", "args": {"q": "x"}})
+        assert env["ok"] is False
+        assert env["error"] == "RuntimeError"
+        records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert records, "expected a WARNING log record from the PTC catch"
+        record = records[-1]
+        assert "search" in record.getMessage()
+        assert getattr(record, "wasmsh_ptc_call_id", None) == "hc_log"
+        assert getattr(record, "wasmsh_ptc_tool", None) == "search"
+        # `exc_info=True` carries the original exception for downstream
+        # handlers (Sentry, structlog adapters, etc.).
+        assert record.exc_info is not None
+        assert isinstance(record.exc_info[1], RuntimeError)
 
     def test_non_dict_args_rejected(self) -> None:
         dispatch = _make_ptc_dispatcher({"search": _StubTool(lambda a: "ok")})

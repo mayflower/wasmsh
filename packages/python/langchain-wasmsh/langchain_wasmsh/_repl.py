@@ -383,6 +383,19 @@ def _make_ptc_dispatcher(
         try:
             raw = invoke(args)
         except Exception as exc:  # noqa: BLE001 -- isolate one tool failure
+            # The envelope reaches the sandbox so the model can recover, but
+            # the original stack and call context are lost in that
+            # conversion. Emit a warning so host applications wiring up
+            # `logging.getLogger("langchain_wasmsh")` get the full picture.
+            logger.warning(
+                "PTC tool %r raised; envelope returned to sandbox",
+                name,
+                extra={
+                    "wasmsh_ptc_call_id": message.get("id"),
+                    "wasmsh_ptc_tool": name,
+                },
+                exc_info=True,
+            )
             return {
                 "ok": False,
                 "error": type(exc).__name__,
