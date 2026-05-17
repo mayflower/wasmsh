@@ -84,11 +84,20 @@ async function boot() {
         imports.sentinel = sentinelStubs;
         // Provide network fetch in env namespace for curl/wget.
         if (!imports.env) imports.env = {};
-        imports.env.wasmsh_js_http_fetch = function (urlPtr, methodPtr, headersJsonPtr, bodyPtr, bodyLen, followRedirects) {
+        imports.env.wasmsh_js_http_fetch = function (urlPtr, methodPtr, headersJsonPtr, bodyPtr, bodyLen, followRedirects, optionsPtr) {
           if (!Module) return 0;
           var url = Module.UTF8ToString(urlPtr);
           var method = Module.UTF8ToString(methodPtr);
           var headersJson = Module.UTF8ToString(headersJsonPtr);
+          var opts = {};
+          try {
+            if (optionsPtr) {
+              var raw = Module.UTF8ToString(optionsPtr);
+              if (raw) opts = JSON.parse(raw) || {};
+            }
+          } catch (_) { opts = {}; }
+          var timeoutMs = (typeof opts.timeout_ms === "number" && opts.timeout_ms > 0) ? opts.timeout_ms : 30000;
+          var maxBytes = (typeof opts.max_response_bytes === "number" && opts.max_response_bytes > 0) ? opts.max_response_bytes : 64 * 1024 * 1024;
           var bodyBytes = null;
           if (bodyPtr !== 0 && bodyLen > 0) {
             bodyBytes = new Uint8Array(Module.HEAPU8.buffer, bodyPtr, bodyLen).slice();
@@ -97,6 +106,7 @@ async function boot() {
           try {
             var xhr = new XMLHttpRequest();
             xhr.open(method, url, false);
+            xhr.timeout = timeoutMs;
             var headers = JSON.parse(headersJson || "[]");
             for (var h = 0; h < headers.length; h++) {
               xhr.setRequestHeader(headers[h][0], headers[h][1]);
@@ -104,6 +114,10 @@ async function boot() {
             xhr.responseType = "arraybuffer";
             xhr.send(bodyBytes);
             var respBytes = new Uint8Array(xhr.response || new ArrayBuffer(0));
+            if (respBytes.byteLength > maxBytes) {
+              result = JSON.stringify({ status: 0, headers: [], body_base64: "", error: "response exceeds max_response_bytes (" + respBytes.byteLength + " > " + maxBytes + ")" });
+              return Module.stringToNewUTF8(result);
+            }
             var binary = "";
             for (var b = 0; b < respBytes.length; b++) binary += String.fromCharCode(respBytes[b]);
             var respHeaders = xhr.getAllResponseHeaders().split("\r\n").filter(function(h){return h;}).map(function(h){

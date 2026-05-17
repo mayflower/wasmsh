@@ -21,13 +21,28 @@ const fetchHelperPath = resolve(
  */
 const IS_DENO = typeof globalThis.Deno !== "undefined";
 
-export function syncHttpFetchNode(url, method, headersJson, bodyBase64, followRedirects) {
+// Hard ceiling on the fetch-helper subprocess wall-clock. The inner
+// AbortController-driven timeout in fetch-helper.mjs honors the caller's
+// `timeout_ms`; this outer execFileSync timeout is the last-ditch kill for
+// a runaway helper and only fires if the inner timeout fails. Keep it
+// strictly larger than any expected per-request timeout_ms.
+const HELPER_OUTER_TIMEOUT_MS = 60000;
+
+export function syncHttpFetchNode(
+  url,
+  method,
+  headersJson,
+  bodyBase64,
+  followRedirects,
+  optionsObj,
+) {
   const input = JSON.stringify({
     url,
     method,
     headers: JSON.parse(headersJson || "[]"),
     body_base64: bodyBase64 || null,
     follow_redirects: Boolean(followRedirects),
+    options: optionsObj || {},
   });
   try {
     // Under Deno, the fetch-helper subprocess needs --allow-net to make
@@ -39,7 +54,12 @@ export function syncHttpFetchNode(url, method, headersJson, bodyBase64, followRe
     const out = execFileSync(
       process.execPath,
       args,
-      { timeout: 30000, encoding: "utf-8", input, stdio: ["pipe", "pipe", "ignore"] },
+      {
+        timeout: HELPER_OUTER_TIMEOUT_MS,
+        encoding: "utf-8",
+        input,
+        stdio: ["pipe", "pipe", "ignore"],
+      },
     );
     return JSON.parse(out);
   } catch (e) {
@@ -47,12 +67,38 @@ export function syncHttpFetchNode(url, method, headersJson, bodyBase64, followRe
   }
 }
 
-function createNetworkStubsNode(moduleRef) {
+function parseOptionsJsonPtr(moduleRef, optionsPtr) {
+  if (!optionsPtr) return {};
+  try {
+    const raw = moduleRef.UTF8ToString(optionsPtr);
+    if (!raw) return {};
+    const obj = JSON.parse(raw);
+    return obj && typeof obj === "object" ? obj : {};
+  } catch {
+    return {};
+  }
+}
+
+function createNetworkStubsNode(moduleRef, fetchHandlerSync) {
+  // fetchHandlerSync defaults to the in-tree helper-spawning broker so
+  // callers can override it (tests, dispatcher-side mocks) — earlier code
+  // accepted the argument but ignored it, which silently bypassed any
+  // test-side network policy. Honor it here.
+  const handler = fetchHandlerSync || syncHttpFetchNode;
   return {
-    wasmsh_js_http_fetch(urlPtr, methodPtr, headersJsonPtr, bodyPtr, bodyLen, followRedirects) {
+    wasmsh_js_http_fetch(
+      urlPtr,
+      methodPtr,
+      headersJsonPtr,
+      bodyPtr,
+      bodyLen,
+      followRedirects,
+      optionsPtr,
+    ) {
       const url = moduleRef.UTF8ToString(urlPtr);
       const method = moduleRef.UTF8ToString(methodPtr);
       const headersJson = moduleRef.UTF8ToString(headersJsonPtr);
+      const optionsObj = parseOptionsJsonPtr(moduleRef, optionsPtr);
 
       let bodyBase64 = "";
       if (bodyPtr !== 0 && bodyLen > 0) {
@@ -60,7 +106,14 @@ function createNetworkStubsNode(moduleRef) {
         bodyBase64 = Buffer.from(bodyBytes).toString("base64");
       }
 
-      const result = syncHttpFetchNode(url, method, headersJson, bodyBase64, followRedirects);
+      const result = handler(
+        url,
+        method,
+        headersJson,
+        bodyBase64,
+        followRedirects,
+        optionsObj,
+      );
       const resultJson = JSON.stringify(result);
       return moduleRef.stringToNewUTF8(resultJson);
     },

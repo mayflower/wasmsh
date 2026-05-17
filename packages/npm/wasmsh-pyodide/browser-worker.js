@@ -119,12 +119,49 @@ function runtimeBridgeModule() {
  * Parameters are WASM pointers (C strings + byte buffer). Returns a pointer
  * to a JSON C string allocated with malloc. The Rust caller frees it.
  */
+// Default cap on response body size when no per-request cap is supplied.
+// Matches the Rust-side DECOMPRESS_OUTPUT_LIMIT so the worker never holds
+// more than ~64 MiB of fetch output regardless of caller config.
+const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
+const DEFAULT_FETCH_TIMEOUT_MS = 30000;
+
+function parseFetchOptions(module, optionsPtr) {
+  if (!optionsPtr) {
+    return {};
+  }
+  try {
+    const raw = module.UTF8ToString(optionsPtr);
+    if (!raw) return {};
+    const obj = JSON.parse(raw);
+    return obj && typeof obj === "object" ? obj : {};
+  } catch {
+    return {};
+  }
+}
+
 function createNetworkStubs(module) {
   return {
-    wasmsh_js_http_fetch(urlPtr, methodPtr, headersJsonPtr, bodyPtr, bodyLen, followRedirects) {
+    wasmsh_js_http_fetch(
+      urlPtr,
+      methodPtr,
+      headersJsonPtr,
+      bodyPtr,
+      bodyLen,
+      followRedirects,
+      optionsPtr,
+    ) {
       const url = module.UTF8ToString(urlPtr);
       const method = module.UTF8ToString(methodPtr);
       const headersJson = module.UTF8ToString(headersJsonPtr);
+      const opts = parseFetchOptions(module, optionsPtr);
+      const timeoutMs =
+        typeof opts.timeout_ms === "number" && opts.timeout_ms > 0
+          ? opts.timeout_ms
+          : DEFAULT_FETCH_TIMEOUT_MS;
+      const maxResponseBytes =
+        typeof opts.max_response_bytes === "number" && opts.max_response_bytes > 0
+          ? opts.max_response_bytes
+          : DEFAULT_MAX_RESPONSE_BYTES;
 
       let bodyBytes = null;
       if (bodyPtr !== 0 && bodyLen > 0) {
@@ -135,7 +172,7 @@ function createNetworkStubs(module) {
       try {
         const xhr = new XMLHttpRequest();
         xhr.open(method, url, false); // synchronous — works in Web Workers
-        xhr.timeout = 30000;
+        xhr.timeout = timeoutMs;
         const headers = JSON.parse(headersJson || "[]");
         for (const [key, value] of headers) {
           xhr.setRequestHeader(key, value);
@@ -153,6 +190,15 @@ function createNetworkStubs(module) {
           });
 
         const respBytes = new Uint8Array(xhr.response || new ArrayBuffer(0));
+        if (respBytes.byteLength > maxResponseBytes) {
+          result = JSON.stringify({
+            status: 0,
+            headers: [],
+            body_base64: "",
+            error: `response exceeds max_response_bytes (${respBytes.byteLength} > ${maxResponseBytes})`,
+          });
+          return module.stringToNewUTF8(result);
+        }
         const bodyBase64 = protocol().encodeBase64(respBytes);
 
         result = JSON.stringify({

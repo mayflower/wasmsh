@@ -15,6 +15,12 @@ extern "C" {
     /// Synchronous HTTP fetch provided by the JS host.
     ///
     /// Takes request parameters as C strings (JSON-encoded where needed).
+    /// `options_json` carries the sandbox limit fields (timeout_ms,
+    /// connect_timeout_ms, max_redirs, max_response_bytes); the JS host
+    /// is required to honor each one it understands and to silently
+    /// ignore unknown keys. An empty / null `options_json` means "no
+    /// caps supplied" (host defaults apply, which themselves should be
+    /// nonzero — see B4).
     /// Returns a JSON string `{"status":200,"headers":[],"body_base64":"..."}`.
     /// The caller must free the returned string with `libc::free`.
     fn wasmsh_js_http_fetch(
@@ -24,6 +30,7 @@ extern "C" {
         body: *const u8,
         body_len: u32,
         follow_redirects: i32,
+        options_json: *const c_char,
     ) -> *mut c_char;
 }
 
@@ -99,6 +106,23 @@ fn decode_base64(input: &str) -> Vec<u8> {
     out
 }
 
+/// JSON shape sent across the FFI as `options_json`.
+///
+/// All fields are optional; the JS host honors what it understands. Adding a
+/// new cap means adding a field here and teaching the host to read it; the
+/// FFI signature stays stable.
+#[derive(serde::Serialize, Default)]
+struct JsFetchOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connect_timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_redirs: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_response_bytes: Option<u64>,
+}
+
 impl NetworkBackend for PyodideNetworkBackend {
     fn fetch(&self, request: &HttpRequest) -> Result<HttpResponse, NetworkError> {
         self.allowlist.check(&request.url)?;
@@ -110,6 +134,16 @@ impl NetworkBackend for PyodideNetworkBackend {
         let headers_json = serde_json::to_string(&request.headers).unwrap_or_else(|_| "[]".into());
         let headers_c =
             CString::new(headers_json.as_str()).map_err(|e| NetworkError::Other(e.to_string()))?;
+
+        let options = JsFetchOptions {
+            timeout_ms: request.timeout_ms,
+            connect_timeout_ms: request.connect_timeout_ms,
+            max_redirs: request.max_redirs,
+            max_response_bytes: request.max_response_bytes,
+        };
+        let options_json = serde_json::to_string(&options).unwrap_or_else(|_| "{}".into());
+        let options_c =
+            CString::new(options_json.as_str()).map_err(|e| NetworkError::Other(e.to_string()))?;
 
         let (body_ptr, body_len) = match &request.body {
             Some(b) => (b.as_ptr(), b.len() as u32),
@@ -124,6 +158,7 @@ impl NetworkBackend for PyodideNetworkBackend {
                 body_ptr,
                 body_len,
                 i32::from(request.follow_redirects),
+                options_c.as_ptr(),
             )
         };
 

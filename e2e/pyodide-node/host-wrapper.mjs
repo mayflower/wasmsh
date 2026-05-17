@@ -61,17 +61,27 @@ function makeInstantiateWasm() {
     if (!imports.env) {
       imports.env = {};
     }
-    imports.env.wasmsh_js_http_fetch = (urlPtr, methodPtr, headersJsonPtr, bodyPtr, bodyLen, followRedirects) => {
+    imports.env.wasmsh_js_http_fetch = (urlPtr, methodPtr, headersJsonPtr, bodyPtr, bodyLen, followRedirects, optionsPtr) => {
       if (!_moduleRef) return 0;
       const url = _moduleRef.UTF8ToString(urlPtr);
       const method = _moduleRef.UTF8ToString(methodPtr);
       const headersJson = _moduleRef.UTF8ToString(headersJsonPtr);
+      let optionsObj = {};
+      try {
+        if (optionsPtr) {
+          const raw = _moduleRef.UTF8ToString(optionsPtr);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === "object") optionsObj = parsed;
+          }
+        }
+      } catch { /* keep optionsObj empty */ }
       let bodyBase64 = "";
       if (bodyPtr !== 0 && bodyLen > 0) {
         const bodyBytes = new Uint8Array(_moduleRef.HEAPU8.buffer, bodyPtr, bodyLen);
         bodyBase64 = Buffer.from(bodyBytes).toString("base64");
       }
-      const result = syncHttpFetchNode(url, method, headersJson, bodyBase64, followRedirects);
+      const result = syncHttpFetchNode(url, method, headersJson, bodyBase64, followRedirects, optionsObj);
       return _moduleRef.stringToNewUTF8(JSON.stringify(result));
     };
     const wasmBytes = readFileSync(resolve(DIST, "pyodide.asm.wasm"));
