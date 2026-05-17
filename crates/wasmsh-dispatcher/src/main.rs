@@ -2,7 +2,7 @@ use std::env;
 
 use anyhow::{anyhow, Context, Result};
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use wasmsh_dispatcher::service::{DispatcherService, ServiceConfig};
 
@@ -69,7 +69,10 @@ async fn main() -> Result<()> {
     verify_policy()?;
 
     let port = parse_port()?;
-    let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    // Default to loopback. The Helm chart sets HOST=0.0.0.0 explicitly so
+    // pod-to-pod traffic still works; a developer running the binary
+    // directly without configuration now gets a safe-by-default bind.
+    let host = env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let runner_urls = configured_runner_urls();
     if runner_urls.is_empty() {
         return Err(anyhow!(
@@ -77,11 +80,29 @@ async fn main() -> Result<()> {
         ));
     }
 
+    // Optional bearer-token auth. When unset and bound to a non-loopback
+    // address, emit a warning so a misconfigured deployment is visible in
+    // logs rather than silently routable from the network.
+    let auth_token = env::var("WASMSH_AUTH_TOKEN").ok().filter(|s| !s.is_empty());
+    let is_loopback = host == "127.0.0.1" || host == "::1" || host == "localhost";
+    match (auth_token.as_ref(), is_loopback) {
+        (None, false) => warn!(
+            %host,
+            "wasmsh-dispatcher bound to a non-loopback address with no \
+             WASMSH_AUTH_TOKEN — anyone reachable can create sessions"
+        ),
+        (Some(_), _) => info!("bearer-token auth enabled on /sessions* routes"),
+        (None, true) => info!("auth disabled (loopback-only, safe for local dev)"),
+    }
+
     let listener = TcpListener::bind(format!("{host}:{port}"))
         .await
         .with_context(|| format!("failed to bind {host}:{port}"))?;
-    let service = DispatcherService::new(ServiceConfig { runner_urls })
-        .context("failed to build dispatcher service")?;
+    let service = DispatcherService::new(ServiceConfig {
+        runner_urls,
+        auth_token,
+    })
+    .context("failed to build dispatcher service")?;
 
     info!(%host, port, "wasmsh-dispatcher listening");
     axum::serve(listener, service.router())

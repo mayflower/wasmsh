@@ -202,6 +202,15 @@ export async function createRunner(options = {}) {
       error.code = "E_RUNNER_DRAINING";
       throw error;
     }
+    // Reject duplicates BEFORE spawning a worker. Without this check the
+    // caller-supplied ID could hijack an existing session: registry.add()
+    // also enforces the rule defensively but only after we've paid the
+    // restore cost. Audit (D1).
+    if (sessionId && registry.has(sessionId)) {
+      const error = new Error(`session already exists: ${sessionId}`);
+      error.code = "WASMSH_SESSION_EXISTS";
+      throw error;
+    }
     pendingCreates += 1;
     try {
       await acquireRestoreSlot();

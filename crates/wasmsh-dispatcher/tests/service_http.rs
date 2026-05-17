@@ -158,7 +158,19 @@ async fn collect_body(response: axum::response::Response) -> (StatusCode, Value)
 }
 
 fn dispatcher_for(urls: Vec<String>) -> DispatcherService {
-    DispatcherService::new(ServiceConfig { runner_urls: urls }).expect("build dispatcher")
+    DispatcherService::new(ServiceConfig {
+        runner_urls: urls,
+        auth_token: None,
+    })
+    .expect("build dispatcher")
+}
+
+fn dispatcher_with_auth(urls: Vec<String>, token: &str) -> DispatcherService {
+    DispatcherService::new(ServiceConfig {
+        runner_urls: urls,
+        auth_token: Some(token.to_string()),
+    })
+    .expect("build dispatcher")
 }
 
 #[tokio::test]
@@ -576,6 +588,127 @@ async fn unknown_route_returns_404() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn session_route_without_auth_token_returns_401() {
+    let svc = dispatcher_with_auth(vec![], "secret-token");
+    let response = svc
+        .router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn session_route_with_wrong_auth_token_returns_401() {
+    let svc = dispatcher_with_auth(vec![], "secret-token");
+    let response = svc
+        .router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/sessions")
+                .header("authorization", "Bearer wrong-token")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn healthz_does_not_require_auth() {
+    let svc = dispatcher_with_auth(vec![], "secret-token");
+    let response = svc
+        .router()
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn session_route_with_correct_auth_passes_middleware() {
+    // Pointed at a non-existent runner so create_session still fails, but it
+    // fails at the runner-discovery step rather than at the auth gate. Used
+    // to prove that a valid Bearer token actually traverses the middleware.
+    let svc = dispatcher_with_auth(vec!["http://127.0.0.1:1".into()], "secret-token");
+    let response = svc
+        .router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/sessions")
+                .header("authorization", "Bearer secret-token")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Anything OTHER than 401 proves the middleware let it through.
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn create_session_with_auth_ignores_caller_supplied_id() {
+    // Capture the session ID the dispatcher actually forwarded to the
+    // runner, and verify it is NOT the one the caller asked for.
+    let (url, stop) = spawn_mock_runner(MockRunnerConfig {
+        runner_id: "r1".into(),
+        restore_slots: 2,
+        healthy: true,
+        ..MockRunnerConfig::default()
+    })
+    .await;
+    let svc = dispatcher_with_auth(vec![url], "secret-token");
+    let response = svc
+        .router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/sessions")
+                .header("authorization", "Bearer secret-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"session_id":"attacker-chosen-id","allowed_hosts":[]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        !body.contains("attacker-chosen-id"),
+        "dispatcher must mint server-side ID under auth, but body returned: {body}"
+    );
+    stop.send(()).ok();
 }
 
 #[tokio::test]

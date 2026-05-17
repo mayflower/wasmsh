@@ -70,6 +70,16 @@ spec:
               value: {{ .Values.dispatcher.port | quote }}
             - name: RUNNER_SERVICE_URLS
               value: {{ include "wasmsh.runnerServiceUrl" . | quote }}
+            {{- if .Values.dispatcher.auth.existingSecretName }}
+            - name: WASMSH_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dispatcher.auth.existingSecretName }}
+                  key: {{ .Values.dispatcher.auth.existingSecretKey | default "token" }}
+            {{- else if .Values.dispatcher.auth.token }}
+            - name: WASMSH_AUTH_TOKEN
+              value: {{ .Values.dispatcher.auth.token | quote }}
+            {{- end }}
             {{- with .Values.dispatcher.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

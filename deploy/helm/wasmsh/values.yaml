@@ -25,6 +25,14 @@ dispatcher:
     pullPolicy: IfNotPresent
   host: "0.0.0.0"
   port: 8080
+  # Bearer-token auth on /sessions* routes. Set `token` inline for quick
+  # demos or point at a pre-existing Secret (`existingSecretName`) for
+  # anything resembling production. Leave both unset to run open — only
+  # safe inside a private mesh with the NetworkPolicy gating ingress.
+  auth:
+    token: ""
+    existingSecretName: ""
+    existingSecretKey: token
   service:
     type: ClusterIP
     port: 8080

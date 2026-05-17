@@ -231,6 +231,10 @@ export async function createRunnerServer(options = {}) {
         json(response, 503, { ok: false, error: message, code: error.code });
         return;
       }
+      if (error?.code === "WASMSH_SESSION_EXISTS") {
+        json(response, 409, { ok: false, error: message, code: error.code });
+        return;
+      }
       // Internal runner service — log 500s server-side so operators can
       // correlate them.  Everything leaving this process is already
       // observed via Prometheus; this console.error is the fallback for

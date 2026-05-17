@@ -92,8 +92,9 @@ class WasmshRemoteSandbox(BaseSandbox):
             timeout: Per-request HTTP timeout in seconds. Tune upwards for
                 long-running commands.
             headers: Extra HTTP headers forwarded with every request.
-                Intended as a future hook for auth (Bearer tokens, etc.)
-                once the dispatcher grows an auth layer.
+                When the dispatcher is configured with
+                ``WASMSH_AUTH_TOKEN``, pass
+                ``headers={"Authorization": f"Bearer {token}"}`` here.
             http_client: Inject a pre-configured `httpx.Client` for tests
                 or custom transports. When omitted the sandbox owns a
                 client it will close on `close()`.

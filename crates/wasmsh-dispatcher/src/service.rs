@@ -3,8 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, Path, Request, State};
 use axum::http::{header, StatusCode};
+use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -20,13 +21,13 @@ use crate::{DispatchError, DispatchRequest, Dispatcher, RunnerId, RunnerSnapshot
 
 /// Maximum JSON request body accepted by the dispatcher control plane.
 ///
-/// The dispatcher is intended to run behind a trusted mesh — there is no
-/// user-facing auth layer here — but we still cap bodies so a misbehaving
-/// caller can't exhaust runner memory with a single oversized `initial_files`
-/// or `write-file` payload.  32 MiB fits the `langchain-tests` sandbox
-/// standard suite's 10 MiB upload test (which expands to ~13 MiB after
-/// base64) with generous headroom, and stays comfortably below typical
-/// runner per-session quotas.
+/// Even with `WASMSH_AUTH_TOKEN` configured to require a bearer token on
+/// session routes, the body cap is the second line of defense so an
+/// authenticated-but-malicious caller can't exhaust runner memory with a
+/// single oversized `initial_files` or `write-file` payload.  32 MiB
+/// fits the `langchain-tests` sandbox standard suite's 10 MiB upload
+/// test (which expands to ~13 MiB after base64) with generous headroom,
+/// and stays comfortably below typical runner per-session quotas.
 const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 /// Per-request timeout for upstream calls to a runner.
@@ -35,11 +36,16 @@ const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// TCP connect timeout for upstream calls to a runner.
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 /// Static configuration for the dispatcher service.
 pub struct ServiceConfig {
     /// Base URLs of runner instances that this dispatcher may route to.
     pub runner_urls: Vec<String>,
+    /// Optional bearer token. When `Some`, all `/sessions*` routes require
+    /// `Authorization: Bearer <token>`. When `None`, the API is open — only
+    /// safe behind a trusted mesh / on loopback. Set via the
+    /// `WASMSH_AUTH_TOKEN` env var in the binary.
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +169,10 @@ enum ServiceError {
     Upstream(String),
     #[error("runner returned status {status}: {message}")]
     UpstreamStatus { status: StatusCode, message: String },
+    #[error("session already exists: {0}")]
+    SessionExists(String),
+    #[error("unauthorized")]
+    Unauthorized,
 }
 
 impl IntoResponse for ServiceError {
@@ -172,6 +182,8 @@ impl IntoResponse for ServiceError {
             Self::UnknownSession(_) => StatusCode::NOT_FOUND,
             Self::Upstream(_) => StatusCode::BAD_GATEWAY,
             Self::UpstreamStatus { status, .. } => *status,
+            Self::SessionExists(_) => StatusCode::CONFLICT,
+            Self::Unauthorized => StatusCode::UNAUTHORIZED,
         };
         (
             status,
@@ -202,9 +214,11 @@ impl DispatcherService {
 
     /// Builds the Axum router that exposes the dispatcher control-plane API.
     pub fn router(&self) -> Router {
-        Router::new()
-            .route("/healthz", get(healthz))
-            .route("/readyz", get(readyz))
+        // /healthz and /readyz stay open for liveness probes. Everything
+        // that touches a session goes through `require_auth`, which is a
+        // no-op when no token is configured (open-mode dev) and a
+        // bearer-token check otherwise.
+        let session_routes = Router::new()
             .route("/sessions", post(create_session))
             .route("/sessions/:session_id", delete(delete_session))
             .route("/sessions/:session_id/init", post(init_session))
@@ -213,9 +227,52 @@ impl DispatcherService {
             .route("/sessions/:session_id/read-file", post(read_file))
             .route("/sessions/:session_id/list-dir", post(list_dir))
             .route("/sessions/:session_id/close", post(close_session))
+            .layer(from_fn_with_state(self.state.clone(), require_auth));
+
+        Router::new()
+            .route("/healthz", get(healthz))
+            .route("/readyz", get(readyz))
+            .merge(session_routes)
             .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
             .with_state(self.state.clone())
     }
+}
+
+/// Bearer-token gate for session routes. With no token configured, every
+/// request passes through unchanged (preserves backwards-compatible local
+/// dev behavior). With a token configured, every request must carry
+/// `Authorization: Bearer <token>`; missing or mismatched tokens get 401.
+async fn require_auth(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response, ServiceError> {
+    let Some(expected) = state.config.auth_token.as_deref() else {
+        return Ok(next.run(request).await);
+    };
+    let header_value = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let supplied = header_value
+        .strip_prefix("Bearer ")
+        .or_else(|| header_value.strip_prefix("bearer "))
+        .unwrap_or("");
+    // Constant-time compare to avoid timing oracles. The token is small;
+    // straight comparison is fine in practice but the explicit pattern
+    // also documents intent.
+    if supplied.len() != expected.len()
+        || !supplied
+            .as_bytes()
+            .iter()
+            .zip(expected.as_bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
+    {
+        return Err(ServiceError::Unauthorized);
+    }
+    Ok(next.run(request).await)
 }
 
 async fn healthz() -> Json<Value> {
@@ -241,9 +298,17 @@ async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateSessionRequest>,
 ) -> Result<impl IntoResponse, ServiceError> {
-    let session_id = payload
-        .session_id
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    // When auth is on, callers cannot pick session IDs: the server mints
+    // a fresh UUID regardless of what was supplied. Without this, a
+    // caller who managed to learn or guess an existing session ID could
+    // attempt to fixate sessions or squat predictable names. In open-
+    // mode dev (no auth token), keep the legacy behavior so existing
+    // local tests that pre-allocate IDs still work.
+    let session_id = match (state.config.auth_token.as_deref(), payload.session_id) {
+        (Some(_), _) => Uuid::new_v4().to_string(),
+        (None, Some(id)) => id,
+        (None, None) => Uuid::new_v4().to_string(),
+    };
     let runner_url = select_runner_url(&state, &session_id).await?;
 
     let request = RunnerCreateSessionRequest {
@@ -263,6 +328,14 @@ async fn create_session(
         );
         let mut routing = state.routing.lock().await;
         routing.dispatcher.release_session(&session_id);
+        // Translate the runner's 409 (caller-supplied duplicate session ID)
+        // into a dispatcher-level SessionExists so the caller sees 409
+        // rather than a generic upstream-status bag.
+        if let ServiceError::UpstreamStatus { status, .. } = error {
+            if *status == StatusCode::CONFLICT {
+                return Err(ServiceError::SessionExists(session_id));
+            }
+        }
     }
     result
 }
