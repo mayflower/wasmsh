@@ -39,16 +39,20 @@ pub fn handle_python_command(
         return None;
     }
 
-    // Install the sandbox membrane before user code runs. Idempotent —
-    // subsequent invocations return immediately. If installation fails the
-    // membrane just isn't active and the user code still runs (with the
-    // Rust-side allowlist still gating curl/wget); we emit a diagnostic
-    // so the failure isn't completely silent.
-    let mut prefix_stderr: Vec<u8> = Vec::new();
+    // Install the sandbox membrane before user code runs. Fail-closed
+    // (audit F2): the membrane is a security boundary. If it cannot be
+    // installed we refuse to run user code rather than emit a warning
+    // and let it run unprotected. Idempotent — subsequent invocations
+    // return Ok immediately via the Rust-side `INSTALLED` flag.
     if let Err(msg) = python_membrane::ensure_installed() {
-        prefix_stderr.extend_from_slice(b"wasmsh: warning: membrane install failed: ");
-        prefix_stderr.extend_from_slice(msg.as_bytes());
-        prefix_stderr.push(b'\n');
+        let mut stderr = b"wasmsh: python disabled: membrane install failed: ".to_vec();
+        stderr.extend_from_slice(msg.as_bytes());
+        stderr.push(b'\n');
+        return Some(ExternalCommandResult {
+            stdout: Vec::new(),
+            stderr,
+            status: 1,
+        });
     }
 
     let code = extract_code(argv, stdin)?;
@@ -120,15 +124,9 @@ pub fn handle_python_command(
             .unwrap_or(0)
     };
 
-    // Splice any membrane-install diagnostic in front of the captured
-    // stderr so the agent sees it on the same response as the command
-    // that triggered it.
-    let mut combined_stderr = prefix_stderr;
-    combined_stderr.extend_from_slice(&stderr_bytes);
-
     Some(ExternalCommandResult {
         stdout: stdout_bytes,
-        stderr: combined_stderr,
+        stderr: stderr_bytes,
         status,
     })
 }

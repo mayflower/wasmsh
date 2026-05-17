@@ -26,16 +26,20 @@ function resolveHelperUrl(relativePath) {
   return new URL(relativePath, self.location.href).href;
 }
 
+let fetchMembraneHelpers = null;
+
 async function ensureHelperModules() {
   if (!helperModulesPromise) {
     helperModulesPromise = Promise.all([
       import(resolveHelperUrl("./lib/protocol.mjs")),
       import(resolveHelperUrl("./lib/runtime-bridge.mjs")),
       import(resolveHelperUrl("./lib/install.mjs")),
-    ]).then(([protocol, runtimeBridgeModule, install]) => {
+      import(resolveHelperUrl("./lib/fetch-membrane.mjs")),
+    ]).then(([protocol, runtimeBridgeModule, install, membrane]) => {
       protocolHelpers = protocol;
       runtimeBridgeHelpers = runtimeBridgeModule;
       installHelpers = install;
+      fetchMembraneHelpers = membrane;
     }).catch((error) => {
       helperModulesPromise = null;
       throw error;
@@ -280,6 +284,15 @@ const methods = {
   }) {
     await ensureBooted(baseUrl);
     sessionAllowedHosts = allowedHosts;
+    // Install the JS fetch membrane on this worker's `self` global BEFORE
+    // any Init/Run reaches Pyodide. Pyodide's `js` proxy resolves
+    // `js.fetch`, `pyodide.http.pyfetch`, and `micropip`'s HTTP through
+    // self.fetch, so all three are now gated by the same allowlist as
+    // curl. Audit F2: this browser path was previously protected only by
+    // the (Python-globals-exposed, hence bypassable) Python preamble.
+    if (fetchMembraneHelpers) {
+      fetchMembraneHelpers.installFetchMembrane(self, allowedHosts);
+    }
     const events = sendHostCommand({
       Init: { step_budget: stepBudget, allowed_hosts: allowedHosts },
     });

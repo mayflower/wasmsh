@@ -1,24 +1,30 @@
 //! Python-side membrane installed once per Pyodide instance.
 //!
-//! The membrane (audit C1/C2) does two things from inside Python:
+//! The membrane (audits C1/C2/F2) hardens the Python side of the
+//! sandbox by blocking dangerous JS surface from reaching user Python.
+//! Network policy is handled in JS (`lib/fetch-membrane.mjs`) rather
+//! than from Python, because Python state is reflectable: a previous
+//! draft stored `_wasmsh_original_fetch` and `_WASMSH_ALLOWED_HOSTS` in
+//! the user's globals, where user code could trivially mutate the
+//! allow-list or call the captured original directly.
 //!
-//! 1. Replaces `js.fetch` with a Python wrapper that gates calls through
-//!    the same host allowlist that `curl`/`wget` use. Because
-//!    `pyodide.http.pyfetch` and `micropip` both end up resolving
-//!    `js.fetch` at call time, replacing the attribute here automatically
-//!    routes every Python network path through the allowlist check.
+//! What the preamble does, in order:
 //!
+//! 1. Runs the install logic inside a single function so locals don't
+//!    leak into `globals()`.
 //! 2. Replaces dangerous attributes on the `js` proxy
 //!    (`process`, `require`, `Deno`, `WebSocket`, `fs`, `child_process`,
 //!    `worker_threads`, `subprocess`, `cluster`, `crypto`) with deny
-//!    proxies that raise `PermissionError` on any read or call. This is
-//!    the Python-side counterpart to the JS host's globalThis.fetch wrap
-//!    in `session-worker.mjs`; together they form the membrane.
+//!    proxies that raise `PermissionError` on any read or call.
+//! 3. Sets a single `builtins.WASMSH_MEMBRANE_INSTALLED` sentinel so a
+//!    subsequent install attempt short-circuits. The Rust caller also
+//!    tracks installation state in a thread-local to avoid the
+//!    PyRun_SimpleString roundtrip on every python invocation.
 //!
-//! Idempotency: the preamble is wrapped in a `try: WASMSH_MEMBRANE_INSTALLED
-//! except NameError: ...` guard so re-running is a no-op. The Rust caller
-//! also tracks installation state in a thread-local to avoid the
-//! PyRun_SimpleString roundtrip on every python invocation.
+//! Network policy (allowlist match, port check, scheme check, redirect
+//! re-validation) lives in the JS-side membrane. See
+//! `packages/npm/wasmsh-pyodide/lib/fetch-membrane.mjs`. Both Node and
+//! browser hosts now install that membrane before booting Pyodide.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
@@ -66,105 +72,48 @@ pub fn ensure_installed() -> Result<(), &'static str> {
     Ok(())
 }
 
-fn build_preamble(allowed_hosts: &[String]) -> String {
-    // Build a Python list literal of the allowed hosts. Each host string
-    // is JSON-encoded so quotes / backslashes are handled cleanly.
-    let mut list = String::from("[");
-    for (i, h) in allowed_hosts.iter().enumerate() {
-        if i > 0 {
-            list.push_str(", ");
-        }
-        list.push_str(&serde_json::to_string(h).unwrap_or_else(|_| "\"\"".into()));
-    }
-    list.push(']');
-
-    // The preamble itself. Multiline Python; carefully indented because
-    // PyRun_SimpleString expects exec-mode source. Triple-quoted in Rust;
-    // we DO NOT use format! beyond the allowlist slot to keep the script
-    // safe from injection through future surprises.
-    format!(
+fn build_preamble(_allowed_hosts: &[String]) -> String {
+    // The preamble runs inside a function so its locals stay out of the
+    // user-visible `globals()`. The audit (F2) flagged the previous draft
+    // for stashing `_wasmsh_original_fetch` and `_WASMSH_ALLOWED_HOSTS`
+    // into globals where user Python could mutate them.
+    //
+    // Network policy is enforced by the JS-side membrane, which keeps
+    // both the allowed_hosts list and the original fetch in JS closure
+    // state that Python cannot reach. The Python preamble below is
+    // narrowed to its remaining job: deny dangerous attributes on `js`.
+    //
+    // The `allowed_hosts` parameter is kept on the Rust side so the JS
+    // side can be re-armed via `set_allowed_hosts`; it is intentionally
+    // not interpolated here.
+    String::from(
         "\
-try:\n\
-    WASMSH_MEMBRANE_INSTALLED  # noqa: F821\n\
-except NameError:\n\
-    import sys as _sys\n\
-    import urllib.parse as _urlparse\n\
-    try:\n\
-        import js as _js\n\
-    except Exception:\n\
-        _js = None\n\
-    _WASMSH_ALLOWED_HOSTS = {hosts}\n\
-\n\
-    def _wasmsh_host_allowed(url):\n\
+import builtins as _wasmsh_builtins\n\
+if not getattr(_wasmsh_builtins, 'WASMSH_MEMBRANE_INSTALLED', False):\n\
+    def _wasmsh_install_membrane():\n\
         try:\n\
-            parsed = _urlparse.urlparse(url)\n\
-            if parsed.scheme.lower() not in ('http', 'https'):\n\
-                return False\n\
-            host = (parsed.hostname or '').lower().rstrip('.')\n\
-            if not host:\n\
-                return False\n\
-            for pat in _WASMSH_ALLOWED_HOSTS:\n\
-                p = pat.lower()\n\
-                colon = p.rfind(':')\n\
-                if colon > 0 and p[colon+1:].isdigit():\n\
-                    p = p[:colon]\n\
-                if p.startswith('*.'):\n\
-                    if host.endswith('.' + p[2:]):\n\
-                        return True\n\
-                elif host == p:\n\
-                    return True\n\
-            return False\n\
+            import js as _js\n\
         except Exception:\n\
             return False\n\
-\n\
-    class _WasmshDeny:\n\
-        def __init__(self, name):\n\
-            object.__setattr__(self, '_name', name)\n\
-        def __getattr__(self, attr):\n\
-            raise PermissionError(\n\
-                'wasmsh: js.' + object.__getattribute__(self, '_name')\n\
-                + '.' + attr + ' is blocked in the sandbox'\n\
-            )\n\
-        def __setattr__(self, attr, value):\n\
-            raise PermissionError(\n\
-                'wasmsh: setting js.' + object.__getattribute__(self, '_name')\n\
-                + '.' + attr + ' is blocked'\n\
-            )\n\
-        def __call__(self, *args, **kwargs):\n\
-            raise PermissionError(\n\
-                'wasmsh: js.' + object.__getattribute__(self, '_name')\n\
-                + '() is blocked'\n\
-            )\n\
-\n\
-    if _js is not None:\n\
-        try:\n\
-            _wasmsh_original_fetch = _js.fetch\n\
-        except Exception:\n\
-            _wasmsh_original_fetch = None\n\
-\n\
-        def _wasmsh_brokered_fetch(input, init=None, *_a, **_kw):\n\
-            try:\n\
-                url = input if isinstance(input, str) else getattr(input, 'url', None) or str(input)\n\
-            except Exception:\n\
-                url = ''\n\
-            if not _wasmsh_host_allowed(url):\n\
+        class _WasmshDeny:\n\
+            def __init__(self, name):\n\
+                object.__setattr__(self, '_name', name)\n\
+            def __getattr__(self, attr):\n\
                 raise PermissionError(\n\
-                    'wasmsh: host denied by sandbox allowlist: ' + str(url)\n\
+                    'wasmsh: js.' + object.__getattribute__(self, '_name')\n\
+                    + '.' + attr + ' is blocked in the sandbox'\n\
                 )\n\
-            if _wasmsh_original_fetch is None:\n\
-                raise PermissionError('wasmsh: no underlying fetch available')\n\
-            if init is None:\n\
-                return _wasmsh_original_fetch(input)\n\
-            return _wasmsh_original_fetch(input, init)\n\
-\n\
-        if _wasmsh_original_fetch is not None:\n\
-            try:\n\
-                _js.fetch = _wasmsh_brokered_fetch\n\
-            except Exception:\n\
-                # Some Pyodide versions don't allow rebinding js.fetch from\n\
-                # Python; defer to the JS-host globalThis.fetch wrapper.\n\
-                pass\n\
-\n\
+            def __setattr__(self, attr, value):\n\
+                raise PermissionError(\n\
+                    'wasmsh: setting js.' + object.__getattribute__(self, '_name')\n\
+                    + '.' + attr + ' is blocked'\n\
+                )\n\
+            def __call__(self, *args, **kwargs):\n\
+                raise PermissionError(\n\
+                    'wasmsh: js.' + object.__getattribute__(self, '_name')\n\
+                    + '() is blocked'\n\
+                )\n\
+        installed = 0\n\
         for _denied in (\n\
             'process', 'require', 'Deno', 'WebSocket', 'fs',\n\
             'child_process', 'worker_threads', 'subprocess', 'cluster',\n\
@@ -172,12 +121,16 @@ except NameError:\n\
         ):\n\
             try:\n\
                 setattr(_js, _denied, _WasmshDeny(_denied))\n\
+                installed += 1\n\
             except Exception:\n\
                 pass\n\
-\n\
-    WASMSH_MEMBRANE_INSTALLED = True\n\
+        return installed > 0\n\
+    _wasmsh_membrane_ok = _wasmsh_install_membrane()\n\
+    del _wasmsh_install_membrane\n\
+    if not _wasmsh_membrane_ok:\n\
+        raise RuntimeError('wasmsh: js attribute membrane install failed')\n\
+    _wasmsh_builtins.WASMSH_MEMBRANE_INSTALLED = True\n\
 ",
-        hosts = list,
     )
 }
 
@@ -186,18 +139,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preamble_contains_each_allowed_host() {
+    fn preamble_does_not_leak_allowed_hosts() {
+        // After the F2 redesign, allowed_hosts MUST NOT appear in the
+        // Python preamble — network policy lives in the JS membrane.
+        // This test guards against accidental re-introduction of a
+        // Python-readable allowlist that user code could mutate.
         let p = build_preamble(&[
             "api.example.com".into(),
             "*.internal.test".into(),
         ]);
-        assert!(p.contains("api.example.com"));
-        assert!(p.contains("*.internal.test"));
+        assert!(
+            !p.contains("api.example.com"),
+            "Python preamble must not embed the host allowlist"
+        );
+        assert!(
+            !p.contains("*.internal.test"),
+            "Python preamble must not embed the host allowlist"
+        );
     }
 
     #[test]
     fn preamble_is_self_guarded() {
         let p = build_preamble(&[]);
         assert!(p.contains("WASMSH_MEMBRANE_INSTALLED"));
+    }
+
+    #[test]
+    fn preamble_runs_inside_a_function_scope() {
+        // Locals must be sealed away from globals(); the body lives in
+        // `def _wasmsh_install_membrane()` which is also deleted after
+        // it returns, leaving only the builtins sentinel reachable.
+        let p = build_preamble(&[]);
+        assert!(p.contains("def _wasmsh_install_membrane"));
+        assert!(p.contains("del _wasmsh_install_membrane"));
+    }
+
+    #[test]
+    fn preamble_fails_closed_on_install_failure() {
+        // If no `js` attributes could be denied (no Pyodide / wrong env),
+        // the preamble must raise rather than silently let user code run.
+        let p = build_preamble(&[]);
+        assert!(p.contains("raise RuntimeError"));
     }
 }
