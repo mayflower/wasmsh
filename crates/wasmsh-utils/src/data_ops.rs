@@ -316,151 +316,155 @@ fn expr_substr(ctx: &mut UtilContext<'_>, string: &str, pos: &str, len: &str) ->
     i32::from(sub.is_empty())
 }
 
-pub(crate) fn util_xargs(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut replace_str: Option<&str> = None;
-    let mut max_args: Option<usize> = None;
-    let mut null_delim = false;
-    let mut cmd_start = 1;
+struct XargsOpts<'a> {
+    replace_str: Option<&'a str>,
+    max_args: Option<usize>,
+    null_delim: bool,
+    cmd_start: usize,
+}
+
+fn parse_xargs_opts<'a>(argv: &'a [&'a str]) -> XargsOpts<'a> {
+    let mut opts = XargsOpts {
+        replace_str: None,
+        max_args: None,
+        null_delim: false,
+        cmd_start: 1,
+    };
     let mut i = 1;
     while i < argv.len() {
         let arg = argv[i];
         if arg == "-I" && i + 1 < argv.len() {
-            replace_str = Some(argv[i + 1]);
+            opts.replace_str = Some(argv[i + 1]);
             i += 2;
-            cmd_start = i;
         } else if arg == "-n" && i + 1 < argv.len() {
-            max_args = argv[i + 1].parse().ok();
+            opts.max_args = argv[i + 1].parse().ok();
             i += 2;
-            cmd_start = i;
         } else if arg == "-0" || arg == "--null" {
-            null_delim = true;
+            opts.null_delim = true;
             i += 1;
-            cmd_start = i;
         } else if (arg == "-d" || arg == "-P" || arg == "-L") && i + 1 < argv.len() {
             i += 2;
-            cmd_start = i;
         } else if arg == "-t" || arg == "-p" {
             i += 1;
-            cmd_start = i;
         } else {
             break;
         }
+        opts.cmd_start = i;
     }
-    let cmd_args = &argv[cmd_start..];
-    let cmd = if cmd_args.is_empty() {
-        "echo"
-    } else {
-        cmd_args[0]
-    };
-    let extra: Vec<&str> = if cmd_args.len() > 1 {
-        cmd_args[1..].to_vec()
-    } else {
-        Vec::new()
-    };
+    opts
+}
+
+fn collect_xargs_items_null(ctx: &mut UtilContext<'_>) -> Option<Vec<String>> {
     let mut items = Vec::new();
-    if null_delim {
-        let mut pending = Vec::new();
-        if stream_input_chunks(ctx, &[], "xargs", |chunk, _| {
-            pending.extend_from_slice(chunk);
-            while let Some(pos) = pending.iter().position(|&b| b == b'\0') {
-                let item = pending.drain(..pos).collect::<Vec<u8>>();
-                pending.drain(..1);
-                if !item.is_empty() {
-                    items.push(String::from_utf8_lossy(&item).to_string());
-                }
+    let mut pending = Vec::new();
+    let res = stream_input_chunks(ctx, &[], "xargs", |chunk, _| {
+        pending.extend_from_slice(chunk);
+        while let Some(pos) = pending.iter().position(|&b| b == b'\0') {
+            let item: Vec<u8> = pending.drain(..pos).collect();
+            pending.drain(..1);
+            if !item.is_empty() {
+                items.push(String::from_utf8_lossy(&item).to_string());
             }
-            Ok(())
-        })
-        .is_err()
-        {
-            return 1;
         }
-        if !pending.is_empty() {
-            items.push(String::from_utf8_lossy(&pending).to_string());
-        }
-    } else if stream_input_whitespace_tokens(ctx, &[], "xargs", |token, _| {
+        Ok(())
+    });
+    if res.is_err() {
+        return None;
+    }
+    if !pending.is_empty() {
+        items.push(String::from_utf8_lossy(&pending).to_string());
+    }
+    Some(items)
+}
+
+fn collect_xargs_items_ws(ctx: &mut UtilContext<'_>) -> Option<Vec<String>> {
+    let mut items = Vec::new();
+    let res = stream_input_whitespace_tokens(ctx, &[], "xargs", |token, _| {
         items.push(token.to_string());
         Ok(())
-    })
-    .is_err()
-    {
-        return 1;
+    });
+    if res.is_err() {
+        return None;
     }
+    Some(items)
+}
+
+fn emit_xargs_line(ctx: &mut UtilContext<'_>, cmd: &str, extra: &[&str], args: &[&str]) {
+    if cmd == "echo" {
+        let joined = if extra.is_empty() {
+            args.join(" ")
+        } else {
+            let mut parts: Vec<&str> = extra.to_vec();
+            parts.extend(args.iter().copied());
+            parts.join(" ")
+        };
+        ctx.output.stdout(joined.as_bytes());
+        ctx.output.stdout(b"\n");
+        return;
+    }
+    let mut line = String::from(cmd);
+    for ea in extra {
+        line.push(' ');
+        line.push_str(ea);
+    }
+    for item in args {
+        line.push(' ');
+        line.push_str(item);
+    }
+    line.push('\n');
+    ctx.output.stdout(line.as_bytes());
+}
+
+fn emit_xargs_replace(
+    ctx: &mut UtilContext<'_>,
+    items: &[String],
+    cmd: &str,
+    extra: &[&str],
+    repl: &str,
+) {
+    for item in items {
+        let substituted: Vec<String> = extra.iter().map(|a| a.replace(repl, item)).collect();
+        if cmd == "echo" {
+            let out = if substituted.is_empty() {
+                item.clone()
+            } else {
+                substituted.join(" ")
+            };
+            ctx.output.stdout(out.as_bytes());
+            ctx.output.stdout(b"\n");
+        } else {
+            let extra_refs: Vec<&str> = substituted.iter().map(String::as_str).collect();
+            emit_xargs_line(ctx, cmd, &extra_refs, &[]);
+        }
+    }
+}
+
+pub(crate) fn util_xargs(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let opts = parse_xargs_opts(argv);
+    let cmd_args = &argv[opts.cmd_start..];
+    let cmd = cmd_args.first().copied().unwrap_or("echo");
+    let extra: Vec<&str> = cmd_args.get(1..).map(<[&str]>::to_vec).unwrap_or_default();
+
+    let items = if opts.null_delim {
+        collect_xargs_items_null(ctx)
+    } else {
+        collect_xargs_items_ws(ctx)
+    };
+    let Some(items) = items else { return 1 };
     if items.is_empty() {
         return 0;
     }
-    if let Some(repl) = replace_str {
-        for item in &items {
-            if cmd == "echo" {
-                let out = if extra.is_empty() {
-                    item.clone()
-                } else {
-                    extra
-                        .iter()
-                        .map(|a| a.replace(repl, item))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                };
-                ctx.output.stdout(out.as_bytes());
-                ctx.output.stdout(b"\n");
-            } else {
-                let mut line = String::from(cmd);
-                for ea in &extra {
-                    line.push(' ');
-                    line.push_str(&ea.replace(repl, item));
-                }
-                line.push('\n');
-                ctx.output.stdout(line.as_bytes());
-            }
-        }
-    } else if let Some(n) = max_args {
+
+    if let Some(repl) = opts.replace_str {
+        emit_xargs_replace(ctx, &items, cmd, &extra, repl);
+    } else if let Some(n) = opts.max_args {
         for chunk in items.chunks(n) {
-            if cmd == "echo" {
-                ctx.output.stdout(
-                    chunk
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .as_bytes(),
-                );
-                ctx.output.stdout(b"\n");
-            } else {
-                let mut line = String::from(cmd);
-                for ea in &extra {
-                    line.push(' ');
-                    line.push_str(ea);
-                }
-                for item in chunk {
-                    line.push(' ');
-                    line.push_str(item);
-                }
-                line.push('\n');
-                ctx.output.stdout(line.as_bytes());
-            }
+            let chunk_refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
+            emit_xargs_line(ctx, cmd, &extra, &chunk_refs);
         }
-    } else if cmd == "echo" {
-        ctx.output.stdout(
-            items
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join(" ")
-                .as_bytes(),
-        );
-        ctx.output.stdout(b"\n");
     } else {
-        let mut line = String::from(cmd);
-        for ea in &extra {
-            line.push(' ');
-            line.push_str(ea);
-        }
-        for item in &items {
-            line.push(' ');
-            line.push_str(item);
-        }
-        line.push('\n');
-        ctx.output.stdout(line.as_bytes());
+        let item_refs: Vec<&str> = items.iter().map(String::as_str).collect();
+        emit_xargs_line(ctx, cmd, &extra, &item_refs);
     }
     0
 }

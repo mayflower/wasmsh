@@ -1546,113 +1546,131 @@ fn sed_apply_transliterate(text: &str, from: &[char], to: &[char]) -> String {
         .collect()
 }
 
-pub(crate) fn util_sed(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
-    let mut suppress_print = false;
-    let mut in_place = false;
-    let mut in_place_suffix: Option<String> = None;
-    let mut expressions: Vec<String> = Vec::new();
-    let mut file_args = Vec::new();
+struct SedOpts<'a> {
+    suppress_print: bool,
+    in_place: bool,
+    in_place_suffix: Option<String>,
+    expressions: Vec<String>,
+    file_args: Vec<&'a str>,
+}
+
+fn parse_sed_args<'a>(ctx: &mut UtilContext<'_>, argv: &'a [&'a str]) -> SedOpts<'a> {
+    let mut opts = SedOpts {
+        suppress_print: false,
+        in_place: false,
+        in_place_suffix: None,
+        expressions: Vec::new(),
+        file_args: Vec::new(),
+    };
     let mut i = 1;
     while i < argv.len() {
         let arg = argv[i];
         if arg == "-n" {
-            suppress_print = true;
+            opts.suppress_print = true;
             i += 1;
         } else if arg == "-i" {
-            in_place = true;
+            opts.in_place = true;
             i += 1;
         } else if let Some(suffix) = arg.strip_prefix("-i") {
-            in_place = true;
-            in_place_suffix = Some(suffix.to_string());
+            opts.in_place = true;
+            opts.in_place_suffix = Some(suffix.to_string());
             i += 1;
         } else if arg == "-e" && i + 1 < argv.len() {
-            expressions.push(argv[i + 1].to_string());
+            opts.expressions.push(argv[i + 1].to_string());
             i += 2;
         } else if arg == "-E" || arg == "-r" {
             i += 1; // extended regex, accept
         } else if arg == "-f" && i + 1 < argv.len() {
-            // script file - read it
             let full = resolve_path(ctx.cwd, argv[i + 1]);
             if let Ok(script) = collect_path_text(ctx, &full, argv[i + 1], "sed") {
-                expressions.push(script);
+                opts.expressions.push(script);
             }
             i += 2;
         } else if arg.starts_with('-') && arg.len() > 1 && arg != "--" {
             i += 1;
+        } else if arg == "--" {
+            i += 1;
+            opts.file_args.extend(argv[i..].iter().copied());
+            break;
         } else {
-            if arg == "--" {
-                i += 1;
-                file_args.extend(argv[i..].iter().copied());
-                break;
-            }
-            if expressions.is_empty() {
-                expressions.push(arg.to_string());
+            if opts.expressions.is_empty() {
+                opts.expressions.push(arg.to_string());
             } else {
-                file_args.push(arg);
+                opts.file_args.push(arg);
             }
             i += 1;
         }
     }
+    opts
+}
 
-    if expressions.is_empty() {
-        ctx.output.stderr(b"sed: missing script\n");
-        return 1;
-    }
-
-    let script = expressions.join(";");
-    let instructions = parse_sed_script(&script);
-
-    if in_place && !file_args.is_empty() {
-        for path in &file_args {
-            let full = resolve_path(ctx.cwd, path);
-            if let Some(ref suffix) = in_place_suffix {
-                let backup = format!("{full}{suffix}");
-                let _ = crate::helpers::copy_file_contents(ctx.fs, &full, &backup);
-            }
-            let mut reader = match open_reader_for_path(ctx, &full, path, "sed") {
-                Ok(reader) => reader,
-                Err(status) => return status,
-            };
-            let mut dummy = SedDummyOutput;
-            let mut result = Some(String::new());
-            if let Err(status) = sed_process_reader(
-                &mut dummy,
-                reader.as_mut(),
-                &instructions,
-                suppress_print,
-                &mut result,
-                "sed",
-            ) {
-                return status;
-            }
-            if let Ok(h) = ctx.fs.open(&full, OpenOptions::write()) {
-                let _ = ctx.fs.write_file(h, result.unwrap_or_default().as_bytes());
-                ctx.fs.close(h);
-            }
+fn sed_run_in_place(
+    ctx: &mut UtilContext<'_>,
+    file_args: &[&str],
+    in_place_suffix: Option<&str>,
+    instructions: &[SedInstruction],
+    suppress_print: bool,
+) -> i32 {
+    for path in file_args {
+        let full = resolve_path(ctx.cwd, path);
+        if let Some(suffix) = in_place_suffix {
+            let backup = format!("{full}{suffix}");
+            let _ = crate::helpers::copy_file_contents(ctx.fs, &full, &backup);
         }
-        return 0;
-    }
-
-    if file_args.is_empty() {
-        let Some(mut stdin) = ctx.stdin.take() else {
-            ctx.output.stderr(b"sed: missing operand\n");
-            return 1;
+        let mut reader = match open_reader_for_path(ctx, &full, path, "sed") {
+            Ok(reader) => reader,
+            Err(status) => return status,
         };
-        let mut capture = None;
-        return match sed_process_reader(
-            ctx.output,
-            &mut stdin,
-            &instructions,
+        let mut dummy = SedDummyOutput;
+        let mut result = Some(String::new());
+        if let Err(status) = sed_process_reader(
+            &mut dummy,
+            reader.as_mut(),
+            instructions,
             suppress_print,
-            &mut capture,
+            &mut result,
             "sed",
         ) {
-            Ok(()) => 0,
-            Err(status) => status,
-        };
+            return status;
+        }
+        if let Ok(h) = ctx.fs.open(&full, OpenOptions::write()) {
+            let _ = ctx.fs.write_file(h, result.unwrap_or_default().as_bytes());
+            ctx.fs.close(h);
+        }
     }
+    0
+}
 
-    for path in &file_args {
+fn sed_run_stdin(
+    ctx: &mut UtilContext<'_>,
+    instructions: &[SedInstruction],
+    suppress_print: bool,
+) -> i32 {
+    let Some(mut stdin) = ctx.stdin.take() else {
+        ctx.output.stderr(b"sed: missing operand\n");
+        return 1;
+    };
+    let mut capture = None;
+    match sed_process_reader(
+        ctx.output,
+        &mut stdin,
+        instructions,
+        suppress_print,
+        &mut capture,
+        "sed",
+    ) {
+        Ok(()) => 0,
+        Err(status) => status,
+    }
+}
+
+fn sed_run_files(
+    ctx: &mut UtilContext<'_>,
+    file_args: &[&str],
+    instructions: &[SedInstruction],
+    suppress_print: bool,
+) -> i32 {
+    for path in file_args {
         let full = resolve_path(ctx.cwd, path);
         let mut reader = match open_reader_for_path(ctx, &full, path, "sed") {
             Ok(reader) => reader,
@@ -1662,7 +1680,7 @@ pub(crate) fn util_sed(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         if let Err(status) = sed_process_reader(
             ctx.output,
             reader.as_mut(),
-            &instructions,
+            instructions,
             suppress_print,
             &mut capture,
             "sed",
@@ -1671,6 +1689,30 @@ pub(crate) fn util_sed(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     }
     0
+}
+
+pub(crate) fn util_sed(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let opts = parse_sed_args(ctx, argv);
+    if opts.expressions.is_empty() {
+        ctx.output.stderr(b"sed: missing script\n");
+        return 1;
+    }
+    let script = opts.expressions.join(";");
+    let instructions = parse_sed_script(&script);
+
+    if opts.in_place && !opts.file_args.is_empty() {
+        return sed_run_in_place(
+            ctx,
+            &opts.file_args,
+            opts.in_place_suffix.as_deref(),
+            &instructions,
+            opts.suppress_print,
+        );
+    }
+    if opts.file_args.is_empty() {
+        return sed_run_stdin(ctx, &instructions, opts.suppress_print);
+    }
+    sed_run_files(ctx, &opts.file_args, &instructions, opts.suppress_print)
 }
 
 struct SedDummyOutput;
