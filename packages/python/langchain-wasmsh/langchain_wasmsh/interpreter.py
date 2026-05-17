@@ -371,9 +371,7 @@ class WasmshInterpreterMiddleware(
         )
         # Snake-case key: that's the attribute name user code sees on `tools`.
         thread_id = _resolve_thread_id(self._fallback_thread_id)
-        self._exposed_ptc_tools[thread_id] = {
-            to_snake_case(t.name): t for t in exposed
-        }
+        self._exposed_ptc_tools[thread_id] = {to_snake_case(t.name): t for t in exposed}
         exposed_names = frozenset(t.name for t in exposed)
         if self._ptc_prompt_cache is None or self._ptc_prompt_cache[0] != exposed_names:
             self._ptc_prompt_cache = (

@@ -133,7 +133,9 @@ class TestDeepAgentWithStubSandbox:
             {"ok": True, "stdout": "84\n", "stderr": "", "value": 84},
         )
         agent = create_deep_agent(
-            model=FakeChatModel(messages=_script("2 * 42", final_message="answer = 84")),
+            model=FakeChatModel(
+                messages=_script("2 * 42", final_message="answer = 84")
+            ),
             middleware=[
                 WasmshInterpreterMiddleware(sandbox_factory=lambda: sandbox),
             ],
@@ -167,7 +169,9 @@ class TestDeepAgentWithStubSandbox:
             },
         )
         agent = create_deep_agent(
-            model=FakeChatModel(messages=_script("print(foo)", final_message="reported")),
+            model=FakeChatModel(
+                messages=_script("print(foo)", final_message="reported")
+            ),
             middleware=[
                 WasmshInterpreterMiddleware(sandbox_factory=lambda: sandbox),
             ],
@@ -259,8 +263,7 @@ _PYODIDE_ASSET = Path(get_dist_dir()) / "pyodide.asm.wasm"
 _NODE_AVAILABLE = shutil.which("node") is not None
 _REAL_SANDBOX_AVAILABLE = _PYODIDE_ASSET.is_file() and _NODE_AVAILABLE
 _SKIP_REASON = (
-    "Pyodide assets or `node` not found; "
-    "real-sandbox integration test requires both."
+    "Pyodide assets or `node` not found; real-sandbox integration test requires both."
 )
 
 

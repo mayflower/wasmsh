@@ -154,12 +154,28 @@ jobs:
       - name: Stage Pyodide assets from published npm tarball
         run: |
           set -euo pipefail
+          # Source of truth: the version in packages/npm/wasmsh-pyodide/package.json
+          # (what `pnpm install` will publish later when v* is tagged). When that
+          # version isn't yet on the npm registry — typical during the
+          # bump-on-main → tag → publish window — fall back to the latest
+          # released version so the integration tests still run against a real
+          # tarball. The released version's adapter ABI is stable enough that
+          # the langchain-wasmsh adapter (the actual subject under test) still
+          # exercises end-to-end behavior; the gap only matters for changes
+          # that touched wasmsh-pyodide internals, which the Pyodide workflow
+          # already gates.
           VERSION="$(node -p "require('./packages/npm/wasmsh-pyodide/package.json').version")"
-          echo "Using @mayflowergmbh/wasmsh-pyodide@$VERSION"
+          echo "Target @mayflowergmbh/wasmsh-pyodide@$VERSION"
           tmp="$(mktemp -d)"
           url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
           echo "Fetching $url"
-          curl -fsSL "$url" -o "$tmp/pkg.tgz"
+          if ! curl -fsSL "$url" -o "$tmp/pkg.tgz"; then
+            echo "Version $VERSION not yet on registry; falling back to latest published"
+            LATEST="$(npm view @mayflowergmbh/wasmsh-pyodide version)"
+            echo "Falling back to @mayflowergmbh/wasmsh-pyodide@$LATEST"
+            url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${LATEST}.tgz"
+            curl -fsSL "$url" -o "$tmp/pkg.tgz"
+          fi
           mkdir -p "$tmp/extract"
           tar -xzf "$tmp/pkg.tgz" -C "$tmp/extract"
           cp -r "$tmp/extract/package/assets/"* packages/npm/wasmsh-pyodide/assets/

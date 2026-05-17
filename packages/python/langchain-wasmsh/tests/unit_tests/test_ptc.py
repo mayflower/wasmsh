@@ -81,7 +81,8 @@ def _build_sandbox(
     # Scripted init: optional ack then the init response.
     if advertise_ack:
         dialogue._outbox.insert(
-            0, json.dumps({"type": "ack", "capabilities": {"host_call": "v1"}}) + "\n",
+            0,
+            json.dumps({"type": "ack", "capabilities": {"host_call": "v1"}}) + "\n",
         )
     dialogue._outbox.append(
         json.dumps({"id": 1, "ok": True, "result": {"events": []}}) + "\n",
@@ -146,7 +147,9 @@ class _StubTool:
 
 class TestPtcDispatcher:
     def test_success_envelope(self) -> None:
-        dispatch = _make_ptc_dispatcher({"search": _StubTool(lambda a: f"hit:{a['q']}")})
+        dispatch = _make_ptc_dispatcher(
+            {"search": _StubTool(lambda a: f"hit:{a['q']}")}
+        )
         env = dispatch({"id": "hc_1", "tool": "search", "args": {"q": "foo"}})
         assert env == {"ok": True, "value": "hit:foo"}
 
@@ -218,33 +221,41 @@ class TestRunPtcRoundTrip:
             if msg.get("method") == "runPtc":
                 req_id = msg["id"]
                 outbox.append(
-                    json.dumps({
-                        "type": "host_call",
-                        "id": "hc_a",
-                        "tool": "search",
-                        "args": {"q": "foo"},
-                    }) + "\n",
+                    json.dumps(
+                        {
+                            "type": "host_call",
+                            "id": "hc_a",
+                            "tool": "search",
+                            "args": {"q": "foo"},
+                        }
+                    )
+                    + "\n",
                 )
                 outbox.append(
-                    json.dumps({
-                        "id": req_id,
-                        "ok": True,
-                        "result": {
-                            "envelope": {
-                                "ok": True,
-                                "stdout": "",
-                                "stderr": "",
-                                "value": "hit:foo",
+                    json.dumps(
+                        {
+                            "id": req_id,
+                            "ok": True,
+                            "result": {
+                                "envelope": {
+                                    "ok": True,
+                                    "stdout": "",
+                                    "stderr": "",
+                                    "value": "hit:foo",
+                                },
                             },
-                        },
-                    }) + "\n",
+                        }
+                    )
+                    + "\n",
                 )
 
         dialogue.set_writeback_hook(writeback)
         sandbox = _build_sandbox(dialogue)
-        dispatcher = _make_ptc_dispatcher({
-            "search": _StubTool(lambda a: f"hit:{a['q']}"),
-        })
+        dispatcher = _make_ptc_dispatcher(
+            {
+                "search": _StubTool(lambda a: f"hit:{a['q']}"),
+            }
+        )
 
         envelope = sandbox.run_ptc(
             "await tools.search(q='foo')",
@@ -253,7 +264,9 @@ class TestRunPtcRoundTrip:
         )
 
         # Sandbox saw the host_call_result we wrote back.
-        host_results = [m for m in dialogue.inbox if m.get("type") == "host_call_result"]
+        host_results = [
+            m for m in dialogue.inbox if m.get("type") == "host_call_result"
+        ]
         assert len(host_results) == 1
         assert host_results[0]["id"] == "hc_a"
         assert host_results[0]["ok"] is True
@@ -269,19 +282,27 @@ class TestRunPtcRoundTrip:
         def writeback(msg: dict[str, Any], outbox: list[str]) -> None:
             if msg.get("method") == "runPtc":
                 outbox.append(
-                    json.dumps({
-                        "type": "host_call",
-                        "id": "hc_z",
-                        "tool": "search",
-                        "args": {},
-                    }) + "\n",
+                    json.dumps(
+                        {
+                            "type": "host_call",
+                            "id": "hc_z",
+                            "tool": "search",
+                            "args": {},
+                        }
+                    )
+                    + "\n",
                 )
                 outbox.append(
-                    json.dumps({
-                        "id": msg["id"],
-                        "ok": True,
-                        "result": {"envelope": {"ok": True, "stdout": "", "stderr": ""}},
-                    }) + "\n",
+                    json.dumps(
+                        {
+                            "id": msg["id"],
+                            "ok": True,
+                            "result": {
+                                "envelope": {"ok": True, "stdout": "", "stderr": ""}
+                            },
+                        }
+                    )
+                    + "\n",
                 )
 
         dialogue.set_writeback_hook(writeback)
@@ -290,7 +311,9 @@ class TestRunPtcRoundTrip:
 
         sandbox.run_ptc("await tools.search()", tools=[], on_host_call=dispatcher)
 
-        host_results = [m for m in dialogue.inbox if m.get("type") == "host_call_result"]
+        host_results = [
+            m for m in dialogue.inbox if m.get("type") == "host_call_result"
+        ]
         assert host_results[0]["ok"] is False
         assert host_results[0]["error"] == "UnknownToolError"
 
@@ -316,41 +339,52 @@ class TestRunPtcRoundTrip:
                 req_id = msg["id"]
                 # Two host_calls in flight, sandbox emits both before result.
                 outbox.append(
-                    json.dumps({
-                        "type": "host_call",
-                        "id": "hc_alpha",
-                        "tool": "search",
-                        "args": {"q": "alpha"},
-                    }) + "\n",
+                    json.dumps(
+                        {
+                            "type": "host_call",
+                            "id": "hc_alpha",
+                            "tool": "search",
+                            "args": {"q": "alpha"},
+                        }
+                    )
+                    + "\n",
                 )
                 outbox.append(
-                    json.dumps({
-                        "type": "host_call",
-                        "id": "hc_beta",
-                        "tool": "search",
-                        "args": {"q": "beta"},
-                    }) + "\n",
+                    json.dumps(
+                        {
+                            "type": "host_call",
+                            "id": "hc_beta",
+                            "tool": "search",
+                            "args": {"q": "beta"},
+                        }
+                    )
+                    + "\n",
                 )
                 outbox.append(
-                    json.dumps({
-                        "id": req_id,
-                        "ok": True,
-                        "result": {
-                            "envelope": {
-                                "ok": True,
-                                "stdout": "",
-                                "stderr": "",
-                                "value": ["hit:alpha", "hit:beta"],
+                    json.dumps(
+                        {
+                            "id": req_id,
+                            "ok": True,
+                            "result": {
+                                "envelope": {
+                                    "ok": True,
+                                    "stdout": "",
+                                    "stderr": "",
+                                    "value": ["hit:alpha", "hit:beta"],
+                                },
                             },
-                        },
-                    }) + "\n",
+                        }
+                    )
+                    + "\n",
                 )
 
         dialogue.set_writeback_hook(writeback)
         sandbox = _build_sandbox(dialogue)
-        dispatcher = _make_ptc_dispatcher({
-            "search": _StubTool(lambda a: f"hit:{a['q']}"),
-        })
+        dispatcher = _make_ptc_dispatcher(
+            {
+                "search": _StubTool(lambda a: f"hit:{a['q']}"),
+            }
+        )
 
         envelope = sandbox.run_ptc(
             "await asyncio.gather(tools.search(q='alpha'), tools.search(q='beta'))",
@@ -359,9 +393,7 @@ class TestRunPtcRoundTrip:
         )
 
         host_results = {
-            m["id"]: m
-            for m in dialogue.inbox
-            if m.get("type") == "host_call_result"
+            m["id"]: m for m in dialogue.inbox if m.get("type") == "host_call_result"
         }
         # Both ids round-tripped, each with the right per-call value.
         assert host_results["hc_alpha"]["value"] == "hit:alpha"
@@ -395,19 +427,27 @@ class TestRunPtcRoundTrip:
         def writeback(msg: dict[str, Any], outbox: list[str]) -> None:
             if msg.get("method") == "runPtc":
                 outbox.append(
-                    json.dumps({
-                        "type": "host_call",
-                        "id": "hc_reentry",
-                        "tool": "search",
-                        "args": {"q": "x"},
-                    }) + "\n",
+                    json.dumps(
+                        {
+                            "type": "host_call",
+                            "id": "hc_reentry",
+                            "tool": "search",
+                            "args": {"q": "x"},
+                        }
+                    )
+                    + "\n",
                 )
                 outbox.append(
-                    json.dumps({
-                        "id": msg["id"],
-                        "ok": True,
-                        "result": {"envelope": {"ok": True, "stdout": "", "stderr": ""}},
-                    }) + "\n",
+                    json.dumps(
+                        {
+                            "id": msg["id"],
+                            "ok": True,
+                            "result": {
+                                "envelope": {"ok": True, "stdout": "", "stderr": ""}
+                            },
+                        }
+                    )
+                    + "\n",
                 )
 
         dialogue.set_writeback_hook(writeback)
@@ -422,7 +462,9 @@ class TestRunPtcRoundTrip:
 
         dispatcher = _make_ptc_dispatcher({"search": _StubTool(reentrant_tool)})
 
-        sandbox.run_ptc("await tools.search(q='x')", tools=["search"], on_host_call=dispatcher)
+        sandbox.run_ptc(
+            "await tools.search(q='x')", tools=["search"], on_host_call=dispatcher
+        )
 
         host_results = [
             m for m in dialogue.inbox if m.get("type") == "host_call_result"
@@ -453,11 +495,13 @@ class _StubSandboxForRepl:
     ) -> dict[str, Any]:
         self.run_ptc_calls.append({"code": code, "tools": tools})
         # Synthesise one host_call so we can verify dispatcher wiring.
-        env = on_host_call({
-            "id": "hc_test",
-            "tool": tools[0] if tools else "missing",
-            "args": {"q": "foo"},
-        })
+        env = on_host_call(
+            {
+                "id": "hc_test",
+                "tool": tools[0] if tools else "missing",
+                "args": {"q": "foo"},
+            }
+        )
         return {
             "ok": env["ok"],
             "stdout": "",

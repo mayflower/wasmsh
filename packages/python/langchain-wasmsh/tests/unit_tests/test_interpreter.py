@@ -253,7 +253,9 @@ class TestPTC:
 
         a = StructuredTool.from_function(func=echo, name="search")
         b = StructuredTool.from_function(func=echo, name="py_eval")
-        exposed = filter_tools_for_ptc([a, b], ["search", "py_eval"], self_tool_name="py_eval")
+        exposed = filter_tools_for_ptc(
+            [a, b], ["search", "py_eval"], self_tool_name="py_eval"
+        )
         assert [t.name for t in exposed] == ["search"]
 
     def test_filter_tools_for_ptc_rejects_non_list(self) -> None:

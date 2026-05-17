@@ -88,7 +88,12 @@ jobs:
           tmp="$(mktemp -d)"
           url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
           echo "Fetching $url"
-          curl -fsSL "$url" -o "$tmp/pkg.tgz"
+          if ! curl -fsSL "$url" -o "$tmp/pkg.tgz"; then
+            echo "Version $VERSION not on registry; falling back to latest published"
+            LATEST="$(npm view @mayflowergmbh/wasmsh-pyodide version)"
+            url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${LATEST}.tgz"
+            curl -fsSL "$url" -o "$tmp/pkg.tgz"
+          fi
           mkdir -p "$tmp/extract"
           tar -xzf "$tmp/pkg.tgz" -C "$tmp/extract"
           cp -r "$tmp/extract/package/assets/"* packages/npm/wasmsh-pyodide/assets/
@@ -170,7 +175,12 @@ jobs:
           tmp="$(mktemp -d)"
           url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
           echo "Fetching $url"
-          curl -fsSL "$url" -o "$tmp/pkg.tgz"
+          if ! curl -fsSL "$url" -o "$tmp/pkg.tgz"; then
+            echo "Version $VERSION not on registry; falling back to latest published"
+            LATEST="$(npm view @mayflowergmbh/wasmsh-pyodide version)"
+            url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${LATEST}.tgz"
+            curl -fsSL "$url" -o "$tmp/pkg.tgz"
+          fi
           mkdir -p "$tmp/extract"
           tar -xzf "$tmp/pkg.tgz" -C "$tmp/extract"
           cp -r "$tmp/extract/package/assets/"* packages/npm/wasmsh-pyodide/assets/

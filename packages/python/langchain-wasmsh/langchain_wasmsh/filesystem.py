@@ -60,6 +60,7 @@ class WasmshNamespaceEscapeError(PermissionError):
             f"path {attempted_path!r} escapes namespace {namespace!r}",
         )
 
+
 if TYPE_CHECKING:
     from deepagents.backends.sandbox import BaseSandbox
 
@@ -191,9 +192,7 @@ class WasmshFilesystemBackend(BackendProtocol):
         if result.error or not result.matches:
             return result
         return GrepResult(
-            matches=[
-                {**m, "path": self._unscope(m["path"])} for m in result.matches
-            ],
+            matches=[{**m, "path": self._unscope(m["path"])} for m in result.matches],
         )
 
     def glob(self, pattern: str, path: str = "/") -> GlobResult:
@@ -203,9 +202,7 @@ class WasmshFilesystemBackend(BackendProtocol):
         if result.error or not result.matches:
             return result
         return GlobResult(
-            matches=[
-                {**m, "path": self._unscope(m["path"])} for m in result.matches
-            ],
+            matches=[{**m, "path": self._unscope(m["path"])} for m in result.matches],
         )
 
     def write(self, file_path: str, content: str) -> WriteResult:

@@ -54,7 +54,11 @@ def _make_mock_process(
         if call_index < len(queue):
             response = dict(queue[call_index])  # shallow copy
             call_index += 1
-            response["id"] = last_request_id[0] if last_request_id[0] is not None else response.get("id")
+            response["id"] = (
+                last_request_id[0]
+                if last_request_id[0] is not None
+                else response.get("id")
+            )
             return json.dumps(response) + "\n"
         # Fallback: empty string signals EOF to the sandbox reader, which
         # surfaces as RuntimeError("wasmsh host terminated unexpectedly").
@@ -422,8 +426,7 @@ class TestAssetPathResolution:
             # Don't let the integration go further than constructor —
             # close() reads the EOF and exits cleanly.
             process.stdout.readline.side_effect = [
-                json.dumps({"id": 1, "ok": True, "result": {"events": []}})
-                + "\n",
+                json.dumps({"id": 1, "ok": True, "result": {"events": []}}) + "\n",
                 "",
             ]
             sandbox = WasmshSandbox(dist_dir=symlinked_assets, runtime="deno")
