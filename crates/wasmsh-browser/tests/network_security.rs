@@ -254,29 +254,64 @@ fn curl_denied_similar_hostname() {
 // ── Wildcard pattern tests ──────────────────────────────────────
 
 #[test]
-fn curl_wildcard_allows_subdomains() {
+fn curl_wildcard_allows_subdomains_but_not_apex() {
     if !mayflower_reachable() {
         return; // mayflower.de unreachable — skip
     }
 
-    // *.mayflower.de should allow www.mayflower.de and bare mayflower.de
+    // `*.mayflower.de` matches strict subdomains only; the apex
+    // `mayflower.de` is NOT covered. See docs/reference/sandbox-and-capabilities.md
+    // and the matching e2e tests in e2e/pyodide-node/tests/network-security.test.mjs.
     let mut rt = init_runtime_with_network(vec!["*.mayflower.de".into()]);
-    let events = rt.handle_command(HostCommand::Run {
-        input: "curl -sL https://mayflower.de".into(),
-    });
 
-    let exit_code = extract_exit_code(&events).unwrap();
+    // www subdomain: must succeed.
+    let events = rt.handle_command(HostCommand::Run {
+        input: "curl -sL https://www.mayflower.de".into(),
+    });
     assert_eq!(
-        exit_code, 0,
-        "curl to mayflower.de should succeed with *.mayflower.de pattern"
+        extract_exit_code(&events).unwrap(),
+        0,
+        "www.mayflower.de should be allowed by *.mayflower.de"
     );
 
-    // But example.com is still blocked
+    // Apex: must be denied.
+    let events = rt.handle_command(HostCommand::Run {
+        input: "curl https://mayflower.de".into(),
+    });
+    assert_ne!(
+        extract_exit_code(&events).unwrap(),
+        0,
+        "apex mayflower.de must NOT be covered by *.mayflower.de"
+    );
+
+    // Unrelated host: still blocked.
     let events = rt.handle_command(HostCommand::Run {
         input: "curl https://example.com".into(),
     });
-    let exit_code = extract_exit_code(&events).unwrap();
-    assert_ne!(exit_code, 0, "example.com must still be blocked");
+    assert_ne!(
+        extract_exit_code(&events).unwrap(),
+        0,
+        "example.com must still be blocked"
+    );
+}
+
+#[test]
+fn curl_explicit_apex_plus_wildcard_covers_both() {
+    if !mayflower_reachable() {
+        return;
+    }
+    let mut rt = init_runtime_with_network(vec![
+        "mayflower.de".into(),
+        "*.mayflower.de".into(),
+    ]);
+    let events = rt.handle_command(HostCommand::Run {
+        input: "curl -sL https://mayflower.de".into(),
+    });
+    assert_eq!(
+        extract_exit_code(&events).unwrap(),
+        0,
+        "explicit apex should be allowed"
+    );
 }
 
 // ── Empty allowlist tests ───────────────────────────────────────
