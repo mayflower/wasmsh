@@ -61,6 +61,42 @@ export interface InstallResult {
   requirements: string[];
 }
 
+export interface HostCallRequest {
+  id: string;
+  tool: string;
+  args: Record<string, unknown>;
+}
+
+export interface HostCallEnvelope {
+  ok: boolean;
+  value?: unknown;
+  error?: string;
+  message?: string;
+}
+
+export interface RunPtcParams {
+  /** Python source to evaluate. Top-level await is supported. */
+  code: string;
+  /** Snake-cased tool names exposed inside user code as `tools.<name>`. */
+  tools?: string[];
+  /**
+   * Called once per `await tools.<name>(...)` in user code. Must return
+   * a `host_call_result` envelope. Multiple host calls can be in flight
+   * concurrently (e.g. via `asyncio.gather`).
+   */
+  onHostCall: (call: HostCallRequest) => Promise<HostCallEnvelope> | HostCallEnvelope;
+}
+
+export interface RunPtcResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  value?: unknown;
+  error?: string;
+  message?: string;
+  traceback?: string;
+}
+
 export interface WasmshSession {
   run(command: string): Promise<RunResult>;
   writeFile(path: string, content: Uint8Array): Promise<{ events: unknown[] }>;
@@ -82,6 +118,17 @@ export interface WasmshSession {
     requirements: string | string[],
     options?: InstallPythonPackagesOptions,
   ): Promise<InstallResult>;
+  /**
+   * Run Python source with host-mediated tool calls (PTC).
+   *
+   * `onHostCall` is invoked synchronously per `await tools.<name>(...)`
+   * the user code emits; the returned envelope is forwarded back into
+   * Python as the awaited value. Only available on the Node session —
+   * the browser session throws.
+   *
+   * Wire spec: docs/explanation/ptc-suspend-resume.md
+   */
+  runPtc(params: RunPtcParams): Promise<RunPtcResult>;
   close(): Promise<void>;
 }
 

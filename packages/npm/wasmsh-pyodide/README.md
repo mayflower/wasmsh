@@ -235,13 +235,39 @@ Returned by both `createNodeSession` and `createBrowserWorkerSession`.
 
 The Node host advertises a `host_call: "v1"` capability on boot and
 accepts a `runPtc` JSON-RPC method that lets user Python `await`
-host-registered tools mid-execution. **This is not yet exposed on
-`WasmshSession`** — npm consumers wanting programmatic tool calling
-must speak the wire protocol directly (or use the Python
-`langchain-wasmsh` adapter's `WasmshSandbox.run_ptc` until the TS
-client surface lands).
+host-registered tools mid-execution. Since v0.6.4 this is exposed
+directly on the Node session — there is no need to speak the wire
+protocol by hand:
 
-Wire protocol (newline-delimited JSON over stdin/stdout):
+```ts
+import { createNodeSession } from "@mayflowergmbh/wasmsh-pyodide";
+
+const session = await createNodeSession();
+try {
+  const envelope = await session.runPtc({
+    code: "x = await tools.search(q='foo'); x",
+    tools: ["search"],
+    onHostCall: async ({ tool, args }) => {
+      // Resolve the host-side tool. Return a `host_call_result` envelope.
+      if (tool === "search") {
+        return { ok: true, value: `hit:${args.q}` };
+      }
+      return { ok: false, error: "UnknownTool", message: tool };
+    },
+  });
+  // envelope.value === "hit:foo"
+} finally {
+  await session.close();
+}
+```
+
+`onHostCall` is invoked once per `await tools.<name>(...)` in the user
+code; multiple host calls can be in flight concurrently (e.g. when the
+user calls `asyncio.gather(...)`). The browser session does **not**
+support `runPtc` and throws if called — PTC is Node-only today.
+
+Wire protocol (newline-delimited JSON over stdin/stdout) for
+implementations that want to drive the host directly:
 
 ```jsonc
 // Boot

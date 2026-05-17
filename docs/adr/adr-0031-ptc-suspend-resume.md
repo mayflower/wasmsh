@@ -127,9 +127,17 @@ build — so PTC degradation is loud, not silent.
 - `WasmshRemoteSandbox.run_ptc` raises `NotImplementedError` until the
   dispatcher path lands (Phase 2: SSE response stream + companion
   `POST /sessions/<id>/host_result` endpoint).
-- The npm `RequestClient` does **not** yet recognise the new message
-  types; npm consumers wanting PTC must speak the protocol directly until
-  Phase 3 lands a `RequestClient.runPtc(...)` method.
+- The npm `NodeSession` (returned by `createNodeSession`) exposes
+  `runPtc({ code, tools, onHostCall })` since `@mayflowergmbh/wasmsh-pyodide`
+  v0.6.4 — npm consumers no longer need to speak the wire protocol by
+  hand. The browser session still throws on `runPtc`; browser PTC is
+  out of scope for Phase 3.
+- The npm `@mayflowergmbh/langchain-wasmsh` adapter consumes `runPtc`
+  through `WasmshInterpreterMiddleware` (TypeScript) and ships a
+  structured `WasmshLogger` hook (`ptcToolError`, `skillLoadError`) so
+  hosts can observe the exceptions the middleware swallows into
+  envelopes. The Python adapter offers the symmetric observability via
+  the stdlib `logging.getLogger("langchain_wasmsh")` namespace.
 - The JS-side `node-host.mjs` and the launcher-side Python helper
   (`lib/ptc-helper.mjs`) duplicate the launcher's globals-pickle / value
   coercion logic with the file-based `_launcher.py` shipped by

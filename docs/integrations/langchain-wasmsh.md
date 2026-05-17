@@ -117,13 +117,23 @@ backend such as `langchain-modal` or `langchain-daytona`.
 
 ## `WasmshInterpreterMiddleware` — persistent Python REPL as an agent tool
 
-The Python package also ships an `AgentMiddleware` that exposes the
-sandbox as a single `py_eval` tool, mirroring the shape of
+The Python package ships an `AgentMiddleware` that exposes the sandbox
+as a single `py_eval` tool, mirroring the shape of
 [`langchain-quickjs`'s `CodeInterpreterMiddleware`](https://docs.langchain.com/oss/python/deepagents/interpreters)
 but with a real WebAssembly-isolated sandbox underneath. State —
 variables, imports, defined functions — persists across calls and
 across agent turns via a globals-pickle snapshot stored in private
 agent state.
+
+> **TypeScript equivalent.** Per LangChain's partner-package policy the
+> TS counterpart (`createWasmshInterpreterMiddleware`,
+> `WasmshFilesystemBackend`, skills loader, `WasmshLogger`) lives in
+> [`deepagentsjs/libs/providers/wasmsh`](https://github.com/langchain-ai/deepagentsjs/tree/main/libs/providers/wasmsh)
+> rather than in this repo. The wire protocol (`host_call` /
+> `host_call_result`) is identical and served by the same Node host
+> binary shipped in `@mayflowergmbh/wasmsh-pyodide`. The npm
+> `@mayflowergmbh/langchain-wasmsh` package in this repo only ships
+> `WasmshSandbox` + `WasmshRemoteSandbox`.
 
 ```python
 from deepagents import create_deep_agent
@@ -176,6 +186,23 @@ allowlist as your permission boundary. PTC currently requires the
 **in-process** backend; `WasmshRemoteSandbox.run_ptc` raises
 `NotImplementedError` until the dispatcher SSE channel ships.
 
+**Observability.** When a PTC tool raises, the middleware converts the
+exception into an envelope so the model can recover — but the original
+stack disappears in that conversion. Each adapter surfaces the dropped
+context the same way:
+
+- **Python**: stdlib `logging` on the `langchain_wasmsh._repl` logger,
+  `WARNING` level, `exc_info=True`, with structured
+  `extra={"wasmsh_ptc_call_id": ..., "wasmsh_ptc_tool": ...}`. Attach
+  your usual handler (`logging.basicConfig`, Sentry, structlog) to the
+  `langchain_wasmsh` namespace.
+- **TypeScript** (in `deepagentsjs/libs/providers/wasmsh`): pass a
+  `WasmshLogger` to `createWasmshInterpreterMiddleware({ logger })`.
+  Implement `ptcToolError({ tool, callId, args, error })` and
+  `skillLoadError({ skill, error })` — the middleware swallows any
+  throw from the logger itself, so a buggy hook cannot break the agent
+  loop.
+
 ### Python skills
 
 Pair `WasmshInterpreterMiddleware` with a `SkillsMiddleware` and a shared
@@ -226,6 +253,18 @@ backend = CompositeBackend(
 
 Unlike using the sandbox directly, the filesystem backend does not
 expose `execute()` — it is a memory store, not a code-runner.
+
+**Namespace boundary (security).** Every path the backend touches is
+joined onto `namespace` and resolved (`posixpath.normpath` in Python,
+`posix.resolve` in TypeScript). A path that resolves outside the
+namespace — via `..` segments, an absolute path smuggled through the
+API, or a sandbox-controlled response — is rejected with
+`WasmshNamespaceEscapeError` (a `PermissionError` subclass in Python)
+before any I/O. The containment is enforced symmetrically on inputs and
+outputs, so a malicious sandbox payload cannot exfiltrate paths from a
+sibling namespace. Treat `namespace=` as the isolation boundary
+between memory routes; skill loaders re-throw this error instead of
+swallowing it into a log.
 
 ## Reference
 

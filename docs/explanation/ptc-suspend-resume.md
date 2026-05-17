@@ -267,7 +267,18 @@ The dispatcher proxies the SSE stream from the runner pod end-to-end without par
 
 ### 7.4 TS adapter
 
-`@mayflowergmbh/langchain-wasmsh` mirrors the Python adapter's shape: the `WasmshSandbox.runWithPtc` method opens the bidirectional channel and dispatches to LangChain JS tools. The runner-side JS in § 7.1 is reused verbatim.
+The TypeScript surface mirrors the Python adapter's shape. Concretely:
+
+- `@mayflowergmbh/wasmsh-pyodide` (this repo) exposes
+  `NodeSession.runPtc({ code, tools, onHostCall })` since v0.6.4. Browser
+  sessions throw on `runPtc`; browser PTC is out of scope for now.
+- `@mayflowergmbh/langchain-wasmsh` (in `deepagentsjs/libs/providers/wasmsh`,
+  the canonical TS adapter location per LangChain's partner-package policy)
+  ships `createWasmshInterpreterMiddleware`, the same `ptc=` knob shape as
+  the Python adapter, and `WasmshLogger` for structured observability of
+  PTC tool errors and skill-load failures.
+
+The runner-side JS in § 7.1 is reused verbatim by both packages.
 
 ## 8. Failure & cancellation semantics
 
@@ -331,12 +342,29 @@ Exit criteria:
 
 ### Phase 3 — TS adapter parity
 
+**Status:** landed for the in-process backend.
+
 Touch points:
-- `packages/npm/langchain-wasmsh`: `WasmshSandbox.runWithPtc` + middleware mirroring the Python surface.
-- `packages/npm/wasmsh-pyodide`: hoist any shared JS used by the host-call dispatcher.
+- `packages/npm/wasmsh-pyodide`: `NodeSession.runPtc({ code, tools, onHostCall })`
+  exposed in v0.6.4 (the JS-side dispatcher loop in § 7.1 is shared with
+  the Python adapter through the same JSON-RPC channel).
+- `deepagentsjs/libs/providers/wasmsh` (LangChain partner package, not in
+  this repo): `createWasmshInterpreterMiddleware` with the same `ptc=`
+  shape as the Python adapter, plus the structured `WasmshLogger` hook
+  surface (`ptcToolError`, `skillLoadError`) for hosts that need to see
+  the errors the middleware swallows into envelopes.
 
 Exit criteria:
-- `e2e/standalone/` or a new TS-adapter E2E covers the same PTC scenarios.
+- `e2e/pyodide-node/tests/ptc-round-trip.test.mjs` covers Node-host PTC
+  end-to-end (host_call fan-out, error envelopes, persistence across
+  calls). Done.
+- TS adapter tests in `deepagentsjs/libs/providers/wasmsh/src/` cover the
+  middleware → sandbox → envelope round-trip with both a scripted
+  FakeChatModel (`agent.test.ts`) and real Pyodide
+  (`sandbox-runPtc.int.test.ts`). Done.
+
+Browser-side PTC (Phase 3b) remains out of scope; the browser session
+throws if `runPtc` is called.
 
 ## 12. Open questions
 

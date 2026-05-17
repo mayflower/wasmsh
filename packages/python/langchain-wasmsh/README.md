@@ -176,6 +176,17 @@ in-process backend; `WasmshRemoteSandbox.run_ptc` raises
 `NotImplementedError` until the dispatcher SSE channel ships. Protocol
 details: [ADR-0031](https://github.com/mayflower/wasmsh/blob/main/docs/adr/adr-0031-ptc-suspend-resume.md).
 
+**Observing PTC tool errors.** When a PTC tool raises, the dispatcher
+converts the exception into a `host_call_result` envelope the model
+can recover from — but the original stack and call context vanish in
+that conversion. The adapter logs every such error through the
+standard `logging` module at `WARNING` level, on the
+`langchain_wasmsh._repl` logger, with `exc_info=True` and structured
+`extra={"wasmsh_ptc_call_id": ..., "wasmsh_ptc_tool": ...}`. Wire a
+handler (Sentry, structlog, plain `logging.basicConfig`) onto the
+`langchain_wasmsh` namespace to capture them. Skill load failures and
+snapshot/restore problems are logged through the same namespace.
+
 ### Python skills (`import skills.<name>`)
 
 Pair the middleware with a `SkillsMiddleware` and a shared
@@ -221,6 +232,16 @@ backend = CompositeBackend(
 
 Unlike using the sandbox directly, the filesystem backend does **not**
 expose `execute()` — it's a memory store, not a code-runner.
+
+**Namespace boundary (security):** every path the backend receives is
+joined onto `namespace` and resolved via `posixpath.normpath`. A path
+that would escape the namespace (for example via `..` segments or an
+absolute path smuggled through the API) is rejected with
+`WasmshNamespaceEscapeError(PermissionError)` before any I/O happens.
+The same containment is enforced symmetrically on outputs (downloaded
+paths, glob results), so a malicious sandbox payload cannot trick the
+backend into surfacing a path from a sibling namespace. Treat the
+`namespace=` value as your isolation boundary between memory routes.
 
 ## Remote / Kubernetes backend
 
