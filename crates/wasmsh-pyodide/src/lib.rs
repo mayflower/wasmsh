@@ -19,6 +19,7 @@ use wasmsh_protocol::{DiagnosticLevel, WorkerEvent};
 mod network;
 mod probe;
 mod python_cmd;
+mod python_membrane;
 
 /// Opaque handle wrapping a shared JSON runtime bridge.
 struct RuntimeHandle {
@@ -33,6 +34,10 @@ pub extern "C" fn wasmsh_runtime_new() -> *mut RuntimeHandle {
     let runtime = JsonRuntimeHandle::with_config(JsonRuntimeConfig {
         external_handler: Some(Box::new(python_cmd::handle_python_command)),
         network_backend_factory: Some(Box::new(|allowed_hosts| {
+            // Mirror the allowlist into the Python membrane so user code
+            // running through `js.fetch` / `pyodide.http.pyfetch` /
+            // `micropip` is gated by the same rules as curl/wget.
+            python_membrane::set_allowed_hosts(allowed_hosts.clone());
             Box::new(network::PyodideNetworkBackend::new(allowed_hosts))
         })),
     });

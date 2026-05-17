@@ -1,7 +1,15 @@
 import { parentPort, threadId, workerData } from "node:worker_threads";
 
 import { createBrokerClient } from "./fetch-broker.mjs";
+import { installFetchMembrane } from "../../../packages/npm/wasmsh-pyodide/lib/fetch-membrane.mjs";
 import { restoreFromSnapshot } from "../../../packages/npm/wasmsh-pyodide/lib/snapshot/restore.mjs";
+
+// Install the fetch membrane on this worker's globalThis BEFORE Pyodide
+// boots. Once Pyodide is up, Python code reaches globalThis.fetch through
+// the `js` proxy — `js.fetch`, `pyodide.http.pyfetch`, and `micropip` all
+// resolve to the wrapper, which enforces the same allowlist as `curl`.
+// See packages/npm/wasmsh-pyodide/lib/fetch-membrane.mjs.
+installFetchMembrane(globalThis, workerData.allowedHosts ?? []);
 
 function deniedFetch() {
   return {

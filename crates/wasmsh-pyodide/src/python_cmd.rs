@@ -8,6 +8,8 @@ use std::ffi::CString;
 use std::sync::atomic::{AtomicU64, Ordering};
 use wasmsh_runtime::{ExternalCommandResult, ExternalCommandStdin};
 
+use crate::python_membrane;
+
 extern "C" {
     fn PyRun_SimpleString(command: *const std::os::raw::c_char) -> std::os::raw::c_int;
 }
@@ -35,6 +37,18 @@ pub fn handle_python_command(
 ) -> Option<ExternalCommandResult> {
     if cmd_name != "python" && cmd_name != "python3" {
         return None;
+    }
+
+    // Install the sandbox membrane before user code runs. Idempotent —
+    // subsequent invocations return immediately. If installation fails the
+    // membrane just isn't active and the user code still runs (with the
+    // Rust-side allowlist still gating curl/wget); we emit a diagnostic
+    // so the failure isn't completely silent.
+    let mut prefix_stderr: Vec<u8> = Vec::new();
+    if let Err(msg) = python_membrane::ensure_installed() {
+        prefix_stderr.extend_from_slice(b"wasmsh: warning: membrane install failed: ");
+        prefix_stderr.extend_from_slice(msg.as_bytes());
+        prefix_stderr.push(b'\n');
     }
 
     let code = extract_code(argv, stdin)?;
@@ -106,9 +120,15 @@ pub fn handle_python_command(
             .unwrap_or(0)
     };
 
+    // Splice any membrane-install diagnostic in front of the captured
+    // stderr so the agent sees it on the same response as the command
+    // that triggered it.
+    let mut combined_stderr = prefix_stderr;
+    combined_stderr.extend_from_slice(&stderr_bytes);
+
     Some(ExternalCommandResult {
         stdout: stdout_bytes,
-        stderr: stderr_bytes,
+        stderr: combined_stderr,
         status,
     })
 }
