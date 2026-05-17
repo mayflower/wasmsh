@@ -8111,14 +8111,11 @@ impl WorkerRuntime {
         if self.collect_stdin_from_redirections(&sel.redirections) {
             return;
         }
-
         let words = self.expand_for_words(sel.words.as_deref());
         if words.is_empty() {
             return;
         }
-
         self.print_select_menu(&words);
-
         let Ok(input) = self.read_pending_input_bytes("select") else {
             return;
         };
@@ -8126,37 +8123,54 @@ impl WorkerRuntime {
 
         for line in input.lines() {
             let reply = line.trim();
-            self.vm
-                .state
-                .set_var(smol_str::SmolStr::from("REPLY"), reply.into());
-
-            let selected = reply.parse::<usize>().ok().and_then(|n| {
-                if n >= 1 && n <= words.len() {
-                    Some(words[n - 1].clone())
-                } else {
-                    None
-                }
-            });
-
-            self.vm
-                .state
-                .set_var(sel.var_name.clone(), selected.unwrap_or_default().into());
-
+            self.bind_select_iteration_vars(sel, reply, &words);
             self.execute_body(&sel.body);
-            if self.exec.break_depth > 0 {
-                self.exec.break_depth -= 1;
-                break;
-            }
-            if self.exec.loop_continue {
-                self.exec.loop_continue = false;
-            }
-            if self.exec.exit_requested.is_some() {
+            if !self.consume_select_loop_control() {
                 break;
             }
             if reply.is_empty() {
                 self.print_select_menu(&words);
             }
         }
+    }
+
+    /// Set `REPLY` and the user-named variable for one iteration of `select`.
+    fn bind_select_iteration_vars(
+        &mut self,
+        sel: &wasmsh_hir::HirSelect,
+        reply: &str,
+        words: &[String],
+    ) {
+        self.vm
+            .state
+            .set_var(smol_str::SmolStr::from("REPLY"), reply.into());
+        let selected = Self::pick_select_word(reply, words).unwrap_or_default();
+        self.vm.state.set_var(sel.var_name.clone(), selected.into());
+    }
+
+    /// Resolve the user's reply to the word at that 1-based menu index, if any.
+    fn pick_select_word(reply: &str, words: &[String]) -> Option<String> {
+        reply
+            .parse::<usize>()
+            .ok()
+            .filter(|&n| n >= 1 && n <= words.len())
+            .map(|n| words[n - 1].clone())
+    }
+
+    /// Apply the post-body break/continue/exit checks. Returns `true` to keep
+    /// looping, `false` to break out of the `select` loop.
+    fn consume_select_loop_control(&mut self) -> bool {
+        if self.exec.break_depth > 0 {
+            self.exec.break_depth -= 1;
+            return false;
+        }
+        if self.exec.loop_continue {
+            self.exec.loop_continue = false;
+        }
+        if self.exec.exit_requested.is_some() {
+            return false;
+        }
+        true
     }
 
     fn print_select_menu(&mut self, words: &[String]) {
