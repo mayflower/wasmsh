@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -404,8 +405,6 @@ class TestAssetPathResolution:
     """
 
     def test_dist_dir_is_canonicalised(self, tmp_path: Any) -> None:
-        from pathlib import Path
-
         # Create a real asset dir and a symlinked alias.
         real_assets = tmp_path / "real" / "assets"
         real_assets.mkdir(parents=True)

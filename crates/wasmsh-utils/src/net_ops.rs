@@ -1493,9 +1493,7 @@ fn redact_url_userinfo(url: &str) -> String {
     };
     let authority_start = scheme_end + 3;
     let rest = &url[authority_start..];
-    let authority_end = rest
-        .find(['/', '?', '#'])
-        .unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
     let Some(at_pos) = authority.rfind('@') else {
         return url.to_string();
@@ -1812,9 +1810,8 @@ fn content_disposition_filename(response: &HttpResponse) -> Option<String> {
 /// into writing to e.g. `CON` or `LPT1`. The VFS today is in-memory but
 /// Emscripten / OPFS backends are on the roadmap.
 const RESERVED_DEVICE_NAMES: &[&str] = &[
-    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5",
-    "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5",
-    "lpt6", "lpt7", "lpt8", "lpt9",
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
 
 fn sanitize_filename(name: &str) -> String {
@@ -1828,10 +1825,7 @@ fn sanitize_filename(name: &str) -> String {
 
     // Drop NULs and ASCII control characters (0x00-0x1f, 0x7f). They have
     // no business in a filename and break tooling on every backend.
-    let cleaned: String = last
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect();
+    let cleaned: String = last.chars().filter(|c| !c.is_control()).collect();
 
     // Leading dash is hostile: many command-line tools (curl/wget/rm
     // included) treat `-foo` as an option, so a saved file named `-rf`
@@ -3573,8 +3567,7 @@ mod tests {
         // 64 MiB ceiling. The classic "deflate bomb" is many megabytes of a
         // single repeated byte; compressed it is a few KiB.
         let original = vec![b'A'; 80 * 1024 * 1024];
-        let deflate_stream =
-            miniz_oxide::deflate::compress_to_vec_zlib(&original, 9);
+        let deflate_stream = miniz_oxide::deflate::compress_to_vec_zlib(&original, 9);
         assert!(
             deflate_stream.len() < 1024 * 1024,
             "test fixture must be small to exercise the bomb"
@@ -3590,10 +3583,7 @@ mod tests {
             ],
             body: deflate_stream,
         };
-        let (status, output) = run_curl(
-            &["curl", "--compressed", "http://example.com/"],
-            &backend,
-        );
+        let (status, output) = run_curl(&["curl", "--compressed", "http://example.com/"], &backend);
         // Non-zero exit and a "deflate inflate failed" message on stderr.
         assert_ne!(status, 0);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -4197,10 +4187,7 @@ mod tests {
             "http://example.com/start".into(),
             redirect_response("http://evil.com/loot"),
         ));
-        let (status, output) = run_curl(
-            &["curl", "-L", "http://example.com/start"],
-            &backend,
-        );
+        let (status, output) = run_curl(&["curl", "-L", "http://example.com/start"], &backend);
         // The first hop returned 302, the redirect target is not allowlisted,
         // so curl must fail with a HostDenied error rather than fetching it.
         assert_ne!(status, 0);
@@ -4229,10 +4216,7 @@ mod tests {
             "http://example.com/redir".into(),
             redirect_response("http://127.0.0.1:8080/private"),
         ));
-        let (status, output) = run_curl(
-            &["curl", "-L", "http://example.com/redir"],
-            &backend,
-        );
+        let (status, output) = run_curl(&["curl", "-L", "http://example.com/redir"], &backend);
         assert_ne!(status, 0);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
@@ -4257,10 +4241,7 @@ mod tests {
             "http://example.com/redir".into(),
             redirect_response("http://api.test.co/data"),
         ));
-        let (status, output) = run_curl(
-            &["curl", "-L", "http://example.com/redir"],
-            &backend,
-        );
+        let (status, output) = run_curl(&["curl", "-L", "http://example.com/redir"], &backend);
         assert_eq!(status, 0, "stderr: {:?}", output.stderr);
         // The backend must have been called twice: once for the redirect,
         // once for the target.
@@ -4344,10 +4325,7 @@ mod tests {
         );
         assert_eq!(status, 0);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            !stderr.contains("hunter2"),
-            "url userinfo leaked: {stderr}"
-        );
+        assert!(!stderr.contains("hunter2"), "url userinfo leaked: {stderr}");
         assert!(!stderr.contains("alice:"));
         assert!(stderr.contains("<redacted>@example.com"));
     }
@@ -4373,10 +4351,7 @@ mod tests {
 
     #[test]
     fn sanitize_filename_strips_path_separators() {
-        assert_eq!(
-            sanitize_filename("../../../etc/passwd"),
-            "passwd"
-        );
+        assert_eq!(sanitize_filename("../../../etc/passwd"), "passwd");
         assert_eq!(
             sanitize_filename("..\\..\\windows\\system32\\config"),
             "config"
@@ -4446,10 +4421,7 @@ mod tests {
     #[test]
     fn curl_warns_when_tls_pinning_flag_is_dropped() {
         let backend = mock_backend(b"data");
-        let (status, output) = run_curl(
-            &["curl", "--tlsv1.2", "http://example.com/"],
-            &backend,
-        );
+        let (status, output) = run_curl(&["curl", "--tlsv1.2", "http://example.com/"], &backend);
         assert_eq!(status, 0);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
@@ -4485,10 +4457,7 @@ mod tests {
         // with whatever the sandbox transport decided. Now it warns
         // (and hard-fails under WASMSH_CURL_STRICT).
         let backend = mock_backend(b"data");
-        let (status, output) = run_curl(
-            &["curl", "-k", "http://example.com/"],
-            &backend,
-        );
+        let (status, output) = run_curl(&["curl", "-k", "http://example.com/"], &backend);
         assert_eq!(status, 0);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
@@ -4500,10 +4469,7 @@ mod tests {
     #[test]
     fn curl_warns_when_short_ip_family_flag_is_dropped() {
         let backend = mock_backend(b"data");
-        let (status, output) = run_curl(
-            &["curl", "-4", "http://example.com/"],
-            &backend,
-        );
+        let (status, output) = run_curl(&["curl", "-4", "http://example.com/"], &backend);
         assert_eq!(status, 0);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
@@ -4516,10 +4482,8 @@ mod tests {
     fn curl_keeps_warning_silent_for_pure_ui_flags() {
         // --progress-bar is cosmetic, not security-relevant. No warning.
         let backend = mock_backend(b"data");
-        let (status, output) = run_curl(
-            &["curl", "--progress-bar", "http://example.com/"],
-            &backend,
-        );
+        let (status, output) =
+            run_curl(&["curl", "--progress-bar", "http://example.com/"], &backend);
         assert_eq!(status, 0);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(

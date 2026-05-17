@@ -300,10 +300,7 @@ fn curl_explicit_apex_plus_wildcard_covers_both() {
     if !mayflower_reachable() {
         return;
     }
-    let mut rt = init_runtime_with_network(vec![
-        "mayflower.de".into(),
-        "*.mayflower.de".into(),
-    ]);
+    let mut rt = init_runtime_with_network(vec!["mayflower.de".into(), "*.mayflower.de".into()]);
     let events = rt.handle_command(HostCommand::Run {
         input: "curl -sL https://mayflower.de".into(),
     });

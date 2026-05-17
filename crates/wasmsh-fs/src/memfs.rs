@@ -143,9 +143,7 @@ impl MemoryFs {
                 continue;
             }
             if inner.nodes.len() >= MAX_INODES {
-                return Err(FsError::Io(
-                    "filesystem inode limit exceeded".into(),
-                ));
+                return Err(FsError::Io("filesystem inode limit exceeded".into()));
             }
             inner.nodes.insert(current.clone(), FsNode::Dir);
         }
@@ -185,9 +183,7 @@ impl MemoryWriteSink {
                     .saturating_sub(old_size)
                     .saturating_add(new_size);
                 if projected_total > MAX_TOTAL_BYTES {
-                    return Err(FsError::Io(
-                        "filesystem quota exceeded".into(),
-                    ));
+                    return Err(FsError::Io("filesystem quota exceeded".into()));
                 }
                 if self.append {
                     let mut combined = contents.as_ref().to_vec();

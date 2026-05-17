@@ -281,12 +281,7 @@ async fn require_auth(
     // `(!diff) == 0` (bitwise NOT on u8), true only when diff was exactly
     // 0xff. Using a vetted constant-time primitive removes both that bug
     // class and the timing-oracle risk in one step.
-    if supplied
-        .as_bytes()
-        .ct_eq(expected.as_bytes())
-        .unwrap_u8()
-        != 1
-    {
+    if supplied.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() != 1 {
         return Err(ServiceError::Unauthorized);
     }
     Ok(next.run(request).await)

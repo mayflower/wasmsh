@@ -1,6 +1,6 @@
 {
   "name": "@mayflowergmbh/langchain-wasmsh",
-  "version": "0.6.4",
+  "version": "0.7.0",
   "description": "wasmsh sandbox backend for LangChain Deep Agents",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
