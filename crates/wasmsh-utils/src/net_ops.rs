@@ -103,6 +103,11 @@ struct CurlOpts {
     time_cond: Option<String>,
     netrc_file: Option<String>,
     netrc_enabled: bool,
+    /// Security-relevant flags the parser silently consumed (TLS pinning,
+    /// DNS overrides, etc.). Emitted as a stderr diagnostic after parsing
+    /// so callers learn the constraint was dropped. Promoted to a hard
+    /// error in `WASMSH_CURL_STRICT=1` mode.
+    dropped_security_flags: Vec<String>,
 }
 
 // ── Argument parsing ────────────────────────────────────────────
@@ -349,6 +354,9 @@ fn parse_long_option(opts: &mut CurlOpts, arg: &str, cur: &mut ArgCursor<'_>) ->
         "--netrc-file" => opts.netrc_file = Some(cur.take_value("--netrc-file")?),
         other => {
             if is_silent_no_op(other, cur)? {
+                if is_security_relevant_no_op(other) {
+                    opts.dropped_security_flags.push(other.to_string());
+                }
                 return Ok(());
             }
             reject_or_unknown(other, cur)?;
@@ -486,20 +494,28 @@ fn parse_u32(s: &str) -> ArgResult<u32> {
 /// or that are simply cosmetic.
 const SILENT_NO_OP_FLAGS_WITH_ARG: &[&str] = &[
     "--parallel-max",
-    "--resolve",
     "--happy-eyeballs-timeout-ms",
     "--expect100-timeout",
+    "--keepalive-time",
+    "--speed-limit",
+    "--speed-time",
+    "--tftp-blksize",
+    "--limit-rate",
+];
+
+/// Security-relevant flags taking a value. Silently accepting these would
+/// let scripts assume their host/transport pinning held when the sandbox
+/// ignored it; instead we emit a stderr diagnostic so the agent sees the
+/// drop. (`--resolve`, `--interface`, `--local-port`, `--dns-*` would have
+/// pinned the transport in real curl.)
+const SECURITY_RELEVANT_NO_OP_FLAGS_WITH_ARG: &[&str] = &[
+    "--resolve",
     "--interface",
     "--local-port",
     "--dns-interface",
     "--dns-ipv4-addr",
     "--dns-ipv6-addr",
     "--dns-servers",
-    "--keepalive-time",
-    "--speed-limit",
-    "--speed-time",
-    "--tftp-blksize",
-    "--limit-rate",
 ];
 
 const SILENT_NO_OP_FLAGS: &[&str] = &[
@@ -509,15 +525,23 @@ const SILENT_NO_OP_FLAGS: &[&str] = &[
     "--no-progress-meter",
     "--no-buffer",
     "--styled-output",
-    "--no-alpn",
-    "--no-npn",
     "--no-keepalive",
     "--no-sessionid",
     "--tcp-nodelay",
     "--tcp-fastopen",
+    "--path-as-is",
+    "--tr-encoding",
+    "--trace-time",
+    "--trace-ids",
+];
+
+/// Security-relevant boolean flags. Same rationale as
+/// `SECURITY_RELEVANT_NO_OP_FLAGS_WITH_ARG`: TLS / HTTP-version / ALPN /
+/// IP-family pinning, false-start. We can't enforce them, so callers
+/// must learn they were dropped.
+const SECURITY_RELEVANT_NO_OP_FLAGS: &[&str] = &[
     "--ipv4",
     "--ipv6",
-    "--path-as-is",
     "--http0.9",
     "--http1.0",
     "--http1.1",
@@ -534,22 +558,55 @@ const SILENT_NO_OP_FLAGS: &[&str] = &[
     "--tlsv1.3",
     "--false-start",
     "--alpn",
-    "--tr-encoding",
+    "--no-alpn",
+    "--no-npn",
     "--ca-native",
-    "--trace-time",
-    "--trace-ids",
 ];
+
+/// Strict mode promotes the security-relevant no-op diagnostics into hard
+/// errors. Opt in via `WASMSH_CURL_STRICT=1`. Off by default so existing
+/// scripts continue to run with a visible diagnostic.
+fn strict_curl_mode() -> bool {
+    std::env::var_os("WASMSH_CURL_STRICT").is_some_and(|v| !v.is_empty() && v != "0")
+}
 
 fn is_silent_no_op(opt: &str, cur: &mut ArgCursor<'_>) -> ArgResult<bool> {
     if SILENT_NO_OP_FLAGS.contains(&opt) {
         return Ok(true);
     }
+    if SECURITY_RELEVANT_NO_OP_FLAGS.contains(&opt) {
+        if strict_curl_mode() {
+            return Err(format!(
+                "{opt}: not supported in sandbox (WASMSH_CURL_STRICT)"
+            ));
+        }
+        // Caller emits the stderr diagnostic; we still consume the flag so
+        // parsing continues, mirroring the original silent behavior except
+        // that the user can see it dropped.
+        return Ok(true);
+    }
     if SILENT_NO_OP_FLAGS_WITH_ARG.contains(&opt) {
-        // Consume and discard the argument.
         let _ = cur.take_value(opt)?;
         return Ok(true);
     }
+    if SECURITY_RELEVANT_NO_OP_FLAGS_WITH_ARG.contains(&opt) {
+        let _ = cur.take_value(opt)?;
+        if strict_curl_mode() {
+            return Err(format!(
+                "{opt}: not supported in sandbox (WASMSH_CURL_STRICT)"
+            ));
+        }
+        return Ok(true);
+    }
     Ok(false)
+}
+
+/// True if `opt` is one of the security-relevant flags whose sandbox
+/// no-op behavior should be announced on stderr. Used by curl/wget so the
+/// diagnostic fires once per occurrence after the parser has accepted it.
+fn is_security_relevant_no_op(opt: &str) -> bool {
+    SECURITY_RELEVANT_NO_OP_FLAGS.contains(&opt)
+        || SECURITY_RELEVANT_NO_OP_FLAGS_WITH_ARG.contains(&opt)
 }
 
 // ── Tier-4 rejection ────────────────────────────────────────────
@@ -1726,14 +1783,71 @@ fn content_disposition_filename(response: &HttpResponse) -> Option<String> {
     for part in raw.split(';') {
         let p = part.trim();
         if let Some(v) = p.strip_prefix("filename=") {
-            return Some(sanitize_filename(v.trim().trim_matches('"')));
+            let cleaned = sanitize_filename(v.trim().trim_matches('"'));
+            if cleaned.is_empty() {
+                // After stripping everything dangerous, nothing useful is
+                // left — let the caller fall back to its default filename
+                // resolution instead of writing to a sketchy path.
+                return None;
+            }
+            return Some(cleaned);
         }
     }
     None
 }
 
+/// Windows reserved device names. Refused so a server can't trick a curl
+/// run on a host VFS that may eventually mount onto a Windows-aware backend
+/// into writing to e.g. `CON` or `LPT1`. The VFS today is in-memory but
+/// Emscripten / OPFS backends are on the roadmap.
+const RESERVED_DEVICE_NAMES: &[&str] = &[
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5",
+    "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5",
+    "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
 fn sanitize_filename(name: &str) -> String {
-    name.rsplit(['/', '\\']).next().unwrap_or(name).to_string()
+    // Strip any path component the server snuck in.
+    let last = name.rsplit(['/', '\\']).next().unwrap_or(name);
+
+    // Reject pure-traversal or empty names so the caller falls back.
+    if last.is_empty() || last == "." || last == ".." {
+        return String::new();
+    }
+
+    // Drop NULs and ASCII control characters (0x00-0x1f, 0x7f). They have
+    // no business in a filename and break tooling on every backend.
+    let cleaned: String = last
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+
+    // Leading dash is hostile: many command-line tools (curl/wget/rm
+    // included) treat `-foo` as an option, so a saved file named `-rf`
+    // turns the next `rm *` into a foot-cannon. Replace with `_`.
+    let cleaned = if cleaned.starts_with('-') {
+        format!("_{}", &cleaned[1..])
+    } else {
+        cleaned
+    };
+
+    // Reject Windows reserved device names (case-insensitive, ignoring
+    // any extension). Cheaper than trying to make every backend handle
+    // them safely.
+    let stem = cleaned
+        .split('.')
+        .next()
+        .unwrap_or(&cleaned)
+        .to_ascii_lowercase();
+    if RESERVED_DEVICE_NAMES.iter().any(|n| *n == stem) {
+        return String::new();
+    }
+
+    // Cap at 255 bytes (POSIX NAME_MAX on most filesystems).
+    if cleaned.len() > 255 {
+        return cleaned[..255].to_string();
+    }
+    cleaned
 }
 
 fn resolve_output_path(ctx: &UtilContext<'_>, opts: &CurlOpts, filename: &str) -> String {
@@ -1975,6 +2089,19 @@ pub(crate) fn util_curl(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
         }
     };
 
+    // Surface any security-relevant flags the parser silently consumed
+    // (TLS/DNS/interface pinning). Caller sees a stderr line per dropped
+    // flag rather than a script that quietly behaved differently from
+    // what the flag implied. `WASMSH_CURL_STRICT=1` short-circuits this
+    // path inside is_silent_no_op() and rejects the flag instead.
+    for opts in &segments {
+        for flag in &opts.dropped_security_flags {
+            ctx.output.stderr(
+                format!("curl: warning: {flag} is not enforced in the sandbox\n").as_bytes(),
+            );
+        }
+    }
+
     if segments.iter().all(|s| s.urls.is_empty()) {
         ctx.output.stderr(b"curl: no URL specified\n");
         return 2;
@@ -2168,6 +2295,9 @@ fn effective_opts_for_url(base: &CurlOpts) -> CurlOpts {
         time_cond: base.time_cond.clone(),
         netrc_file: base.netrc_file.clone(),
         netrc_enabled: base.netrc_enabled,
+        // Per-URL effective opts don't need to re-emit the diagnostic; the
+        // top-level util_curl already printed once per segment.
+        dropped_security_flags: Vec::new(),
     }
 }
 
@@ -4210,6 +4340,115 @@ mod tests {
             "https://example.com/x"
         );
         assert_eq!(redact_url_userinfo("not a url"), "not a url");
+    }
+
+    // ── Content-Disposition filename sanitization ───────────────
+
+    #[test]
+    fn sanitize_filename_strips_path_separators() {
+        assert_eq!(
+            sanitize_filename("../../../etc/passwd"),
+            "passwd"
+        );
+        assert_eq!(
+            sanitize_filename("..\\..\\windows\\system32\\config"),
+            "config"
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_rejects_pure_traversal() {
+        // After stripping path components, only "." / ".." remain. Caller
+        // sees empty string and falls back to default naming.
+        assert_eq!(sanitize_filename("."), "");
+        assert_eq!(sanitize_filename(".."), "");
+        assert_eq!(sanitize_filename("/../"), "");
+    }
+
+    #[test]
+    fn sanitize_filename_strips_control_characters() {
+        assert_eq!(sanitize_filename("ab\x00cd"), "abcd");
+        assert_eq!(sanitize_filename("ab\x1bcd"), "abcd");
+        assert_eq!(sanitize_filename("ab\x7fcd"), "abcd");
+    }
+
+    #[test]
+    fn sanitize_filename_neutralises_leading_dash() {
+        // `-rf` would be interpreted as a flag by the next `rm`/`grep`/...
+        assert_eq!(sanitize_filename("-rf"), "_rf");
+    }
+
+    #[test]
+    fn sanitize_filename_rejects_reserved_device_names() {
+        for name in ["CON", "con", "PRN.txt", "nul.html", "LPT1.log"] {
+            assert_eq!(sanitize_filename(name), "", "expected rejection for {name}");
+        }
+    }
+
+    #[test]
+    fn sanitize_filename_caps_length() {
+        let huge = "a".repeat(500);
+        let cleaned = sanitize_filename(&huge);
+        assert!(cleaned.len() <= 255);
+    }
+
+    #[test]
+    fn sanitize_filename_passthrough_ordinary_names() {
+        assert_eq!(sanitize_filename("report-2026.pdf"), "report-2026.pdf");
+        assert_eq!(sanitize_filename("data.json"), "data.json");
+    }
+
+    // ── Security-relevant flag diagnostics ─────────────────────
+
+    #[test]
+    fn curl_warns_when_tls_pinning_flag_is_dropped() {
+        let backend = mock_backend(b"data");
+        let (status, output) = run_curl(
+            &["curl", "--tlsv1.2", "http://example.com/"],
+            &backend,
+        );
+        assert_eq!(status, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("--tlsv1.2 is not enforced"),
+            "expected diagnostic for --tlsv1.2, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn curl_warns_when_resolve_pinning_flag_is_dropped() {
+        let backend = mock_backend(b"data");
+        let (status, output) = run_curl(
+            &[
+                "curl",
+                "--resolve",
+                "example.com:443:1.2.3.4",
+                "http://example.com/",
+            ],
+            &backend,
+        );
+        assert_eq!(status, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("--resolve is not enforced"),
+            "expected diagnostic for --resolve, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn curl_keeps_warning_silent_for_pure_ui_flags() {
+        // --progress-bar is cosmetic, not security-relevant. No warning.
+        let backend = mock_backend(b"data");
+        let (status, output) = run_curl(
+            &["curl", "--progress-bar", "http://example.com/"],
+            &backend,
+        );
+        assert_eq!(status, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("not enforced"),
+            "ui flag must not produce a security warning: {stderr}"
+        );
     }
 
     #[test]
