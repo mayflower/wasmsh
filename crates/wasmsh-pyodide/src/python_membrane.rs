@@ -95,50 +95,55 @@ fn build_preamble(_allowed_hosts: &[String]) -> String {
     // globalThis attrs, version skew on pyodide.ffi), and every one of
     // those would refuse user `python3` invocations entirely. That's a
     // much bigger regression than the modest defence-in-depth loss.
+    //
+    // The body is a raw string so Python's required indentation
+    // survives. Earlier drafts used `"\\n\\"` line continuations and
+    // Rust silently ate every leading space — `PyRun_SimpleString`
+    // returned SyntaxError on every invocation and the whole membrane
+    // shipped non-functional across the F-series.
     String::from(
-        "\
-import builtins as _wasmsh_builtins\n\
-if not getattr(_wasmsh_builtins, 'WASMSH_MEMBRANE_INSTALLED', False):\n\
-    try:\n\
-        import js as _wasmsh_js\n\
-        try:\n\
-            from pyodide.ffi import create_proxy as _wasmsh_create_proxy\n\
-        except BaseException:\n\
-            _wasmsh_create_proxy = None\n\
-        class _WasmshDeny:\n\
-            def __init__(self, name):\n\
-                object.__setattr__(self, '_name', name)\n\
-            def __getattr__(self, attr):\n\
-                raise PermissionError(\n\
-                    'wasmsh: js.' + object.__getattribute__(self, '_name')\n\
-                    + '.' + attr + ' is blocked in the sandbox'\n\
-                )\n\
-            def __setattr__(self, attr, value):\n\
-                raise PermissionError(\n\
-                    'wasmsh: setting js.' + object.__getattribute__(self, '_name')\n\
-                    + '.' + attr + ' is blocked'\n\
-                )\n\
-            def __call__(self, *args, **kwargs):\n\
-                raise PermissionError(\n\
-                    'wasmsh: js.' + object.__getattribute__(self, '_name')\n\
-                    + '() is blocked'\n\
-                )\n\
-        for _wasmsh_denied in (\n\
-            'process', 'require', 'Deno', 'WebSocket', 'fs',\n\
-            'child_process', 'worker_threads', 'subprocess', 'cluster',\n\
-            'crypto',\n\
-        ):\n\
-            try:\n\
-                _wasmsh_target = _WasmshDeny(_wasmsh_denied)\n\
-                if _wasmsh_create_proxy is not None:\n\
-                    _wasmsh_target = _wasmsh_create_proxy(_wasmsh_target)\n\
-                setattr(_wasmsh_js, _wasmsh_denied, _wasmsh_target)\n\
-            except BaseException:\n\
-                pass\n\
-    except BaseException:\n\
-        pass\n\
-    _wasmsh_builtins.WASMSH_MEMBRANE_INSTALLED = True\n\
-",
+        r#"import builtins as _wasmsh_builtins
+if not getattr(_wasmsh_builtins, 'WASMSH_MEMBRANE_INSTALLED', False):
+    try:
+        import js as _wasmsh_js
+        try:
+            from pyodide.ffi import create_proxy as _wasmsh_create_proxy
+        except BaseException:
+            _wasmsh_create_proxy = None
+        class _WasmshDeny:
+            def __init__(self, name):
+                object.__setattr__(self, '_name', name)
+            def __getattr__(self, attr):
+                raise PermissionError(
+                    'wasmsh: js.' + object.__getattribute__(self, '_name')
+                    + '.' + attr + ' is blocked in the sandbox'
+                )
+            def __setattr__(self, attr, value):
+                raise PermissionError(
+                    'wasmsh: setting js.' + object.__getattribute__(self, '_name')
+                    + '.' + attr + ' is blocked'
+                )
+            def __call__(self, *args, **kwargs):
+                raise PermissionError(
+                    'wasmsh: js.' + object.__getattribute__(self, '_name')
+                    + '() is blocked'
+                )
+        for _wasmsh_denied in (
+            'process', 'require', 'Deno', 'WebSocket', 'fs',
+            'child_process', 'worker_threads', 'subprocess', 'cluster',
+            'crypto',
+        ):
+            try:
+                _wasmsh_target = _WasmshDeny(_wasmsh_denied)
+                if _wasmsh_create_proxy is not None:
+                    _wasmsh_target = _wasmsh_create_proxy(_wasmsh_target)
+                setattr(_wasmsh_js, _wasmsh_denied, _wasmsh_target)
+            except BaseException:
+                pass
+    except BaseException:
+        pass
+    _wasmsh_builtins.WASMSH_MEMBRANE_INSTALLED = True
+"#,
     )
 }
 
@@ -187,11 +192,51 @@ mod tests {
     }
 
     #[test]
+    fn preamble_preserves_indentation() {
+        // Regression for a bug that shipped silently across the entire
+        // F-series: an earlier draft used Rust's `"...\n\"` line
+        // continuation to break the preamble across source lines, which
+        // ate every leading space and produced unindented Python that
+        // PyRun_SimpleString refused with IndentationError on the very
+        // first `if`. The whole membrane was non-functional, every
+        // python3 invocation was rejected, and CI surfaced only
+        // "membrane preamble execution failed" with no traceback.
+        let p = build_preamble(&[]);
+        assert!(p.contains("    try:\n"), "outer try block must be indented");
+        assert!(
+            p.contains("        import js as _wasmsh_js\n"),
+            "import must be indented inside the try block"
+        );
+        assert!(
+            p.contains("            from pyodide.ffi import create_proxy"),
+            "create_proxy import must be deeply indented"
+        );
+        // Negative assertion: the preamble must NOT contain a `try:`
+        // immediately at column zero, which would happen if line
+        // continuations ever crept back in.
+        assert!(
+            !p.contains("\ntry:\n"),
+            "found a top-level `try:` — Rust line continuations are eating indentation again"
+        );
+    }
+
+    #[test]
     fn preamble_always_sets_installed_sentinel() {
         // Idempotency: the WASMSH_MEMBRANE_INSTALLED flag must be set on
         // the builtins module regardless of whether shadowing succeeded,
         // so subsequent invocations of the preamble are no-ops.
         let p = build_preamble(&[]);
         assert!(p.contains("WASMSH_MEMBRANE_INSTALLED = True"));
+    }
+
+    /// Lets us dump the actual emitted Python source from the build script
+    /// for debugging when CI shows `PyRun_SimpleString` returning nonzero
+    /// against an opaque Python environment.
+    #[test]
+    #[ignore]
+    fn dump_preamble_to_stderr() {
+        eprintln!("--- BEGIN PREAMBLE ---");
+        eprint!("{}", build_preamble(&[]));
+        eprintln!("--- END PREAMBLE ---");
     }
 }
