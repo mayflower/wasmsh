@@ -2129,6 +2129,14 @@ fn emit_fail_error(ctx: &mut UtilContext<'_>, opts: &CurlOpts, status: u16) {
 /// are either unsupported (returned as an error) or passed through.  On
 /// successful decoding the encoding-related headers are normalized so that
 /// downstream `-i`/`-D`/`-w` output reflects the decoded body.
+/// Hard cap on the decoded size of any compressed response body.
+///
+/// Mirrors the gzip path's existing 64 MiB ceiling. Without this cap a
+/// deflate bomb (a few KiB of input expanding to gigabytes) would exhaust
+/// the runtime's memory before the utility-level `--max-filesize` check
+/// gets a chance to reject it.
+const DECOMPRESS_OUTPUT_LIMIT: usize = 64 * 1024 * 1024;
+
 fn maybe_decompress(response: &mut HttpResponse) -> Result<(), String> {
     let encoding = match find_header_ref(response, "content-encoding") {
         Some(v) => v.trim().to_ascii_lowercase(),
@@ -2137,12 +2145,20 @@ fn maybe_decompress(response: &mut HttpResponse) -> Result<(), String> {
     let decoded = match encoding.as_str() {
         "gzip" => miniz_oxide::inflate::decompress_to_vec_with_limit(
             strip_gzip_framing(&response.body)?,
-            64 * 1024 * 1024,
+            DECOMPRESS_OUTPUT_LIMIT,
         )
         .map_err(|e| format!("gzip inflate failed: {e:?}"))?,
-        "deflate" => miniz_oxide::inflate::decompress_to_vec_zlib(&response.body)
-            .or_else(|_| miniz_oxide::inflate::decompress_to_vec(&response.body))
-            .map_err(|e| format!("deflate inflate failed: {e:?}"))?,
+        "deflate" => miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(
+            &response.body,
+            DECOMPRESS_OUTPUT_LIMIT,
+        )
+        .or_else(|_| {
+            miniz_oxide::inflate::decompress_to_vec_with_limit(
+                &response.body,
+                DECOMPRESS_OUTPUT_LIMIT,
+            )
+        })
+        .map_err(|e| format!("deflate inflate failed: {e:?}"))?,
         "identity" | "" => return Ok(()),
         other => return Err(format!("unsupported Content-Encoding: {other}")),
     };
@@ -3308,6 +3324,42 @@ mod tests {
         assert!(s.ends_with(std::str::from_utf8(&original).unwrap()));
         // Content-Encoding must be stripped after decoding.
         assert!(!s.to_ascii_lowercase().contains("content-encoding"));
+    }
+
+    #[test]
+    fn curl_compressed_deflate_bomb_is_capped() {
+        // Build a deflate stream whose decompressed size would exceed the
+        // 64 MiB ceiling. The classic "deflate bomb" is many megabytes of a
+        // single repeated byte; compressed it is a few KiB.
+        let original = vec![b'A'; 80 * 1024 * 1024];
+        let deflate_stream =
+            miniz_oxide::deflate::compress_to_vec_zlib(&original, 9);
+        assert!(
+            deflate_stream.len() < 1024 * 1024,
+            "test fixture must be small to exercise the bomb"
+        );
+
+        let mut backend = mock_backend(b"");
+        backend.response = HttpResponse {
+            status: 200,
+            headers: vec![
+                ("Content-Type".into(), "text/plain".into()),
+                ("Content-Encoding".into(), "deflate".into()),
+                ("Content-Length".into(), deflate_stream.len().to_string()),
+            ],
+            body: deflate_stream,
+        };
+        let (status, output) = run_curl(
+            &["curl", "--compressed", "http://example.com/"],
+            &backend,
+        );
+        // Non-zero exit and a "deflate inflate failed" message on stderr.
+        assert_ne!(status, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("deflate inflate failed"),
+            "expected deflate failure, got: {stderr}"
+        );
     }
 
     fn crc32_of(data: &[u8]) -> u32 {
