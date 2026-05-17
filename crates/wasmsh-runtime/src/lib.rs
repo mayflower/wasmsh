@@ -5161,35 +5161,40 @@ impl WorkerRuntime {
 
     fn parse_streaming_head_stage(args: &[String]) -> Option<StreamingPipelineStage> {
         let mut mode = StreamingHeadMode::Lines(10);
-        let mut files = Vec::new();
+        let mut files: Vec<&str> = Vec::new();
         let mut i = 0usize;
         while i < args.len() {
-            let arg = args[i].as_str();
-            if arg == "-c" && i + 1 < args.len() {
-                mode = StreamingHeadMode::Bytes(args[i + 1].parse().ok()?);
-                i += 2;
-            } else if arg == "-n" && i + 1 < args.len() {
-                mode = StreamingHeadMode::Lines(args[i + 1].parse().ok()?);
-                i += 2;
-            } else if arg.starts_with('-') && arg.len() > 1 && arg != "--" {
-                if let Ok(lines) = arg[1..].parse::<usize>() {
-                    mode = StreamingHeadMode::Lines(lines);
-                } else {
-                    return None;
-                }
-                i += 1;
-            } else if arg == "--" {
-                i += 1;
-            } else {
-                files.push(arg);
-                i += 1;
-            }
+            i = Self::apply_streaming_head_arg(args, i, &mut mode, &mut files)?;
         }
-        if files.is_empty() {
-            Some(StreamingPipelineStage::Head(mode))
-        } else {
-            None
+        files
+            .is_empty()
+            .then_some(StreamingPipelineStage::Head(mode))
+    }
+
+    fn apply_streaming_head_arg<'a>(
+        args: &'a [String],
+        i: usize,
+        mode: &mut StreamingHeadMode,
+        files: &mut Vec<&'a str>,
+    ) -> Option<usize> {
+        let arg = args[i].as_str();
+        if arg == "--" {
+            return Some(i + 1);
         }
+        if arg == "-c" && i + 1 < args.len() {
+            *mode = StreamingHeadMode::Bytes(args[i + 1].parse().ok()?);
+            return Some(i + 2);
+        }
+        if arg == "-n" && i + 1 < args.len() {
+            *mode = StreamingHeadMode::Lines(args[i + 1].parse().ok()?);
+            return Some(i + 2);
+        }
+        if arg.starts_with('-') && arg.len() > 1 {
+            *mode = StreamingHeadMode::Lines(arg[1..].parse().ok()?);
+            return Some(i + 1);
+        }
+        files.push(arg);
+        Some(i + 1)
     }
 
     fn parse_streaming_tail_stage(args: &[String]) -> Option<StreamingPipelineStage> {
@@ -6507,14 +6512,7 @@ impl WorkerRuntime {
             output_pipes: &output_pipes,
         };
 
-        if let Some(source_pipe) = source_pipe {
-            self.setup_process_subst_first_stage_from_pipe(source_pipe, &ctx, &mut processes)?;
-        } else {
-            self.setup_process_subst_first_stage_standalone(&ctx, &mut processes)?;
-        }
-        for idx in 1..stages.len() {
-            self.setup_process_subst_later_stage(idx, &ctx, &mut processes)?;
-        }
+        self.setup_process_subst_stages(source_pipe, &ctx, &mut processes)?;
 
         let final_pipe = output_pipes.last().cloned()?;
         Some((
@@ -6524,6 +6522,27 @@ impl WorkerRuntime {
             final_pipe,
             stage_statuses,
         ))
+    }
+
+    /// Wire the first stage (with or without an upstream pipe) and then every
+    /// subsequent stage of a process-substitution pipeline. Extracted from
+    /// `build_live_process_subst_pipeline` to keep its cognitive complexity
+    /// under the project threshold.
+    fn setup_process_subst_stages(
+        &mut self,
+        source_pipe: Option<Rc<RefCell<PipeBuffer>>>,
+        ctx: &StreamingStageCtx<'_>,
+        processes: &mut Vec<StreamingPipeProcess<'static>>,
+    ) -> Option<()> {
+        if let Some(source_pipe) = source_pipe {
+            self.setup_process_subst_first_stage_from_pipe(source_pipe, ctx, processes)?;
+        } else {
+            self.setup_process_subst_first_stage_standalone(ctx, processes)?;
+        }
+        for idx in 1..ctx.stages.len() {
+            self.setup_process_subst_later_stage(idx, ctx, processes)?;
+        }
+        Some(())
     }
 
     /// First stage of a process-substitution pipeline when there is an upstream
