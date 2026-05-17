@@ -21,7 +21,7 @@ const MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 
 /// Hard cap on the number of inodes (files + directories) the VFS will
 /// hold. Defends against fork-bombs-of-tiny-files that wouldn't trip the
-/// byte quota but still exhaust HashMap memory and slow read_dir scans.
+/// byte quota but still exhaust `HashMap` memory and slow `read_dir` scans.
 const MAX_INODES: usize = 100_000;
 
 /// An entry in the memory filesystem.

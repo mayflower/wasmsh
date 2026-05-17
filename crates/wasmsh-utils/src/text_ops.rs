@@ -1554,6 +1554,56 @@ struct SedOpts<'a> {
     file_args: Vec<&'a str>,
 }
 
+/// One token of a sed argv classified into a flat enum. Lets `parse_sed_args`
+/// dispatch via a `match` instead of a deeply-nested if/else-if chain,
+/// keeping its cognitive complexity below the rust:S3776 threshold.
+enum SedArg<'a> {
+    SuppressPrint,
+    InPlaceNoSuffix,
+    InPlaceSuffix(&'a str),
+    Expression,
+    ExtendedRegex,
+    ScriptFile,
+    DoubleDash,
+    UnknownFlag,
+    Positional,
+}
+
+fn classify_sed_arg(arg: &str) -> SedArg<'_> {
+    match arg {
+        "-n" => SedArg::SuppressPrint,
+        "-i" => SedArg::InPlaceNoSuffix,
+        "-e" => SedArg::Expression,
+        "-E" | "-r" => SedArg::ExtendedRegex,
+        "-f" => SedArg::ScriptFile,
+        "--" => SedArg::DoubleDash,
+        _ => {
+            if let Some(suffix) = arg.strip_prefix("-i") {
+                SedArg::InPlaceSuffix(suffix)
+            } else if arg.starts_with('-') && arg.len() > 1 {
+                SedArg::UnknownFlag
+            } else {
+                SedArg::Positional
+            }
+        }
+    }
+}
+
+fn push_sed_positional<'a>(arg: &'a str, opts: &mut SedOpts<'a>) {
+    if opts.expressions.is_empty() {
+        opts.expressions.push(arg.to_string());
+    } else {
+        opts.file_args.push(arg);
+    }
+}
+
+fn load_sed_script_file(ctx: &mut UtilContext<'_>, path_arg: &str, opts: &mut SedOpts<'_>) {
+    let full = resolve_path(ctx.cwd, path_arg);
+    if let Ok(script) = collect_path_text(ctx, &full, path_arg, "sed") {
+        opts.expressions.push(script);
+    }
+}
+
 fn parse_sed_args<'a>(ctx: &mut UtilContext<'_>, argv: &'a [&'a str]) -> SedOpts<'a> {
     let mut opts = SedOpts {
         suppress_print: false,
@@ -1565,40 +1615,44 @@ fn parse_sed_args<'a>(ctx: &mut UtilContext<'_>, argv: &'a [&'a str]) -> SedOpts
     let mut i = 1;
     while i < argv.len() {
         let arg = argv[i];
-        if arg == "-n" {
-            opts.suppress_print = true;
-            i += 1;
-        } else if arg == "-i" {
-            opts.in_place = true;
-            i += 1;
-        } else if let Some(suffix) = arg.strip_prefix("-i") {
-            opts.in_place = true;
-            opts.in_place_suffix = Some(suffix.to_string());
-            i += 1;
-        } else if arg == "-e" && i + 1 < argv.len() {
-            opts.expressions.push(argv[i + 1].to_string());
-            i += 2;
-        } else if arg == "-E" || arg == "-r" {
-            i += 1; // extended regex, accept
-        } else if arg == "-f" && i + 1 < argv.len() {
-            let full = resolve_path(ctx.cwd, argv[i + 1]);
-            if let Ok(script) = collect_path_text(ctx, &full, argv[i + 1], "sed") {
-                opts.expressions.push(script);
+        match classify_sed_arg(arg) {
+            SedArg::SuppressPrint => {
+                opts.suppress_print = true;
+                i += 1;
             }
-            i += 2;
-        } else if arg.starts_with('-') && arg.len() > 1 && arg != "--" {
-            i += 1;
-        } else if arg == "--" {
-            i += 1;
-            opts.file_args.extend(argv[i..].iter().copied());
-            break;
-        } else {
-            if opts.expressions.is_empty() {
-                opts.expressions.push(arg.to_string());
-            } else {
-                opts.file_args.push(arg);
+            SedArg::InPlaceNoSuffix => {
+                opts.in_place = true;
+                i += 1;
             }
-            i += 1;
+            SedArg::InPlaceSuffix(suffix) => {
+                opts.in_place = true;
+                opts.in_place_suffix = Some(suffix.to_string());
+                i += 1;
+            }
+            SedArg::Expression => {
+                if i + 1 < argv.len() {
+                    opts.expressions.push(argv[i + 1].to_string());
+                }
+                i += 2;
+            }
+            SedArg::ExtendedRegex | SedArg::UnknownFlag => {
+                i += 1;
+            }
+            SedArg::ScriptFile => {
+                if i + 1 < argv.len() {
+                    load_sed_script_file(ctx, argv[i + 1], &mut opts);
+                }
+                i += 2;
+            }
+            SedArg::DoubleDash => {
+                i += 1;
+                opts.file_args.extend(argv[i..].iter().copied());
+                break;
+            }
+            SedArg::Positional => {
+                push_sed_positional(arg, &mut opts);
+                i += 1;
+            }
         }
     }
     opts
