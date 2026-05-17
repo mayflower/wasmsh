@@ -32,6 +32,28 @@ pub struct PyodideNetworkBackend {
     allowlist: HostAllowlist,
 }
 
+/// RAII guard that frees a `libc::malloc`-allocated C string on drop.
+///
+/// The JS host returns a `*mut c_char` that the caller must free with
+/// `libc::free`. Without this guard, any early-return path (UTF-8 error,
+/// JSON parse failure, etc.) between receipt and the manual free would leak
+/// the allocation.
+struct JsAllocCString(*mut c_char);
+
+impl JsAllocCString {
+    fn as_ptr(&self) -> *const c_char {
+        self.0
+    }
+}
+
+impl Drop for JsAllocCString {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { libc::free(self.0.cast()) };
+        }
+    }
+}
+
 impl PyodideNetworkBackend {
     pub fn new(allowed_hosts: Vec<String>) -> Self {
         Self {
@@ -109,16 +131,13 @@ impl NetworkBackend for PyodideNetworkBackend {
             return Err(NetworkError::Other("fetch returned null".into()));
         }
 
-        let result_str = unsafe { CStr::from_ptr(result_ptr) }
+        let owned = JsAllocCString(result_ptr);
+        let result_str = unsafe { CStr::from_ptr(owned.as_ptr()) }
             .to_str()
-            .unwrap_or("{}");
+            .map_err(|e| NetworkError::Other(format!("non-utf8 fetch response: {e}")))?;
         let parsed: JsFetchResponse = serde_json::from_str(result_str)
             .map_err(|e| NetworkError::Other(format!("invalid fetch response: {e}")))?;
-
-        // Free the JS-allocated string.
-        unsafe {
-            libc::free(result_ptr.cast());
-        }
+        drop(owned);
 
         if let Some(err) = parsed.error {
             return Err(NetworkError::ConnectionFailed(err));
