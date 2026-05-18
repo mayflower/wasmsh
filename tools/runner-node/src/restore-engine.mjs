@@ -207,18 +207,23 @@ export async function restoreSessionWorker({
     throw error;
   });
 
+  // Per-command wall-clock timeout: a runaway worker (infinite Python loop,
+  // wedged broker fetch) must not pin a session forever. Bound every
+  // sendRequest by this ceiling, then terminate() the worker and reject the
+  // pending promise. Callers that legitimately need longer must opt in by
+  // passing `timeoutMs` explicitly.
+  //
+  // The const must be declared BEFORE the first sendRequest() call. function
+  // declarations hoist, but `const` does not — when sendRequest was called
+  // for `init` below, DEFAULT_REQUEST_TIMEOUT_MS was still in the TDZ.
+  const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+
   restore.endStage("worker_spawn");
   restore.beginStage("sandbox_restore");
   const initResult = await sendRequest("init", {});
   restore.endStage("sandbox_restore");
   const restoreResult = restore.finish();
 
-  // Per-command wall-clock timeout: a runaway worker (infinite Python loop,
-  // wedged broker fetch) must not pin a session forever. Bound every
-  // sendRequest by this ceiling, then terminate() the worker and reject the
-  // pending promise. Callers that legitimately need longer must opt in by
-  // passing `timeoutMs` explicitly.
-  const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
   function sendRequest(method, params, options = {}) {
     ensureWorkerActive();
     const id = nextRequestId;
