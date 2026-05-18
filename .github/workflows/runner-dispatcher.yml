@@ -45,6 +45,35 @@ jobs:
       - name: Lint dispatcher
         run: cargo clippy -p wasmsh-dispatcher --all-targets -- -D warnings
 
+      - name: Stage Pyodide assets from published npm tarball
+        # The runner-node tests instantiate the full session worker, which
+        # requires `pyodide.asm.wasm` and friends to live in
+        # `packages/npm/wasmsh-pyodide/assets/`. Building Pyodide from
+        # source on every push is too slow (~30 min), so we reuse the
+        # already-published tarball — same approach as the LangChain
+        # Adapters workflow. Fall back to the latest published version
+        # during the post-version-bump / pre-publish window so this
+        # workflow stays green while a release is in flight.
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./packages/npm/wasmsh-pyodide/package.json').version")"
+          echo "Target @mayflowergmbh/wasmsh-pyodide@$VERSION"
+          tmp="$(mktemp -d)"
+          url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
+          echo "Fetching $url"
+          if ! curl -fsSL "$url" -o "$tmp/pkg.tgz"; then
+            echo "Version $VERSION not yet on registry; falling back to latest published"
+            LATEST="$(npm view @mayflowergmbh/wasmsh-pyodide version)"
+            echo "Falling back to @mayflowergmbh/wasmsh-pyodide@$LATEST"
+            url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${LATEST}.tgz"
+            curl -fsSL "$url" -o "$tmp/pkg.tgz"
+          fi
+          mkdir -p "$tmp/extract"
+          tar -xzf "$tmp/pkg.tgz" -C "$tmp/extract"
+          mkdir -p packages/npm/wasmsh-pyodide/assets
+          cp -r "$tmp/extract/package/assets/"* packages/npm/wasmsh-pyodide/assets/
+          ls packages/npm/wasmsh-pyodide/assets/pyodide.asm.wasm
+
       - name: Run runner E2E
         run: just test-e2e-runner-node
 

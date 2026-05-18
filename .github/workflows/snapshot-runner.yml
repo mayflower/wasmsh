@@ -36,6 +36,18 @@ jobs:
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential wget ccache pkg-config xz-utils autoconf automake libtool
 
+      # `tools/pyodide/build-custom.sh` creates `pyodide-src/.venv` via
+      # `python3 -m venv` and then `pip install pyodide-build` into it.
+      # The system Python on `mayflower-k8s-runners` is Debian 3.12, which
+      # ships without the `venv` module unless `python3.12-venv` is
+      # explicitly installed. `actions/setup-python` provides a hermetic
+      # Python that already has venv bundled — matching what `pyodide.yml`
+      # uses for the same `just build-pyodide` step, so the two workflows
+      # stay in lockstep.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-emscripten
