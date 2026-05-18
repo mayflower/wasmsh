@@ -184,6 +184,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build langchain-wasmsh adapter
+        # The deepagent-typescript example imports
+        # @mayflowergmbh/langchain-wasmsh via `workspace:*`, which pnpm
+        # resolves to packages/npm/langchain-wasmsh — and tsx then needs
+        # the compiled `dist/index.js`. Build it before the smoke test
+        # so the example resolution doesn't fail with ERR_MODULE_NOT_FOUND.
+        run: pnpm --filter @mayflowergmbh/langchain-wasmsh build
+
       - name: Integration tests (sandbox standard suite, no LLM)
         run: pnpm --filter @mayflowergmbh/langchain-wasmsh test:int
 

@@ -270,7 +270,7 @@ The dispatcher proxies the SSE stream from the runner pod end-to-end without par
 The TypeScript surface mirrors the Python adapter's shape. Concretely:
 
 - `@mayflowergmbh/wasmsh-pyodide` (this repo) exposes
-  `NodeSession.runPtc({ code, tools, onHostCall })` since v0.6.4. Browser
+  `NodeSession.runPtc({ code, tools, onHostCall })` since v0.7.0. Browser
   sessions throw on `runPtc`; browser PTC is out of scope for now.
 - `@mayflowergmbh/langchain-wasmsh` (in `deepagentsjs/libs/providers/wasmsh`,
   the canonical TS adapter location per LangChain's partner-package policy)
@@ -346,7 +346,7 @@ Exit criteria:
 
 Touch points:
 - `packages/npm/wasmsh-pyodide`: `NodeSession.runPtc({ code, tools, onHostCall })`
-  exposed in v0.6.4 (the JS-side dispatcher loop in § 7.1 is shared with
+  exposed in v0.7.0 (the JS-side dispatcher loop in § 7.1 is shared with
   the Python adapter through the same JSON-RPC channel).
 - `deepagentsjs/libs/providers/wasmsh` (LangChain partner package, not in
   this repo): `createWasmshInterpreterMiddleware` with the same `ptc=`

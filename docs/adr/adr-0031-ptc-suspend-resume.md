@@ -129,7 +129,7 @@ build — so PTC degradation is loud, not silent.
   `POST /sessions/<id>/host_result` endpoint).
 - The npm `NodeSession` (returned by `createNodeSession`) exposes
   `runPtc({ code, tools, onHostCall })` since `@mayflowergmbh/wasmsh-pyodide`
-  v0.6.4 — npm consumers no longer need to speak the wire protocol by
+  v0.7.0 — npm consumers no longer need to speak the wire protocol by
   hand. The browser session still throws on `runPtc`; browser PTC is
   out of scope for Phase 3.
 - The npm `@mayflowergmbh/langchain-wasmsh` adapter consumes `runPtc`
