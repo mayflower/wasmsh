@@ -265,11 +265,17 @@ export async function createRunnerServer(options = {}) {
         }
         case "read-file": {
           const result = await session.readFile(body.path);
+          // Strip `content` (a Uint8Array) before spreading. JSON.stringify
+          // serializes Uint8Array as `{"0":104,"1":101,...}` — roughly 17x
+          // expansion. A 10 MiB file becomes a ~185 MiB JSON response and
+          // trips the dispatcher's 64 MiB upstream-response cap. Clients
+          // consume `contentBase64`; the raw `content` field was redundant.
+          const { content: _ignored, ...rest } = result;
           json(response, 200, {
             ok: true,
             sessionId,
             result: {
-              ...result,
+              ...rest,
               contentBase64: Buffer.from(result.content).toString("base64"),
             },
           });

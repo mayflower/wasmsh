@@ -127,7 +127,12 @@ async function main() {
   await ensureTools();
 
   if (!values["skip-build"]) {
-    await buildImages({ skipExisting: true });
+    // skipExisting:false so a source edit between runs actually lands in
+    // the next image. Docker's layer cache still skips unchanged
+    // COPY/RUN steps, so the rebuild is fast (~5s for a no-op). The
+    // explicit --skip-build flag covers the case where the caller wants
+    // to reuse the previous image verbatim.
+    await buildImages({ skipExisting: false });
   }
   await retagImages();
   await composeUp();
