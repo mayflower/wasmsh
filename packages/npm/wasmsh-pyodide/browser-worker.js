@@ -272,6 +272,28 @@ async function boot(baseUrl) {
     installFsMembrane(module.FS);
   }
 
+  // Preload micropip BEFORE the fetch membrane is installed on the worker
+  // global. `installPythonPackages` always goes through `micropip.install`,
+  // and micropip is a Pyodide bundled package fetched from `indexURL` via
+  // `pyodide.loadPackage("micropip")`. Once the membrane is installed with
+  // the session's `allowedHosts` (which usually omits the asset host), that
+  // fetch is denied and every install call fails with
+  // "ModuleNotFoundError: No module named 'micropip'". Loading it here, in
+  // the boot path, sidesteps the membrane without weakening the network
+  // policy for user code. Node-on-the-same-codepath reads bundled wheels
+  // from disk so this preload is a no-op there; in the browser it is what
+  // makes emfs:-only installs work with `allowedHosts=[]`.
+  try {
+    await pyodide.loadPackage("micropip");
+  } catch (err) {
+    // Don't fail boot — if micropip can't be loaded the user will see a
+    // clear error from installPythonPackages, and the rest of the sandbox
+    // is still usable for shell + python3 code that doesn't install pkgs.
+    if (typeof console !== "undefined" && console.warn) {
+      console.warn("wasmsh: preloading micropip failed:", err?.message ?? err);
+    }
+  }
+
   module._pyodide = pyodide;
   runtimeBridge = runtimeBridgeModule().createRuntimeBridge(module);
 }

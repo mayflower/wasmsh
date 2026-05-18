@@ -118,14 +118,30 @@ test("similar hostnames: lookalikes do not bypass the allowlist", async () => {
   }
 });
 
-test("wildcard: *.host allows base + subdomain, still blocks strangers", async (t) => {
+test("wildcard: *.host covers subdomains and explicitly excludes the apex", async (t) => {
   if (!(await ensureOutbound(t))) return;
+  // `*.example.com` matches strict subdomains only; the apex (`example.com`)
+  // must be listed explicitly. Per docs/reference/sandbox-and-capabilities.md
+  // and the May-17 net_types.rs fix (49cdeea9).
   const sb = await sandbox([`*.${ALLOWED_HOST}`]);
-  const allowed = await sb.execute(`curl -sL https://${ALLOWED_HOST}`);
-  assert.equal(allowed.exitCode, 0, `wildcard should allow base domain: ${JSON.stringify(allowed)}`);
+
+  const apex = await sb.execute(`curl -s -o /dev/null -w '%{http_code}' https://${ALLOWED_HOST} 2>&1`);
+  assert.notEqual(apex.exitCode, 0,
+    `apex must NOT be covered by *.${ALLOWED_HOST}: ${JSON.stringify(apex)}`);
 
   const denied = await sb.execute(`curl https://${DENIED_HOST} 2>&1`);
   assert.notEqual(denied.exitCode, 0, "example.com must still be blocked under wildcard");
+});
+
+test("wildcard + apex listed together: both are allowed", async (t) => {
+  if (!(await ensureOutbound(t))) return;
+  // The documented way to grant both apex and subdomains: list both
+  // patterns explicitly. Mirrors the equivalent pyodide-node test.
+  const sb = await sandbox([ALLOWED_HOST, `*.${ALLOWED_HOST}`]);
+  // `-sL` to follow the apex→www redirect under per-hop re-check (audit B3);
+  // both hops must be permitted by the allowlist.
+  const apex = await sb.execute(`curl -sL https://${ALLOWED_HOST}`);
+  assert.equal(apex.exitCode, 0, `apex must be allowed when listed: ${JSON.stringify(apex)}`);
 });
 
 test("empty allowlist: every outbound fetch is denied", async () => {
