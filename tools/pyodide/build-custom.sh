@@ -170,6 +170,20 @@ check() {
 # Add the runtime staticlib to the Pyodide link command.  Guard on the
 # full path substring (unique to our substitution) rather than a short
 # token that could collide with unrelated changes.
+#
+# Before re-patching, strip any *previous* libwasmsh_pyodide.a paths from
+# the link command. Otherwise, if the build is run from a different repo
+# checkout (e.g. /Volumes/... after a prior run under /Users/...), the
+# `grep -qF "$RUNTIME_LIB"` check below misses the old path and the sed
+# below appends a second staticlib — wasm-ld then reports thousands of
+# duplicate-symbol errors and aborts.
+if grep -qE "libwasmsh_pyodide\.a" Makefile; then
+    "$SED" -i -E 's| /[^ ]*/libwasmsh_pyodide\.a||g' Makefile
+    if grep -qE "libwasmsh_pyodide\.a" Makefile; then
+        echo "ERROR: failed to strip prior libwasmsh_pyodide.a paths from Makefile."
+        exit 1
+    fi
+fi
 if ! grep -qF "$RUNTIME_LIB" Makefile; then
     "$SED" -i "s|\$(CXX) -o dist/pyodide.asm.js -lpyodide src/core/main.o|\$(CXX) -o dist/pyodide.asm.js -lpyodide src/core/main.o $RUNTIME_LIB|" Makefile
     check Makefile "$(printf '%s' "$RUNTIME_LIB" | sed 's/[][\\.*^$]/\\&/g')" \

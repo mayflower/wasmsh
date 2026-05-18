@@ -187,6 +187,82 @@ test("301 POST is downgraded to GET on redirect", async () => {
   });
 });
 
+test("response body with multiple chunks drains via arrayBuffer() without hanging", async () => {
+  // Regression for the streaming wrapper deadlock: an earlier draft put
+  // the entire read loop inside an `async start(controller)` callback,
+  // and `await reader.cancel()` on the error path could deadlock the
+  // consumer that was waiting for the start promise to resolve. Pyodide's
+  // micropip calls `await response.arrayBuffer()` to read wheel bytes; if
+  // the wrapper hangs, every wheel install hangs.
+  //
+  // This test serves a multi-chunk body through the wrapper and verifies
+  // arrayBuffer() resolves within a short timeout with the exact bytes.
+  const expected = new Uint8Array(8 * 1024);
+  for (let i = 0; i < expected.length; i++) expected[i] = i & 0xff;
+  const fake = async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        // Multiple enqueues with an async gap to simulate a real network
+        // response that arrives in chunks rather than one synchronous burst.
+        const half = expected.length / 2;
+        controller.enqueue(expected.slice(0, half));
+        queueMicrotask(() => {
+          controller.enqueue(expected.slice(half));
+          controller.close();
+        });
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { "content-type": "application/octet-stream" },
+    });
+  };
+  await withMembrane(["allowed.test"], fake, async (brokered) => {
+    const result = await Promise.race([
+      brokered("https://allowed.test/wheel")
+        .then((res) => res.arrayBuffer())
+        .then((buf) => new Uint8Array(buf)),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("arrayBuffer hung > 2s")), 2000),
+      ),
+    ]);
+    assert.equal(result.length, expected.length);
+    for (let i = 0; i < expected.length; i++) {
+      if (result[i] !== expected[i]) {
+        assert.fail(`byte ${i} mismatch: ${result[i]} != ${expected[i]}`);
+      }
+    }
+  });
+});
+
+test("response body drains via text() without hanging", async () => {
+  // Same regression as above, but for the text() read path. Pyodide's
+  // pyfetch.string() goes through here.
+  const expected = "x".repeat(4096) + "y".repeat(4096);
+  const fake = async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        const enc = new TextEncoder();
+        controller.enqueue(enc.encode("x".repeat(4096)));
+        queueMicrotask(() => {
+          controller.enqueue(enc.encode("y".repeat(4096)));
+          controller.close();
+        });
+      },
+    });
+    return new Response(stream, { status: 200 });
+  };
+  await withMembrane(["allowed.test"], fake, async (brokered) => {
+    const result = await Promise.race([
+      brokered("https://allowed.test/text").then((res) => res.text()),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("text() hung > 2s")), 2000),
+      ),
+    ]);
+    assert.equal(result, expected);
+  });
+});
+
 test("redirect chain longer than the cap is rejected", async () => {
   let n = 0;
   const fake = async () => {

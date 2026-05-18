@@ -4,6 +4,7 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import { createFullModule } from "./lib/node-module.mjs";
+import { installFetchMembrane } from "./lib/fetch-membrane.mjs";
 import { installPackages, handlePipCommand } from "./lib/install.mjs";
 import {
   buildRunResult,
@@ -181,6 +182,12 @@ class WasmshNodeHost {
   async init({ stepBudget = 0, initialFiles = [], allowedHosts = [] } = {}) {
     await this.ensureBooted();
     this._allowedHosts = allowedHosts;
+    // Install the JS fetch membrane on the host's globalThis so Pyodide's
+    // `js.fetch` / `pyodide.http.pyfetch` / `micropip` all go through the
+    // same allowlist as curl. The membrane is idempotent across re-init
+    // calls and the original fetch is captured inside a JS closure that
+    // is not reachable from user Python. Audit F2.
+    installFetchMembrane(globalThis, allowedHosts);
     const events = this.sendHostCommand({
       Init: { step_budget: stepBudget, allowed_hosts: allowedHosts },
     });

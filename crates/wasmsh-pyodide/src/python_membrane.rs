@@ -13,9 +13,18 @@
 //! 1. Runs the install logic inside a single function so locals don't
 //!    leak into `globals()`.
 //! 2. Replaces dangerous attributes on the `js` proxy
-//!    (`process`, `require`, `Deno`, `WebSocket`, `fs`, `child_process`,
-//!    `worker_threads`, `subprocess`, `cluster`, `crypto`) with deny
-//!    proxies that raise `PermissionError` on any read or call.
+//!    (`require`, `Deno`, `WebSocket`, `fs`, `child_process`,
+//!    `worker_threads`, `subprocess`, `cluster`) with deny proxies that
+//!    raise `PermissionError` on any read or call.
+//!
+//!    `js.process` is **not** denied. Pyodide-on-Node reads
+//!    `js.process.execPath` / `.version` / `.platform` during boot for
+//!    Node-vs-browser detection; replacing the whole `process` object
+//!    with a deny-proxy breaks Pyodide initialization with a
+//!    PermissionError before any user code can run. The dangerous
+//!    process APIs (`spawnSync`, `kill`, `binding`) are reached via
+//!    `require('child_process')` which IS denied, so closing the
+//!    `js.require` path is the real seam.
 //! 3. Sets a single `builtins.WASMSH_MEMBRANE_INSTALLED` sentinel so a
 //!    subsequent install attempt short-circuits. The Rust caller also
 //!    tracks installation state in a thread-local to avoid the
@@ -129,9 +138,8 @@ if not getattr(_wasmsh_builtins, 'WASMSH_MEMBRANE_INSTALLED', False):
                     + '() is blocked'
                 )
         for _wasmsh_denied in (
-            'process', 'require', 'Deno', 'WebSocket', 'fs',
+            'require', 'Deno', 'WebSocket', 'fs',
             'child_process', 'worker_threads', 'subprocess', 'cluster',
-            'crypto',
         ):
             try:
                 _wasmsh_target = _WasmshDeny(_wasmsh_denied)
