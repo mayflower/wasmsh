@@ -3119,7 +3119,7 @@ impl WorkerRuntime {
                 )]
             }
             HostCommand::ReadFile { path } => self.handle_read_file_command(&path),
-            HostCommand::WriteFile { path, data } => self.handle_write_file_command(path, &data),
+            HostCommand::WriteFile { path, data } => self.handle_write_file_command(&path, &data),
             HostCommand::ListDir { path } => self.handle_list_dir_command(&path),
             HostCommand::Mount { .. } => {
                 vec![WorkerEvent::Diagnostic(
@@ -3224,15 +3224,20 @@ impl WorkerRuntime {
         }
     }
 
-    fn handle_write_file_command(&mut self, path: String, data: &[u8]) -> Vec<WorkerEvent> {
+    fn handle_write_file_command(&mut self, path: &str, data: &[u8]) -> Vec<WorkerEvent> {
         use wasmsh_fs::OpenOptions;
-        match self.fs.open(&path, OpenOptions::write()) {
+        match self.fs.open(path, OpenOptions::write()) {
             Ok(h) => {
                 if let Err(e) = self.fs.write_file(h, data) {
                     self.write_stderr(format!("wasmsh: write error: {e}\n").as_bytes());
                 }
                 self.fs.close(h);
-                vec![WorkerEvent::FsChanged(path)]
+                // The open/write above recorded the path in the FS change log;
+                // drain through the same path the in-shell writes use so the
+                // `FsChanged` emission stays unified.
+                let mut events = Vec::new();
+                self.drain_fs_change_events(&mut events);
+                events
             }
             Err(e) => vec![WorkerEvent::Diagnostic(
                 DiagnosticLevel::Error,
@@ -3353,6 +3358,7 @@ impl WorkerRuntime {
             self.run_exit_trap_if_needed(&mut events);
             self.drain_io_events(&mut events);
             self.drain_diagnostic_events(&mut events);
+            self.drain_fs_change_events(&mut events);
             let exit_status = self.current_run_exit_status();
             events.push(WorkerEvent::Exit(exit_status));
             self.active_run = None;
@@ -3360,6 +3366,7 @@ impl WorkerRuntime {
         } else {
             let mut events = pending_signal_events;
             events.extend(self.drain_partial_run_events());
+            self.drain_fs_change_events(&mut events);
             self.active_run = Some(run);
             Some(ExecutionPoll::Yield(events))
         }
@@ -3500,6 +3507,7 @@ impl WorkerRuntime {
         self.run_exit_trap_if_needed(&mut events);
         self.drain_io_events(&mut events);
         self.drain_diagnostic_events(&mut events);
+        self.drain_fs_change_events(&mut events);
         let exit_status = self.current_run_exit_status();
         events.push(WorkerEvent::Exit(exit_status));
         self.exec.reset();
@@ -4280,6 +4288,29 @@ impl WorkerRuntime {
                 Self::to_protocol_diag_level(diag.level),
                 diag.message,
             ));
+        }
+    }
+
+    /// Returns `true` for filesystem paths that are internal runtime scratch
+    /// (heredoc/pipe staging, process substitution) and must not surface to
+    /// the host as `FsChanged` events.
+    fn is_internal_scratch_path(path: &str) -> bool {
+        path.starts_with("/tmp/_wasmsh_") || path.starts_with("/tmp/_proc_subst_")
+    }
+
+    /// Drain the filesystem backend's change log into `FsChanged` events, one
+    /// per distinct mutated path, skipping internal scratch paths. This is how
+    /// in-shell writes (`echo > f`, `touch`, `mkdir`, `cp`, `rm`, `tee`,
+    /// redirections) notify the host that the VFS changed.
+    fn drain_fs_change_events(&mut self, events: &mut Vec<WorkerEvent>) {
+        let Some(log) = self.fs.change_log() else {
+            return;
+        };
+        for path in log.take() {
+            if Self::is_internal_scratch_path(&path) {
+                continue;
+            }
+            events.push(WorkerEvent::FsChanged(path));
         }
     }
 

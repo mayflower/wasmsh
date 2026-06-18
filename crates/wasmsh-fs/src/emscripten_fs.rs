@@ -9,7 +9,7 @@ use std::ffi::CString;
 use std::io::Read;
 use std::rc::Rc;
 
-use crate::{DirEntry, FileHandle, FsError, Metadata, OpenOptions, Vfs, VfsWriteSink};
+use crate::{DirEntry, FileHandle, FsChangeLog, FsError, Metadata, OpenOptions, Vfs, VfsWriteSink};
 
 /// A filesystem backed by Emscripten's POSIX layer.
 ///
@@ -20,6 +20,7 @@ pub struct EmscriptenFs {
     virtual_readers: HashMap<String, Rc<RefCell<Box<dyn Read>>>>,
     /// Maps our `FileHandle` to (libc `FILE*`, path, open-for-write).
     open_files: HashMap<u64, OpenFile>,
+    change_log: FsChangeLog,
 }
 
 impl std::fmt::Debug for EmscriptenFs {
@@ -28,6 +29,7 @@ impl std::fmt::Debug for EmscriptenFs {
             .field("next_handle", &self.next_handle)
             .field("virtual_reader_count", &self.virtual_readers.len())
             .field("open_files", &self.open_files)
+            .field("change_log", &self.change_log)
             .finish()
     }
 }
@@ -166,6 +168,7 @@ impl EmscriptenFs {
             next_handle: 1,
             virtual_readers: HashMap::new(),
             open_files: HashMap::new(),
+            change_log: FsChangeLog::new(),
         }
     }
 }
@@ -176,6 +179,9 @@ impl Clone for EmscriptenFs {
             next_handle: 1,
             virtual_readers: self.virtual_readers.clone(),
             open_files: HashMap::new(),
+            // Share the same underlying change log so writes performed via a
+            // clone still surface to the host that drains the original.
+            change_log: self.change_log.clone(),
         }
     }
 }
@@ -245,6 +251,10 @@ impl Vfs for EmscriptenFs {
                 return Err(FsError::NotFound(path.to_string()));
             }
             return Err(FsError::PermissionDenied(path.to_string()));
+        }
+
+        if opts.write || opts.append || opts.create || opts.truncate {
+            self.change_log.record(path);
         }
 
         let h = self.next_handle;
@@ -352,6 +362,7 @@ impl Vfs for EmscriptenFs {
                 if written != data.len() {
                     return Err(FsError::Io("short write".into()));
                 }
+                self.change_log.record(path);
                 Ok(())
             }
             OpenFileSource::Virtual(_) => Err(FsError::PermissionDenied(
@@ -376,6 +387,7 @@ impl Vfs for EmscriptenFs {
         if fp.is_null() {
             return Err(errno_to_fs_error(path));
         }
+        self.change_log.record(path);
         Ok(Box::new(EmscriptenWriteSink { fp }))
     }
 
@@ -443,6 +455,7 @@ impl Vfs for EmscriptenFs {
         if rc != 0 {
             return Err(errno_to_fs_error(path));
         }
+        self.change_log.record(path);
         Ok(())
     }
 
@@ -454,6 +467,7 @@ impl Vfs for EmscriptenFs {
         if unsafe { libc::unlink(cpath.as_ptr()) } != 0 {
             return Err(errno_to_fs_error(path));
         }
+        self.change_log.record(path);
         Ok(())
     }
 
@@ -462,6 +476,11 @@ impl Vfs for EmscriptenFs {
         if unsafe { libc::rmdir(cpath.as_ptr()) } != 0 {
             return Err(errno_to_fs_error(path));
         }
+        self.change_log.record(path);
         Ok(())
+    }
+
+    fn change_log(&self) -> Option<&FsChangeLog> {
+        Some(&self.change_log)
     }
 }

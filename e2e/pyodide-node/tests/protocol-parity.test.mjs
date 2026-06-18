@@ -91,6 +91,29 @@ describe("protocol parity: Pyodide runtime", () => {
     assert.equal(exit.Exit, 0);
   });
 
+  // ── In-shell writes emit FsChanged ────────────────────────
+
+  it("Run with in-shell redirect emits FsChanged", { skip: SKIP }, async () => {
+    const events = await adapter.send({
+      Run: { input: "echo inshell > /workspace/inshell.txt" },
+    });
+    const changed = events
+      .filter((e) => "FsChanged" in e)
+      .map((e) => e.FsChanged);
+    assert.ok(
+      changed.includes("/workspace/inshell.txt"),
+      "in-shell redirect must emit FsChanged, got: " + JSON.stringify(changed),
+    );
+    const exit = events.find((e) => "Exit" in e);
+    assert.equal(exit.Exit, 0);
+
+    // Read-back confirms the file really exists.
+    const readEvents = await adapter.send({
+      ReadFile: { path: "/workspace/inshell.txt" },
+    });
+    assert.equal(decodeStdout(readEvents), "inshell\n");
+  });
+
   // ── Cancel ────────────────────────────────────────────────
 
   it("Cancel returns Diagnostic(Info) event", { skip: SKIP }, async () => {

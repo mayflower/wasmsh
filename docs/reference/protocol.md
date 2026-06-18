@@ -86,7 +86,19 @@ Sending `Run` (or any other command) before `Init` produces
   more work remains, the batch ends with `Yielded`. The final poll ends with
   `Exit(code)` and no trailing `Yielded`.
 - Within a batch, `Stdout` and `Stderr` chunks appear in production order.
-  `Exit` is always the last event in a completed execution batch.
+  Any `FsChanged(path)` events for the batch are emitted after the I/O and
+  diagnostic events and immediately before the terminal `Exit`.
+- In-shell filesystem writes emit `FsChanged` too. When a run mutates the VFS
+  (`echo > f`, `touch`, `mkdir`, `cp`, `rm`, `tee`, redirections, etc.), the
+  runtime emits one `FsChanged(path)` per **distinct** mutated path. Paths are
+  de-duplicated per drain window (a file written several times in one run
+  surfaces once) and preserve first-touch order. Internal runtime scratch
+  paths (heredoc/pipe staging, process substitution under
+  `/tmp/_wasmsh_*` and `/tmp/_proc_subst_*`) are never surfaced. Note: files
+  written by the in-process Python interpreter go through Emscripten's libc
+  directly rather than the shell VFS, so they are not reported via
+  `FsChanged`. See [ADR-0032](../adr/adr-0032-fs-change-notification.md) for
+  the design.
 - For `WriteFile`, exactly one `FsChanged(path)` is emitted on success, or
   one `Diagnostic(Error, …)` on failure.
 - For `ReadFile`, exactly one `Stdout(bytes)` is emitted on success, or one
@@ -218,7 +230,7 @@ List directory contents.
 | `Exit(i32)`              | exit code         | `Run`, `PollRun`                            | Final event for a completed execution. 0 = success; 1+ = command exit; 127 = not found; 130 = cancelled. |
 | `Yielded`                | none              | `StartRun`, `PollRun`                       | Execution is still active; poll again. |
 | `Diagnostic(level, msg)` | level + message   | any command                                 | Runtime-level message (parse errors, init errors, network denials, …). |
-| `FsChanged(String)`      | path              | `WriteFile`, runtime when scripts touch FS  | Notifies the host that a VFS file changed so it can re-read or re-render. |
+| `FsChanged(String)`      | path              | `WriteFile`; `Run`/`PollRun` when a script mutates the VFS | Notifies the host that a VFS path changed so it can re-read or re-render. One event per distinct mutated path, de-duplicated per run; internal scratch paths excluded. |
 | `Version(String)`        | version           | `Init`                                      | Protocol version announcement. |
 
 ### Diagnostic Levels
