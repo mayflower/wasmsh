@@ -116,6 +116,55 @@ test("ListDir includes written file", async ({ page }) => {
   expect(listing).toContain("a.txt");
 });
 
+test("Run with in-shell redirect emits FsChanged", async ({ page }) => {
+  await page.goto("/");
+  await initWorker(page);
+
+  const runReply = await send(page, {
+    type: "Run",
+    input: "echo hi > /workspace/b.txt",
+  });
+
+  const fsChanged = runReply.events.filter((e: any) => "FsChanged" in e);
+  expect(fsChanged.length).toBe(1);
+  expect(fsChanged[0].FsChanged).toBe("/workspace/b.txt");
+
+  const exitEvt = runReply.events.find((e: any) => "Exit" in e);
+  expect(exitEvt.Exit).toBe(0);
+
+  // Read-back confirms the write really happened.
+  const readReply = await send(page, {
+    type: "ReadFile",
+    path: "/workspace/b.txt",
+  });
+  const stdoutEvt = readReply.events.find((e: any) => "Stdout" in e);
+  const text = new TextDecoder().decode(new Uint8Array(stdoutEvt.Stdout));
+  expect(text).toBe("hi\n");
+});
+
+test("Run with mkdir/touch/rm emits one FsChanged per path", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await initWorker(page);
+
+  const runReply = await send(page, {
+    type: "Run",
+    input:
+      "mkdir /workspace/d\ntouch /workspace/d/f.txt\nrm /workspace/d/f.txt",
+  });
+
+  const changed = runReply.events
+    .filter((e: any) => "FsChanged" in e)
+    .map((e: any) => e.FsChanged);
+
+  expect(changed).toContain("/workspace/d");
+  expect(changed).toContain("/workspace/d/f.txt");
+
+  const exitEvt = runReply.events.find((e: any) => "Exit" in e);
+  expect(exitEvt.Exit).toBe(0);
+});
+
 test("Run cat reads VFS file written via WriteFile", async ({ page }) => {
   await page.goto("/");
   await initWorker(page);

@@ -246,6 +246,81 @@ fn write_file_then_read_file() {
     assert_eq!(read_events, vec![WorkerEvent::Stdout(b"content".to_vec())]);
 }
 
+fn fs_changed_paths(events: &[WorkerEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            WorkerEvent::FsChanged(path) => Some(path.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn in_shell_redirect_emits_fs_changed() {
+    let mut rt = new_runtime(0);
+    let events = rt.handle_command(HostCommand::Run {
+        input: "echo hi > /workspace/a.txt".into(),
+    });
+    assert_eq!(get_exit(&events), 0);
+    assert_eq!(fs_changed_paths(&events), vec!["/workspace/a.txt"]);
+}
+
+#[test]
+fn in_shell_mkdir_touch_cp_rm_emit_fs_changed_per_path() {
+    let mut rt = new_runtime(0);
+    let events = rt.handle_command(HostCommand::Run {
+        input: "mkdir /workspace\ntouch /workspace/src.txt\ncp /workspace/src.txt /workspace/dst.txt\nrm /workspace/src.txt".into(),
+    });
+    assert_eq!(get_exit(&events), 0);
+    let changed = fs_changed_paths(&events);
+    for expected in ["/workspace", "/workspace/src.txt", "/workspace/dst.txt"] {
+        assert!(
+            changed.iter().any(|p| p == expected),
+            "expected FsChanged for {expected}, got: {changed:?}"
+        );
+    }
+}
+
+#[test]
+fn fs_changed_dedups_repeated_writes_to_same_path() {
+    let mut rt = new_runtime(0);
+    let events = rt.handle_command(HostCommand::Run {
+        input: "echo one > /workspace/log.txt\necho two >> /workspace/log.txt".into(),
+    });
+    assert_eq!(get_exit(&events), 0);
+    assert_eq!(fs_changed_paths(&events), vec!["/workspace/log.txt"]);
+}
+
+#[test]
+fn read_only_commands_emit_no_fs_changed() {
+    let mut rt = new_runtime(0);
+    rt.handle_command(HostCommand::Run {
+        input: "echo seed > /workspace/a.txt".into(),
+    });
+    let events = rt.handle_command(HostCommand::Run {
+        input: "cat /workspace/a.txt".into(),
+    });
+    assert_eq!(get_stdout(&events), "seed\n");
+    assert!(fs_changed_paths(&events).is_empty());
+}
+
+#[test]
+fn internal_pipe_scratch_does_not_emit_fs_changed() {
+    let mut rt = new_runtime(0);
+    // A heredoc stages input through an internal /tmp/_wasmsh_pipe_ file; that
+    // scratch path must not surface as a host-visible FsChanged event.
+    let events = rt.handle_command(HostCommand::Run {
+        input: "cat <<EOF\nhello\nEOF".into(),
+    });
+    assert_eq!(get_stdout(&events), "hello\n");
+    assert!(
+        fs_changed_paths(&events).is_empty(),
+        "internal scratch leaked: {:?}",
+        fs_changed_paths(&events)
+    );
+}
+
 #[test]
 fn list_dir_shows_written_files() {
     let mut rt = WorkerRuntime::new();
