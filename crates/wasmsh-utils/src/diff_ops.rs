@@ -1328,7 +1328,7 @@ mod tests {
     use super::*;
     use crate::helpers::read_text;
     use crate::{UtilContext, VecOutput};
-    use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
+    use wasmsh_fs::{BackendFs as MemoryFs, OpenOptions, Vfs};
 
     fn make_fs() -> MemoryFs {
         MemoryFs::new()

@@ -2873,7 +2873,7 @@ mod tests {
 #[cfg(target_arch = "wasm32")]
 mod wasm_bindings {
     use wasm_bindgen::prelude::*;
-    use wasmsh_protocol::HostCommand;
+    use wasmsh_protocol::{HostCommand, MountFile};
     use wasmsh_utils::net_types::{
         HostAllowlist, HttpRequest, HttpResponse, NetworkBackend, NetworkError,
     };
@@ -2994,6 +2994,30 @@ mod wasm_bindings {
             let events = self.runtime.handle_command(HostCommand::Init {
                 step_budget,
                 allowed_hosts,
+            });
+            serde_json::to_string(&events).unwrap_or_default()
+        }
+
+        /// Mount a read-only copy-on-write base at the root of the VFS.
+        ///
+        /// `base_json` is a JSON object mapping absolute paths to UTF-8 file
+        /// contents, e.g. `{"/base/readme.txt":"hello"}`. The files become a
+        /// lazily-read, read-only layer: reads fall through to the base, and
+        /// the first write to a base path copies it into the writable layer
+        /// (copy-on-write). Call after `init`. Returns a JSON array of events.
+        pub fn mount(&mut self, base_json: &str) -> String {
+            let entries: std::collections::BTreeMap<String, String> =
+                serde_json::from_str(base_json).unwrap_or_default();
+            let base = entries
+                .into_iter()
+                .map(|(path, content)| MountFile {
+                    path,
+                    data: content.into_bytes(),
+                })
+                .collect();
+            let events = self.runtime.handle_command(HostCommand::Mount {
+                path: "/".to_string(),
+                base,
             });
             serde_json::to_string(&events).unwrap_or_default()
         }

@@ -51,10 +51,19 @@ pub enum HostCommand {
     },
     /// Cancel the currently running execution.
     Cancel,
-    /// Mount a virtual filesystem at the given path.
+    /// Mount a read-only base filesystem under a copy-on-write overlay.
+    ///
+    /// The supplied `base` files become a lazily-read, read-only layer at
+    /// `path` (use `/` for a root overlay). Reads fall through to the base;
+    /// the first write to a base path copies it into the writable upper layer
+    /// (copy-on-write). Only supported where the overlay backend is active
+    /// (the standalone/native build); other backends emit a warning.
     Mount {
-        /// Absolute path at which to mount the filesystem.
+        /// Absolute path at which to mount the base (currently only `/`).
         path: String,
+        /// Read-only base files exposed under the overlay.
+        #[serde(default)]
+        base: Vec<MountFile>,
     },
     /// Read a file from the virtual filesystem.
     ReadFile {
@@ -73,6 +82,15 @@ pub enum HostCommand {
         /// Absolute path of the directory to list.
         path: String,
     },
+}
+
+/// A single read-only file in a [`HostCommand::Mount`] base layer.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MountFile {
+    /// Absolute path of the file within the mounted base.
+    pub path: String,
+    /// Raw file contents.
+    pub data: Vec<u8>,
 }
 
 /// An event sent from the worker to the host.
@@ -174,6 +192,33 @@ mod tests {
         assert_eq!(encoded, r#"{"Signal":{"signal":"TERM"}}"#);
         let decoded: HostCommand = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, signal);
+    }
+
+    #[test]
+    fn mount_roundtrips_json_with_base() {
+        let mount = HostCommand::Mount {
+            path: "/".into(),
+            base: vec![MountFile {
+                path: "/seed.txt".into(),
+                data: b"hi".to_vec(),
+            }],
+        };
+        let encoded = serde_json::to_string(&mount).unwrap();
+        let decoded: HostCommand = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, mount);
+    }
+
+    #[test]
+    fn mount_without_base_field_defaults_empty() {
+        // Back-compat: an old `{"Mount":{"path":"/"}}` still deserializes.
+        let decoded: HostCommand = serde_json::from_str(r#"{"Mount":{"path":"/"}}"#).unwrap();
+        assert_eq!(
+            decoded,
+            HostCommand::Mount {
+                path: "/".into(),
+                base: vec![],
+            }
+        );
     }
 
     #[test]

@@ -17,19 +17,22 @@ mod emscripten_fs;
 mod memfs;
 #[cfg(feature = "opfs")]
 mod opfs;
+mod overlay;
 
 #[cfg(feature = "emscripten")]
 pub use emscripten_fs::EmscriptenFs;
 pub use memfs::MemoryFs;
 #[cfg(feature = "opfs")]
 pub use opfs::OpfsFs;
+pub use overlay::{InMemoryBase, LazyBase, OverlayFs};
 
 /// Platform filesystem backend.
 ///
 /// Resolves to the libc-backed [`EmscriptenFs`] when the `emscripten` feature
-/// is enabled and the target is `wasm32-unknown-emscripten`; otherwise
-/// [`MemoryFs`]. The feature gate keeps native `--all-features` builds working
-/// while letting the Pyodide embedding share the same libc/POSIX backend.
+/// is enabled and the target is `wasm32-unknown-emscripten`; otherwise the
+/// lazy copy-on-write [`OverlayFs`] over an [`InMemoryBase`]. The feature gate
+/// keeps native `--all-features` builds working while letting the Pyodide
+/// embedding share the same libc/POSIX backend.
 #[cfg(all(
     feature = "emscripten",
     target_arch = "wasm32",
@@ -37,13 +40,17 @@ pub use opfs::OpfsFs;
 ))]
 pub type BackendFs = EmscriptenFs;
 
-/// Platform filesystem backend (default: in-memory).
+/// Platform filesystem backend (default: lazy copy-on-write overlay).
+///
+/// With an empty base this is behaviorally identical to a bare [`MemoryFs`]; a
+/// read-only base is installed at runtime via `HostCommand::Mount`. See
+/// [ADR-0033](https://github.com/yshaul/wasmsh/blob/main/docs/adr/adr-0033-lazy-cow-vfs.md).
 #[cfg(not(all(
     feature = "emscripten",
     target_arch = "wasm32",
     target_os = "emscripten"
 )))]
-pub type BackendFs = MemoryFs;
+pub type BackendFs = OverlayFs<InMemoryBase>;
 
 use thiserror::Error;
 

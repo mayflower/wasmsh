@@ -3199,7 +3199,7 @@ pub(crate) fn util_awk(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 mod tests {
     use super::*;
     use crate::{UtilContext, VecOutput};
-    use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
+    use wasmsh_fs::{BackendFs as MemoryFs, OpenOptions, Vfs};
 
     fn run_awk(program: &str, input: &str) -> (i32, String, String) {
         run_awk_with_args(&["awk", program], input)

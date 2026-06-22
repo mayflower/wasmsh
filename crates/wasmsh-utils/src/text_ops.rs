@@ -3273,7 +3273,7 @@ mod tests {
     use super::*;
     use crate::{UtilContext, VecOutput};
     use std::io::Read;
-    use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
+    use wasmsh_fs::{BackendFs as MemoryFs, OpenOptions, Vfs};
 
     fn make_fs() -> MemoryFs {
         MemoryFs::new()

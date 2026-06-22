@@ -174,18 +174,34 @@ on the next `PollRun` (or during `Run`'s internal drain).
 
 ### `Mount`
 
-Mount a virtual filesystem at the given path. Reserved for future
-multi-backend mounts (e.g., overlay an OPFS-backed FS on a path).
+Install a read-only base filesystem under a lazy copy-on-write overlay
+(see [ADR-0033](../adr/adr-0033-lazy-cow-vfs.md)). The base files become a
+lazily-read, read-only layer; reads fall through to the base, and the first
+write to a base path copies it into the writable upper layer (copy-on-write).
+Deletions of base entries are recorded as whiteouts (the base is never mutated).
 
-| Field  | Type     | Description |
-|--------|----------|-------------|
-| `path` | `String` | Absolute VFS path at which to mount the filesystem |
+| Field  | Type              | Description |
+|--------|-------------------|-------------|
+| `path` | `String`          | Mount point. Only the root `/` is currently supported. |
+| `base` | `Vec<MountFile>`  | Read-only base entries. Defaults to empty. |
 
-**Response**: currently `Diagnostic(Warning, "mount not yet implemented")`.
-The variant is reserved so embedders can serialise / deserialise
-forward-compatible messages. To seed the VFS today, use `WriteFile`. To
-swap the entire backend at compile time, enable the
-`wasmsh-runtime/emscripten` feature.
+`MountFile` is `{ path: String, data: Vec<u8> }`. The `base` field defaults to
+empty for backward compatibility (an old `{"Mount":{"path":"/"}}` still
+decodes).
+
+**Response** (standalone / native build, where the backend is the overlay):
+`Diagnostic(Info, "mount: read-only base installed")`, or
+`Diagnostic(Warning, …)` if a non-root mount point is given. A `Mount` resets
+the read-only base and clears whiteouts; the writable upper layer is left
+intact. Re-sending `Init` rebuilds the overlay with an empty base.
+
+**Response** (emscripten / Pyodide build): `Diagnostic(Warning, "mount not yet
+implemented")` — the overlay is not the backend there (the libc-backed
+`EmscriptenFs` is). Seed that VFS with `WriteFile` instead.
+
+The `WasmShell` standalone JS API exposes this as `shell.mount(baseJson)`,
+where `baseJson` is a JSON object mapping absolute paths to UTF-8 file
+contents, e.g. `{"/base/readme.txt":"hello"}`.
 
 ### `ReadFile`
 

@@ -1160,7 +1160,7 @@ fn tar_list(ctx: &mut UtilContext<'_>, archive_path: &str, gzipped: bool) -> i32
 mod tests {
     use super::*;
     use crate::{UtilContext, VecOutput};
-    use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
+    use wasmsh_fs::{BackendFs as MemoryFs, OpenOptions, Vfs};
 
     fn run_util(
         func: fn(&mut UtilContext<'_>, &[&str]) -> i32,

@@ -296,7 +296,7 @@ impl Default for UtilRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
+    use wasmsh_fs::{BackendFs as MemoryFs, OpenOptions, Vfs};
 
     fn make_fs_with_file(path: &str, content: &[u8]) -> MemoryFs {
         let mut fs = MemoryFs::new();

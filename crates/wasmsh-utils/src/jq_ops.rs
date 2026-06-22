@@ -383,7 +383,7 @@ fn finalize_jq_status(
 mod tests {
     use super::*;
     use crate::{UtilContext, VecOutput};
-    use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
+    use wasmsh_fs::{BackendFs as MemoryFs, OpenOptions, Vfs};
 
     fn run(argv: &[&str], stdin: Option<&[u8]>) -> (i32, String, String) {
         let mut fs = MemoryFs::new();

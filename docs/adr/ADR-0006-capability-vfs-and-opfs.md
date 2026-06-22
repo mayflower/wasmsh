@@ -13,3 +13,6 @@ wasmsh uses its own VFS interface with `MemoryFs`, `OverlayFs`, and optionally `
 - Deterministic FS behavior
 - Isolatable sessions
 - Good foundation for sandboxing and snapshots
+
+`OverlayFs` is specified as a lazy copy-on-write backend in
+[ADR-0033](adr-0033-lazy-cow-vfs.md).

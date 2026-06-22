@@ -964,7 +964,7 @@ fn bc_run(ctx: &mut UtilContext<'_>, env: &mut BcEnv, stmt: &BcStmt) -> Result<(
 mod tests {
     use super::*;
     use crate::{UtilContext, VecOutput};
-    use wasmsh_fs::MemoryFs;
+    use wasmsh_fs::BackendFs as MemoryFs;
 
     fn run_bc(input: &str, flags: &[&str]) -> (i32, String, String) {
         let mut fs = MemoryFs::new();
