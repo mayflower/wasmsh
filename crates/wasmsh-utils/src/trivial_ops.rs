@@ -1759,7 +1759,7 @@ fn day_of_week(year: u32, month: u32, day: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::{UtilContext, VecOutput};
-    use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
+    use wasmsh_fs::{BackendFs as MemoryFs, OpenOptions, Vfs};
 
     fn make_fs() -> MemoryFs {
         MemoryFs::new()

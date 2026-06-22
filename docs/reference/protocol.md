@@ -86,7 +86,19 @@ Sending `Run` (or any other command) before `Init` produces
   more work remains, the batch ends with `Yielded`. The final poll ends with
   `Exit(code)` and no trailing `Yielded`.
 - Within a batch, `Stdout` and `Stderr` chunks appear in production order.
-  `Exit` is always the last event in a completed execution batch.
+  Any `FsChanged(path)` events for the batch are emitted after the I/O and
+  diagnostic events and immediately before the terminal `Exit`.
+- In-shell filesystem writes emit `FsChanged` too. When a run mutates the VFS
+  (`echo > f`, `touch`, `mkdir`, `cp`, `rm`, `tee`, redirections, etc.), the
+  runtime emits one `FsChanged(path)` per **distinct** mutated path. Paths are
+  de-duplicated per drain window (a file written several times in one run
+  surfaces once) and preserve first-touch order. Internal runtime scratch
+  paths (heredoc/pipe staging, process substitution under
+  `/tmp/_wasmsh_*` and `/tmp/_proc_subst_*`) are never surfaced. Note: files
+  written by the in-process Python interpreter go through Emscripten's libc
+  directly rather than the shell VFS, so they are not reported via
+  `FsChanged`. See [ADR-0032](../adr/adr-0032-fs-change-notification.md) for
+  the design.
 - For `WriteFile`, exactly one `FsChanged(path)` is emitted on success, or
   one `Diagnostic(Error, …)` on failure.
 - For `ReadFile`, exactly one `Stdout(bytes)` is emitted on success, or one
@@ -162,18 +174,34 @@ on the next `PollRun` (or during `Run`'s internal drain).
 
 ### `Mount`
 
-Mount a virtual filesystem at the given path. Reserved for future
-multi-backend mounts (e.g., overlay an OPFS-backed FS on a path).
+Install a read-only base filesystem under a lazy copy-on-write overlay
+(see [ADR-0033](../adr/adr-0033-lazy-cow-vfs.md)). The base files become a
+lazily-read, read-only layer; reads fall through to the base, and the first
+write to a base path copies it into the writable upper layer (copy-on-write).
+Deletions of base entries are recorded as whiteouts (the base is never mutated).
 
-| Field  | Type     | Description |
-|--------|----------|-------------|
-| `path` | `String` | Absolute VFS path at which to mount the filesystem |
+| Field  | Type              | Description |
+|--------|-------------------|-------------|
+| `path` | `String`          | Mount point. Only the root `/` is currently supported. |
+| `base` | `Vec<MountFile>`  | Read-only base entries. Defaults to empty. |
 
-**Response**: currently `Diagnostic(Warning, "mount not yet implemented")`.
-The variant is reserved so embedders can serialise / deserialise
-forward-compatible messages. To seed the VFS today, use `WriteFile`. To
-swap the entire backend at compile time, enable the
-`wasmsh-runtime/emscripten` feature.
+`MountFile` is `{ path: String, data: Vec<u8> }`. The `base` field defaults to
+empty for backward compatibility (an old `{"Mount":{"path":"/"}}` still
+decodes).
+
+**Response** (standalone / native build, where the backend is the overlay):
+`Diagnostic(Info, "mount: read-only base installed")`, or
+`Diagnostic(Warning, …)` if a non-root mount point is given. A `Mount` resets
+the read-only base and clears whiteouts; the writable upper layer is left
+intact. Re-sending `Init` rebuilds the overlay with an empty base.
+
+**Response** (emscripten / Pyodide build): `Diagnostic(Warning, "mount not yet
+implemented")` — the overlay is not the backend there (the libc-backed
+`EmscriptenFs` is). Seed that VFS with `WriteFile` instead.
+
+The `WasmShell` standalone JS API exposes this as `shell.mount(baseJson)`,
+where `baseJson` is a JSON object mapping absolute paths to UTF-8 file
+contents, e.g. `{"/base/readme.txt":"hello"}`.
 
 ### `ReadFile`
 
@@ -218,7 +246,7 @@ List directory contents.
 | `Exit(i32)`              | exit code         | `Run`, `PollRun`                            | Final event for a completed execution. 0 = success; 1+ = command exit; 127 = not found; 130 = cancelled. |
 | `Yielded`                | none              | `StartRun`, `PollRun`                       | Execution is still active; poll again. |
 | `Diagnostic(level, msg)` | level + message   | any command                                 | Runtime-level message (parse errors, init errors, network denials, …). |
-| `FsChanged(String)`      | path              | `WriteFile`, runtime when scripts touch FS  | Notifies the host that a VFS file changed so it can re-read or re-render. |
+| `FsChanged(String)`      | path              | `WriteFile`; `Run`/`PollRun` when a script mutates the VFS | Notifies the host that a VFS path changed so it can re-read or re-render. One event per distinct mutated path, de-duplicated per run; internal scratch paths excluded. |
 | `Version(String)`        | version           | `Init`                                      | Protocol version announcement. |
 
 ### Diagnostic Levels

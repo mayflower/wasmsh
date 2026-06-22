@@ -10,7 +10,7 @@ mod common;
 use common::{get_exit, get_stderr, get_stdout};
 use wasmsh_ast::WordPart;
 use wasmsh_hir::HirCommand;
-use wasmsh_protocol::{DiagnosticLevel, HostCommand, WorkerEvent, PROTOCOL_VERSION};
+use wasmsh_protocol::{DiagnosticLevel, HostCommand, MountFile, WorkerEvent, PROTOCOL_VERSION};
 use wasmsh_runtime::{ExecutionPoll, ExternalCommandResult, WorkerRuntime};
 
 fn new_runtime(step_budget: u32) -> WorkerRuntime {
@@ -244,6 +244,81 @@ fn write_file_then_read_file() {
         path: "/test.txt".into(),
     });
     assert_eq!(read_events, vec![WorkerEvent::Stdout(b"content".to_vec())]);
+}
+
+fn fs_changed_paths(events: &[WorkerEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            WorkerEvent::FsChanged(path) => Some(path.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn in_shell_redirect_emits_fs_changed() {
+    let mut rt = new_runtime(0);
+    let events = rt.handle_command(HostCommand::Run {
+        input: "echo hi > /workspace/a.txt".into(),
+    });
+    assert_eq!(get_exit(&events), 0);
+    assert_eq!(fs_changed_paths(&events), vec!["/workspace/a.txt"]);
+}
+
+#[test]
+fn in_shell_mkdir_touch_cp_rm_emit_fs_changed_per_path() {
+    let mut rt = new_runtime(0);
+    let events = rt.handle_command(HostCommand::Run {
+        input: "mkdir /workspace\ntouch /workspace/src.txt\ncp /workspace/src.txt /workspace/dst.txt\nrm /workspace/src.txt".into(),
+    });
+    assert_eq!(get_exit(&events), 0);
+    let changed = fs_changed_paths(&events);
+    for expected in ["/workspace", "/workspace/src.txt", "/workspace/dst.txt"] {
+        assert!(
+            changed.iter().any(|p| p == expected),
+            "expected FsChanged for {expected}, got: {changed:?}"
+        );
+    }
+}
+
+#[test]
+fn fs_changed_dedups_repeated_writes_to_same_path() {
+    let mut rt = new_runtime(0);
+    let events = rt.handle_command(HostCommand::Run {
+        input: "echo one > /workspace/log.txt\necho two >> /workspace/log.txt".into(),
+    });
+    assert_eq!(get_exit(&events), 0);
+    assert_eq!(fs_changed_paths(&events), vec!["/workspace/log.txt"]);
+}
+
+#[test]
+fn read_only_commands_emit_no_fs_changed() {
+    let mut rt = new_runtime(0);
+    rt.handle_command(HostCommand::Run {
+        input: "echo seed > /workspace/a.txt".into(),
+    });
+    let events = rt.handle_command(HostCommand::Run {
+        input: "cat /workspace/a.txt".into(),
+    });
+    assert_eq!(get_stdout(&events), "seed\n");
+    assert!(fs_changed_paths(&events).is_empty());
+}
+
+#[test]
+fn internal_pipe_scratch_does_not_emit_fs_changed() {
+    let mut rt = new_runtime(0);
+    // A heredoc stages input through an internal /tmp/_wasmsh_pipe_ file; that
+    // scratch path must not surface as a host-visible FsChanged event.
+    let events = rt.handle_command(HostCommand::Run {
+        input: "cat <<EOF\nhello\nEOF".into(),
+    });
+    assert_eq!(get_stdout(&events), "hello\n");
+    assert!(
+        fs_changed_paths(&events).is_empty(),
+        "internal scratch leaked: {:?}",
+        fs_changed_paths(&events)
+    );
 }
 
 #[test]
@@ -874,6 +949,105 @@ fn external_handler_stdout_redirect_then_2dup1_captures_stderr_in_file() {
         path: "/out.txt".into(),
     });
     assert_eq!(get_stdout(&file), "ERR\n");
+}
+
+fn mount_base(rt: &mut WorkerRuntime, files: &[(&str, &[u8])]) -> Vec<WorkerEvent> {
+    rt.handle_command(HostCommand::Mount {
+        path: "/".into(),
+        base: files
+            .iter()
+            .map(|(p, d)| MountFile {
+                path: (*p).into(),
+                data: (*d).to_vec(),
+            })
+            .collect(),
+    })
+}
+
+#[test]
+fn mount_base_is_readable_through_overlay() {
+    let mut rt = new_runtime(0);
+    let events = mount_base(&mut rt, &[("/base/seed.txt", b"from base")]);
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, WorkerEvent::Diagnostic(DiagnosticLevel::Info, _))));
+
+    // The base file reads through the overlay without ever being WriteFile'd.
+    let read = rt.handle_command(HostCommand::Run {
+        input: "cat /base/seed.txt".into(),
+    });
+    assert_eq!(get_stdout(&read), "from base");
+    assert_eq!(get_exit(&read), 0);
+    // A pure read of a base file must not surface as a host-visible change.
+    assert!(fs_changed_paths(&read).is_empty());
+}
+
+#[test]
+fn mount_base_write_is_copy_on_write_and_emits_fs_changed() {
+    let mut rt = new_runtime(0);
+    mount_base(&mut rt, &[("/base/seed.txt", b"original")]);
+
+    let write = rt.handle_command(HostCommand::Run {
+        input: "echo changed > /base/seed.txt".into(),
+    });
+    assert_eq!(get_exit(&write), 0);
+    assert_eq!(fs_changed_paths(&write), vec!["/base/seed.txt"]);
+
+    let read = rt.handle_command(HostCommand::Run {
+        input: "cat /base/seed.txt".into(),
+    });
+    assert_eq!(get_stdout(&read), "changed\n");
+}
+
+#[test]
+fn mount_base_delete_hides_entry_via_whiteout() {
+    let mut rt = new_runtime(0);
+    mount_base(&mut rt, &[("/a.txt", b"a"), ("/b.txt", b"b")]);
+
+    let rm = rt.handle_command(HostCommand::Run {
+        input: "rm /a.txt".into(),
+    });
+    assert_eq!(get_exit(&rm), 0);
+    assert_eq!(fs_changed_paths(&rm), vec!["/a.txt"]);
+
+    let list = rt.handle_command(HostCommand::ListDir { path: "/".into() });
+    let stdout = get_stdout(&list);
+    assert!(
+        !stdout.contains("a.txt"),
+        "a.txt should be hidden: {stdout}"
+    );
+    assert!(stdout.contains("b.txt"), "b.txt should remain: {stdout}");
+}
+
+#[test]
+fn mount_non_root_path_is_rejected_with_warning() {
+    let mut rt = new_runtime(0);
+    let events = rt.handle_command(HostCommand::Mount {
+        path: "/mnt".into(),
+        base: vec![],
+    });
+    assert!(events.iter().any(|e| matches!(
+        e,
+        WorkerEvent::Diagnostic(DiagnosticLevel::Warning, msg) if msg.contains("root mount point")
+    )));
+}
+
+#[test]
+fn reinit_clears_mounted_base() {
+    let mut rt = new_runtime(0);
+    mount_base(&mut rt, &[("/seed.txt", b"data")]);
+
+    // Re-initialize: the overlay (and its base) is rebuilt empty.
+    rt.handle_command(HostCommand::Init {
+        step_budget: 0,
+        allowed_hosts: vec![],
+    });
+    let read = rt.handle_command(HostCommand::ReadFile {
+        path: "/seed.txt".into(),
+    });
+    assert!(read
+        .iter()
+        .any(|e| matches!(e, WorkerEvent::Diagnostic(DiagnosticLevel::Error, _))));
 }
 
 #[test]

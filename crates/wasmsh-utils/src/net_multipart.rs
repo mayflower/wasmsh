@@ -217,7 +217,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 mod tests {
     use super::*;
     use crate::VecOutput;
-    use wasmsh_fs::MemoryFs;
+    use wasmsh_fs::BackendFs as MemoryFs;
 
     fn ctx_with_file<'a>(
         fs: &'a mut MemoryFs,

@@ -928,7 +928,7 @@ fn fd_walk(
 mod tests {
     use super::*;
     use crate::{UtilContext, VecOutput};
-    use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
+    use wasmsh_fs::{BackendFs as MemoryFs, OpenOptions, Vfs};
 
     fn make_search_fs() -> MemoryFs {
         let mut fs = MemoryFs::new();

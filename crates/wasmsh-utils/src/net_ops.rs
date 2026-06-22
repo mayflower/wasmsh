@@ -2792,7 +2792,7 @@ mod tests {
     use crate::net_types::{HostAllowlist, HttpResponse, NetworkBackend, NetworkError};
     use crate::VecOutput;
     use std::cell::RefCell;
-    use wasmsh_fs::MemoryFs;
+    use wasmsh_fs::BackendFs as MemoryFs;
 
     struct MockNetworkBackend {
         allowlist: HostAllowlist,

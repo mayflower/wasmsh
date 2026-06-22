@@ -6,7 +6,7 @@ use std::io::{Cursor, Read};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::{DirEntry, FileHandle, FsError, Metadata, OpenOptions, Vfs, VfsWriteSink};
+use crate::{DirEntry, FileHandle, FsChangeLog, FsError, Metadata, OpenOptions, Vfs, VfsWriteSink};
 
 /// Maximum file size (64 MiB).
 const MAX_FILE_SIZE: usize = 64 * 1024 * 1024;
@@ -96,6 +96,7 @@ impl std::fmt::Debug for MemoryFsInner {
 #[derive(Debug, Clone)]
 pub struct MemoryFs {
     inner: Rc<RefCell<MemoryFsInner>>,
+    change_log: FsChangeLog,
 }
 
 struct MemoryWriteSink {
@@ -118,6 +119,7 @@ impl MemoryFs {
                 next_handle: 1,
                 total_bytes: 0,
             })),
+            change_log: FsChangeLog::new(),
         }
     }
 
@@ -263,6 +265,10 @@ impl Vfs for MemoryFs {
         }
         drop(inner);
 
+        if opts.write || opts.append || opts.create || opts.truncate {
+            self.change_log.record(&norm);
+        }
+
         let h = self.alloc_handle();
         self.inner.borrow_mut().handles.insert(
             h,
@@ -355,6 +361,8 @@ impl Vfs for MemoryFs {
         let append = of.opts.append;
         drop(inner);
 
+        self.change_log.record(&path);
+
         MemoryWriteSink {
             inner: Rc::clone(&self.inner),
             path,
@@ -396,6 +404,7 @@ impl Vfs for MemoryFs {
                 .nodes
                 .insert(norm.clone(), FsNode::File(Arc::from([])));
         }
+        self.change_log.record(&norm);
         Ok(Box::new(MemoryWriteSink {
             inner: Rc::clone(&self.inner),
             path: norm,
@@ -487,7 +496,9 @@ impl Vfs for MemoryFs {
         self.ensure_parents(&norm)?;
         let mut inner = self.inner.borrow_mut();
         check_inode_room(&inner)?;
-        inner.nodes.insert(norm, FsNode::Dir);
+        inner.nodes.insert(norm.clone(), FsNode::Dir);
+        drop(inner);
+        self.change_log.record(&norm);
         Ok(())
     }
 
@@ -505,6 +516,8 @@ impl Vfs for MemoryFs {
                 inner.nodes.remove(&norm);
                 inner.virtual_readers.remove(&norm);
                 inner.total_bytes = inner.total_bytes.saturating_sub(size);
+                drop(inner);
+                self.change_log.record(&norm);
                 Ok(())
             }
             None => Err(FsError::NotFound(norm)),
@@ -534,7 +547,12 @@ impl Vfs for MemoryFs {
             return Err(FsError::Io(format!("directory not empty: {norm}")));
         }
         self.inner.borrow_mut().nodes.remove(&norm);
+        self.change_log.record(&norm);
         Ok(())
+    }
+
+    fn change_log(&self) -> Option<&FsChangeLog> {
+        Some(&self.change_log)
     }
 }
 
@@ -760,5 +778,58 @@ mod tests {
 
         let h = fs.open("/log.txt", OpenOptions::read()).unwrap();
         assert_eq!(fs.read_file(h).unwrap(), b"line1\nline2\n");
+    }
+
+    #[test]
+    fn change_log_records_writes_creates_and_removals() {
+        let mut fs = MemoryFs::new();
+        let log = fs.change_log().expect("MemoryFs tracks changes").clone();
+
+        // Write via open(write) + write_file.
+        let h = fs.open("/a.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"hi").unwrap();
+        fs.close(h);
+        // Write via streaming sink.
+        let mut sink = fs.open_write_sink("/b.txt", false).unwrap();
+        sink.write(b"x").unwrap();
+        drop(sink);
+        fs.create_dir("/dir").unwrap();
+        fs.remove_file("/a.txt").unwrap();
+        fs.remove_dir("/dir").unwrap();
+
+        let changed = log.take();
+        assert_eq!(changed, vec!["/a.txt", "/b.txt", "/dir"]);
+        // Draining resets the log.
+        assert!(log.take().is_empty());
+    }
+
+    #[test]
+    fn change_log_dedups_repeated_writes_in_first_seen_order() {
+        let mut fs = MemoryFs::new();
+        let log = fs.change_log().expect("MemoryFs tracks changes").clone();
+
+        for path in ["/one", "/two", "/one"] {
+            let h = fs.open(path, OpenOptions::write()).unwrap();
+            fs.write_file(h, b"data").unwrap();
+            fs.close(h);
+        }
+
+        assert_eq!(log.take(), vec!["/one", "/two"]);
+    }
+
+    #[test]
+    fn change_log_ignores_read_only_opens() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/seed.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"data").unwrap();
+        fs.close(h);
+        let log = fs.change_log().unwrap().clone();
+        let _ = log.take();
+
+        let h = fs.open("/seed.txt", OpenOptions::read()).unwrap();
+        let _ = fs.read_file(h).unwrap();
+        fs.close(h);
+
+        assert!(log.take().is_empty());
     }
 }

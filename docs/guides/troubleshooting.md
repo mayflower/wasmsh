@@ -25,11 +25,13 @@ yourself rather than using the factory.
 
 ### `Diagnostic(Warning, "mount not yet implemented")`
 
-You sent `HostCommand::Mount`. The variant is reserved for future
-multi-backend filesystem mounts; the runtime does not yet honour it. Use
-`WriteFile` to seed the VFS instead, or compile with the
-`wasmsh-runtime/emscripten` feature to swap the entire backend at compile
-time.
+You sent `HostCommand::Mount` on the **emscripten / Pyodide** build, where the
+backend is the libc-backed `EmscriptenFs` rather than the copy-on-write overlay,
+so mounting a read-only base is not supported there. Seed that VFS with
+`WriteFile` instead. On the standalone / native build, `Mount` installs the base
+and replies `Diagnostic(Info, "mount: read-only base installed")` — see
+[ADR-0033](../adr/adr-0033-lazy-cow-vfs.md) and the
+[protocol reference](../reference/protocol.md).
 
 ### `Diagnostic(Warning, "unknown command")`
 

@@ -6,7 +6,10 @@
 
 #![warn(missing_docs)]
 
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::io::Read;
+use std::rc::Rc;
 
 #[cfg(feature = "emscripten")]
 #[allow(unsafe_code, clippy::borrow_as_ptr)]
@@ -14,19 +17,22 @@ mod emscripten_fs;
 mod memfs;
 #[cfg(feature = "opfs")]
 mod opfs;
+mod overlay;
 
 #[cfg(feature = "emscripten")]
 pub use emscripten_fs::EmscriptenFs;
 pub use memfs::MemoryFs;
 #[cfg(feature = "opfs")]
 pub use opfs::OpfsFs;
+pub use overlay::{InMemoryBase, LazyBase, OverlayFs};
 
 /// Platform filesystem backend.
 ///
 /// Resolves to the libc-backed [`EmscriptenFs`] when the `emscripten` feature
-/// is enabled and the target is `wasm32-unknown-emscripten`; otherwise
-/// [`MemoryFs`]. The feature gate keeps native `--all-features` builds working
-/// while letting the Pyodide embedding share the same libc/POSIX backend.
+/// is enabled and the target is `wasm32-unknown-emscripten`; otherwise the
+/// lazy copy-on-write [`OverlayFs`] over an [`InMemoryBase`]. The feature gate
+/// keeps native `--all-features` builds working while letting the Pyodide
+/// embedding share the same libc/POSIX backend.
 #[cfg(all(
     feature = "emscripten",
     target_arch = "wasm32",
@@ -34,13 +40,17 @@ pub use opfs::OpfsFs;
 ))]
 pub type BackendFs = EmscriptenFs;
 
-/// Platform filesystem backend (default: in-memory).
+/// Platform filesystem backend (default: lazy copy-on-write overlay).
+///
+/// With an empty base this is behaviorally identical to a bare [`MemoryFs`]; a
+/// read-only base is installed at runtime via `HostCommand::Mount`. See
+/// [ADR-0033](https://github.com/yshaul/wasmsh/blob/main/docs/adr/adr-0033-lazy-cow-vfs.md).
 #[cfg(not(all(
     feature = "emscripten",
     target_arch = "wasm32",
     target_os = "emscripten"
 )))]
-pub type BackendFs = MemoryFs;
+pub type BackendFs = OverlayFs<InMemoryBase>;
 
 use thiserror::Error;
 
@@ -139,6 +149,58 @@ impl OpenOptions {
     }
 }
 
+/// Records the paths a filesystem backend mutated, so a host can learn which
+/// files changed during a run and re-read or re-render them.
+///
+/// The log preserves first-seen insertion order and de-duplicates paths, so a
+/// file written several times within a single run surfaces once. It is cheap
+/// to clone (`Rc`-backed): backends keep a clone and the host drains the same
+/// underlying log with [`FsChangeLog::take`].
+#[derive(Debug, Clone, Default)]
+pub struct FsChangeLog {
+    inner: Rc<RefCell<FsChangeLogInner>>,
+}
+
+#[derive(Debug, Default)]
+struct FsChangeLogInner {
+    order: Vec<String>,
+    seen: HashSet<String>,
+}
+
+impl FsChangeLog {
+    /// Create a new, empty change log.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that `path` was created, modified, or removed.
+    ///
+    /// Duplicate paths are ignored after the first record within a drain
+    /// window, preserving the order in which paths were first touched.
+    pub fn record(&self, path: &str) {
+        let mut inner = self.inner.borrow_mut();
+        if inner.seen.insert(path.to_string()) {
+            inner.order.push(path.to_string());
+        }
+    }
+
+    /// Drain and return the recorded paths in first-seen order, resetting the
+    /// log so the next run starts empty.
+    #[must_use]
+    pub fn take(&self) -> Vec<String> {
+        let mut inner = self.inner.borrow_mut();
+        inner.seen.clear();
+        std::mem::take(&mut inner.order)
+    }
+
+    /// Return `true` if no paths are currently recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.borrow().order.is_empty()
+    }
+}
+
 /// Virtual filesystem trait.
 pub trait VfsWriteSink {
     /// Write a chunk to the sink.
@@ -178,6 +240,15 @@ pub trait Vfs {
     fn remove_file(&mut self, path: &str) -> Result<(), FsError>;
     /// Remove the empty directory at `path`.
     fn remove_dir(&mut self, path: &str) -> Result<(), FsError>;
+
+    /// Access this backend's filesystem change log, if it records mutations.
+    ///
+    /// Backends that track writes return a handle the host can drain (via
+    /// [`FsChangeLog::take`]) to learn which paths changed during a run. The
+    /// default returns `None` for backends that do not track changes.
+    fn change_log(&self) -> Option<&FsChangeLog> {
+        None
+    }
 }
 
 /// An opaque file handle.

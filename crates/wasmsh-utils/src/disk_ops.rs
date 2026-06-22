@@ -332,7 +332,7 @@ fn vfs_total_size(fs: &BackendFs, path: &str) -> u64 {
 mod tests {
     use super::*;
     use crate::{UtilContext, VecOutput};
-    use wasmsh_fs::{MemoryFs, OpenOptions, Vfs};
+    use wasmsh_fs::{BackendFs as MemoryFs, OpenOptions, Vfs};
 
     fn run_util(
         func: fn(&mut UtilContext<'_>, &[&str]) -> i32,

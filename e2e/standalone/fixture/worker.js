@@ -8,6 +8,7 @@
  *   { type: "WriteFile", path: string, data: number[] }
  *   { type: "ReadFile",  path: string }
  *   { type: "ListDir",   path: string }
+ *   { type: "Mount",     base: { [path: string]: string } }
  *
  * Replies with { events: WorkerEvent[] } where events are the parsed
  * JSON array returned by WasmShell methods.
@@ -84,6 +85,9 @@ function handle(msg) {
       break;
     case "ListDir":
       json = shell.list_dir(msg.path);
+      break;
+    case "Mount":
+      json = shell.mount(JSON.stringify(msg.base ?? {}));
       break;
     case "Cancel":
       json = shell.cancel();

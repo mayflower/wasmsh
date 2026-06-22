@@ -425,7 +425,7 @@ fn yaml_format_object_value(buf: &mut String, val: &Val, indent: usize) {
 mod tests {
     use super::*;
     use crate::{UtilContext, VecOutput};
-    use wasmsh_fs::MemoryFs;
+    use wasmsh_fs::BackendFs as MemoryFs;
 
     fn run_yq(argv: &[&str], stdin: Option<&[u8]>) -> (i32, String, String) {
         let mut fs = MemoryFs::new();

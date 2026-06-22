@@ -1397,7 +1397,7 @@ pub(crate) fn util_mktemp(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
 mod tests {
     use super::*;
     use crate::{UtilContext, UtilStdin, VecOutput};
-    use wasmsh_fs::MemoryFs;
+    use wasmsh_fs::BackendFs as MemoryFs;
 
     fn run_cat(argv: &[&str], stdin: Option<&[u8]>, fs: &mut MemoryFs) -> (i32, String, String) {
         let mut output = VecOutput::default();
