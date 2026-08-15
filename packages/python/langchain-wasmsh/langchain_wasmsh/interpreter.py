@@ -21,11 +21,13 @@ wasmsh shell utilities via ``subprocess.run``.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import uuid
+import warnings
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Annotated, Any, NotRequired
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, NotRequired, get_args
 
 from langchain.agents.middleware.types import (
     AgentMiddleware,
@@ -40,13 +42,19 @@ from langchain.tools import (
     ToolRuntime,  # noqa: TC002 -- needed at runtime for langgraph's ToolNode injection scan
 )
 from langchain_core._api import beta
-from langchain_core.messages import SystemMessage, ToolMessage
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 from pydantic import BaseModel, Field
 
-from langchain_wasmsh._prompt import render_repl_system_prompt, to_snake_case
+from langchain_wasmsh._prompt import (
+    PersistenceMode,
+    append_system_prompt_block,
+    render_repl_system_prompt,
+    to_snake_case,
+)
 from langchain_wasmsh._ptc import (
+    DEFAULT_MAX_PTC_CALLS,
     PTCOption,
     filter_tools_for_ptc,
     render_ptc_prompt,
@@ -62,6 +70,7 @@ from langchain_wasmsh.sandbox import WasmshSandbox
 if TYPE_CHECKING:
     from deepagents.backends.protocol import BackendProtocol
     from deepagents.middleware.skills import SkillMetadata
+    from langchain_core.messages import SystemMessage
     from langgraph.runtime import Runtime
 
 
@@ -71,6 +80,8 @@ _DEFAULT_TIMEOUT = 30.0
 _DEFAULT_MAX_RESULT_CHARS = 4_000
 _DEFAULT_TOOL_NAME = "py_eval"
 _DEFAULT_MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024  # 8 MiB pickle cap
+_VALID_MODES: tuple[str, ...] = get_args(PersistenceMode)
+_MODE_UNSET = object()
 
 # Module-level so `Annotated[str, _CODE_DOC]` can be resolved by
 # `typing.get_type_hints(...)`, which langgraph's ToolNode invokes when
@@ -106,14 +117,30 @@ class _PyEvalSchema(BaseModel):
 
 
 def _resolve_thread_id(fallback: str) -> str:
-    """Return ``thread_id`` from langgraph config, else ``fallback``."""
+    """Return the most specific session key LangGraph exposes for this run.
+
+    Preference order:
+
+    1. ``configurable.thread_id`` — the real conversation thread, present
+       whenever a checkpointer is configured.
+    2. ``run_id`` — no thread, but still unique per invocation, so two
+       concurrent checkpointer-less runs get their own interpreter instead
+       of sharing (and corrupting) one set of REPL globals.
+    3. ``fallback`` — a per-middleware-instance id, used only outside any
+       LangGraph run (direct tool invocation in tests, for instance).
+    """
     try:
         config = get_config()
     except RuntimeError:
         return fallback
-    thread_id = config.get("configurable", {}).get("thread_id") if config else None
+    if not config:
+        return fallback
+    thread_id = config.get("configurable", {}).get("thread_id")
     if thread_id is not None:
         return str(thread_id)
+    run_id = config.get("run_id")
+    if run_id is not None:
+        return f"run:{run_id}"
     return fallback
 
 
@@ -122,15 +149,54 @@ def _default_sandbox_factory() -> WasmshSandbox:
     return WasmshSandbox()
 
 
+def _resolve_mode(
+    mode: PersistenceMode | None,
+    snapshot_between_turns: bool | Any,  # noqa: FBT001 -- mirrors the deprecated kwarg
+) -> PersistenceMode:
+    """Reconcile the ``mode`` argument with its deprecated boolean alias.
+
+    Accepting both without a conflict check would let a caller write
+    ``mode="call", snapshot_between_turns=True`` and silently get one of the
+    two, so a combination that expresses two different intents is rejected
+    outright rather than resolved by precedence.
+    """
+    legacy_given = snapshot_between_turns is not _MODE_UNSET
+    if mode is not None and legacy_given:
+        msg = (
+            "Pass either `mode` or the deprecated `snapshot_between_turns`, "
+            "not both. `snapshot_between_turns=True` is `mode='thread'` and "
+            "`False` is `mode='turn'`."
+        )
+        raise ValueError(msg)
+    if legacy_given:
+        if not isinstance(snapshot_between_turns, bool):
+            msg = "`snapshot_between_turns` must be a bool"
+            raise TypeError(msg)
+        warnings.warn(
+            "`snapshot_between_turns` is deprecated and will be removed in the "
+            "next minor release; use mode='thread' (True) or mode='turn' "
+            "(False) instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return "thread" if snapshot_between_turns else "turn"
+    if mode is None:
+        return "thread"
+    if mode not in _VALID_MODES:
+        msg = f"`mode` must be one of {_VALID_MODES}, got {mode!r}"
+        raise ValueError(msg)
+    return mode
+
+
 @beta()
 class WasmshInterpreterMiddleware(
     AgentMiddleware[WasmshReplState, ContextT, ResponseT],
 ):
     """Persistent Python interpreter middleware backed by wasmsh.
 
-    Each LangGraph thread gets its own wasmsh sandbox session; state persists
-    across tool calls within a turn and across turns via a globals-pickle
-    snapshot stored in private agent state.
+    Each LangGraph thread gets its own wasmsh sandbox session. How long that
+    session lives is chosen with ``mode``; with the default ``"thread"`` it
+    survives across turns via a globals-pickle held in private agent state.
 
     Args:
         sandbox_factory: Callable returning a fresh ``WasmshSandbox`` for one
@@ -148,13 +214,25 @@ class WasmshInterpreterMiddleware(
             calls bypass the regular ``ToolNode`` path, so ``interrupt_on``
             approval is NOT enforced for them — treat the allowlist as your
             permission boundary. ``None`` (default) disables PTC.
+        max_ptc_calls: Cap on nested tool calls within a single ``py_eval``
+            evaluation. The budget resets per evaluation. Default 256;
+            ``None`` disables the cap. Exists so a loop in generated code
+            cannot issue unbounded tool calls inside one turn.
         skills_backend: Optional ``BackendProtocol``. When set and a paired
             ``SkillsMiddleware`` populates ``skills_metadata``, skills with
             Python source under their directory become importable inside the
             REPL via ``import skills.<name>``.
-        snapshot_between_turns: If ``True`` (default), persist REPL globals
-            across agent turns via :func:`pickle`. Set ``False`` for a
-            single-turn ephemeral REPL.
+        mode: Interpreter lifetime, matching the convention the LangChain
+            interpreter middlewares share:
+
+            - ``"thread"`` (default): globals persist across calls *and*
+              turns, carried between turns as a pickle in private state.
+            - ``"turn"``: globals persist across calls inside one agent turn,
+              then the session is evicted. Nothing is written to state.
+            - ``"call"``: every ``py_eval`` call gets a fresh interpreter.
+        snapshot_between_turns: Deprecated alias kept for one minor release.
+            ``True`` maps to ``mode="thread"``, ``False`` to ``mode="turn"``.
+            Passing it together with ``mode`` is an error.
         max_snapshot_bytes: Drop the snapshot if the pickle exceeds this many
             bytes. Default 8 MiB.
 
@@ -172,6 +250,18 @@ class WasmshInterpreterMiddleware(
 
     state_schema = WasmshReplState
 
+    serialized_name: ClassVar[str] = "WasmshInterpreterMiddleware"
+    """Stable public alias for profile exclusions and config round-trips.
+
+    `HarnessProfile.excluded_middleware` matches either a class or an
+    `AgentMiddleware.name`, and `HarnessProfileConfig.from_harness_profile`
+    can only serialize a class entry when the class advertises this alias.
+    Declaring it explicitly — rather than letting it default to the class
+    `__name__` — is what makes `excluded_middleware={WasmshInterpreterMiddleware}`
+    round-trip through `to_dict()`/`from_dict()`, and pins the name against a
+    future rename.
+    """
+
     def __init__(  # noqa: PLR0913 -- public API mirrors CodeInterpreterMiddleware
         self,
         *,
@@ -181,7 +271,9 @@ class WasmshInterpreterMiddleware(
         max_result_chars: int = _DEFAULT_MAX_RESULT_CHARS,
         ptc: PTCOption | None = None,
         skills_backend: BackendProtocol | None = None,
-        snapshot_between_turns: bool = True,
+        max_ptc_calls: int | None = DEFAULT_MAX_PTC_CALLS,
+        mode: PersistenceMode | None = None,
+        snapshot_between_turns: bool | Any = _MODE_UNSET,
         max_snapshot_bytes: int | None = _DEFAULT_MAX_SNAPSHOT_BYTES,
     ) -> None:
         """Build the middleware; see the class docstring for parameter details."""
@@ -192,6 +284,10 @@ class WasmshInterpreterMiddleware(
         if max_snapshot_bytes is not None and max_snapshot_bytes < 1:
             msg = "`max_snapshot_bytes` must be >= 1 or None"
             raise ValueError(msg)
+        if max_ptc_calls is not None and max_ptc_calls < 1:
+            msg = "`max_ptc_calls` must be >= 1 or None"
+            raise ValueError(msg)
+        self._mode = _resolve_mode(mode, snapshot_between_turns)
         self._sandbox_factory: SandboxFactory = (
             sandbox_factory or _default_sandbox_factory
         )
@@ -199,15 +295,15 @@ class WasmshInterpreterMiddleware(
         self._tool_name = tool_name
         self._max_result_chars = max_result_chars
         self._ptc = ptc
+        self._max_ptc_calls = max_ptc_calls
         self._skills_backend = skills_backend
-        self._snapshot_between_turns = snapshot_between_turns
         self._max_snapshot_bytes = max_snapshot_bytes
         self._registry = _Registry(self._sandbox_factory)
         self._base_system_prompt = render_repl_system_prompt(
             tool_name=tool_name,
             timeout=timeout,
             max_result_chars=max_result_chars,
-            snapshot_between_turns=snapshot_between_turns,
+            mode=self._mode,
         )
         self._ptc_prompt_cache: tuple[frozenset[str], str] | None = None
         # Per-thread snapshot of the exposed PTC tools for this turn. Keyed
@@ -242,12 +338,18 @@ class WasmshInterpreterMiddleware(
             repl = registry.get(thread_id)
             skills = middleware._skills_for_eval(runtime)
             ptc_tools = middleware._exposed_ptc_tools.get(thread_id)
-            outcome = repl.eval_sync(
-                code,
-                skills=skills,
-                skills_backend=middleware._skills_backend,
-                ptc_tools=ptc_tools,
-            )
+            try:
+                outcome = repl.eval_sync(
+                    code,
+                    skills=skills,
+                    skills_backend=middleware._skills_backend,
+                    ptc_tools=ptc_tools,
+                    outer_runtime=runtime,
+                    max_ptc_calls=middleware._max_ptc_calls,
+                )
+            finally:
+                if middleware._mode == "call":
+                    registry.evict(thread_id)
             return _wrap(outcome, runtime.tool_call_id)
 
         async def async_eval(
@@ -258,12 +360,18 @@ class WasmshInterpreterMiddleware(
             repl = registry.get(thread_id)
             skills = middleware._skills_for_eval(runtime)
             ptc_tools = middleware._exposed_ptc_tools.get(thread_id)
-            outcome = await repl.eval_async(
-                code,
-                skills=skills,
-                skills_backend=middleware._skills_backend,
-                ptc_tools=ptc_tools,
-            )
+            try:
+                outcome = await repl.eval_async(
+                    code,
+                    skills=skills,
+                    skills_backend=middleware._skills_backend,
+                    ptc_tools=ptc_tools,
+                    outer_runtime=runtime,
+                    max_ptc_calls=middleware._max_ptc_calls,
+                )
+            finally:
+                if middleware._mode == "call":
+                    await asyncio.to_thread(registry.evict, thread_id)
             return _wrap(outcome, runtime.tool_call_id)
 
         # Let StructuredTool infer the schema from the function signature so
@@ -305,7 +413,7 @@ class WasmshInterpreterMiddleware(
         runtime: Runtime[ContextT],  # noqa: ARG002 -- middleware hook signature
     ) -> dict[str, Any] | None:
         """Restore the globals-pickle into the current thread's REPL."""
-        if not self._snapshot_between_turns:
+        if self._mode != "thread":
             return None
         payload = state.get("_wasmsh_snapshot_payload")
         if payload is None:
@@ -315,6 +423,9 @@ class WasmshInterpreterMiddleware(
         try:
             repl.restore_snapshot(payload)
         except Exception:  # noqa: BLE001 -- best-effort snapshot path
+            # A corrupt or unreadable snapshot must not take the rest of the
+            # checkpoint with it: clear only this private field and continue
+            # with an empty interpreter.
             logger.warning(
                 "Failed to restore wasmsh snapshot for thread_id=%s",
                 thread_id,
@@ -328,8 +439,13 @@ class WasmshInterpreterMiddleware(
         state: WasmshReplState,
         runtime: Runtime[ContextT],
     ) -> dict[str, Any] | None:
-        """Async variant — restore is cheap, so we just delegate."""
-        return self.before_agent(state, runtime)
+        """Async variant of :meth:`before_agent`.
+
+        Restoring uploads the pickle into the sandbox over a blocking
+        stdio/HTTP round-trip, so it runs on a worker thread rather than
+        stalling the event loop the agent is scheduled on.
+        """
+        return await asyncio.to_thread(self.before_agent, state, runtime)
 
     def wrap_model_call(
         self,
@@ -385,9 +501,16 @@ class WasmshInterpreterMiddleware(
         system_message: SystemMessage | None,
         prompt: str,
     ) -> SystemMessage:
-        existing = (system_message.content if system_message is not None else "") or ""
-        body = f"{existing}\n\n{prompt}" if existing else prompt
-        return SystemMessage(content=body)
+        """Append the interpreter prompt without flattening what came before.
+
+        By the time this runs, memory, skills, harness-profile and
+        prompt-caching middleware may all have contributed structured content
+        blocks — including `cache_control` markers. Rebuilding the message
+        from `.content` as one string would drop them, so the append is
+        block-aware; see
+        :func:`langchain_wasmsh._prompt.append_system_prompt_block`.
+        """
+        return append_system_prompt_block(system_message, prompt)
 
     def after_agent(
         self,
@@ -397,7 +520,10 @@ class WasmshInterpreterMiddleware(
         """Snapshot the REPL globals (if any) and evict the thread slot."""
         thread_id = _resolve_thread_id(self._fallback_thread_id)
         self._exposed_ptc_tools.pop(thread_id, None)
-        if not self._snapshot_between_turns:
+        if self._mode != "thread":
+            # "turn" and "call" both end the turn with no interpreter state
+            # in the checkpoint. "call" has already evicted after each eval;
+            # evicting again is a no-op.
             self._registry.evict(thread_id)
             return None
         repl = self._registry.get_if_exists(thread_id)
@@ -423,8 +549,12 @@ class WasmshInterpreterMiddleware(
         state: WasmshReplState,
         runtime: Runtime[ContextT],
     ) -> dict[str, Any] | None:
-        """Async variant of :meth:`after_agent`."""
-        return self.after_agent(state, runtime)
+        """Async variant of :meth:`after_agent`.
+
+        Reading the snapshot back out of the sandbox and closing the session
+        are blocking transfers, so they run on a worker thread.
+        """
+        return await asyncio.to_thread(self.after_agent, state, runtime)
 
     def _snapshot_update(
         self,

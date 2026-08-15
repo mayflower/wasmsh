@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from typing import Any
+from dataclasses import dataclass
+from typing import Annotated, Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,11 +14,20 @@ from deepagents.backends.protocol import (
     FileDownloadResponse,
     FileUploadResponse,
 )
+from langchain.tools import InjectedState, ToolRuntime
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import InjectedToolCallId, tool
+from langgraph.store.memory import InMemoryStore
+from langgraph.types import Command
+from pydantic import BaseModel
 
+from langchain_wasmsh._ptc import (
+    coerce_tool_output_for_ptc,
+    normalize_tool_input,
+)
 from langchain_wasmsh._repl import (
     Outcome,
-    _coerce_tool_output,
-    _make_ptc_dispatcher,
+    _PTCSession,
     _ThreadREPL,
 )
 from langchain_wasmsh.sandbox import WasmshSandbox
@@ -95,76 +106,251 @@ def _build_sandbox(
         return WasmshSandbox()
 
 
-# ── _coerce_tool_output ────────────────────────────────────────────────────
+# ── coerce_tool_output_for_ptc ─────────────────────────────────────────────
 
 
 class TestCoerceToolOutput:
     def test_primitives_pass_through(self) -> None:
-        assert _coerce_tool_output(None) is None
-        assert _coerce_tool_output(True) is True
-        assert _coerce_tool_output(7) == 7
-        assert _coerce_tool_output(1.5) == 1.5
-        assert _coerce_tool_output("hi") == "hi"
+        assert coerce_tool_output_for_ptc(None) is None
+        assert coerce_tool_output_for_ptc(True) is True
+        assert coerce_tool_output_for_ptc(7) == 7
+        assert coerce_tool_output_for_ptc(1.5) == 1.5
+        assert coerce_tool_output_for_ptc("hi") == "hi"
 
     def test_list_and_dict_recurse(self) -> None:
-        assert _coerce_tool_output([1, "x", None]) == [1, "x", None]
-        assert _coerce_tool_output({"a": 1, "b": [2, 3]}) == {"a": 1, "b": [2, 3]}
+        assert coerce_tool_output_for_ptc([1, "x", None]) == [1, "x", None]
+        assert coerce_tool_output_for_ptc({"a": 1, "b": [2, 3]}) == {
+            "a": 1,
+            "b": [2, 3],
+        }
 
-    def test_basemodel_like_model_dump_is_used(self) -> None:
-        class FakeModel:
-            def model_dump(self) -> dict[str, Any]:
-                return {"x": 1}
+    def test_pydantic_model_keeps_field_shape(self) -> None:
+        class Result(BaseModel):
+            score: int
+            label: str
 
-        assert _coerce_tool_output(FakeModel()) == {"x": 1}
+        assert coerce_tool_output_for_ptc(Result(score=3, label="x")) == {
+            "score": 3,
+            "label": "x",
+        }
 
-    def test_to_dict_fallback(self) -> None:
-        class FakeObj:
-            def to_dict(self) -> dict[str, Any]:
-                return {"x": 2}
-
-        assert _coerce_tool_output(FakeObj()) == {"x": 2}
-
-    def test_string_fallback(self) -> None:
+    def test_nested_structure_survives_an_unserialisable_leaf(self) -> None:
+        # Only the leaf is stringified; the object around it stays navigable
+        # from the interpreter.
         class Custom:
             def __repr__(self) -> str:
                 return "<C>"
 
-        assert _coerce_tool_output(Custom()) == "<C>"
+        assert coerce_tool_output_for_ptc({"rows": [{"obj": Custom()}]}) == {
+            "rows": [{"obj": "<C>"}],
+        }
+
+    def test_tool_message_is_unwrapped_to_its_content(self) -> None:
+        message = ToolMessage(content="payload", tool_call_id="abc")
+        assert coerce_tool_output_for_ptc(message) == "payload"
+
+    def test_command_is_unwrapped_to_its_trailing_message(self) -> None:
+        command = Command(
+            update={"messages": [ToolMessage(content="done", tool_call_id="abc")]},
+        )
+        assert coerce_tool_output_for_ptc(command) == "done"
 
 
-# ── _make_ptc_dispatcher ────────────────────────────────────────────────────
+# ── argument normalization ─────────────────────────────────────────────────
 
 
-class _StubTool:
-    """Minimal stand-in for langchain BaseTool with an ``invoke`` method."""
+class TestNormalizeToolInput:
+    def test_none_becomes_empty_args(self) -> None:
+        assert normalize_tool_input(None) == {}
 
-    def __init__(self, fn: Any) -> None:
-        self._fn = fn
+    def test_dict_passes_through_as_a_copy(self) -> None:
+        source = {"q": "x"}
+        assert normalize_tool_input(source) == {"q": "x"}
+        assert normalize_tool_input(source) is not source
 
-    def invoke(self, args: dict[str, Any]) -> Any:
-        return self._fn(args)
+    def test_scalar_is_routed_into_schema_validation(self) -> None:
+        # Wrapping under a conventional key makes the tool's own schema
+        # produce an actionable error instead of silently missing an arg.
+        assert normalize_tool_input("bare") == {"input": "bare"}
+
+
+# ── runtime-aware dispatch ─────────────────────────────────────────────────
+
+
+@dataclass
+class _Context:
+    """Stand-in for an application's `context_schema` dataclass."""
+
+    user_id: str
+
+
+def _runtime(
+    *,
+    state: Any = None,
+    store: Any = None,
+    context: Any = None,
+) -> ToolRuntime:
+    return ToolRuntime(
+        state=state if state is not None else {"messages": []},
+        context=context,
+        config={"configurable": {"thread_id": "t1"}},
+        stream_writer=lambda _: None,
+        tool_call_id="outer_call",
+        store=store,
+        tools=[],
+    )
+
+
+def _dispatch(session: _PTCSession, tool: str, args: Any = None) -> dict[str, Any]:
+    return session.dispatch({"id": "hc_1", "tool": tool, "args": args})
 
 
 class TestPtcDispatcher:
     def test_success_envelope(self) -> None:
-        dispatch = _make_ptc_dispatcher(
-            {"search": _StubTool(lambda a: f"hit:{a['q']}")}
-        )
-        env = dispatch({"id": "hc_1", "tool": "search", "args": {"q": "foo"}})
-        assert env == {"ok": True, "value": "hit:foo"}
+        @tool
+        def search(q: str) -> str:
+            """Search."""
+            return f"hit:{q}"
+
+        session = _PTCSession(tools={"search": search}, outer_runtime=_runtime())
+        assert _dispatch(session, "search", {"q": "foo"}) == {
+            "ok": True,
+            "value": "hit:foo",
+        }
 
     def test_unknown_tool(self) -> None:
-        dispatch = _make_ptc_dispatcher({"search": _StubTool(lambda a: "ok")})
-        env = dispatch({"id": "hc_2", "tool": "ghost", "args": {}})
+        session = _PTCSession(tools={})
+        env = _dispatch(session, "ghost", {})
         assert env["ok"] is False
         assert env["error"] == "UnknownToolError"
 
-    def test_invoke_raises_isolated(self) -> None:
-        def boom(_: dict[str, Any]) -> None:
-            raise RuntimeError("nope")
+    def test_tool_receives_child_runtime_with_a_fresh_call_id(self) -> None:
+        seen: dict[str, Any] = {}
 
-        dispatch = _make_ptc_dispatcher({"search": _StubTool(boom)})
-        env = dispatch({"id": "hc_3", "tool": "search", "args": {}})
+        @tool
+        def probe(runtime: ToolRuntime) -> str:
+            """Probe the injected runtime."""
+            seen["tool_call_id"] = runtime.tool_call_id
+            seen["context"] = runtime.context
+            seen["state"] = runtime.state
+            return "ok"
+
+        outer = _runtime(
+            state={"messages": [], "custom": 42},
+            context=_Context(user_id="u1"),
+        )
+        session = _PTCSession(tools={"probe": probe}, outer_runtime=outer)
+
+        assert _dispatch(session, "probe")["ok"] is True
+        # Derived from the outer call, but with its own id so tracing and
+        # checkpointed state can correlate the nested call separately.
+        assert seen["tool_call_id"] != "outer_call"
+        assert seen["tool_call_id"].startswith("ptc_probe_")
+        assert seen["context"] == _Context(user_id="u1")
+        assert seen["state"]["custom"] == 42
+
+    def test_tool_receives_the_store(self) -> None:
+        store = InMemoryStore()
+        store.put(("ns",), "k", {"v": 1})
+
+        @tool
+        def reader(runtime: ToolRuntime) -> dict[str, Any]:
+            """Read from the store."""
+            item = runtime.store.get(("ns",), "k")
+            return item.value
+
+        session = _PTCSession(
+            tools={"reader": reader},
+            outer_runtime=_runtime(store=store),
+        )
+        assert _dispatch(session, "reader") == {"ok": True, "value": {"v": 1}}
+
+    def test_injected_state_field_is_supplied(self) -> None:
+        @tool
+        def peek(custom: Annotated[int, InjectedState("custom")]) -> int:
+            """Peek at a state field."""
+            return custom
+
+        session = _PTCSession(
+            tools={"peek": peek},
+            outer_runtime=_runtime(state={"messages": [], "custom": 7}),
+        )
+        assert _dispatch(session, "peek") == {"ok": True, "value": 7}
+
+    def test_injected_tool_call_id_is_supplied(self) -> None:
+        @tool
+        def stamped(tool_call_id: Annotated[str, InjectedToolCallId]) -> str:
+            """Return a message stamped with the call id."""
+            return ToolMessage(content=tool_call_id, tool_call_id=tool_call_id)
+
+        session = _PTCSession(tools={"stamped": stamped}, outer_runtime=_runtime())
+        env = _dispatch(session, "stamped")
+        assert env["ok"] is True
+        assert env["value"].startswith("ptc_stamped_")
+
+    def test_generated_code_cannot_forge_injected_arguments(self) -> None:
+        seen: dict[str, Any] = {}
+
+        @tool
+        def probe(runtime: ToolRuntime) -> str:
+            """Probe the injected runtime."""
+            seen["context"] = runtime.context
+            return "ok"
+
+        session = _PTCSession(
+            tools={"probe": probe},
+            outer_runtime=_runtime(context=_Context(user_id="real")),
+        )
+        # A model-authored program supplying its own `runtime` must not be
+        # able to substitute identity.
+        _dispatch(
+            session, "probe", {"runtime": {"context": _Context(user_id="forged")}}
+        )
+        assert seen["context"] == _Context(user_id="real")
+
+    def test_async_only_tool_runs_from_the_sync_path(self) -> None:
+        @tool
+        async def fetch(q: str) -> str:
+            """Async-only tool."""
+            await asyncio.sleep(0)
+            return f"async:{q}"
+
+        session = _PTCSession(tools={"fetch": fetch}, outer_runtime=_runtime())
+        assert _dispatch(session, "fetch", {"q": "x"}) == {
+            "ok": True,
+            "value": "async:x",
+        }
+
+    async def test_tools_run_on_the_agent_loop_under_async_execution(self) -> None:
+        loop = asyncio.get_running_loop()
+        seen: dict[str, Any] = {}
+
+        @tool
+        async def fetch() -> str:
+            """Record which loop executed the tool."""
+            seen["loop"] = asyncio.get_running_loop()
+            return "ok"
+
+        session = _PTCSession(
+            tools={"fetch": fetch},
+            outer_runtime=_runtime(),
+            outer_loop=loop,
+        )
+        # The dispatcher itself runs on a worker thread, mirroring
+        # `eval_async`'s `asyncio.to_thread` hand-off.
+        env = await asyncio.to_thread(_dispatch, session, "fetch")
+        assert env == {"ok": True, "value": "ok"}
+        assert seen["loop"] is loop
+
+    def test_invoke_raises_isolated(self) -> None:
+        @tool
+        def boom() -> str:
+            """Always fails."""
+            msg = "nope"
+            raise RuntimeError(msg)
+
+        session = _PTCSession(tools={"boom": boom}, outer_runtime=_runtime())
+        env = _dispatch(session, "boom")
         assert env["ok"] is False
         assert env["error"] == "RuntimeError"
         assert env["message"] == "nope"
@@ -176,40 +362,109 @@ class TestPtcDispatcher:
         # The envelope still round-trips to the sandbox so the model can
         # recover; the structured log is the host's only window into the
         # original stack and call context.
-        def boom(_: dict[str, Any]) -> None:
-            err = RuntimeError("kaboom")
-            raise err
+        @tool
+        def boom() -> str:
+            """Always fails."""
+            msg = "kaboom"
+            raise RuntimeError(msg)
 
-        dispatch = _make_ptc_dispatcher({"search": _StubTool(boom)})
+        session = _PTCSession(tools={"boom": boom}, outer_runtime=_runtime())
         with caplog.at_level(logging.WARNING, logger="langchain_wasmsh._repl"):
-            env = dispatch({"id": "hc_log", "tool": "search", "args": {"q": "x"}})
+            env = session.dispatch({"id": "hc_log", "tool": "boom", "args": {}})
         assert env["ok"] is False
         assert env["error"] == "RuntimeError"
         records = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert records, "expected a WARNING log record from the PTC catch"
         record = records[-1]
-        assert "search" in record.getMessage()
+        assert "boom" in record.getMessage()
         assert getattr(record, "wasmsh_ptc_call_id", None) == "hc_log"
-        assert getattr(record, "wasmsh_ptc_tool", None) == "search"
+        assert getattr(record, "wasmsh_ptc_tool", None) == "boom"
         # `exc_info=True` carries the original exception for downstream
         # handlers (Sentry, structlog adapters, etc.).
         assert record.exc_info is not None
         assert isinstance(record.exc_info[1], RuntimeError)
 
-    def test_non_dict_args_rejected(self) -> None:
-        dispatch = _make_ptc_dispatcher({"search": _StubTool(lambda a: "ok")})
-        env = dispatch({"id": "hc_4", "tool": "search", "args": "not a dict"})
-        assert env["ok"] is False
-        assert env["error"] == "TypeError"
+    def test_invalid_arguments_reach_schema_validation(self) -> None:
+        @tool
+        def search(q: str) -> str:
+            """Search."""
+            return q
 
-    def test_tool_without_invoke(self) -> None:
-        dispatch = _make_ptc_dispatcher({"oops": object()})
-        env = dispatch({"id": "hc_5", "tool": "oops", "args": {}})
+        session = _PTCSession(tools={"search": search}, outer_runtime=_runtime())
+        env = _dispatch(session, "search", "not a dict")
         assert env["ok"] is False
-        assert env["error"] == "ToolMisconfigured"
+        assert "q" in env["message"]
+
+
+class TestPtcCallBudget:
+    @staticmethod
+    def _counting_session(limit: int | None) -> tuple[_PTCSession, list[int]]:
+        calls: list[int] = []
+
+        @tool
+        def ping() -> str:
+            """Count one call."""
+            calls.append(1)
+            return "pong"
+
+        session = _PTCSession(
+            tools={"ping": ping},
+            outer_runtime=_runtime(),
+            max_ptc_calls=limit,
+        )
+        return session, calls
+
+    def test_calls_up_to_the_limit_succeed(self) -> None:
+        session, calls = self._counting_session(3)
+        for _ in range(3):
+            assert _dispatch(session, "ping")["ok"] is True
+        assert len(calls) == 3
+
+    def test_the_call_past_the_limit_fails_without_invoking_the_tool(self) -> None:
+        session, calls = self._counting_session(2)
+        _dispatch(session, "ping")
+        _dispatch(session, "ping")
+        env = _dispatch(session, "ping")
+        assert env["ok"] is False
+        assert env["error"] == "PTCCallBudgetExceededError"
+        assert "limit=2" in env["message"]
+        # The point of the budget: the third call never reaches the tool.
+        assert len(calls) == 2
+
+    def test_none_disables_the_budget(self) -> None:
+        session, calls = self._counting_session(None)
+        for _ in range(5):
+            assert _dispatch(session, "ping")["ok"] is True
+        assert len(calls) == 5
+
+    def test_budget_is_per_evaluation(self) -> None:
+        # A fresh _PTCSession is built per eval, so a new program starts
+        # with a full budget rather than inheriting the previous one.
+        first, _ = self._counting_session(1)
+        assert _dispatch(first, "ping")["ok"] is True
+        assert _dispatch(first, "ping")["ok"] is False
+        second, _ = self._counting_session(1)
+        assert _dispatch(second, "ping")["ok"] is True
 
 
 # ── WasmshSandbox.run_ptc end-to-end (stub subprocess) ─────────────────────
+
+
+# These exercise the JSON-RPC transport, not tool semantics, so they build a
+# dispatcher over trivial tools and assert on the wire exchange.
+
+
+def _stub_tool(name: str, fn: Any) -> Any:
+    @tool(name)
+    def _impl(q: str = "") -> Any:
+        """Stub tool."""
+        return fn({"q": q})
+
+    return _impl
+
+
+def _make_ptc_dispatcher(tools: dict[str, Any]) -> Any:
+    return _PTCSession(tools=tools).dispatch
 
 
 class TestRunPtcRoundTrip:
@@ -253,7 +508,7 @@ class TestRunPtcRoundTrip:
         sandbox = _build_sandbox(dialogue)
         dispatcher = _make_ptc_dispatcher(
             {
-                "search": _StubTool(lambda a: f"hit:{a['q']}"),
+                "search": _stub_tool("search", lambda a: f"hit:{a['q']}"),
             }
         )
 
@@ -382,7 +637,7 @@ class TestRunPtcRoundTrip:
         sandbox = _build_sandbox(dialogue)
         dispatcher = _make_ptc_dispatcher(
             {
-                "search": _StubTool(lambda a: f"hit:{a['q']}"),
+                "search": _stub_tool("search", lambda a: f"hit:{a['q']}"),
             }
         )
 
@@ -460,7 +715,9 @@ class TestRunPtcRoundTrip:
             captured_sandbox[0].execute("echo hi")
             return "should not reach"
 
-        dispatcher = _make_ptc_dispatcher({"search": _StubTool(reentrant_tool)})
+        dispatcher = _make_ptc_dispatcher(
+            {"search": _stub_tool("search", reentrant_tool)}
+        )
 
         sandbox.run_ptc(
             "await tools.search(q='x')", tools=["search"], on_host_call=dispatcher
@@ -538,7 +795,7 @@ class TestReplRoutesThroughRunPtc:
         repl = _ThreadREPL(factory=lambda: sandbox)
         outcome = repl.eval_sync(
             "await tools.search(q='foo')",
-            ptc_tools={"search": _StubTool(lambda a: f"hit:{a['q']}")},
+            ptc_tools={"search": _stub_tool("search", lambda a: f"hit:{a['q']}")},
         )
         assert isinstance(outcome, Outcome)
         assert outcome.ok is True

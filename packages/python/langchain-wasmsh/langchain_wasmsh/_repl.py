@@ -30,11 +30,20 @@ from langchain_wasmsh._launcher import (
     LAUNCHER_SCRIPT,
     RESULT_MARKER,
 )
+from langchain_wasmsh._ptc import (
+    PTCCallBudgetExceededError,
+    coerce_tool_output_for_ptc,
+    inject_tool_args_for_ptc,
+    normalize_tool_input,
+    synth_tool_call_id,
+    tool_uses_injected_tool_call_id,
+)
 from langchain_wasmsh._skills import LoadedSkill, load_skill, scan_skill_references
 
 if TYPE_CHECKING:
     from deepagents.backends.protocol import BackendProtocol
     from deepagents.middleware.skills import SkillMetadata
+    from langchain_core.tools import BaseTool
 
 
 logger = logging.getLogger(__name__)
@@ -221,13 +230,16 @@ class _ThreadREPL:
 
     # ---- eval ------------------------------------------------------------
 
-    def eval_sync(
+    def eval_sync(  # noqa: PLR0913 -- one call carries the whole PTC context
         self,
         code: str,
         *,
         skills: dict[str, SkillMetadata] | None = None,
         skills_backend: BackendProtocol | None = None,
-        ptc_tools: dict[str, Any] | None = None,
+        ptc_tools: dict[str, BaseTool] | None = None,
+        outer_runtime: Any = None,
+        outer_loop: asyncio.AbstractEventLoop | None = None,
+        max_ptc_calls: int | None = None,
     ) -> Outcome:
         """Run one interpreter call; safe to call from multiple threads.
 
@@ -235,13 +247,28 @@ class _ThreadREPL:
         ``sandbox.run_ptc`` so user code can ``await tools.<name>(...)`` —
         each ``host_call`` event is dispatched against ``ptc_tools[name]``.
         Otherwise the standard file-launcher shell path is used.
+
+        ``outer_runtime`` is the ``ToolRuntime`` of the ``py_eval`` call that
+        started this program; it is what nested tools receive (with a child
+        ``tool_call_id``). ``outer_loop`` is the event loop the agent is
+        running on, when there is one, so an async tool executes there
+        instead of on a throwaway loop.
         """
         with self._lock:
             try:
                 self._install_pending_skills(code, skills, skills_backend)
                 sandbox = self._ensure_sandbox()
                 if ptc_tools:
-                    return self._eval_with_ptc(sandbox, code, ptc_tools)
+                    return self._eval_with_ptc(
+                        sandbox,
+                        code,
+                        _PTCSession(
+                            tools=ptc_tools,
+                            outer_runtime=outer_runtime,
+                            outer_loop=outer_loop,
+                            max_ptc_calls=max_ptc_calls,
+                        ),
+                    )
                 # Upload the user code to the fixed VFS path the launcher
                 # reads from (wasmsh's python3 builtin does not pass argv).
                 sandbox.upload_files([(CODE_PATH, code.encode("utf-8"))])
@@ -256,7 +283,7 @@ class _ThreadREPL:
         self,
         sandbox: _SandboxLike,
         code: str,
-        ptc_tools: dict[str, Any],
+        session: _PTCSession,
     ) -> Outcome:
         run_ptc = getattr(sandbox, "run_ptc", None)
         if run_ptc is None:
@@ -264,12 +291,11 @@ class _ThreadREPL:
                 "PTCUnsupported",
                 "sandbox does not implement run_ptc",
             )
-        dispatcher = _make_ptc_dispatcher(ptc_tools)
         try:
             envelope = run_ptc(
                 code,
-                tools=sorted(ptc_tools),
-                on_host_call=dispatcher,
+                tools=sorted(session.tools),
+                on_host_call=session.dispatch,
             )
         except (RuntimeError, OSError) as exc:
             # Narrow: transport / protocol / capability failures from
@@ -279,21 +305,31 @@ class _ThreadREPL:
             return Outcome.host_error(type(exc).__name__, str(exc))
         return Outcome.from_envelope(envelope)
 
-    async def eval_async(
+    async def eval_async(  # noqa: PLR0913 -- mirrors eval_sync
         self,
         code: str,
         *,
         skills: dict[str, SkillMetadata] | None = None,
         skills_backend: BackendProtocol | None = None,
-        ptc_tools: dict[str, Any] | None = None,
+        ptc_tools: dict[str, BaseTool] | None = None,
+        outer_runtime: Any = None,
+        max_ptc_calls: int | None = None,
     ) -> Outcome:
-        """Async wrapper around :meth:`eval_sync` (runs in a worker thread)."""
+        """Async wrapper around :meth:`eval_sync` (runs in a worker thread).
+
+        The running loop is captured before handing off so nested async
+        tools are scheduled back onto the agent's own loop rather than a
+        fresh one created inside the worker thread.
+        """
         return await asyncio.to_thread(
             self.eval_sync,
             code,
             skills=skills,
             skills_backend=skills_backend,
             ptc_tools=ptc_tools,
+            outer_runtime=outer_runtime,
+            outer_loop=asyncio.get_running_loop(),
+            max_ptc_calls=max_ptc_calls,
         )
 
     # ---- snapshot --------------------------------------------------------
@@ -324,64 +360,51 @@ class _ThreadREPL:
         self._sandbox.upload_files([(GLOBALS_PATH, payload)])
 
 
-def _coerce_tool_output(value: Any) -> Any:
-    """Convert a LangChain tool's return value into a JSON-serialisable shape.
+@dataclass
+class _PTCSession:
+    """One evaluation's PTC context: allowlist, runtime, loop, call budget.
 
-    Mirrors the QuickJS adapter's coercion chain so behaviour stays familiar
-    across interpreters: BaseModel → ``model_dump``; objects with ``to_dict``
-    → that method; primitives pass through; anything else → ``str(value)``.
+    Created per ``eval`` call, so the budget resets each time the model runs
+    a program rather than accumulating across a conversation.
     """
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, (list, tuple)):
-        return [_coerce_tool_output(v) for v in value]
-    if isinstance(value, dict):
-        return {str(k): _coerce_tool_output(v) for k, v in value.items()}
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        try:
-            return model_dump()
-        except Exception:  # noqa: BLE001, S110 -- best-effort coercion fallback
-            pass
-    to_dict = getattr(value, "to_dict", None)
-    if callable(to_dict):
-        try:
-            return to_dict()
-        except Exception:  # noqa: BLE001, S110 -- best-effort coercion fallback
-            pass
-    return str(value)
 
+    tools: dict[str, BaseTool]
+    outer_runtime: Any = None
+    outer_loop: asyncio.AbstractEventLoop | None = None
+    max_ptc_calls: int | None = None
+    calls_made: int = 0
 
-def _make_ptc_dispatcher(
-    tools: dict[str, Any],
-) -> Any:
-    """Build the ``on_host_call`` callable WasmshSandbox.run_ptc expects."""
+    def dispatch(self, message: dict[str, Any]) -> dict[str, Any]:
+        """Handle one ``host_call`` event and return its result envelope.
 
-    def dispatch(message: dict[str, Any]) -> dict[str, Any]:
+        Never raises: a failure here would abort the JSON-RPC exchange and
+        strand the sandbox mid-program, so everything is reported back as an
+        envelope the interpreter turns into a Python exception the generated
+        code can catch.
+        """
         name = message.get("tool")
-        if not isinstance(name, str) or name not in tools:
-            return {
-                "ok": False,
-                "error": "UnknownToolError",
-                "message": f"tool {name!r} is not on the PTC allowlist",
-            }
-        tool = tools[name]
-        args = message.get("args") or {}
-        if not isinstance(args, dict):
-            return {
-                "ok": False,
-                "error": "TypeError",
-                "message": "host_call args must be an object",
-            }
-        invoke = getattr(tool, "invoke", None)
-        if not callable(invoke):
-            return {
-                "ok": False,
-                "error": "ToolMisconfigured",
-                "message": f"{name!r} is not a callable tool",
-            }
+        if not isinstance(name, str) or name not in self.tools:
+            return _ptc_error(
+                "UnknownToolError",
+                f"tool {name!r} is not on the PTC allowlist",
+            )
+        tool = self.tools[name]
+
         try:
-            raw = invoke(args)
+            self._consume_budget(name)
+        except PTCCallBudgetExceededError as exc:
+            logger.warning("PTC call budget exceeded on tool %r", name)
+            return _ptc_error(type(exc).__name__, str(exc))
+
+        args = normalize_tool_input(message.get("args"))
+        try:
+            enriched = inject_tool_args_for_ptc(
+                tool,
+                args,
+                self.outer_runtime,
+                (call_id := synth_tool_call_id(tool.name)),
+            )
+            raw = self._invoke(tool, enriched, call_id)
         except Exception as exc:  # noqa: BLE001 -- isolate one tool failure
             # The envelope reaches the sandbox so the model can recover, but
             # the original stack and call context are lost in that
@@ -396,14 +419,73 @@ def _make_ptc_dispatcher(
                 },
                 exc_info=True,
             )
-            return {
-                "ok": False,
-                "error": type(exc).__name__,
-                "message": str(exc),
-            }
-        return {"ok": True, "value": _coerce_tool_output(raw)}
+            return _ptc_error(type(exc).__name__, str(exc))
+        return {"ok": True, "value": coerce_tool_output_for_ptc(raw)}
 
-    return dispatch
+    def _consume_budget(self, tool_name: str) -> None:
+        if self.max_ptc_calls is None:
+            return
+        if self.calls_made >= self.max_ptc_calls:
+            raise PTCCallBudgetExceededError(
+                limit=self.max_ptc_calls,
+                tool_name=tool_name,
+            )
+        self.calls_made += 1
+
+    def _invoke(self, tool: BaseTool, args: dict[str, Any], call_id: str) -> Any:
+        """Run one tool, from whichever thread the dispatcher is on.
+
+        `arun` is used for every tool, sync ones included: LangChain routes a
+        sync-only tool to a worker thread itself, so one path covers both
+        kinds without having to classify the tool first.
+
+        `tool_call_id` is passed only when the tool declares
+        `InjectedToolCallId`. Supplying it otherwise makes LangChain wrap the
+        return value in a `ToolMessage` with string-coerced content, which
+        would flatten the structured results the interpreter is meant to see.
+        """
+        tool_call_id = call_id if tool_uses_injected_tool_call_id(tool) else None
+
+        if self.outer_loop is not None:
+            # Async agent path: the dispatcher runs on an `asyncio.to_thread`
+            # worker while the agent's loop is idle, so scheduling back onto
+            # it keeps loop-bound tools working and cannot deadlock.
+            future = asyncio.run_coroutine_threadsafe(
+                tool.arun(args, tool_call_id=tool_call_id),
+                self.outer_loop,
+            )
+            return future.result()
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            msg = (
+                "PTC dispatch reached a thread with a running event loop but "
+                "no outer loop was captured; this means eval_sync was called "
+                "from async code. Use eval_async instead."
+            )
+            raise RuntimeError(msg)
+
+        if _is_async_only(tool):
+            return asyncio.run(tool.arun(args, tool_call_id=tool_call_id))
+        # Sync agent path with a sync tool: run it inline rather than routing
+        # through `arun`, which would hand it to an executor thread. Staying
+        # on this thread keeps thread-local context (and the sandbox reentry
+        # guard's thread check) meaningful.
+        return tool.run(args, tool_call_id=tool_call_id)
+
+
+def _ptc_error(error: str, message: str) -> dict[str, Any]:
+    return {"ok": False, "error": error, "message": message}
+
+
+def _is_async_only(tool: BaseTool) -> bool:
+    """Return whether ``tool`` only provides a coroutine implementation."""
+    return getattr(tool, "func", None) is None and (
+        getattr(tool, "coroutine", None) is not None
+    )
 
 
 def _parse_response(response: Any) -> Outcome:

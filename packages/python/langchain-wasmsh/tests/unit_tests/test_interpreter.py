@@ -460,19 +460,70 @@ class TestMiddlewareConstruction:
                 ptc="search",  # type: ignore[arg-type]
             )
 
-    def test_base_system_prompt_includes_persistence_when_snapshotting(self) -> None:
-        mw = WasmshInterpreterMiddleware(
-            sandbox_factory=_StubSandbox,
-            snapshot_between_turns=True,
-        )
+    def test_default_mode_is_thread(self) -> None:
+        mw = WasmshInterpreterMiddleware(sandbox_factory=_StubSandbox)
+        assert mw._mode == "thread"
         assert "persists across" in mw._base_system_prompt
 
-    def test_base_system_prompt_warns_when_snapshot_disabled(self) -> None:
-        mw = WasmshInterpreterMiddleware(
-            sandbox_factory=_StubSandbox,
-            snapshot_between_turns=False,
+    @pytest.mark.parametrize(
+        ("mode", "expected_fragment"),
+        [
+            ("thread", "persists across"),
+            ("turn", "DOES NOT persist"),
+            ("call", "does NOT persist"),
+        ],
+    )
+    def test_mode_selects_the_matching_prompt(
+        self,
+        mode: str,
+        expected_fragment: str,
+    ) -> None:
+        mw = WasmshInterpreterMiddleware(sandbox_factory=_StubSandbox, mode=mode)
+        assert mw._mode == mode
+        assert expected_fragment in mw._base_system_prompt
+
+    def test_unknown_mode_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="mode"):
+            WasmshInterpreterMiddleware(sandbox_factory=_StubSandbox, mode="forever")
+
+    @pytest.mark.parametrize(
+        ("legacy", "expected_mode"),
+        [(True, "thread"), (False, "turn")],
+    )
+    def test_deprecated_snapshot_flag_maps_to_a_mode(
+        self,
+        legacy: bool,  # noqa: FBT001 -- parametrized fixture value
+        expected_mode: str,
+    ) -> None:
+        with pytest.deprecated_call():
+            mw = WasmshInterpreterMiddleware(
+                sandbox_factory=_StubSandbox,
+                snapshot_between_turns=legacy,
+            )
+        assert mw._mode == expected_mode
+
+    def test_mode_and_deprecated_flag_together_are_rejected(self) -> None:
+        # Resolving by precedence would silently discard half of what the
+        # caller asked for, so the combination is an error instead.
+        with pytest.raises(ValueError, match="not both"):
+            WasmshInterpreterMiddleware(
+                sandbox_factory=_StubSandbox,
+                mode="call",
+                snapshot_between_turns=True,
+            )
+
+    def test_max_ptc_calls_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="max_ptc_calls"):
+            WasmshInterpreterMiddleware(sandbox_factory=_StubSandbox, max_ptc_calls=0)
+
+    def test_serialized_name_is_stable(self) -> None:
+        # Harness profiles exclude middleware by class or `.name`, and only a
+        # class carrying `serialized_name` survives a config round-trip.
+        assert (
+            WasmshInterpreterMiddleware.serialized_name == "WasmshInterpreterMiddleware"
         )
-        assert "DOES NOT persist" in mw._base_system_prompt
+        mw = WasmshInterpreterMiddleware(sandbox_factory=_StubSandbox)
+        assert mw.name == "WasmshInterpreterMiddleware"
 
 
 class TestRegistry:

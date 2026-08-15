@@ -119,6 +119,7 @@ class WasmshSandbox(BaseSandbox):
         self._next_request_id = 0
         self._capabilities: dict[str, str] = {}
         self._lock_owner: int | None = None  # thread id while _request runs
+        self._dispatching = False  # True while a PTC host_call is being served
         self._stderr_lines: list[str] = []
         self._stderr_bytes = 0
         self._terminated_reason: str | None = None
@@ -257,8 +258,17 @@ class WasmshSandbox(BaseSandbox):
         # Reentry guard: a PTC tool that calls back into the same sandbox
         # while we're mid-request would deadlock on _lock and corrupt the
         # JSON-RPC stream. Surface a clean error instead.
+        #
+        # `_dispatching` is checked as well as the owning thread id because a
+        # tool does not necessarily run on the thread that is waiting for the
+        # response — an async tool runs on the agent's event loop, and a sync
+        # tool reached through `arun` runs on an executor thread. A thread-id
+        # check alone would miss both and hang on `_lock`. One sandbox is
+        # driven by one `_ThreadREPL`, which already serialises its own calls,
+        # so treating *any* call made during a dispatch as reentrant does not
+        # reject legitimate concurrent use.
         current_thread = threading.get_ident()
-        if self._lock_owner == current_thread:
+        if self._dispatching or self._lock_owner == current_thread:
             msg = (
                 f"reentrant wasmsh sandbox call: {method!r} invoked from a "
                 "PTC tool dispatch. PTC tools must not call back into the "
@@ -377,6 +387,7 @@ class WasmshSandbox(BaseSandbox):
                 },
             )
             return
+        self._dispatching = True
         try:
             envelope = on_host_call(message)
         except Exception as exc:  # noqa: BLE001 -- isolate one tool failure
@@ -386,6 +397,8 @@ class WasmshSandbox(BaseSandbox):
                 "error": type(exc).__name__,
                 "message": str(exc),
             }
+        finally:
+            self._dispatching = False
         # Ensure the dispatcher's envelope carries the correlation id.
         envelope.setdefault("id", call_id)
         self._send_host_call_result(envelope)
