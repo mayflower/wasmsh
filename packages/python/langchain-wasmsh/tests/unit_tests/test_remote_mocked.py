@@ -362,133 +362,213 @@ class TestClose:
 
 
 class TestEdit:
+    """Edit is upstream's temp-file route: two uploads plus one `execute`."""
+
     @respx.mock
-    def test_single_occurrence_replace(self) -> None:
+    def test_uploads_payload_and_runs_server_side_script(self) -> None:
         sandbox = _make_sandbox(respx.mock)
-        respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/run").mock(
+        run_route = respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/run").mock(
             return_value=httpx.Response(
                 200,
-                json={"ok": True, "result": {"output": "\n", "exitCode": 0}},
-            ),
-        )
-        respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/read-file").mock(
-            return_value=httpx.Response(
-                200,
-                json={
-                    "ok": True,
-                    "result": {
-                        "contentBase64": base64.b64encode(b"hello world").decode(),
-                        "events": [],
-                    },
-                },
+                json={"ok": True, "result": {"output": '{"count": 1}', "exitCode": 0}},
             ),
         )
         write_route = respx.mock.post(
             f"{BASE_URL}/sessions/{SESSION_ID}/write-file",
         ).mock(return_value=httpx.Response(200, json={"ok": True, "result": {}}))
+
         result = sandbox.edit("/workspace/a.txt", "world", "there")
+
         assert result.error is None
         assert result.occurrences == 1
-        payload = json.loads(write_route.calls[-1].request.content)
-        assert base64.b64decode(payload["contentBase64"]) == b"hello there"
+        assert result.path == "/workspace/a.txt"
+        # old_string and new_string travel as temp files, never as stdin —
+        # wasmsh's in-process `python3` never receives the shell's stdin.
+        uploaded = [
+            base64.b64decode(json.loads(call.request.content)["contentBase64"])
+            for call in write_route.calls
+        ]
+        assert uploaded == [b"world", b"there"]
+        assert run_route.called
 
     @respx.mock
-    def test_rejects_multiple_without_replace_all(self) -> None:
+    def test_maps_upstream_error_codes(self) -> None:
         sandbox = _make_sandbox(respx.mock)
         respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/run").mock(
-            return_value=httpx.Response(
-                200,
-                json={"ok": True, "result": {"output": "\n", "exitCode": 0}},
-            ),
-        )
-        respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/read-file").mock(
             return_value=httpx.Response(
                 200,
                 json={
                     "ok": True,
                     "result": {
-                        "contentBase64": base64.b64encode(b"a a a").decode(),
-                        "events": [],
+                        "output": '{"error": "multiple_occurrences", "count": 3}',
+                        "exitCode": 0,
                     },
                 },
             ),
         )
+        respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/write-file").mock(
+            return_value=httpx.Response(200, json={"ok": True, "result": {}}),
+        )
+
         result = sandbox.edit("/workspace/a.txt", "a", "b")
+
         assert result.error is not None
-        assert "Multiple occurrences" in result.error
+        assert "replace_all=True" in result.error
+
+    @respx.mock
+    def test_rejects_known_binary_extension_without_touching_the_sandbox(
+        self,
+    ) -> None:
+        sandbox = _make_sandbox(respx.mock)
+        run_route = respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/run").mock(
+            return_value=httpx.Response(
+                200,
+                json={"ok": True, "result": {"output": '{"count": 1}', "exitCode": 0}},
+            ),
+        )
+
+        result = sandbox.edit("/workspace/logo.png", "a", "b")
+
+        assert result.error is not None
+        assert "not a text file" in result.error
+        assert not run_route.called
 
 
 # ── read ───────────────────────────────────────────────────────────────────
 
 
 class TestRead:
-    @respx.mock
-    def test_text_returns_file_data(self) -> None:
-        sandbox = _make_sandbox(respx.mock)
-        respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/run").mock(
-            return_value=httpx.Response(
-                200,
-                json={"ok": True, "result": {"output": "\n", "exitCode": 0}},
-            ),
-        )
-        respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/read-file").mock(
+    """Read runs upstream's server-side pagination script through `execute`."""
+
+    @staticmethod
+    def _run_returns(payload: dict[str, Any]) -> respx.Route:
+        return respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/run").mock(
             return_value=httpx.Response(
                 200,
                 json={
                     "ok": True,
-                    "result": {
-                        "contentBase64": base64.b64encode(b"line1\nline2").decode(),
-                        "events": [],
-                    },
+                    "result": {"output": json.dumps(payload), "exitCode": 0},
                 },
             ),
         )
+
+    @respx.mock
+    def test_text_returns_file_data_with_pagination_metadata(self) -> None:
+        sandbox = _make_sandbox(respx.mock)
+        self._run_returns(
+            {
+                "encoding": "utf-8",
+                "content": "line1\nline2",
+                "total_lines": 2,
+                "start_line": 1,
+                "end_line": 2,
+                "next_offset": None,
+            },
+        )
+
         result = sandbox.read("/workspace/a.txt")
+
         assert result.error is None
         assert result.file_data is not None
         assert result.file_data["encoding"] == "utf-8"
-        assert "line1\nline2" in result.file_data["content"]
+        assert result.file_data["content"] == "line1\nline2"
+        assert (result.total_lines, result.start_line, result.end_line) == (2, 1, 2)
+        assert result.next_offset is None
 
     @respx.mock
     def test_empty_file_returns_reminder(self) -> None:
         sandbox = _make_sandbox(respx.mock)
-        respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/run").mock(
-            return_value=httpx.Response(
-                200,
-                json={"ok": True, "result": {"output": "\n", "exitCode": 0}},
-            ),
+        self._run_returns(
+            {
+                "encoding": "utf-8",
+                "content": "System reminder: File exists but has empty contents",
+            },
         )
-        respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/read-file").mock(
-            return_value=httpx.Response(
-                200,
-                json={
-                    "ok": True,
-                    "result": {
-                        "contentBase64": base64.b64encode(b"").decode(),
-                        "events": [],
-                    },
-                },
-            ),
-        )
+
         result = sandbox.read("/workspace/empty.txt")
+
         assert result.file_data is not None
         assert "empty contents" in result.file_data["content"]
+        assert result.no_lines_requested is False
+
+    @respx.mock
+    def test_zero_limit_flags_no_lines_requested(self) -> None:
+        sandbox = _make_sandbox(respx.mock)
+        self._run_returns(
+            {"encoding": "utf-8", "content": "", "no_lines_requested": True},
+        )
+
+        result = sandbox.read("/workspace/a.txt", limit=0)
+
+        assert result.no_lines_requested is True
+        assert result.start_line is None
 
     @respx.mock
     def test_missing_file_returns_error(self) -> None:
         sandbox = _make_sandbox(respx.mock)
+        self._run_returns({"error": "file_not_found"})
+
+        result = sandbox.read("/missing")
+
+        assert result.error is not None
+        assert "file_not_found" in result.error
+
+
+# ── grep ───────────────────────────────────────────────────────────────────
+
+
+class TestGrep:
+    """Grep runs the wasmsh-safe script and parses upstream's record format."""
+
+    @staticmethod
+    def _run_returns(output: str) -> respx.Route:
+        return respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/run").mock(
+            return_value=httpx.Response(
+                200,
+                json={"ok": True, "result": {"output": output, "exitCode": 0}},
+            ),
+        )
+
+    @respx.mock
+    def test_parses_nul_separated_records(self) -> None:
+        sandbox = _make_sandbox(respx.mock)
+        self._run_returns("/w/a.txt\x0012:hit here\n")
+
+        result = sandbox.grep("hit")
+
+        assert result.error is None
+        assert result.matches == [
+            {"path": "/w/a.txt", "line": 12, "text": "hit here"},
+        ]
+        assert result.truncated is False
+
+    @respx.mock
+    def test_max_count_marks_truncated(self) -> None:
+        sandbox = _make_sandbox(respx.mock)
+        # The script deliberately emits one record past the cap so the
+        # parser can tell "exactly at the cap" from "capped early".
+        self._run_returns("/w/a.txt\x001:x\n/w/a.txt\x002:x\n")
+
+        result = sandbox.grep("x", max_count=1)
+
+        assert result.matches is not None
+        assert len(result.matches) == 1
+        assert result.truncated is True
+
+    @respx.mock
+    def test_nonzero_exit_is_an_error(self) -> None:
+        sandbox = _make_sandbox(respx.mock)
         respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/run").mock(
             return_value=httpx.Response(
                 200,
-                json={"ok": True, "result": {"output": "\n", "exitCode": 0}},
+                json={
+                    "ok": True,
+                    "result": {"output": "boom", "exitCode": 2},
+                },
             ),
         )
-        respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/read-file").mock(
-            return_value=httpx.Response(
-                404,
-                json={"ok": False, "error": "file not found: /missing"},
-            ),
-        )
-        result = sandbox.read("/missing")
+
+        result = sandbox.grep("x", path="/missing")
+
         assert result.error is not None
-        assert "file_not_found" in result.error
+        assert result.matches is None

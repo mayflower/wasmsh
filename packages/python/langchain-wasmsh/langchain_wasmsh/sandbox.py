@@ -1,9 +1,13 @@
-"""Wasmsh sandbox implementation."""
+"""Wasmsh sandbox implementation.
+
+`WasmshSandbox` is a plain :class:`deepagents.backends.sandbox.BaseSandbox`
+subclass. Everything except `execute`, `upload_files`, `download_files`, and
+the two documented transport overrides (`edit`, `grep` — see
+:mod:`langchain_wasmsh._file_ops`) runs upstream Deep Agents code unchanged.
+"""
 
 from __future__ import annotations
 
-import base64
-import io
 import json
 import logging
 import shlex
@@ -20,26 +24,41 @@ if TYPE_CHECKING:
 from deepagents.backends.protocol import (
     EditResult,
     ExecuteResponse,
-    FileData,
     FileDownloadResponse,
     FileUploadResponse,
-    ReadResult,
+    GrepResult,
 )
 from deepagents.backends.sandbox import BaseSandbox
 from wasmsh_pyodide_runtime import get_dist_dir, get_node_host_script
 
 from langchain_wasmsh._errors import extract_diagnostic, map_error
-from langchain_wasmsh._text import (
-    MAX_BINARY_PREVIEW_BYTES,
+from langchain_wasmsh._file_ops import (
+    TIMEOUT_EXIT_CODE,
+    aroute_edit_via_upload,
+    build_grep_cmd,
     decode_content,
     encode_content,
-    paginate_text,
+    parse_grep_output,
+    route_edit_via_upload,
+    timeout_response_output,
     to_initial_files,
 )
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_DIR = "/workspace"
+
+
+class WasmshSessionTerminatedError(RuntimeError):
+    """Raised when a call reaches a session that was destroyed by a timeout.
+
+    `execute(timeout=N)` cannot interrupt an in-flight Pyodide evaluation:
+    the interpreter runs synchronously inside the WebAssembly module and the
+    host has no safe cancellation point. Rather than keep talking to an
+    interpreter that is still executing the abandoned command, the sandbox
+    kills the host process and refuses every later call, so a caller cannot
+    silently read half-written state.
+    """
 
 
 class WasmshSandbox(BaseSandbox):
@@ -100,7 +119,9 @@ class WasmshSandbox(BaseSandbox):
         self._next_request_id = 0
         self._capabilities: dict[str, str] = {}
         self._lock_owner: int | None = None  # thread id while _request runs
-        self._stderr_buffer = io.StringIO()
+        self._stderr_lines: list[str] = []
+        self._stderr_bytes = 0
+        self._terminated_reason: str | None = None
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
         try:
@@ -197,8 +218,13 @@ class WasmshSandbox(BaseSandbox):
         if self._process.stderr is None:
             return
         for line in self._process.stderr:
-            if self._stderr_buffer.tell() < self._MAX_STDERR_BYTES:
-                self._stderr_buffer.write(line)
+            if self._stderr_bytes >= self._MAX_STDERR_BYTES:
+                continue
+            self._stderr_lines.append(line)
+            self._stderr_bytes += len(line)
+
+    def _stderr_text(self) -> str:
+        return "".join(self._stderr_lines).strip()
 
     _MAX_NON_JSON_LINES = 100
     # Defensive cap: protects against a host that emits valid-JSON but
@@ -222,6 +248,8 @@ class WasmshSandbox(BaseSandbox):
         is provided, the dispatcher is invoked synchronously per host call
         and a ``host_call_result`` message is sent back inline.
         """
+        if self._terminated_reason is not None:
+            raise WasmshSessionTerminatedError(self._terminated_reason)
         if not self._process.stdin or not self._process.stdout:
             msg = "wasmsh host is not available"
             raise RuntimeError(msg)
@@ -248,7 +276,7 @@ class WasmshSandbox(BaseSandbox):
                 self._process.stdin.write(json.dumps(payload) + "\n")
                 self._process.stdin.flush()
             except OSError as exc:
-                stderr = self._stderr_buffer.getvalue().strip()
+                stderr = self._stderr_text()
                 msg = f"Failed to send '{method}' to wasmsh host: {exc}"
                 if stderr:
                     msg += f"\nHost stderr: {stderr}"
@@ -271,7 +299,7 @@ class WasmshSandbox(BaseSandbox):
         while True:
             line = self._process.stdout.readline() if self._process.stdout else ""
             if not line:
-                stderr = self._stderr_buffer.getvalue().strip()
+                stderr = self._stderr_text()
                 msg = stderr or "wasmsh host terminated unexpectedly"
                 raise RuntimeError(msg)
             try:
@@ -380,23 +408,144 @@ class WasmshSandbox(BaseSandbox):
         return dict(self._capabilities)
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
-        """Execute a shell command inside the sandbox."""
-        if timeout is not None:
-            logger.warning(
-                "WasmshSandbox does not enforce execute() timeout; "
-                "use step_budget instead",
-            )
-        result = self._request(
-            "run",
-            {
-                "command": f"cd {shlex.quote(self._working_directory)} && {command}",
-            },
+        """Execute a shell command inside the sandbox.
+
+        `timeout` is a real wall-clock deadline in seconds, enforced by the
+        client. `None` (the default) and `0` mean "no deadline", matching
+        `SandboxBackendProtocol.execute`.
+
+        Pyodide runs the shell synchronously inside the WebAssembly module,
+        and the host offers no safe way to interrupt an evaluation mid-flight.
+        So the deadline is enforced the only way that keeps the session
+        honest: the host process is killed, this sandbox is marked terminated
+        (every later call raises :class:`WasmshSessionTerminatedError`), and
+        the call returns an exit code of 124 — GNU `timeout(1)`'s convention.
+        Use `step_budget` when you want a bound that leaves the session alive.
+        """
+        payload = {
+            "command": f"cd {shlex.quote(self._working_directory)} && {command}",
+        }
+        if timeout is None or timeout <= 0:
+            result = self._request("run", payload)
+            return self._to_execute_response(result)
+
+        # The host has no cancellation point, so the deadline is armed as a
+        # watchdog that kills the process. Killing it is also what unblocks
+        # the reader: `readline()` returns "" once stdout closes, which
+        # `_read_response` reports as an unexpected termination.
+        watchdog = threading.Timer(
+            timeout,
+            self._on_execute_timeout,
+            (command, timeout),
         )
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            result = self._request("run", payload)
+        except RuntimeError:
+            if self._terminated_reason is None:
+                raise
+            return ExecuteResponse(
+                output=timeout_response_output(command, timeout),
+                exit_code=TIMEOUT_EXIT_CODE,
+                truncated=False,
+            )
+        finally:
+            watchdog.cancel()
+        return self._to_execute_response(result)
+
+    @staticmethod
+    def _to_execute_response(result: dict[str, Any]) -> ExecuteResponse:
         return ExecuteResponse(
             output=str(result["output"]),
             exit_code=result.get("exitCode"),
             truncated=False,
         )
+
+    def _on_execute_timeout(self, command: str, timeout: int) -> None:
+        """Destroy the host process after a missed `execute` deadline."""
+        if self._terminated_reason is not None:
+            return
+        self._terminated_reason = (
+            f"wasmsh session was destroyed after `execute(timeout={timeout})` "
+            f"expired while running: {command}"
+        )
+        logger.warning(
+            "wasmsh execute exceeded timeout=%ss; terminating session %s",
+            timeout,
+            self._id,
+        )
+        self._kill_process()
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,  # noqa: FBT001, FBT002 -- mirrors BackendProtocol
+    ) -> EditResult:
+        """Edit a file through upstream's temp-file route.
+
+        Upstream's default (inline) route feeds its payload to `python3 -c`
+        over a heredoc, and wasmsh's in-process `python3` never sees the
+        shell's stdin. Forcing the temp-file route keeps the replacement
+        algorithm, CRLF handling, and error strings upstream's — see
+        :mod:`langchain_wasmsh._file_ops`.
+        """
+        return route_edit_via_upload(
+            self,
+            file_path,
+            old_string,
+            new_string,
+            replace_all,
+        )
+
+    async def aedit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,  # noqa: FBT001, FBT002 -- mirrors BackendProtocol
+    ) -> EditResult:
+        """Async version of :meth:`edit`."""
+        return await aroute_edit_via_upload(
+            self,
+            file_path,
+            old_string,
+            new_string,
+            replace_all,
+        )
+
+    def grep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+        *,
+        max_count: int | None = None,
+    ) -> GrepResult:
+        """Search file contents for a literal string.
+
+        wasmsh's `grep` silently ignores `-Z`, so upstream's NUL-delimited
+        record parser cannot read its output. This runs an in-sandbox Python
+        search that emits exactly the records upstream expects; parsing,
+        `max_count`, and `truncated` semantics stay upstream's. See
+        :mod:`langchain_wasmsh._file_ops`.
+        """
+        result = self.execute(build_grep_cmd(pattern, path, glob, max_count))
+        return parse_grep_output(result, path, max_count)
+
+    async def agrep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+        *,
+        max_count: int | None = None,
+    ) -> GrepResult:
+        """Async version of :meth:`grep`."""
+        result = await self.aexecute(build_grep_cmd(pattern, path, glob, max_count))
+        return parse_grep_output(result, path, max_count)
 
     def run_ptc(
         self,
@@ -437,125 +586,6 @@ class WasmshSandbox(BaseSandbox):
             msg = "runPtc returned no envelope; host adapter is out of sync"
             raise RuntimeError(msg)  # noqa: TRY004 -- protocol misuse, not a type error
         return envelope
-
-    def read(
-        self,
-        file_path: str,
-        offset: int = 0,
-        limit: int = 2000,
-    ) -> ReadResult:
-        """Read a file, returning text with offset/limit or base64 binary.
-
-        Overrides `BaseSandbox.read`, which invokes a `python3 -c` script
-        through `execute()` — that path doesn't work against wasmsh's
-        Pyodide runtime (the large heredoc trips the shell layer).  The
-        JSON-RPC `readFile` command used by `download_files` is the
-        Pyodide-safe equivalent.
-
-        The return shape matches `BaseSandbox.read` exactly so the
-        `langchain-tests` sandbox standard suite passes against this
-        backend.
-        """
-        responses = self.download_files([file_path])
-        resp = responses[0]
-        if resp.error or resp.content is None:
-            detail = resp.error or "file not found"
-            return ReadResult(error=f"File '{file_path}': {detail}")
-
-        raw = resp.content
-
-        if not raw:
-            return ReadResult(
-                file_data=FileData(
-                    content="System reminder: File exists but has empty contents",
-                    encoding="utf-8",
-                ),
-            )
-
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            if len(raw) > MAX_BINARY_PREVIEW_BYTES:
-                return ReadResult(
-                    error=(
-                        f"File '{file_path}': Binary file exceeds maximum "
-                        f"preview size of {MAX_BINARY_PREVIEW_BYTES} bytes"
-                    ),
-                )
-            return ReadResult(
-                file_data=FileData(
-                    content=base64.b64encode(raw).decode("ascii"),
-                    encoding="base64",
-                ),
-            )
-
-        page = paginate_text(text, offset=int(offset), limit=int(limit))
-        return ReadResult(file_data=FileData(content=page, encoding="utf-8"))
-
-    def edit(  # noqa: C901, PLR0911
-        self,
-        file_path: str,
-        old_string: str,
-        new_string: str,
-        replace_all: bool = False,  # noqa: FBT001, FBT002
-    ) -> EditResult:
-        """Edit a file via download + string replace + upload.
-
-        Overrides `BaseSandbox.edit` for the same reason as `read`: the
-        default implementation uses `python3 -c` and fails under Pyodide.
-        Error strings match BaseSandbox so the standard suite passes.
-        """
-        responses = self.download_files([file_path])
-        if responses[0].error or responses[0].content is None:
-            detail = responses[0].error or "file_not_found"
-            return EditResult(error=f"File '{file_path}': {detail}")
-
-        text = responses[0].content.decode("utf-8", errors="replace")
-
-        if not old_string:
-            if text:
-                return EditResult(
-                    error="oldString must not be empty unless file is empty",
-                )
-            if not new_string:
-                return EditResult(path=file_path, occurrences=0)
-            data = new_string.encode("utf-8")
-            upload = self.upload_files([(file_path, data)])
-            if upload[0].error:
-                return EditResult(
-                    error=f"Failed to write '{file_path}': {upload[0].error}",
-                )
-            return EditResult(path=file_path, occurrences=1)
-
-        idx = text.find(old_string)
-        if idx == -1:
-            return EditResult(error=f"String not found in file '{file_path}'")
-
-        if old_string == new_string:
-            return EditResult(path=file_path, occurrences=1)
-
-        if replace_all:
-            count = text.count(old_string)
-            new_text = text.replace(old_string, new_string)
-        else:
-            second = text.find(old_string, idx + len(old_string))
-            if second != -1:
-                return EditResult(
-                    error=(
-                        f"Multiple occurrences found in '{file_path}'. "
-                        "Use replace_all=True to replace all."
-                    ),
-                )
-            count = 1
-            new_text = text[:idx] + new_string + text[idx + len(old_string) :]
-
-        data = new_text.encode("utf-8")
-        upload = self.upload_files([(file_path, data)])
-        if upload[0].error:
-            return EditResult(
-                error=f"Failed to write '{file_path}': {upload[0].error}",
-            )
-        return EditResult(path=file_path, occurrences=count)
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         """Download files from the sandbox.

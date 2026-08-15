@@ -8,9 +8,11 @@ Kubernetes-scale concurrency or want agent sessions to outlive the
 client process.
 
 The transport is plain JSON/HTTP to the dispatcher; all binary payloads
-travel base64-encoded over the wire (the dispatcher's stable
-contract).  Client-side file-operation semantics (error mapping, text
-pagination, edit semantics) are identical to the in-process backend.
+travel base64-encoded over the wire (the dispatcher's stable contract).
+File-operation semantics come from `BaseSandbox` itself, so they are
+identical to the in-process backend by construction — including the two
+transport overrides (`edit`, `grep`) both share via
+:mod:`langchain_wasmsh._file_ops`.
 """
 
 from __future__ import annotations
@@ -24,19 +26,22 @@ import httpx
 from deepagents.backends.protocol import (
     EditResult,
     ExecuteResponse,
-    FileData,
     FileDownloadResponse,
     FileUploadResponse,
-    ReadResult,
+    GrepResult,
 )
 from deepagents.backends.sandbox import BaseSandbox
 
 from langchain_wasmsh._errors import extract_diagnostic, map_error
-from langchain_wasmsh._text import (
-    MAX_BINARY_PREVIEW_BYTES,
+from langchain_wasmsh._file_ops import (
+    TIMEOUT_EXIT_CODE,
+    aroute_edit_via_upload,
+    build_grep_cmd,
     decode_content,
     encode_content,
-    paginate_text,
+    parse_grep_output,
+    route_edit_via_upload,
+    timeout_response_output,
     to_initial_files,
 )
 
@@ -47,6 +52,15 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_DIR = "/workspace"
 _DEFAULT_TIMEOUT_SECONDS = 30.0
+
+_EXECUTE_TIMEOUT_GRACE_SECONDS = 10.0
+"""Extra socket budget on top of a per-command `execute(timeout=N)` deadline.
+
+The runner enforces the deadline itself and answers with a timeout result;
+the client socket must outlive that exchange, otherwise it would abort the
+request before the authoritative answer arrives and the caller could not
+tell a timed-out command from a dead dispatcher.
+"""
 
 
 class WasmshRemoteSandbox(BaseSandbox):
@@ -143,13 +157,25 @@ class WasmshRemoteSandbox(BaseSandbox):
     def _url(self, path: str) -> str:
         return f"{self._base_url}{path}"
 
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        request_timeout: float | None = None,
+    ) -> dict[str, Any]:
         """POST `payload` as JSON to `path`; return parsed dispatcher response.
 
-        Raises `RuntimeError` with the dispatcher-supplied error message on
-        non-2xx; callers may inspect `args[0]` for classification.
+        `request_timeout` overrides the client-wide socket timeout for this
+        one call, which `execute()` needs so a long command deadline is not
+        clipped by the default. Raises `RuntimeError` with the
+        dispatcher-supplied error message on non-2xx; callers may inspect
+        `args[0]` for classification.
         """
-        response = self._client.post(self._url(path), json=payload)
+        kwargs: dict[str, Any] = {"json": payload}
+        if request_timeout is not None:
+            kwargs["timeout"] = request_timeout
+        response = self._client.post(self._url(path), **kwargs)
         return self._parse_response(response, path)
 
     def _delete(self, path: str) -> dict[str, Any]:
@@ -181,25 +207,127 @@ class WasmshRemoteSandbox(BaseSandbox):
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         """Execute a shell command inside the remote sandbox.
 
-        `timeout` is accepted for protocol compatibility but is enforced
-        by the dispatcher / runner, not by the client.
+        `timeout` is a real wall-clock deadline in seconds. It is sent to the
+        dispatcher as `timeout_ms` and enforced by the *runner*, which owns
+        the Pyodide worker and can terminate it; the client additionally
+        widens its own socket deadline past the command deadline so the
+        runner's authoritative timeout answer is not cut off in transit.
+        `None` and `0` mean "no deadline", matching
+        `SandboxBackendProtocol.execute`.
+
+        On expiry the runner destroys the worker for that session and reports
+        exit code 124 (GNU `timeout(1)`'s convention). The session is then
+        unusable — an in-flight Pyodide evaluation cannot be interrupted
+        safely, so it is not resumed.
         """
-        if timeout is not None:
-            logger.debug(
-                "WasmshRemoteSandbox.execute timeout=%s is advisory; "
-                "dispatcher/runner enforces session budget",
+        payload: dict[str, Any] = {
+            "command": f"cd {shlex.quote(self._working_directory)} && {command}",
+        }
+        request_timeout: float | None = None
+        if timeout is not None and timeout > 0:
+            payload["timeout_ms"] = int(timeout) * 1000
+            request_timeout = float(timeout) + _EXECUTE_TIMEOUT_GRACE_SECONDS
+        try:
+            body = self._post(
+                f"/sessions/{self._session_id}/run",
+                payload,
+                request_timeout=request_timeout,
+            )
+        except httpx.TimeoutException:
+            if timeout is None:
+                raise
+            logger.warning(
+                "dispatcher did not answer within %ss for a command with "
+                "timeout=%ss; reporting a client-side timeout",
+                request_timeout,
                 timeout,
             )
-        body = self._post(
-            f"/sessions/{self._session_id}/run",
-            {"command": f"cd {shlex.quote(self._working_directory)} && {command}"},
-        )
+            return ExecuteResponse(
+                output=timeout_response_output(command, timeout),
+                exit_code=TIMEOUT_EXIT_CODE,
+                truncated=False,
+            )
         result = body.get("result") or {}
+        if result.get("timedOut"):
+            runner_output = result.get("output") or timeout_response_output(
+                command,
+                int(timeout or 0),
+            )
+            return ExecuteResponse(
+                output=str(runner_output),
+                exit_code=result.get("exitCode", TIMEOUT_EXIT_CODE),
+                truncated=False,
+            )
         return ExecuteResponse(
             output=str(result.get("output", "")),
             exit_code=result.get("exitCode"),
             truncated=False,
         )
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,  # noqa: FBT001, FBT002 -- mirrors BackendProtocol
+    ) -> EditResult:
+        """Edit a file through upstream's temp-file route.
+
+        Identical to `WasmshSandbox.edit`: the runner executes the same
+        wasmsh shell, so upstream's heredoc-fed inline route fails the same
+        way. See :mod:`langchain_wasmsh._file_ops`.
+        """
+        return route_edit_via_upload(
+            self,
+            file_path,
+            old_string,
+            new_string,
+            replace_all,
+        )
+
+    async def aedit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,  # noqa: FBT001, FBT002 -- mirrors BackendProtocol
+    ) -> EditResult:
+        """Async version of :meth:`edit`."""
+        return await aroute_edit_via_upload(
+            self,
+            file_path,
+            old_string,
+            new_string,
+            replace_all,
+        )
+
+    def grep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+        *,
+        max_count: int | None = None,
+    ) -> GrepResult:
+        """Search file contents for a literal string.
+
+        Same transport override as `WasmshSandbox.grep`; see
+        :mod:`langchain_wasmsh._file_ops`.
+        """
+        result = self.execute(build_grep_cmd(pattern, path, glob, max_count))
+        return parse_grep_output(result, path, max_count)
+
+    async def agrep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+        *,
+        max_count: int | None = None,
+    ) -> GrepResult:
+        """Async version of :meth:`grep`."""
+        result = await self.aexecute(build_grep_cmd(pattern, path, glob, max_count))
+        return parse_grep_output(result, path, max_count)
 
     def run_ptc(
         self,
@@ -222,116 +350,6 @@ class WasmshRemoteSandbox(BaseSandbox):
             "must land first"
         )
         raise NotImplementedError(msg)
-
-    def read(
-        self,
-        file_path: str,
-        offset: int = 0,
-        limit: int = 2000,
-    ) -> ReadResult:
-        """Read a file, returning text with offset/limit or base64 binary.
-
-        Mirrors `WasmshSandbox.read` byte-for-byte so both backends pass
-        the `langchain-tests` sandbox standard suite.
-        """
-        responses = self.download_files([file_path])
-        resp = responses[0]
-        if resp.error or resp.content is None:
-            detail = resp.error or "file not found"
-            return ReadResult(error=f"File '{file_path}': {detail}")
-
-        raw = resp.content
-        if not raw:
-            return ReadResult(
-                file_data=FileData(
-                    content="System reminder: File exists but has empty contents",
-                    encoding="utf-8",
-                ),
-            )
-
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            if len(raw) > MAX_BINARY_PREVIEW_BYTES:
-                return ReadResult(
-                    error=(
-                        f"File '{file_path}': Binary file exceeds maximum "
-                        f"preview size of {MAX_BINARY_PREVIEW_BYTES} bytes"
-                    ),
-                )
-            return ReadResult(
-                file_data=FileData(
-                    content=encode_content(raw),
-                    encoding="base64",
-                ),
-            )
-
-        page = paginate_text(text, offset=int(offset), limit=int(limit))
-        return ReadResult(file_data=FileData(content=page, encoding="utf-8"))
-
-    def edit(  # noqa: C901, PLR0911
-        self,
-        file_path: str,
-        old_string: str,
-        new_string: str,
-        replace_all: bool = False,  # noqa: FBT001, FBT002
-    ) -> EditResult:
-        """Edit a file via download + string replace + upload.
-
-        Mirrors `WasmshSandbox.edit` so error strings stay compatible with
-        the standard suite.
-        """
-        responses = self.download_files([file_path])
-        if responses[0].error or responses[0].content is None:
-            detail = responses[0].error or "file_not_found"
-            return EditResult(error=f"File '{file_path}': {detail}")
-
-        text = responses[0].content.decode("utf-8", errors="replace")
-
-        if not old_string:
-            if text:
-                return EditResult(
-                    error="oldString must not be empty unless file is empty",
-                )
-            if not new_string:
-                return EditResult(path=file_path, occurrences=0)
-            data = new_string.encode("utf-8")
-            upload = self.upload_files([(file_path, data)])
-            if upload[0].error:
-                return EditResult(
-                    error=f"Failed to write '{file_path}': {upload[0].error}",
-                )
-            return EditResult(path=file_path, occurrences=1)
-
-        idx = text.find(old_string)
-        if idx == -1:
-            return EditResult(error=f"String not found in file '{file_path}'")
-
-        if old_string == new_string:
-            return EditResult(path=file_path, occurrences=1)
-
-        if replace_all:
-            count = text.count(old_string)
-            new_text = text.replace(old_string, new_string)
-        else:
-            second = text.find(old_string, idx + len(old_string))
-            if second != -1:
-                return EditResult(
-                    error=(
-                        f"Multiple occurrences found in '{file_path}'. "
-                        "Use replace_all=True to replace all."
-                    ),
-                )
-            count = 1
-            new_text = text[:idx] + new_string + text[idx + len(old_string) :]
-
-        data = new_text.encode("utf-8")
-        upload = self.upload_files([(file_path, data)])
-        if upload[0].error:
-            return EditResult(
-                error=f"Failed to write '{file_path}': {upload[0].error}",
-            )
-        return EditResult(path=file_path, occurrences=count)
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         """Download files from the remote sandbox.

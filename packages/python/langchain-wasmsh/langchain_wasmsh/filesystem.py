@@ -1,32 +1,48 @@
-"""``WasmshFilesystemBackend`` — DeepAgents memory backend backed by a wasmsh VFS.
+"""``WasmshFilesystemBackend`` — a namespace/path adapter over a wasmsh VFS.
 
-A thin shim that adapts a ``WasmshSandbox`` (or ``WasmshRemoteSandbox``) to
-the DeepAgents :class:`~deepagents.backends.protocol.BackendProtocol`. Unlike
-using the sandbox directly, this backend:
+Adapts a ``WasmshSandbox`` (or ``WasmshRemoteSandbox``) to the Deep Agents
+:class:`~deepagents.backends.protocol.BackendProtocol` so one sandbox can
+serve several routes of a
+:class:`~deepagents.backends.composite.CompositeBackend` without collisions.
+It is deliberately thin: every operation is forwarded to the sandbox, and
+the only work done here is rewriting paths in and out of the namespace.
 
-- never exposes ``execute()`` — it is a memory store, not a code-runner;
-- supports a ``namespace`` prefix so several memory routes can share one
-  sandbox without colliding (``/memories``, ``/skills``, …);
-- is composable as a sub-backend in
-  :class:`~deepagents.backends.composite.CompositeBackend`.
+What this backend is not
+~~~~~~~~~~~~~~~~~~~~~~~~
 
-Use it on its own for laptop-scale persistent memory, or wire it behind a
-``CompositeBackend`` route for production setups where memory lives in a
-long-running dedicated wasmsh session.
+**Not durable memory.** A local wasmsh VFS lives inside the host subprocess
+and disappears when that process exits; a remote session's files last only
+as long as the dispatcher keeps that session. Neither is a cross-process
+store. For durable user, agent, and organization memory — profiles, skills,
+policies — route those prefixes to
+:class:`~deepagents.backends.store.StoreBackend` over a real LangGraph
+``BaseStore`` instead, and keep the wasmsh backend for the executable
+workspace and transient artifacts.
 
-Path traversal containment
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+**Not a tenant-isolation boundary.** ``namespace`` is enforced lexically:
+:func:`posixpath.normpath` collapses ``.``/``..`` and the result must still
+sit under the namespace root. That stops an agent-controlled ``file_path``
+like ``../../skills/secret.py`` on the ordinary ``read_file`` /
+``write_file`` / ``edit_file`` tools, which is what it exists for. It does
+**not** survive symlinks: the sandbox resolves them at the POSIX layer, so
+anything with shell access (``execute``, the Python interpreter, a custom
+tool) can link out of the namespace and read through it. When principals do
+not trust each other, give each one its own sandbox session, or put the
+sensitive data in a non-executable store namespace.
 
-The ``namespace`` is a security boundary. The wasmsh sandbox VFS resolves
-``..`` segments at the POSIX layer, so a naive ``f"{namespace}{path}"``
-join would let any caller — including an LLM-driven agent that controls
-``file_path`` on the standard ``read_file`` / ``write_file`` / ``edit_file``
-tools — escape the namespace with payloads like ``../../skills/secret.py``.
+Example:
+    ```python
+    from deepagents.backends import CompositeBackend, StateBackend
+    from langchain_wasmsh import WasmshFilesystemBackend, WasmshSandbox
 
-``_scope`` resolves the joined path with :func:`posixpath.normpath` and
-rejects any input that, after normalisation, leaves the namespace root.
-``_unscope`` applies the matching containment check on inbound result
-paths so an upstream bug elsewhere can't leak non-namespaced paths.
+    sandbox = WasmshSandbox()
+    backend = CompositeBackend(
+        default=StateBackend(),
+        routes={
+            "/scratch/": WasmshFilesystemBackend(sandbox, namespace="/scratch"),
+        },
+    )
+    ```
 """
 
 from __future__ import annotations
@@ -36,6 +52,7 @@ from typing import TYPE_CHECKING
 
 from deepagents.backends.protocol import (
     BackendProtocol,
+    DeleteResult,
     EditResult,
     FileDownloadResponse,
     FileUploadResponse,
@@ -56,6 +73,7 @@ class WasmshNamespaceEscapeError(PermissionError):
     """
 
     def __init__(self, attempted_path: str, namespace: str) -> None:
+        """Record the rejected path and the namespace it tried to leave."""
         super().__init__(
             f"path {attempted_path!r} escapes namespace {namespace!r}",
         )
@@ -70,30 +88,17 @@ if TYPE_CHECKING:
 
 
 class WasmshFilesystemBackend(BackendProtocol):
-    """Memory backend that routes file ops to a wasmsh VFS.
+    """Route Deep Agents file operations into a namespaced wasmsh VFS path.
 
     Args:
         sandbox: A live ``WasmshSandbox`` / ``WasmshRemoteSandbox`` instance,
             or any object implementing the deepagents ``BaseSandbox`` file
             surface. The backend does **not** take ownership: callers are
             responsible for closing the sandbox.
-        namespace: Optional absolute-path prefix (e.g. ``"/memories"``) that
-            is silently prepended to every path the agent uses. Lets one
-            sandbox host multiple memory routes without collisions.
-
-    Example:
-        ```python
-        from deepagents.backends import CompositeBackend, StateBackend
-        from langchain_wasmsh import WasmshFilesystemBackend, WasmshSandbox
-
-        sandbox = WasmshSandbox()
-        backend = CompositeBackend(
-            default=StateBackend(),
-            routes={
-                "/memories/": WasmshFilesystemBackend(sandbox, namespace="/memories"),
-            },
-        )
-        ```
+        namespace: Optional absolute-path prefix (e.g. ``"/scratch"``) that
+            is silently prepended to every path the agent uses. Read the
+            module docstring before treating it as an isolation boundary —
+            it is a routing prefix, not a sandbox.
     """
 
     def __init__(
@@ -146,6 +151,10 @@ class WasmshFilesystemBackend(BackendProtocol):
         stripped = path[len(self._namespace) :]
         return stripped or "/"
 
+    def _unscope_optional(self, path: str | None) -> str | None:
+        """Unscope a result path that a failed operation may leave unset."""
+        return None if path is None else self._unscope(path)
+
     def _is_contained(self, resolved: str) -> bool:
         """``True`` iff ``resolved`` sits at the namespace root or below.
 
@@ -157,11 +166,15 @@ class WasmshFilesystemBackend(BackendProtocol):
             return True
         return resolved.startswith(self._namespace + "/")
 
-    # ---- BackendProtocol surface ----------------------------------------
+    # ---- result mapping --------------------------------------------------
+    #
+    # Errors are forwarded verbatim. Their text embeds the scoped path, which
+    # is the path the sandbox actually operated on, and rewriting it risks
+    # changing what the message means (an error can name a path other than
+    # the one the caller passed). Only the `path` field of a *successful*
+    # result is translated back into the caller's namespace-relative view.
 
-    def ls(self, path: str) -> LsResult:
-        """Delegate ``ls`` to the wrapped sandbox, unscoping result paths."""
-        result = self._sandbox.ls(self._scope(path) or "/")
+    def _map_ls(self, result: LsResult) -> LsResult:
         if result.error or not result.entries:
             return result
         return LsResult(
@@ -171,72 +184,39 @@ class WasmshFilesystemBackend(BackendProtocol):
             ],
         )
 
-    def read(
-        self,
-        file_path: str,
-        offset: int = 0,
-        limit: int = 2000,
-    ) -> ReadResult:
-        """Read a file inside the scoped namespace."""
-        scoped = self._scope(file_path) or file_path
-        return self._sandbox.read(scoped, offset=offset, limit=limit)
-
-    def grep(
-        self,
-        pattern: str,
-        path: str | None = None,
-        glob: str | None = None,
-    ) -> GrepResult:
-        """Grep within the scoped namespace, unscoping result paths."""
-        result = self._sandbox.grep(pattern, self._scope(path), glob)
+    def _map_grep(self, result: GrepResult) -> GrepResult:
         if result.error or not result.matches:
             return result
         return GrepResult(
             matches=[{**m, "path": self._unscope(m["path"])} for m in result.matches],
+            truncated=result.truncated,
         )
 
-    def glob(self, pattern: str, path: str = "/") -> GlobResult:
-        """Glob within the scoped namespace, unscoping result paths."""
-        scoped = self._scope(path) or "/"
-        result = self._sandbox.glob(pattern, scoped)
+    def _map_glob(self, result: GlobResult) -> GlobResult:
         if result.error or not result.matches:
             return result
         return GlobResult(
             matches=[{**m, "path": self._unscope(m["path"])} for m in result.matches],
+            truncated=result.truncated,
         )
 
-    def write(self, file_path: str, content: str) -> WriteResult:
-        """Write a new file inside the scoped namespace."""
-        scoped = self._scope(file_path) or file_path
-        return self._sandbox.write(scoped, content)
+    def _map_write(self, result: WriteResult) -> WriteResult:
+        if result.error:
+            return result
+        return WriteResult(path=self._unscope_optional(result.path))
 
-    def edit(
-        self,
-        file_path: str,
-        old_string: str,
-        new_string: str,
-        replace_all: bool = False,  # noqa: FBT001, FBT002 -- mirrors BackendProtocol
-    ) -> EditResult:
-        """Edit a file inside the scoped namespace."""
-        scoped = self._scope(file_path) or file_path
-        return self._sandbox.edit(scoped, old_string, new_string, replace_all)
+    def _map_edit(self, result: EditResult) -> EditResult:
+        if result.error:
+            return result
+        return EditResult(
+            path=self._unscope_optional(result.path),
+            occurrences=result.occurrences,
+        )
 
-    def upload_files(
-        self,
-        files: list[tuple[str, bytes]],
-    ) -> list[FileUploadResponse]:
-        """Upload many files at once into the scoped namespace."""
-        scoped = [(self._scope(p) or p, content) for p, content in files]
-        responses = self._sandbox.upload_files(scoped)
-        return [self._unscope_upload(resp) for resp in responses]
-
-    def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
-        """Download many files at once from the scoped namespace."""
-        scoped = [self._scope(p) or p for p in paths]
-        responses = self._sandbox.download_files(scoped)
-        return [self._unscope_download(resp) for resp in responses]
-
-    # ---- helpers --------------------------------------------------------
+    def _map_delete(self, result: DeleteResult) -> DeleteResult:
+        if result.error:
+            return result
+        return DeleteResult(path=self._unscope_optional(result.path))
 
     def _unscope_upload(self, response: FileUploadResponse) -> FileUploadResponse:
         if not self._namespace:
@@ -258,5 +238,173 @@ class WasmshFilesystemBackend(BackendProtocol):
             error=response.error,
         )
 
+    # ---- BackendProtocol surface ----------------------------------------
 
-__all__ = ["WasmshFilesystemBackend"]
+    def ls(self, path: str) -> LsResult:
+        """Delegate ``ls`` to the wrapped sandbox, unscoping result paths."""
+        return self._map_ls(self._sandbox.ls(self._scope(path) or "/"))
+
+    async def als(self, path: str) -> LsResult:
+        """Async version of :meth:`ls`."""
+        return self._map_ls(await self._sandbox.als(self._scope(path) or "/"))
+
+    def read(
+        self,
+        file_path: str,
+        offset: int = 0,
+        limit: int = 2000,
+    ) -> ReadResult:
+        """Read a file inside the scoped namespace."""
+        return self._sandbox.read(self._scope(file_path) or file_path, offset, limit)
+
+    async def aread(
+        self,
+        file_path: str,
+        offset: int = 0,
+        limit: int = 2000,
+    ) -> ReadResult:
+        """Async version of :meth:`read`."""
+        return await self._sandbox.aread(
+            self._scope(file_path) or file_path,
+            offset,
+            limit,
+        )
+
+    def grep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+        *,
+        max_count: int | None = None,
+    ) -> GrepResult:
+        """Grep within the scoped namespace, unscoping result paths."""
+        return self._map_grep(
+            self._sandbox.grep(pattern, self._scope(path), glob, max_count=max_count),
+        )
+
+    async def agrep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+        *,
+        max_count: int | None = None,
+    ) -> GrepResult:
+        """Async version of :meth:`grep`."""
+        return self._map_grep(
+            await self._sandbox.agrep(
+                pattern,
+                self._scope(path),
+                glob,
+                max_count=max_count,
+            ),
+        )
+
+    def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        """Glob within the scoped namespace, unscoping result paths."""
+        return self._map_glob(self._sandbox.glob(pattern, self._scope(path or "/")))
+
+    async def aglob(self, pattern: str, path: str | None = None) -> GlobResult:
+        """Async version of :meth:`glob`."""
+        return self._map_glob(
+            await self._sandbox.aglob(pattern, self._scope(path or "/")),
+        )
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        """Write a file inside the scoped namespace (creating or overwriting)."""
+        return self._map_write(
+            self._sandbox.write(self._scope(file_path) or file_path, content),
+        )
+
+    async def awrite(self, file_path: str, content: str) -> WriteResult:
+        """Async version of :meth:`write`."""
+        return self._map_write(
+            await self._sandbox.awrite(self._scope(file_path) or file_path, content),
+        )
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,  # noqa: FBT001, FBT002 -- mirrors BackendProtocol
+    ) -> EditResult:
+        """Edit a file inside the scoped namespace."""
+        return self._map_edit(
+            self._sandbox.edit(
+                self._scope(file_path) or file_path,
+                old_string,
+                new_string,
+                replace_all,
+            ),
+        )
+
+    async def aedit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,  # noqa: FBT001, FBT002 -- mirrors BackendProtocol
+    ) -> EditResult:
+        """Async version of :meth:`edit`."""
+        return self._map_edit(
+            await self._sandbox.aedit(
+                self._scope(file_path) or file_path,
+                old_string,
+                new_string,
+                replace_all,
+            ),
+        )
+
+    def delete(self, file_path: str) -> DeleteResult:
+        """Delete a path inside the scoped namespace, recursively.
+
+        Deep Agents classifies `delete` as a *write* operation, and it
+        removes everything nested under ``file_path``. The namespace prefix
+        bounds which subtree the caller can name, but nothing else: a
+        `delete` of the namespace root removes every file the route holds.
+        """
+        return self._map_delete(
+            self._sandbox.delete(self._scope(file_path) or file_path),
+        )
+
+    async def adelete(self, file_path: str) -> DeleteResult:
+        """Async version of :meth:`delete`."""
+        return self._map_delete(
+            await self._sandbox.adelete(self._scope(file_path) or file_path),
+        )
+
+    def upload_files(
+        self,
+        files: list[tuple[str, bytes]],
+    ) -> list[FileUploadResponse]:
+        """Upload many files at once into the scoped namespace."""
+        scoped = [(self._scope(p) or p, content) for p, content in files]
+        return [self._unscope_upload(r) for r in self._sandbox.upload_files(scoped)]
+
+    async def aupload_files(
+        self,
+        files: list[tuple[str, bytes]],
+    ) -> list[FileUploadResponse]:
+        """Async version of :meth:`upload_files`."""
+        scoped = [(self._scope(p) or p, content) for p, content in files]
+        responses = await self._sandbox.aupload_files(scoped)
+        return [self._unscope_upload(r) for r in responses]
+
+    def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        """Download many files at once from the scoped namespace."""
+        scoped = [self._scope(p) or p for p in paths]
+        return [self._unscope_download(r) for r in self._sandbox.download_files(scoped)]
+
+    async def adownload_files(
+        self,
+        paths: list[str],
+    ) -> list[FileDownloadResponse]:
+        """Async version of :meth:`download_files`."""
+        scoped = [self._scope(p) or p for p in paths]
+        responses = await self._sandbox.adownload_files(scoped)
+        return [self._unscope_download(r) for r in responses]
+
+
+__all__ = ["WasmshFilesystemBackend", "WasmshNamespaceEscapeError"]
