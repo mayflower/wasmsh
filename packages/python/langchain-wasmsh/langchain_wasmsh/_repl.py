@@ -20,7 +20,7 @@ import logging
 import shlex
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from langchain_wasmsh._launcher import (
@@ -38,7 +38,12 @@ from langchain_wasmsh._ptc import (
     synth_tool_call_id,
     tool_uses_injected_tool_call_id,
 )
-from langchain_wasmsh._skills import LoadedSkill, load_skill, scan_skill_references
+from langchain_wasmsh._skills import (
+    SkillBundleCache,
+    load_skill,
+    resolve_importable_skills,
+    scan_skill_references,
+)
 
 if TYPE_CHECKING:
     from deepagents.backends.protocol import BackendProtocol
@@ -152,16 +157,6 @@ def _block(label: str, body: str, limit: int) -> str:
     return f"<{label}>\n{truncated}\n</{label}>"
 
 
-@dataclass
-class _SkillCache:
-    """Tracks which skill packages have been staged into the sandbox VFS."""
-
-    installed: dict[str, LoadedSkill] = field(default_factory=dict)
-
-    def needs_install(self, requested: frozenset[str]) -> set[str]:
-        return {name for name in requested if name not in self.installed}
-
-
 class _ThreadREPL:
     """One REPL session for one LangGraph thread."""
 
@@ -170,7 +165,7 @@ class _ThreadREPL:
         self._sandbox: _SandboxLike | None = None
         self._launcher_uploaded = False
         self._snapshot_pending: bytes | None = None
-        self._skill_cache = _SkillCache()
+        self._skill_cache = SkillBundleCache()
         self._lock = threading.Lock()
 
     # ---- lifecycle -------------------------------------------------------
@@ -208,25 +203,42 @@ class _ThreadREPL:
         skills: dict[str, SkillMetadata] | None,
         backend: BackendProtocol | None,
     ) -> None:
+        """Stage every skill this program imports, if not already current.
+
+        Only skills the source actually references are fetched, so metadata
+        discovery stays outside the sandbox and an unused skill in the
+        library costs nothing. A skill that fails to load is logged and
+        skipped: the import will fail inside the interpreter with an ordinary
+        `ModuleNotFoundError`, which the model can react to, rather than
+        taking down the whole evaluation.
+        """
         if not skills or backend is None:
             return
         referenced = scan_skill_references(source)
         if not referenced:
             return
+        importable = resolve_importable_skills(skills)
         sandbox = self._ensure_sandbox()
-        for package_name in self._skill_cache.needs_install(referenced):
-            kebab = package_name.replace("_", "-")
-            meta = skills.get(kebab) or skills.get(package_name)
+        for package_name in sorted(referenced):
+            meta = importable.get(package_name)
             if meta is None:
-                logger.debug("skill %r referenced but not in metadata", package_name)
+                logger.debug(
+                    "`skills.%s` is referenced but no loaded skill maps to it",
+                    package_name,
+                )
                 continue
             try:
                 loaded = load_skill(meta, backend)
             except Exception as exc:  # noqa: BLE001 -- isolate one broken skill
-                logger.warning("failed to load skill %r: %s", kebab, exc)
+                logger.warning("failed to load skill %r: %s", meta["name"], exc)
+                continue
+            # Fingerprint comparison, not a name check: a skill whose bytes
+            # changed re-stages, and one that merely got referenced again in
+            # the same session does not pay for another upload.
+            if self._skill_cache.is_current(loaded):
                 continue
             sandbox.upload_files(list(loaded.files.items()))
-            self._skill_cache.installed[loaded.package_name] = loaded
+            self._skill_cache.record(loaded)
 
     # ---- eval ------------------------------------------------------------
 

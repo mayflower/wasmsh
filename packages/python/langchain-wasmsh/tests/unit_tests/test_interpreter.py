@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from deepagents.backends.protocol import (
@@ -26,12 +25,6 @@ from langchain_wasmsh._launcher import (
 )
 from langchain_wasmsh._ptc import filter_tools_for_ptc
 from langchain_wasmsh._repl import Outcome, _Registry, _ThreadREPL, format_outcome
-from langchain_wasmsh._skills import (
-    SKILL_MODULE_EXTENSIONS,
-    LoadedSkill,
-    load_skill,
-    scan_skill_references,
-)
 from langchain_wasmsh.filesystem import WasmshNamespaceEscapeError
 
 # ── Sandbox stub ─────────────────────────────────────────────────────────────
@@ -261,80 +254,6 @@ class TestPTC:
     def test_filter_tools_for_ptc_rejects_non_list(self) -> None:
         with pytest.raises(TypeError):
             filter_tools_for_ptc([], "search", self_tool_name="py_eval")  # type: ignore[arg-type]
-
-
-# ── Skills ───────────────────────────────────────────────────────────────────
-
-
-class TestSkills:
-    def test_extensions_python_only(self) -> None:
-        assert SKILL_MODULE_EXTENSIONS == (".py",)
-
-    def test_scan_skill_references_handles_both_forms(self) -> None:
-        source = """
-        import skills.foo
-        from skills.bar import baz
-        """
-        found = scan_skill_references(source)
-        assert "foo" in found
-        assert "bar" in found
-
-    def test_scan_skill_references_ignores_unrelated_imports(self) -> None:
-        source = "import os\nfrom json import loads\n"
-        assert scan_skill_references(source) == frozenset()
-
-    def test_load_skill_builds_files_map_with_init(self) -> None:
-        backend = _make_skill_backend(
-            skill_dir="/skills/order-helpers",
-            files={
-                "/skills/order-helpers/helper.py": b"def add(a, b): return a + b\n",
-            },
-        )
-        metadata = {
-            "name": "order-helpers",
-            "path": "/skills/order-helpers/SKILL.md",
-            "description": "Helpers",
-            "license": None,
-            "compatibility": None,
-            "metadata": {},
-            "allowed_tools": [],
-            "module": "helper.py",
-        }
-        loaded = load_skill(metadata, backend)
-        assert isinstance(loaded, LoadedSkill)
-        assert loaded.package_name == "order_helpers"
-        # __init__.py is auto-synthesised and re-exports the entrypoint.
-        init_bytes = loaded.files["/skills/order_helpers/__init__.py"]
-        assert b"from .helper import *" in init_bytes
-        assert loaded.files["/skills/order_helpers/helper.py"].startswith(
-            b"def add(",
-        )
-
-
-def _make_skill_backend(skill_dir: str, files: dict[str, bytes]) -> MagicMock:
-    """Build a mock BackendProtocol that knows about a skill directory."""
-    backend = MagicMock()
-
-    def _glob(pattern: str, path: str) -> Any:
-        del pattern, path
-        result = MagicMock(error=None)
-        result.matches = [{"path": p} for p in files]
-        return result
-
-    def _download(paths: list[str]) -> list[FileDownloadResponse]:
-        out = []
-        for path in paths:
-            content = files.get(path)
-            if content is None:
-                out.append(FileDownloadResponse(path=path, error="not found"))
-            else:
-                out.append(FileDownloadResponse(path=path, content=content))
-        return out
-
-    backend.glob.side_effect = _glob
-    backend.download_files.side_effect = _download
-    backend._skill_dir = skill_dir
-    return backend
 
 
 # ── Filesystem backend ──────────────────────────────────────────────────────
