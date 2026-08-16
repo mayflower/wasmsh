@@ -120,7 +120,7 @@ All utilities operate on the in-process VFS (no OS calls).
 | `realpath`   | Done   | Resolve to absolute path |
 | `stat`       | Done   | Show file metadata |
 | `find`       | Done   | Search filesystem |
-| `chmod`      | Stub   | Returns 0; the VFS has no permission model. |
+| `chmod`      | Yes    | Octal and symbolic modes, `-R`. Owner bits are enforced on `open`; `ls -l` and `test -r/-w/-x` read them. Ownership is not modelled — the VFS has one principal. |
 | `mktemp`     | Done   | Create a temporary file |
 
 ### Text utilities (14)

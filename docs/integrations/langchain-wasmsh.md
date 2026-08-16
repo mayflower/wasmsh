@@ -450,6 +450,11 @@ the obvious guess. Each is asserted by a test rather than only described.
 - **Local VFS state is transient.** Durable memory, profiles, and skills
   belong in a `StoreBackend` or an explicitly tested persistent remote
   volume.
+- **Filesystem permissions are enforced.** `chmod` sets real mode bits, `open`
+  honours them, `ls -l` renders them, and `test -r`/`-w`/`-x` consult them.
+  This needs a runtime built after the permission model landed; older
+  published assets silently ignore `chmod`, as every wasmsh release before it
+  did.
 - **Node gives weaker network enforcement than Deno.** Under Deno,
   `allowed_hosts` maps to `--allow-net`, an OS-level restriction on the
   subprocess. Under Node it is enforced only at the wasmsh application

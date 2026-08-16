@@ -134,6 +134,28 @@ A `create_deep_agent` compatibility matrix now lists every constructor input
 as supported, intentionally limited, or unsupported, with each row backed by
 a test that builds a real graph.
 
+### Filesystem permissions are now real
+
+`chmod` used to be a no-op that returned 0, and the VFS had no permission
+model at all: `ls -l` printed a hardcoded `-rw-r--r--` for everything, and
+`test -r` answered "does it exist" rather than "can it be read", so any
+script gating on it took the wrong branch. Deep Agents' sandbox conformance
+suite checks exactly this, and the check could not pass.
+
+The `Vfs` trait now carries a `mode`, `set_mode` is implemented for both the
+in-memory and Emscripten backends, `open` enforces the read/write bits, and
+`chmod` parses both octal and symbolic forms (including `-R`). Emscripten
+ships with `FS.ignorePermissions = true` and Pyodide depends on that for its
+own stdlib, so the check happens in the Rust layer against the mode `stat`
+reports rather than by flipping the global flag.
+
+**This needs a `wasmsh-pyodide-runtime` release to reach installed users.**
+Until the assets carrying it are published, the conformance test probes the
+running runtime and skips with an actionable message instead of failing; the
+enforcement itself is covered by `wasmsh-fs` unit tests and three `chmod_*`
+cases in the shell suite. Raise the adapter's runtime floor to that release
+when it ships.
+
 ### Deep Agents Code providers (optional)
 
 Two sandbox providers are registered under the

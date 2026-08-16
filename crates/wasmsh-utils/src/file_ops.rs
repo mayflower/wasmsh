@@ -271,6 +271,29 @@ struct LsEntry {
     name: String,
     is_dir: bool,
     size: u64,
+    mode: u32,
+}
+
+/// Permission bits assumed when an entry cannot be stat'd.
+fn default_mode(is_dir: bool) -> u32 {
+    if is_dir {
+        wasmsh_fs::DEFAULT_DIR_MODE
+    } else {
+        wasmsh_fs::DEFAULT_FILE_MODE
+    }
+}
+
+/// Render permission bits the way `ls -l` does: `-rw-r--r--`, `drwxr-xr-x`.
+fn mode_string(mode: u32, is_dir: bool) -> String {
+    let mut out = String::with_capacity(10);
+    out.push(if is_dir { 'd' } else { '-' });
+    for shift in [6, 3, 0] {
+        let bits = (mode >> shift) & 0o7;
+        out.push(if bits & 0o4 != 0 { 'r' } else { '-' });
+        out.push(if bits & 0o2 != 0 { 'w' } else { '-' });
+        out.push(if bits & 0o1 != 0 { 'x' } else { '-' });
+    }
+    out
 }
 
 fn ls_collect_entries(fs: &mut BackendFs, dir: &str, flags: &LsFlags) -> Result<Vec<LsEntry>, ()> {
@@ -280,11 +303,16 @@ fn ls_collect_entries(fs: &mut BackendFs, dir: &str, flags: &LsFlags) -> Result<
         .filter(|e| flags.all || !e.name.starts_with('.'))
         .map(|e| {
             let child = child_path(dir, &e.name);
-            let size = fs.stat(&child).map_or(0, |m| m.size);
+            let meta = fs.stat(&child).ok();
+            let size = meta.as_ref().map_or(0, |m| m.size);
+            let mode = meta
+                .as_ref()
+                .map_or_else(|| default_mode(e.is_dir), |m| m.mode);
             LsEntry {
                 name: e.name,
                 is_dir: e.is_dir,
                 size,
+                mode,
             }
         })
         .collect();
@@ -301,7 +329,7 @@ fn ls_collect_entries(fs: &mut BackendFs, dir: &str, flags: &LsFlags) -> Result<
 
 fn ls_emit_entry(output: &mut dyn UtilOutput, e: &LsEntry, flags: &LsFlags) {
     if flags.long {
-        let mode = if e.is_dir { "drwxr-xr-x" } else { "-rw-r--r--" };
+        let mode = mode_string(e.mode, e.is_dir);
         let sz = if flags.human {
             ls_human_size(e.size)
         } else {
@@ -373,6 +401,10 @@ pub(crate) fn util_ls(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                 name: path.to_string(),
                 is_dir: true,
                 size: 0,
+                mode: ctx
+                    .fs
+                    .stat(&full)
+                    .map_or_else(|_| default_mode(true), |m| m.mode),
             };
             ls_emit_entry(ctx.output, &e, &flags);
             continue;
@@ -391,6 +423,7 @@ pub(crate) fn util_ls(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
                     name: path.to_string(),
                     is_dir: false,
                     size: meta.size,
+                    mode: meta.mode,
                 };
                 ls_emit_entry(ctx.output, &e, &flags);
             }
@@ -1281,8 +1314,131 @@ pub(crate) fn util_find(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
     0
 }
 
-pub(crate) fn util_chmod(_ctx: &mut UtilContext<'_>, _argv: &[&str]) -> i32 {
-    // VFS has no permission model — chmod is a no-op that succeeds
+/// Parse a `chmod` mode argument against the entry's current bits.
+///
+/// Octal is taken as an absolute mode. Symbolic form (`u+x`, `go-w`, `a=r`)
+/// is applied to `current`, because `+`/`-` are meaningless without it.
+/// Returns `None` for anything it does not understand, so the caller can
+/// report a real error rather than silently applying a wrong mode.
+fn parse_chmod_mode(spec: &str, current: u32) -> Option<u32> {
+    if let Ok(octal) = u32::from_str_radix(spec, 8) {
+        if spec.chars().all(|c| ('0'..='7').contains(&c)) {
+            return Some(octal & wasmsh_fs::MODE_PERM_MASK);
+        }
+    }
+
+    let mut mode = current & wasmsh_fs::MODE_PERM_MASK;
+    for clause in spec.split(',') {
+        let split = clause.find(['+', '-', '='])?;
+        let (whos, rest) = clause.split_at(split);
+        let mut chars = rest.chars();
+        let op = chars.next()?;
+        let perms: String = chars.collect();
+
+        let mut mask = 0u32;
+        for perm in perms.chars() {
+            mask |= match perm {
+                'r' => 0o444,
+                'w' => 0o222,
+                'x' => 0o111,
+                _ => return None,
+            };
+        }
+
+        let mut who_mask = 0u32;
+        let whos = if whos.is_empty() { "a" } else { whos };
+        for who in whos.chars() {
+            who_mask |= match who {
+                'u' => 0o700,
+                'g' => 0o070,
+                'o' => 0o007,
+                'a' => 0o777,
+                _ => return None,
+            };
+        }
+
+        let bits = mask & who_mask;
+        match op {
+            '+' => mode |= bits,
+            '-' => mode &= !bits,
+            '=' => mode = (mode & !who_mask) | bits,
+            _ => return None,
+        }
+    }
+    Some(mode)
+}
+
+pub(crate) fn util_chmod(ctx: &mut UtilContext<'_>, argv: &[&str]) -> i32 {
+    let mut recursive = false;
+    let mut operands: Vec<&str> = Vec::new();
+    for arg in &argv[1..] {
+        match *arg {
+            "-R" | "--recursive" => recursive = true,
+            // `-v`/`-c`/`-f` change reporting only; accepting them keeps
+            // ordinary scripts working without implying they do something.
+            "-v" | "-c" | "-f" | "--silent" | "--quiet" | "--verbose" => {}
+            other => operands.push(other),
+        }
+    }
+
+    let Some((spec, paths)) = operands.split_first() else {
+        ctx.output.stderr(b"chmod: missing operand\n");
+        return 1;
+    };
+    if paths.is_empty() {
+        let msg = format!("chmod: missing operand after '{spec}'\n");
+        ctx.output.stderr(msg.as_bytes());
+        return 1;
+    }
+
+    let mut status = 0;
+    for path in paths {
+        let full = resolve_path(ctx.cwd, path);
+        if chmod_one(ctx, &full, path, spec, recursive) != 0 {
+            status = 1;
+        }
+    }
+    status
+}
+
+fn chmod_one(
+    ctx: &mut UtilContext<'_>,
+    full: &str,
+    display: &str,
+    spec: &str,
+    recursive: bool,
+) -> i32 {
+    let meta = match ctx.fs.stat(full) {
+        Ok(meta) => meta,
+        Err(e) => {
+            emit_error(ctx.output, "chmod", display, &e);
+            return 1;
+        }
+    };
+    let Some(mode) = parse_chmod_mode(spec, meta.mode) else {
+        let msg = format!("chmod: invalid mode: '{spec}'\n");
+        ctx.output.stderr(msg.as_bytes());
+        return 1;
+    };
+    if let Err(e) = ctx.fs.set_mode(full, mode) {
+        emit_error(ctx.output, "chmod", display, &e);
+        return 1;
+    }
+
+    if recursive && meta.is_dir {
+        // Descend before returning so `chmod -R` on a tree the caller is
+        // about to lock down still reaches the children.
+        let children = ctx.fs.read_dir(full).unwrap_or_default();
+        let mut status = 0;
+        for child in children {
+            let child_full = child_path(full, &child.name);
+            let child_display = child_path(display, &child.name);
+            if chmod_one(ctx, &child_full, &child_display, spec, true) != 0 {
+                status = 1;
+            }
+        }
+        return status;
+    }
     0
 }
 

@@ -1,0 +1,23 @@
+# Symbolic modes apply to the *current* bits, so `+`/`-` need the existing
+# mode read back rather than a fixed default.
+[test]
+name = "chmod-symbolic-mode"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["chmod"]
+
+[setup]
+files = { "/data/f.txt" = "x\n" }
+
+[input]
+script = """
+chmod u-w /data/f.txt
+test -w /data/f.txt; echo "writable=$?"
+test -r /data/f.txt; echo "readable=$?"
+chmod u+w /data/f.txt
+test -w /data/f.txt; echo "restored=$?"
+"""
+
+[expect]
+status = 0
+stdout = "writable=1\nreadable=0\nrestored=0\n"

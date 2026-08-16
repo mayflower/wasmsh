@@ -196,6 +196,27 @@ impl Default for EmscriptenFs {
     }
 }
 
+/// Return the error `open` should report for `path`, or `None` to proceed.
+///
+/// An entry that does not exist yet is not a permission failure: the caller
+/// may be creating it, and `fopen` reports the real outcome. Only an existing
+/// entry whose bits deny the requested access is rejected here.
+fn permission_error(cpath: &CString, path: &str, opts: OpenOptions) -> Option<FsError> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::stat(cpath.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    #[allow(clippy::unnecessary_cast)]
+    let mode = (st.st_mode as u32) & crate::MODE_PERM_MASK;
+    if opts.read && mode & 0o400 == 0 {
+        return Some(FsError::PermissionDenied(path.to_string()));
+    }
+    if (opts.write || opts.append || opts.truncate) && mode & 0o200 == 0 {
+        return Some(FsError::PermissionDenied(path.to_string()));
+    }
+    None
+}
+
 impl Vfs for EmscriptenFs {
     fn open(&mut self, path: &str, opts: OpenOptions) -> Result<FileHandle, FsError> {
         if opts.read && !opts.write && !opts.append && !opts.create && !opts.truncate {
@@ -224,6 +245,17 @@ impl Vfs for EmscriptenFs {
         }
 
         let cpath = to_cstring(path)?;
+
+        // Emscripten ships with `FS.ignorePermissions = true`, so its own
+        // `open` never consults the mode bits — a `chmod 000` file opens
+        // happily. Pyodide relies on that default for its stdlib, so
+        // flipping the flag globally is not an option; instead the check
+        // happens here, against the mode `stat` reports, for the paths that
+        // go through this VFS.
+        if let Some(err) = permission_error(&cpath, path, opts) {
+            return Err(err);
+        }
+
         let mode = if opts.append {
             c"a+"
         } else if opts.write && opts.read {
@@ -398,6 +430,7 @@ impl Vfs for EmscriptenFs {
             return Ok(Metadata {
                 is_dir: false,
                 size: 0,
+                mode: crate::DEFAULT_FILE_MODE,
             });
         }
         let cpath = to_cstring(path)?;
@@ -408,7 +441,25 @@ impl Vfs for EmscriptenFs {
         Ok(Metadata {
             is_dir: (st.st_mode & libc::S_IFMT) == libc::S_IFDIR,
             size: st.st_size as u64,
+            #[allow(clippy::unnecessary_cast)]
+            mode: (st.st_mode as u32) & crate::MODE_PERM_MASK,
         })
+    }
+
+    fn set_mode(&mut self, path: &str, mode: u32) -> Result<(), FsError> {
+        let cpath = to_cstring(path)?;
+        // `chmod` is what makes the bits visible to `stat`, and therefore to
+        // both `ls -l` and the check in `open` above.
+        let rc = unsafe {
+            libc::chmod(
+                cpath.as_ptr(),
+                (mode & crate::MODE_PERM_MASK) as libc::mode_t,
+            )
+        };
+        if rc != 0 {
+            return Err(errno_to_fs_error(path));
+        }
+        Ok(())
     }
 
     fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>, FsError> {

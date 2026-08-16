@@ -71,6 +71,12 @@ impl Read for SharedReadHandle {
 
 struct MemoryFsInner {
     nodes: HashMap<String, FsNode>,
+    /// Permission bits per path, only for entries whose mode was changed.
+    ///
+    /// Kept beside `nodes` rather than inside `FsNode` so the common case —
+    /// a filesystem nobody has called `chmod` on — costs nothing, and so the
+    /// node enum stays a plain file/dir distinction.
+    modes: HashMap<String, u32>,
     virtual_readers: HashMap<String, Rc<RefCell<Box<dyn Read>>>>,
     handles: HashMap<u64, OpenFile>,
     next_handle: u64,
@@ -84,6 +90,7 @@ impl std::fmt::Debug for MemoryFsInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MemoryFsInner")
             .field("nodes", &self.nodes)
+            .field("modes", &self.modes)
             .field("virtual_reader_count", &self.virtual_readers.len())
             .field("handles", &self.handles)
             .field("next_handle", &self.next_handle)
@@ -113,6 +120,7 @@ impl MemoryFs {
         Self {
             inner: Rc::new(RefCell::new(MemoryFsInner {
                 nodes,
+                modes: HashMap::new(),
                 virtual_readers: HashMap::new(),
                 handles: HashMap::new(),
                 next_handle: 1,
@@ -213,6 +221,17 @@ impl Default for MemoryFs {
     }
 }
 
+impl MemoryFsInner {
+    /// Permission bits for `path`, falling back to the type default.
+    fn mode_of(&self, path: &str, is_dir: bool) -> u32 {
+        self.modes.get(path).copied().unwrap_or(if is_dir {
+            crate::DEFAULT_DIR_MODE
+        } else {
+            crate::DEFAULT_FILE_MODE
+        })
+    }
+}
+
 impl Vfs for MemoryFs {
     fn open(&mut self, path: &str, opts: OpenOptions) -> Result<FileHandle, FsError> {
         let norm = crate::normalize_path(path);
@@ -239,6 +258,13 @@ impl Vfs for MemoryFs {
                 return Err(FsError::IsADirectory(norm));
             }
             Some(FsNode::File(contents)) => {
+                let mode = inner.mode_of(&norm, false);
+                if opts.read && mode & 0o400 == 0 {
+                    return Err(FsError::PermissionDenied(norm));
+                }
+                if (opts.write || opts.append || opts.truncate) && mode & 0o200 == 0 {
+                    return Err(FsError::PermissionDenied(norm));
+                }
                 if opts.write && opts.truncate && !opts.append {
                     let old_size = contents.len();
                     inner
@@ -440,10 +466,12 @@ impl Vfs for MemoryFs {
             Some(FsNode::File(data)) => Ok(Metadata {
                 is_dir: false,
                 size: data.len() as u64,
+                mode: self.inner.borrow().mode_of(&norm, false),
             }),
             Some(FsNode::Dir) => Ok(Metadata {
                 is_dir: true,
                 size: 0,
+                mode: self.inner.borrow().mode_of(&norm, true),
             }),
             None => Err(FsError::NotFound(norm)),
         }
@@ -503,6 +531,7 @@ impl Vfs for MemoryFs {
                 let size = contents.len();
                 let mut inner = self.inner.borrow_mut();
                 inner.nodes.remove(&norm);
+                inner.modes.remove(&norm);
                 inner.virtual_readers.remove(&norm);
                 inner.total_bytes = inner.total_bytes.saturating_sub(size);
                 Ok(())
@@ -533,7 +562,19 @@ impl Vfs for MemoryFs {
         if has_children {
             return Err(FsError::Io(format!("directory not empty: {norm}")));
         }
-        self.inner.borrow_mut().nodes.remove(&norm);
+        let mut inner = self.inner.borrow_mut();
+        inner.nodes.remove(&norm);
+        inner.modes.remove(&norm);
+        Ok(())
+    }
+
+    fn set_mode(&mut self, path: &str, mode: u32) -> Result<(), FsError> {
+        let norm = crate::normalize_path(path);
+        let mut inner = self.inner.borrow_mut();
+        if !inner.nodes.contains_key(&norm) {
+            return Err(FsError::NotFound(norm));
+        }
+        inner.modes.insert(norm, mode & crate::MODE_PERM_MASK);
         Ok(())
     }
 }
@@ -541,6 +582,100 @@ impl Vfs for MemoryFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_file_reports_the_default_mode() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/f.txt", OpenOptions::write()).unwrap();
+        fs.close(h);
+        assert_eq!(fs.stat("/f.txt").unwrap().mode, crate::DEFAULT_FILE_MODE);
+        assert_eq!(fs.stat("/").unwrap().mode, crate::DEFAULT_DIR_MODE);
+    }
+
+    #[test]
+    fn chmod_000_makes_a_file_unreadable_and_unwritable() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/secret.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"secret").unwrap();
+        fs.close(h);
+
+        fs.set_mode("/secret.txt", 0o000).unwrap();
+
+        assert!(matches!(
+            fs.open("/secret.txt", OpenOptions::read()),
+            Err(FsError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            fs.open("/secret.txt", OpenOptions::write()),
+            Err(FsError::PermissionDenied(_))
+        ));
+        // The bits are still observable, so `ls -l` can render them.
+        assert_eq!(fs.stat("/secret.txt").unwrap().mode, 0o000);
+    }
+
+    #[test]
+    fn a_read_only_file_can_be_read_but_not_written() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/ro.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"data").unwrap();
+        fs.close(h);
+
+        fs.set_mode("/ro.txt", 0o444).unwrap();
+
+        let h = fs.open("/ro.txt", OpenOptions::read()).unwrap();
+        assert_eq!(fs.read_file(h).unwrap(), b"data");
+        fs.close(h);
+        assert!(matches!(
+            fs.open("/ro.txt", OpenOptions::write()),
+            Err(FsError::PermissionDenied(_))
+        ));
+    }
+
+    #[test]
+    fn restoring_the_mode_restores_access() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/f.txt", OpenOptions::write()).unwrap();
+        fs.write_file(h, b"data").unwrap();
+        fs.close(h);
+
+        fs.set_mode("/f.txt", 0o000).unwrap();
+        assert!(fs.open("/f.txt", OpenOptions::read()).is_err());
+        fs.set_mode("/f.txt", 0o644).unwrap();
+        assert!(fs.open("/f.txt", OpenOptions::read()).is_ok());
+    }
+
+    #[test]
+    fn set_mode_ignores_bits_above_the_permission_mask() {
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/f.txt", OpenOptions::write()).unwrap();
+        fs.close(h);
+        // A caller passing a whole `st_mode` gets the obvious behaviour.
+        fs.set_mode("/f.txt", 0o100_644).unwrap();
+        assert_eq!(fs.stat("/f.txt").unwrap().mode, 0o644);
+    }
+
+    #[test]
+    fn set_mode_on_a_missing_path_is_an_error() {
+        let mut fs = MemoryFs::new();
+        assert!(matches!(
+            fs.set_mode("/nope.txt", 0o644),
+            Err(FsError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn a_recreated_path_starts_from_the_default_mode() {
+        // Otherwise a stale entry would silently apply to a different file.
+        let mut fs = MemoryFs::new();
+        let h = fs.open("/f.txt", OpenOptions::write()).unwrap();
+        fs.close(h);
+        fs.set_mode("/f.txt", 0o000).unwrap();
+        fs.remove_file("/f.txt").unwrap();
+
+        let h = fs.open("/f.txt", OpenOptions::write()).unwrap();
+        fs.close(h);
+        assert_eq!(fs.stat("/f.txt").unwrap().mode, crate::DEFAULT_FILE_MODE);
+    }
 
     #[test]
     fn create_and_read_file() {

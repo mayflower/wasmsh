@@ -1,0 +1,17 @@
+# `ls -l` reported a hardcoded `-rw-r--r--` for every file, which made the
+# permission bits invisible even once they were being enforced.
+[test]
+name = "chmod-ls-long-renders-mode"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["chmod", "ls"]
+
+[setup]
+files = { "/data/f.txt" = "x\n" }
+
+[input]
+script = "chmod 750 /data/f.txt && ls -l /data/f.txt | cut -d' ' -f1"
+
+[expect]
+status = 0
+stdout = "-rwxr-x---\n"

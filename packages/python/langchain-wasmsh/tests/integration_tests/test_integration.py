@@ -4,19 +4,32 @@ Run once per local host runtime (Node and Deno) so a divergence between the
 two — Deno's permission model restricts the subprocess differently — cannot
 hide behind a single green leg.
 
-Two deviations from the suite are expected and each is scoped to one test:
+One inherited assertion no longer matches the release it tests.
+`test_write_existing_file_fails` expects Deep Agents' pre-0.7 create-only
+`write`; `BaseSandbox.write`'s own docstring now reads "creating or
+overwriting it if it already exists" and its preflight only creates parent
+directories. Verified against every backend upstream ships — `BaseSandbox`,
+`StateBackend`, `StoreBackend`, `FilesystemBackend` — and all four overwrite.
+Making wasmsh create-only to satisfy it would make wasmsh the only backend
+violating the documented contract, so the assertion is marked `xfail`, which
+is the only deviation mechanism this suite sanctions
+(`test_no_overrides_DO_NOT_OVERRIDE` rejects a rewritten body outright).
 
-`test_download_error_permission_denied`
-    Emscripten's VFS accepts `chmod` and then ignores it, so a
-    permission-denied read cannot be provoked at all.
+The behaviour itself is not left untested: `TestWriteOverwriteContract` below
+asserts what 0.7.x actually promises, and would fail if wasmsh ever stopped
+overwriting.
 
-`test_write_existing_file_fails`
-    The suite still asserts Deep Agents' pre-0.7 create-only `write`.
-    `deepagents==0.7.4` changed `BaseSandbox.write` to overwrite (its
-    preflight only creates parent directories), so *every* 0.7.4 sandbox
-    fails this assertion, including upstream's own backends. Verified
-    directly against `deepagents.backends.local_shell.LocalShellBackend`.
+`test_download_error_permission_denied` needs a wasmsh runtime whose VFS
+enforces permission bits. That landed with the `chmod` implementation in this
+repo, so it passes against a locally built dist; an environment still on a
+published runtime from before that release skips it, with the probe below
+deciding which. A skip here is temporary by construction — it clears itself
+the moment the runtime package is released — and the enforcement itself is
+covered independently by the `wasmsh-fs` unit tests and the `chmod_*` cases
+in `tests/suite/`.
 """
+
+# ruff: noqa: S108 -- paths are inside the sandbox VFS, not the host
 
 from __future__ import annotations
 
@@ -44,14 +57,20 @@ _ASSETS_REASON = (
     "Pyodide assets not built (run just build-pyodide && just package-pyodide-runtime)"
 )
 
-_WRITE_OVERWRITE_REASON = (
-    "langchain-tests 1.1.9 still asserts pre-0.7 create-only write; "
-    "deepagents 0.7.4 BaseSandbox.write overwrites by design"
-)
 
-_CHMOD_REASON = (
-    "Emscripten VFS does not enforce chmod — permissions are silently ignored"
-)
+def enforces_permissions(backend: SandboxBackendProtocol) -> bool:
+    """Whether this runtime's VFS actually honours `chmod`.
+
+    Asked by doing it rather than by comparing version strings: the runtime
+    package and the assets inside it can move independently, and the only
+    thing the test cares about is the observable behaviour.
+    """
+    probe = "/tmp/.wasmsh_permission_probe"
+    backend.execute(f"echo probe > {probe} && chmod 000 {probe}")
+    try:
+        return backend.download_files([probe])[0].error == "permission_denied"
+    finally:
+        backend.execute(f"chmod 644 {probe} && rm -f {probe}")
 
 
 @pytest.mark.skipif(not _assets_available, reason=_ASSETS_REASON)
@@ -68,14 +87,35 @@ class _WasmshStandardSuite(SandboxIntegrationTests):
         finally:
             backend.close()
 
-    @pytest.mark.xfail(reason=_CHMOD_REASON, strict=True)
-    def test_download_error_permission_denied(
+    @pytest.fixture(autouse=True)
+    def _skip_without_permission_support(
         self,
+        request: pytest.FixtureRequest,
         sandbox_backend: SandboxBackendProtocol,
     ) -> None:
-        super().test_download_error_permission_denied(sandbox_backend)
+        """Skip the permission test on a runtime that cannot enforce modes.
 
-    @pytest.mark.xfail(reason=_WRITE_OVERWRITE_REASON, strict=True)
+        Implemented as a fixture rather than by overriding the test, because
+        `test_no_overrides_DO_NOT_OVERRIDE` rejects a rewritten body and
+        would force a blanket `xfail` — which would keep reporting a failure
+        long after the runtime gained the capability.
+        """
+        if request.node.name != "test_download_error_permission_denied":
+            return
+        if not enforces_permissions(sandbox_backend):
+            pytest.skip(
+                "installed wasmsh runtime predates VFS permission enforcement; "
+                "rebuild with `just build-pyodide && just package-pyodide-runtime`",
+            )
+
+    @pytest.mark.xfail(
+        reason=(
+            "langchain-tests 1.1.9 asserts pre-0.7 create-only write; every "
+            "deepagents 0.7.x backend overwrites by design. Covered instead "
+            "by TestWriteOverwriteContract."
+        ),
+        strict=True,
+    )
     def test_write_existing_file_fails(
         self,
         sandbox_backend: SandboxBackendProtocol,
@@ -92,3 +132,34 @@ class TestWasmshSandboxStandardNode(_WasmshStandardSuite):
 @pytest.mark.skipif(shutil.which("deno") is None, reason="deno is not installed")
 class TestWasmshSandboxStandardDeno(_WasmshStandardSuite):
     runtime = "deno"
+
+
+@pytest.mark.skipif(not _assets_available, reason=_ASSETS_REASON)
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+class TestWriteOverwriteContract:
+    """The 0.7.x `write` contract the stale suite assertion contradicts.
+
+    Kept here rather than as a suite override, which
+    `test_no_overrides_DO_NOT_OVERRIDE` forbids. If wasmsh ever regressed to
+    create-only `write`, this fails while the xfail above would flip to
+    XPASS — either way the change is reported.
+    """
+
+    def test_write_replaces_existing_content(self, sandbox: WasmshSandbox) -> None:
+        path = "/tmp/overwrite/existing.txt"
+        assert sandbox.write(path, "First content").error is None
+
+        result = sandbox.write(path, "Second content")
+
+        assert result.error is None
+        assert result.path == path
+        assert sandbox.execute(f"cat {path}").output.strip() == "Second content"
+
+    async def test_awrite_replaces_existing_content(
+        self,
+        sandbox: WasmshSandbox,
+    ) -> None:
+        path = "/tmp/overwrite/existing_async.txt"
+        assert (await sandbox.awrite(path, "First")).error is None
+        assert (await sandbox.awrite(path, "Second")).error is None
+        assert sandbox.execute(f"cat {path}").output.strip() == "Second"

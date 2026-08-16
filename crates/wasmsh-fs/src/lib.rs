@@ -75,6 +75,44 @@ pub struct Metadata {
     pub is_dir: bool,
     /// Size of the entry in bytes.
     pub size: u64,
+    /// POSIX permission bits (the low 9 of `st_mode`).
+    ///
+    /// Only the `rwx` triples are modelled. Ownership is not: the VFS has a
+    /// single principal, so "owner" is the only class that can differ from
+    /// the others, and a `chmod` that cleared just the group bits would have
+    /// nothing to enforce against. Callers that want to know whether a path
+    /// is readable should ask [`Metadata::is_readable`] rather than
+    /// re-deriving it from the bits.
+    pub mode: u32,
+}
+
+/// Default permission bits for a newly created file.
+pub const DEFAULT_FILE_MODE: u32 = 0o644;
+
+/// Default permission bits for a newly created directory.
+pub const DEFAULT_DIR_MODE: u32 = 0o755;
+
+/// Mask selecting the permission bits of a `st_mode` value.
+pub const MODE_PERM_MASK: u32 = 0o777;
+
+impl Metadata {
+    /// True when the owner may read this entry.
+    #[must_use]
+    pub const fn is_readable(&self) -> bool {
+        self.mode & 0o400 != 0
+    }
+
+    /// True when the owner may write this entry.
+    #[must_use]
+    pub const fn is_writable(&self) -> bool {
+        self.mode & 0o200 != 0
+    }
+
+    /// True when the owner may execute this entry (or search it, if a directory).
+    #[must_use]
+    pub const fn is_executable(&self) -> bool {
+        self.mode & 0o100 != 0
+    }
 }
 
 /// A directory entry.
@@ -178,6 +216,12 @@ pub trait Vfs {
     fn remove_file(&mut self, path: &str) -> Result<(), FsError>;
     /// Remove the empty directory at `path`.
     fn remove_dir(&mut self, path: &str) -> Result<(), FsError>;
+    /// Set the permission bits of the entry at `path`.
+    ///
+    /// Only the low 9 bits of `mode` are significant; the rest are ignored
+    /// rather than rejected, so a caller passing a full `st_mode` gets the
+    /// obvious behaviour.
+    fn set_mode(&mut self, path: &str, mode: u32) -> Result<(), FsError>;
 }
 
 /// An opaque file handle.

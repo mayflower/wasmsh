@@ -837,7 +837,18 @@ fn test_unary(op: &str, val: &str, ctx: &BuiltinContext<'_>) -> bool {
             .fs
             .is_some_and(|fs| fs.stat(val).is_ok_and(|m| m.size > 0)),
         "-t" => val == "0" && ctx.stdin.is_some(),
-        "-r" | "-w" | "-x" => ctx.fs.is_some_and(|fs| fs.stat(val).is_ok()),
+        // These used to answer "does it exist", which made `test -r` on a
+        // `chmod 000` file report success and any script gating on it take
+        // the wrong branch.
+        "-r" => ctx
+            .fs
+            .is_some_and(|fs| fs.stat(val).is_ok_and(|m| m.is_readable())),
+        "-w" => ctx
+            .fs
+            .is_some_and(|fs| fs.stat(val).is_ok_and(|m| m.is_writable())),
+        "-x" => ctx
+            .fs
+            .is_some_and(|fs| fs.stat(val).is_ok_and(|m| m.is_executable())),
         _ => false,
     }
 }

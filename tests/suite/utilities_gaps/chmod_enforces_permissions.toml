@@ -1,0 +1,25 @@
+# `chmod` used to be a no-op that returned 0, so `test -r` on a locked file
+# answered "yes" and any script gating on it took the wrong branch. Deep
+# Agents' sandbox conformance suite checks exactly this.
+[test]
+name = "chmod-enforces-read-permission"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["chmod"]
+
+[setup]
+files = { "/data/secret.txt" = "classified\n" }
+
+[input]
+script = """
+chmod 000 /data/secret.txt
+test -r /data/secret.txt; echo "readable=$?"
+cat /data/secret.txt 2>/dev/null; echo "cat=$?"
+chmod 644 /data/secret.txt
+test -r /data/secret.txt; echo "restored=$?"
+cat /data/secret.txt
+"""
+
+[expect]
+status = 0
+stdout = "readable=1\ncat=1\nrestored=0\nclassified\n"
