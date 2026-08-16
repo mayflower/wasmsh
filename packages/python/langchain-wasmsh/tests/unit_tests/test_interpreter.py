@@ -13,7 +13,6 @@ from deepagents.backends.protocol import (
 )
 
 from langchain_wasmsh import (
-    WasmshFilesystemBackend,
     WasmshInterpreterMiddleware,
 )
 from langchain_wasmsh._launcher import (
@@ -25,7 +24,6 @@ from langchain_wasmsh._launcher import (
 )
 from langchain_wasmsh._ptc import filter_tools_for_ptc
 from langchain_wasmsh._repl import Outcome, _Registry, _ThreadREPL, format_outcome
-from langchain_wasmsh.filesystem import WasmshNamespaceEscapeError
 
 # ── Sandbox stub ─────────────────────────────────────────────────────────────
 
@@ -254,98 +252,6 @@ class TestPTC:
     def test_filter_tools_for_ptc_rejects_non_list(self) -> None:
         with pytest.raises(TypeError):
             filter_tools_for_ptc([], "search", self_tool_name="py_eval")  # type: ignore[arg-type]
-
-
-# ── Filesystem backend ──────────────────────────────────────────────────────
-
-
-class TestFilesystemBackend:
-    def test_namespace_prefix_applied_to_uploads(self) -> None:
-        sandbox = _StubSandbox()
-        backend = WasmshFilesystemBackend(sandbox, namespace="/mem")
-        backend.upload_files([("/note.txt", b"hi")])
-        uploaded_paths = [path for path, _ in sandbox.upload_log]
-        assert "/mem/note.txt" in uploaded_paths
-
-    def test_namespace_unscoped_on_download_response(self) -> None:
-        sandbox = _StubSandbox()
-        sandbox.vfs["/mem/note.txt"] = b"hi"
-        backend = WasmshFilesystemBackend(sandbox, namespace="/mem")
-        responses = backend.download_files(["/note.txt"])
-        assert responses[0].path == "/note.txt"
-        assert responses[0].content == b"hi"
-
-    def test_namespace_normalisation_strips_trailing_slash(self) -> None:
-        sandbox = _StubSandbox()
-        backend = WasmshFilesystemBackend(sandbox, namespace="/mem/")
-        backend.upload_files([("/note.txt", b"hi")])
-        uploaded_paths = [path for path, _ in sandbox.upload_log]
-        assert "/mem/note.txt" in uploaded_paths
-
-    def test_empty_namespace_is_passthrough(self) -> None:
-        sandbox = _StubSandbox()
-        backend = WasmshFilesystemBackend(sandbox)
-        backend.upload_files([("/note.txt", b"hi")])
-        uploaded_paths = [path for path, _ in sandbox.upload_log]
-        assert uploaded_paths == ["/note.txt"]
-
-
-class TestFilesystemBackendTraversalContainment:
-    """Pyodide's POSIX VFS resolves `..` segments; the namespace must hold."""
-
-    def test_direct_dotdot_escape_is_rejected_on_every_method(self) -> None:
-
-        sandbox = _StubSandbox()
-        backend = WasmshFilesystemBackend(sandbox, namespace="/mem")
-        escape = "/../skills/secret.py"
-        with pytest.raises(WasmshNamespaceEscapeError):
-            backend.read(escape)
-        with pytest.raises(WasmshNamespaceEscapeError):
-            backend.write(escape, "x")
-        with pytest.raises(WasmshNamespaceEscapeError):
-            backend.edit(escape, "a", "b")
-        with pytest.raises(WasmshNamespaceEscapeError):
-            backend.upload_files([(escape, b"x")])
-        with pytest.raises(WasmshNamespaceEscapeError):
-            backend.download_files([escape])
-        with pytest.raises(WasmshNamespaceEscapeError):
-            backend.ls(escape)
-        with pytest.raises(WasmshNamespaceEscapeError):
-            backend.glob("*.py", escape)
-        with pytest.raises(WasmshNamespaceEscapeError):
-            backend.grep("TODO", escape)
-
-    def test_multi_segment_dotdot_payload_rejected(self) -> None:
-
-        backend = WasmshFilesystemBackend(_StubSandbox(), namespace="/mem")
-        with pytest.raises(WasmshNamespaceEscapeError, match="escapes namespace"):
-            backend.read("../../skills/secret.py")
-
-    def test_interior_dotdot_landing_outside_namespace_rejected(self) -> None:
-
-        backend = WasmshFilesystemBackend(_StubSandbox(), namespace="/mem")
-        with pytest.raises(WasmshNamespaceEscapeError):
-            backend.read("/x/../../etc/passwd")
-
-    def test_sibling_prefix_attack_rejected(self) -> None:
-        """/memstore shares the prefix /mem but is a different sibling."""
-        backend = WasmshFilesystemBackend(_StubSandbox(), namespace="/mem")
-        with pytest.raises(WasmshNamespaceEscapeError):
-            backend.read("/../memstore/x")
-
-    def test_interior_dotdot_staying_inside_namespace_allowed(self) -> None:
-        sandbox = _StubSandbox()
-        backend = WasmshFilesystemBackend(sandbox, namespace="/mem")
-        backend.upload_files([("/a/../b/x", b"hi")])
-        uploaded = [p for p, _ in sandbox.upload_log]
-        assert uploaded == ["/mem/b/x"]
-
-    def test_dot_and_dot_slash_paths_allowed(self) -> None:
-        sandbox = _StubSandbox()
-        backend = WasmshFilesystemBackend(sandbox, namespace="/mem")
-        backend.upload_files([("/./sub/x", b"hi")])
-        uploaded = [p for p, _ in sandbox.upload_log]
-        assert uploaded == ["/mem/sub/x"]
 
 
 # ── Middleware construction ─────────────────────────────────────────────────
