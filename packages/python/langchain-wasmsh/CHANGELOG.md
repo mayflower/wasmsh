@@ -134,12 +134,26 @@ A `create_deep_agent` compatibility matrix now lists every constructor input
 as supported, intentionally limited, or unsupported, with each row backed by
 a test that builds a real graph.
 
+### Deep Agents Code providers (optional)
+
+Two sandbox providers are registered under the
+`deepagents_code.sandbox_providers` entry-point group: `wasmsh` (local) and
+`wasmsh-remote` (dispatcher session). `deepagents-code` stays out of the base
+dependencies and lives behind the `[deepagents-code]` extra, with its own
+CI job that is allowed to fail without gating the release.
+
+They are separate providers because a single one would have to lie about
+`supports_sandbox_id`, the flag the CLI uses to decide whether reconnecting
+is possible. `wasmsh-remote` only closes sessions it created.
+
+The `bash -c` setup-shell concern turned out not to be a blocker: wasmsh
+already resolves `bash` and `sh` to its own shell, and unsupported syntax
+fails with a non-zero exit rather than a fake success. Both directions are
+tested.
+
 ### Not included
 
 - **Remote PTC.** `WasmshRemoteSandbox.run_ptc` still raises
   `NotImplementedError` pending ADR-0031 Phase 2. It fails loudly rather than
   degrading.
-- **Deep Agents Code sandbox provider.** Blocked on a `bash -c` setup-shell
-  mismatch; adding a `bash` that silently accepts unsupported syntax would be
-  worse than not shipping it.
 - **Capture/offload** stays disabled (`enable_capture_offload=False`).

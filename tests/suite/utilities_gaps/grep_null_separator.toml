@@ -1,0 +1,20 @@
+# `grep -Z` writes NUL between the file name and the rest of the record so a
+# path containing `:` stays parseable. wasmsh used to accept the flag and emit
+# `:` anyway, which is worse than rejecting it: a caller splitting on NUL sees
+# one unsplittable record and cannot tell that from a genuine no-match.
+# Deep Agents' sandbox backend parses `grep -rHnFZ` output exactly this way.
+[test]
+name = "grep-null-separator"
+tags = ["utility", "gap"]
+tier = "P1"
+requires = ["grep"]
+
+[setup]
+files = { "/data/a:b.txt" = "needle\n" }
+
+[input]
+script = "grep -HnZ needle '/data/a:b.txt'"
+
+[expect]
+status = 0
+stdout = "/data/a:b.txt\u00001:needle\n"

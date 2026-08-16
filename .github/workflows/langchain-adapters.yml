@@ -150,6 +150,50 @@ jobs:
           uv pip install --python /tmp/sdist-check/bin/python dist/*.tar.gz
           /tmp/sdist-check/bin/python -c "import langchain_wasmsh; print('sdist ok')"
 
+  # ── Optional: Deep Agents Code sandbox provider ────────────
+  # Its own job because `deepagents-code` is a separate distribution with its
+  # own release cadence and its own Deep Agents pin. A break there is worth
+  # knowing about, but it must not gate the adapter's release — so this job
+  # is allowed to fail without failing the workflow.
+  dcode-provider:
+    name: Deep Agents Code provider (optional)
+    runs-on: mayflower-k8s-runners
+    timeout-minutes: 15
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: packages/python/langchain-wasmsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.7"
+
+      - name: Install Node.js (runtime for WasmshSandbox subprocess)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Sync dependencies with the optional provider extra
+        run: uv sync --group test --extra deepagents-code
+
+      - name: Show the resolved stack
+        run: |
+          uv run --group test python - <<'PY'
+          import importlib.metadata as md
+          for name in ("deepagents", "deepagents-code", "langchain-wasmsh"):
+              print(f"{name}=={md.version(name)}")
+          PY
+
+      - name: Provider discovery and behaviour
+        run: uv run --group test pytest tests/unit_tests/test_dcode_provider.py -v --timeout 120
+
   # ── npm: unit + build + typecheck ──────────────────────────
   npm:
     name: npm unit (Node ${{ matrix.node-version }})

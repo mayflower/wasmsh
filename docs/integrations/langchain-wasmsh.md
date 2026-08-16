@@ -488,7 +488,7 @@ active. See `packages/python/langchain-wasmsh/tests/integration_tests/`.
 | `store` | Supported | Cross-thread and cross-sandbox persistence; runtime-injected store in tools and PTC. |
 | `cache` | Supported | Smoke-tested with the wasmsh backend active. |
 | `debug` / `name` | Supported | Passed through unchanged. |
-| Deep Agents Code provider | Not shipped | Optional integration; blocked on a `bash -c` setup-shell mismatch. |
+| Deep Agents Code provider | Optional extra | `pip install "langchain-wasmsh[deepagents-code]"`; see below. |
 | Remote PTC | Unsupported | ADR-0031 Phase 2. |
 
 **Subagent inheritance** (0.7.4, asserted in `test_agent_subagents.py`): a
@@ -501,6 +501,54 @@ than merging — and inherits **no memory at all**, because `SubAgent` has no
 ambient backend, permissions, memory, skills, or interpreter reach it. Top-
 level custom middleware is not inherited either, so an interpreter in a
 subagent stack must be added there deliberately.
+
+## Deep Agents Code sandbox providers (optional)
+
+The [Deep Agents Code](https://pypi.org/project/deepagents-code/) CLI
+discovers third-party sandboxes through the
+`deepagents_code.sandbox_providers` entry-point group. This package registers
+two:
+
+| Provider | Backend | `supports_sandbox_id` |
+|---|---|---|
+| `wasmsh` | `WasmshSandbox` (local subprocess) | `False` |
+| `wasmsh-remote` | `WasmshRemoteSandbox` (dispatcher session) | `True` |
+
+```bash
+pip install "langchain-wasmsh[deepagents-code]"
+dcode --sandbox wasmsh
+```
+
+`deepagents-code` is **not** a base dependency: it is a separate
+distribution with its own release cadence and its own Deep Agents pin, and an
+ordinary agent process must not pull the CLI stack. The entry points are
+always declared — only the CLI reads that group — and
+`langchain_wasmsh.dcode_provider` raises a clear `ImportError` if the package
+is absent.
+
+Two providers rather than one, because a single provider would have to lie
+about `supports_sandbox_id` — the flag the CLI uses to decide whether
+reconnecting is possible. A local sandbox is a subprocess with nothing to
+reconnect to; asking `wasmsh` for an id it does not hold raises
+`SandboxNotFoundError` rather than quietly handing back a fresh, empty
+filesystem.
+
+`wasmsh-remote` reconnects to an existing dispatcher session when you pass
+`sandbox_id`, and on cleanup only closes sessions **it** created — ending
+someone else's session on exit would be a surprising way to lose work.
+
+```toml
+# .deepagents/config.toml
+[sandbox.providers.wasmsh-remote]
+params = { dispatcher_url = "http://wasmsh-dispatcher:8080" }
+```
+
+**Setup scripts.** Deep Agents Code runs them as `bash -c <script>`. wasmsh
+resolves `bash` (and `sh`) to its own shell rather than shipping a stub that
+swallows what it cannot run: a script using syntax wasmsh does not implement
+fails with a non-zero exit rather than a fake success. Scripts inside
+wasmsh's supported Bash subset ([`SUPPORTED.md`](../../SUPPORTED.md)) work
+normally. This is tested both ways.
 
 ## Reference
 

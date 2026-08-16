@@ -394,6 +394,30 @@ See [`examples/deepagent-python/remote_basic.py`](https://github.com/mayflower/w
 and the [integration guide](https://github.com/mayflower/wasmsh/blob/main/docs/integrations/langchain-wasmsh.md#wasmshremotesandbox--docker--kubernetes-backend)
 for a runnable Docker Compose stack and full deployment notes.
 
+## Deep Agents Code CLI (optional)
+
+Install the extra to register two sandbox providers with the
+[Deep Agents Code](https://pypi.org/project/deepagents-code/) CLI:
+
+```bash
+pip install "langchain-wasmsh[deepagents-code]"
+dcode --sandbox wasmsh          # local in-process sandbox
+dcode --sandbox wasmsh-remote   # dispatcher session
+```
+
+`deepagents-code` is not a base dependency — it is a separate distribution
+with its own release cadence, and an ordinary agent process should not pull
+the CLI stack.
+
+The two providers are separate because a local sandbox is a subprocess with
+no identity to reconnect to (`supports_sandbox_id=False`) while a dispatcher
+session has one (`supports_sandbox_id=True`). `wasmsh-remote` reconnects when
+given a `sandbox_id`, and on cleanup closes only sessions it created.
+
+Setup scripts run as `bash -c <script>`; wasmsh resolves `bash` to its own
+shell, so a script using unsupported syntax fails loudly rather than
+appearing to succeed.
+
 ## Reference
 
 ### `WasmshSandbox(*, runtime, dist_dir, working_directory, step_budget, initial_files, allowed_hosts)`

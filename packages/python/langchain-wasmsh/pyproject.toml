@@ -32,6 +32,21 @@ dependencies = [
     "pydantic>=2.7.4,<3.0.0",
 ]
 
+[project.optional-dependencies]
+# The CLI integration only. Deliberately not a base dependency: it is a
+# separate distribution with its own release cadence and its own Deep Agents
+# pin, and `langchain_wasmsh` must not pull the CLI stack into an ordinary
+# agent process.
+deepagents-code = ["deepagents-code>=0.1.56"]
+
+[project.entry-points."deepagents_code.sandbox_providers"]
+# Discovered by the Deep Agents Code CLI. Declaring the entry points is safe
+# even without the optional extra installed: the CLI is the only thing that
+# reads this group, and `langchain_wasmsh.dcode_provider` raises a clear
+# ImportError rather than importing anything from an absent package.
+wasmsh = "langchain_wasmsh.dcode_provider:WasmshSandboxProvider"
+wasmsh-remote = "langchain_wasmsh.dcode_provider:WasmshRemoteSandboxProvider"
+
 [project.urls]
 Homepage = "https://github.com/mayflower/wasmsh/tree/main/packages/python/langchain-wasmsh"
 Repository = "https://github.com/mayflower/wasmsh"
@@ -70,6 +85,16 @@ min-deepagents = [
 
 [tool.uv]
 constraint-dependencies = ["urllib3>=2.6.3"]
+# `deepagents-code` pins an exact `deepagents` version of its own choosing,
+# which will not in general be the floor the `min-deepagents` leg pins. Both
+# are legitimate configurations, just not simultaneous ones, so they are
+# declared conflicting rather than being reconciled by loosening either.
+conflicts = [
+    [
+        { extra = "deepagents-code" },
+        { group = "min-deepagents" },
+    ],
+]
 
 [tool.ruff.format]
 docstring-code-format = true

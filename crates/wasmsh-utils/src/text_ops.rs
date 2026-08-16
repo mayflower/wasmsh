@@ -636,6 +636,9 @@ struct GrepFlags {
     before_context: usize,
     max_count: Option<usize>,
     show_filename: Option<bool>, // None=auto, Some(true)=always, Some(false)=never
+    /// `-Z` / `--null`: separate the file name from the rest of the record
+    /// with NUL instead of `:`, so a path containing `:` stays unambiguous.
+    null_after_filename: bool,
     patterns: Vec<String>,
     include_glob: Option<String>,
     exclude_glob: Option<String>,
@@ -687,6 +690,7 @@ fn default_grep_flags() -> GrepFlags {
         before_context: 0,
         max_count: None,
         show_filename: None,
+        null_after_filename: false,
         patterns: Vec::new(),
         include_glob: None,
         exclude_glob: None,
@@ -702,6 +706,10 @@ fn parse_grep_long_option(arg: &str, flags: &mut GrepFlags) -> bool {
     }
     if let Some(g) = arg.strip_prefix("--exclude=") {
         flags.exclude_glob = Some(g.to_string());
+        return true;
+    }
+    if arg == "--null" {
+        flags.null_after_filename = true;
         return true;
     }
     arg == "--color" || arg.starts_with("--color=")
@@ -761,6 +769,7 @@ fn parse_grep_short_cluster(cluster: &str, flags: &mut GrepFlags) {
             'q' => flags.quiet = true,
             'h' => flags.show_filename = Some(false),
             'H' => flags.show_filename = Some(true),
+            'Z' => flags.null_after_filename = true,
             // 'z' etc. — accepted, no-op
             _ => {}
         }
@@ -1038,8 +1047,9 @@ fn grep_emit_count_result(
     match_count: u64,
 ) {
     let with_filename = filename.is_some() && flags.show_filename != Some(false);
+    let separator = if flags.null_after_filename { '\0' } else { ':' };
     let line = match (filename, with_filename) {
-        (Some(f), true) => format!("{f}:{match_count}\n"),
+        (Some(f), true) => format!("{f}{separator}{match_count}\n"),
         _ => format!("{match_count}\n"),
     };
     output.stdout(line.as_bytes());
@@ -1068,7 +1078,11 @@ fn grep_emit_one(
     if let Some(f) = filename {
         if flags.show_filename != Some(false) {
             prefix.push_str(f);
-            prefix.push(':');
+            // GNU grep writes the name/data separator as NUL under `-Z`.
+            // Accepting the flag and then emitting `:` anyway is worse than
+            // rejecting it: a caller parsing on NUL sees one unsplittable
+            // record and cannot tell that from a genuine no-match.
+            prefix.push(if flags.null_after_filename { '\0' } else { ':' });
         }
     }
     if flags.show_line_numbers {
@@ -3555,6 +3569,50 @@ mod tests {
         assert_eq!(status, 0);
         assert!(out.contains("2:bbb"), "expected 2:bbb in: {out}");
         assert!(out.contains("4:bbb"), "expected 4:bbb in: {out}");
+    }
+
+    // -------------------------------------------------------------------
+    // grep -Z / --null  NUL after the file name
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn grep_null_separator_after_filename() {
+        // `-Z` exists so a path containing `:` stays parseable. Accepting the
+        // flag and emitting `:` anyway is worse than rejecting it: the caller
+        // parsing on NUL sees one unsplittable record and cannot tell that
+        // from a genuine no-match.
+        let mut fs = make_fs_with_file("/a:b.txt", b"needle\n");
+        let (status, out, _) = run(util_grep, &["grep", "-HnZ", "needle", "/a:b.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(out, "/a:b.txt\u{0}1:needle\n");
+    }
+
+    #[test]
+    fn grep_long_null_flag_matches_short_form() {
+        let mut fs = make_fs_with_file("/n.txt", b"needle\n");
+        let (status, out, _) = run(
+            util_grep,
+            &["grep", "-Hn", "--null", "needle", "/n.txt"],
+            &mut fs,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(out, "/n.txt\u{0}1:needle\n");
+    }
+
+    #[test]
+    fn grep_without_null_flag_keeps_the_colon_separator() {
+        let mut fs = make_fs_with_file("/n.txt", b"needle\n");
+        let (status, out, _) = run(util_grep, &["grep", "-Hn", "needle", "/n.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(out, "/n.txt:1:needle\n");
+    }
+
+    #[test]
+    fn grep_count_honours_the_null_separator() {
+        let mut fs = make_fs_with_file("/c.txt", b"x\nx\ny\n");
+        let (status, out, _) = run(util_grep, &["grep", "-HcZ", "x", "/c.txt"], &mut fs);
+        assert_eq!(status, 0);
+        assert_eq!(out, "/c.txt\u{0}2\n");
     }
 
     // -------------------------------------------------------------------

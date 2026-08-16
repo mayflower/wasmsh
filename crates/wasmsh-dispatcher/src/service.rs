@@ -415,9 +415,9 @@ async fn run_session(
     // Without the extra headroom the fixed 30s client timeout would abort a
     // 60s command mid-flight and report a transport error, hiding the exit
     // code the caller needs to tell "timed out" from "dispatcher is down".
-    let upstream_timeout = payload.timeout_ms.map(|ms| {
-        Duration::from_millis(ms.min(MAX_COMMAND_TIMEOUT_MS)) + UPSTREAM_TIMEOUT_GRACE
-    });
+    let upstream_timeout = payload
+        .timeout_ms
+        .map(|ms| Duration::from_millis(ms.min(MAX_COMMAND_TIMEOUT_MS)) + UPSTREAM_TIMEOUT_GRACE);
     let request = RunnerRunRequest {
         command: payload.command,
         timeout_ms: payload.timeout_ms.map(|ms| ms.min(MAX_COMMAND_TIMEOUT_MS)),
