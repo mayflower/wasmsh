@@ -280,6 +280,33 @@ jobs:
         run: |
           ls -la package/
           node -e "const p = require('./package/package.json'); console.log(p.name + '@' + p.version)"
+      - name: Verify the package installs and boots
+        # `ls` and a version print say the artifact exists, not that it
+        # works. This package is almost entirely assets, and the failure
+        # mode is a file silently absent from `files`/`package-data` —
+        # exactly how `lib/baseline/boot-plan.mjs` went missing in
+        # 0.5.10-0.6.2. Installing the real tarball into a clean project
+        # and booting a session is the only check that notices.
+        run: |
+          set -euo pipefail
+          tarball="$(npm pack ./package/ --pack-destination "$RUNNER_TEMP" | tail -1)"
+          workdir="$RUNNER_TEMP/verify-npm"
+          mkdir -p "$workdir" && cd "$workdir"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund "$RUNNER_TEMP/$tarball"
+          node - <<'JS'
+          const { createNodeSession } = await import("@mayflowergmbh/wasmsh-pyodide");
+          const session = await createNodeSession();
+          try {
+            const result = await session.run("echo release-check; exit 3");
+            if (result.exitCode !== 3 || !result.output.includes("release-check")) {
+              throw new Error("unexpected result: " + JSON.stringify(result));
+            }
+          } finally {
+            await session.close();
+          }
+          console.log("npm package verified");
+          JS
       - name: Publish to npm
         run: |
           npm publish ./package/ --access public 2>&1 || {
@@ -318,6 +345,41 @@ jobs:
         run: |
           pip install build
           cd package && python -m build
+      - name: Verify the wheel carries every asset
+        # `package-data` globs in this project are one directory deep and
+        # do not recurse, so a new subdirectory under `assets/` is dropped
+        # from the wheel unless someone remembers to add its glob. That is
+        # not hypothetical: `assets/lib/baseline/boot-plan.mjs` was missing
+        # from 0.5.10-0.6.2 and only surfaced as ERR_MODULE_NOT_FOUND in a
+        # downstream adapter. Compare the wheel against the source tree
+        # instead of against a hand-maintained list.
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib
+          import sys
+          import zipfile
+
+          wheel = next(pathlib.Path("package/dist").glob("*.whl"))
+          packaged = {
+              name.split("wasmsh_pyodide_runtime/", 1)[1]
+              for name in zipfile.ZipFile(wheel).namelist()
+              if "wasmsh_pyodide_runtime/assets/" in name
+          }
+          source_root = pathlib.Path("package/wasmsh_pyodide_runtime")
+          expected = {
+              str(path.relative_to(source_root))
+              for path in (source_root / "assets").rglob("*")
+              if path.is_file()
+          }
+          missing = sorted(expected - packaged)
+          if missing:
+              print(f"{len(missing)} asset(s) missing from {wheel.name}:")
+              for name in missing:
+                  print("   ", name)
+              sys.exit(1)
+          print(f"{wheel.name}: all {len(expected)} assets packaged")
+          PY
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:

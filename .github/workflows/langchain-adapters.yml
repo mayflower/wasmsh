@@ -229,6 +229,40 @@ jobs:
       - name: Unit tests
         run: pnpm --filter @mayflowergmbh/langchain-wasmsh test:unit
 
+      - name: Pack check (workspace protocol + build output)
+        # Runs here as well as in the publish workflow so a packaging
+        # regression is caught on the PR that causes it, rather than on
+        # the release tag when it is far more expensive to fix.
+        run: |
+          set -euo pipefail
+          pnpm --filter @mayflowergmbh/langchain-wasmsh pack \
+            --pack-destination "$RUNNER_TEMP"
+          tarball="$(find "$RUNNER_TEMP" -name 'mayflowergmbh-langchain-wasmsh-*.tgz' | head -1)"
+          tar xzOf "$tarball" package/package.json > "$RUNNER_TEMP/manifest.json"
+          node - "$RUNNER_TEMP/manifest.json" <<'JS'
+          const fs = require("node:fs");
+          const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          for (const [field, deps] of Object.entries({
+            dependencies: manifest.dependencies ?? {},
+            peerDependencies: manifest.peerDependencies ?? {},
+          })) {
+            for (const [name, range] of Object.entries(deps)) {
+              if (String(range).startsWith("workspace:")) {
+                throw new Error(
+                  `${field}.${name} still uses the workspace protocol ` +
+                  `(${range}); pack with pnpm, not npm`,
+                );
+              }
+            }
+          }
+          console.log("manifest ok:", manifest.name + "@" + manifest.version);
+          JS
+          for entry in package/dist/index.js package/dist/index.cjs package/dist/index.d.ts; do
+            tar tzf "$tarball" | grep -qx "$entry" \
+              || { echo "missing from tarball: $entry" >&2; exit 1; }
+          done
+          echo "tarball contents ok"
+
   # ── npm: integration (no LLM) + basic example ──────────────
   # Requires Pyodide assets in packages/npm/wasmsh-pyodide/assets/.
   # These are gitignored (built by tools/pyodide/build-custom.sh, ~30min).

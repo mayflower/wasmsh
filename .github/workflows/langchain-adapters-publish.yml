@@ -78,6 +78,47 @@ jobs:
       - name: Build sdist + wheel
         run: uv build
 
+      - name: Verify the built wheel installs and runs
+        # Publishing an artifact nobody installed is how a packaging
+        # mistake reaches users first: an editable checkout resolves a
+        # different graph than a built wheel, so a missing runtime
+        # dependency or a file left out of the wheel is invisible until
+        # someone `pip install`s it. Drive a real sandbox, not just an
+        # import — the assets come from a separate distribution, and a
+        # broken pin there only shows up when the sandbox boots.
+        run: |
+          set -euo pipefail
+          uv venv /tmp/verify-wheel
+          uv pip install --python /tmp/verify-wheel/bin/python dist/*.whl
+          /tmp/verify-wheel/bin/python - <<'PY'
+          from langchain_wasmsh import (
+              WasmshFilesystemBackend,
+              WasmshInterpreterMiddleware,
+              WasmshRemoteSandbox,
+              WasmshSandbox,
+          )
+
+          sandbox = WasmshSandbox()
+          try:
+              result = sandbox.execute("echo release-check; exit 3")
+              assert result.exit_code == 3, result
+              assert "release-check" in result.output, result
+              assert sandbox.write("/workspace/v.txt", "ok").error is None
+              read = sandbox.read("/workspace/v.txt")
+              assert read.error is None, read
+              assert read.file_data["content"].strip() == "ok", read
+          finally:
+              sandbox.close()
+          print("wheel verified")
+          PY
+
+      - name: Verify the built sdist installs
+        run: |
+          set -euo pipefail
+          uv venv /tmp/verify-sdist
+          uv pip install --python /tmp/verify-sdist/bin/python dist/*.tar.gz
+          /tmp/verify-sdist/bin/python -c "import langchain_wasmsh; print('sdist verified')"
+
       - name: Publish to PyPI
         # Trusted publishing via OIDC; no token needed on the runner.
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -121,6 +162,54 @@ jobs:
 
       - name: Unit tests
         run: pnpm --filter @mayflowergmbh/langchain-wasmsh test:unit
+
+      - name: Verify the packed tarball
+        # Two packaging mistakes this catches, both of which produce a
+        # tarball that looks fine and fails on the user's machine:
+        #
+        #   1. `workspace:*` left verbatim. This package depends on
+        #      `@mayflowergmbh/wasmsh-pyodide` through the workspace
+        #      protocol, and only pnpm rewrites it to a real version.
+        #      An npm-packed tarball installs with EUNSUPPORTEDPROTOCOL.
+        #   2. A tarball with no `dist/`. `npm pack` does not run
+        #      `prepublishOnly`, so packing without an explicit build
+        #      ships LICENSE, README and package.json and nothing else.
+        #
+        # A full runtime boot is not attempted here: it would need
+        # `@mayflowergmbh/wasmsh-pyodide` at the version being released,
+        # which is not on the registry yet during a coordinated release.
+        # `langchain-adapters.yml` covers the runtime path against the
+        # published assets.
+        run: |
+          set -euo pipefail
+          pnpm --filter @mayflowergmbh/langchain-wasmsh pack \
+            --pack-destination "$RUNNER_TEMP"
+          tarball="$(find "$RUNNER_TEMP" -name 'mayflowergmbh-langchain-wasmsh-*.tgz' | head -1)"
+          echo "Packed: $tarball"
+          tar xzOf "$tarball" package/package.json > "$RUNNER_TEMP/manifest.json"
+          node - "$RUNNER_TEMP/manifest.json" <<'JS'
+          const fs = require("node:fs");
+          const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          for (const [field, deps] of Object.entries({
+            dependencies: manifest.dependencies ?? {},
+            peerDependencies: manifest.peerDependencies ?? {},
+          })) {
+            for (const [name, range] of Object.entries(deps)) {
+              if (String(range).startsWith("workspace:")) {
+                throw new Error(
+                  `${field}.${name} still uses the workspace protocol ` +
+                  `(${range}); pack with pnpm, not npm`,
+                );
+              }
+            }
+          }
+          console.log("manifest ok:", manifest.name + "@" + manifest.version);
+          JS
+          for entry in package/dist/index.js package/dist/index.cjs package/dist/index.d.ts; do
+            tar tzf "$tarball" | grep -qx "$entry" \
+              || { echo "missing from tarball: $entry" >&2; exit 1; }
+          done
+          echo "tarball contents ok"
 
       - name: Publish to npm
         # `pnpm publish` refuses workspace:* protocol by default; use
