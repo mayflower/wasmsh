@@ -33,13 +33,21 @@ permissions:
 jobs:
   # ── Python: unit + integration (no LLM) + basic example ────
   python:
-    name: Python (${{ matrix.python-version }})
+    name: Python ${{ matrix.python-version }} (${{ matrix.resolution }})
     runs-on: mayflower-k8s-runners
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
+        # `highest` is the newest resolution allowed by the declared window
+        # (`deepagents>=0.7.4,<0.8.0`). `lowest-direct` pins every declared
+        # floor, which is the only way a too-low bound gets caught — a floor
+        # nothing ever installs is a promise, not a constraint.
+        resolution: ["highest"]
+        include:
+          - python-version: "3.12"
+            resolution: "lowest-direct"
     defaults:
       run:
         working-directory: packages/python/langchain-wasmsh
@@ -60,8 +68,32 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install Deno (second host runtime for the standard suite)
+        # The langchain-tests conformance suite runs once per host runtime.
+        # Deno restricts the subprocess with --allow-read/--allow-net, so a
+        # permission-related divergence from Node cannot hide behind a single
+        # green leg.
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
       - name: Sync dependencies
-        run: uv sync --group test
+        run: uv sync --group test --resolution ${{ matrix.resolution }}
+
+      - name: Pin the exact 0.7.4 floor
+        if: matrix.resolution == 'lowest-direct'
+        # `lowest-direct` already resolves deepagents to its floor; installing
+        # the group makes the intent explicit and fails loudly if the floor
+        # ever stops being installable.
+        run: uv sync --group test --group min-deepagents --resolution lowest-direct
+
+      - name: Show the resolved Deep Agents stack
+        run: |
+          uv run --group test python - <<'PY'
+          import importlib.metadata as md
+          for name in ("deepagents", "langchain", "langchain-core", "langgraph", "langchain-tests", "wasmsh-pyodide-runtime"):
+              print(f"{name}=={md.version(name)}")
+          PY
 
       - name: Lint (ruff check)
         run: uv run --group test ruff check langchain_wasmsh tests
@@ -76,12 +108,13 @@ jobs:
         run: uv run --group test pytest tests/unit_tests/test_sandbox.py -v
 
       - name: Integration tests (no LLM)
-        # test_e2e_agent.py — bash+python sharing /workspace (3 tests).
-        # test_integration.py — full langchain-tests sandbox standard
-        #   suite (~85 tests + 1 xfail for chmod which Emscripten's VFS
-        #   cannot enforce).
-        # test_agent_sandbox.py is LLM-only and runs in `*-llm.yml`.
-        run: uv run --group test pytest tests/integration_tests/test_e2e_agent.py tests/integration_tests/test_integration.py -v --timeout 60
+        # Everything under integration_tests/ except test_agent_sandbox.py,
+        # which needs an ANTHROPIC_API_KEY and runs in `*-llm.yml`. That
+        # includes the langchain-tests standard suite (run once per host
+        # runtime), the create_deep_agent composition matrix, memory/store
+        # scopes, permissions, subagents, skills, PTC, the execute-timeout
+        # behaviour, and the full-composition golden test.
+        run: uv run --group test pytest tests/integration_tests --ignore=tests/integration_tests/test_agent_sandbox.py -v --timeout 300
 
       - name: Basic example smoke
         # Runs the non-LLM example from examples/deepagent-python/ via the
@@ -89,8 +122,33 @@ jobs:
         # at PyPI (the package isn't published yet).
         run: uv run --group test python ../../../examples/deepagent-python/basic.py
 
-      - name: Build wheel
-        run: uv build --wheel
+      - name: Build wheel and sdist
+        run: uv build
+
+      - name: Wheel install smoke test
+        # A built wheel must resolve the same package graph an editable
+        # checkout does; a missing runtime dependency only shows up here.
+        run: |
+          set -euo pipefail
+          uv venv /tmp/wheel-check
+          uv pip install --python /tmp/wheel-check/bin/python dist/*.whl
+          /tmp/wheel-check/bin/python -c "
+          from langchain_wasmsh import (
+              WasmshFilesystemBackend,
+              WasmshInterpreterMiddleware,
+              WasmshRemoteSandbox,
+              WasmshSandbox,
+          )
+          import deepagents
+          print('wheel ok, deepagents', deepagents.__version__)
+          "
+
+      - name: Sdist install smoke test
+        run: |
+          set -euo pipefail
+          uv venv /tmp/sdist-check
+          uv pip install --python /tmp/sdist-check/bin/python dist/*.tar.gz
+          /tmp/sdist-check/bin/python -c "import langchain_wasmsh; print('sdist ok')"
 
   # ── npm: unit + build + typecheck ──────────────────────────
   npm:

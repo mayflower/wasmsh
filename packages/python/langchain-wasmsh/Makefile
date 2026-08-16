@@ -15,8 +15,12 @@ test tests:
 	uv run --group test pytest -vvv $(PYTEST_EXTRA) --disable-socket --allow-unix-socket $(TEST_FILE)
 
 integration_test: ## Run integration tests
+# 30s was enough when this only ran the sandbox conformance suite. The
+# composition tests boot several Pyodide sessions per module and the
+# execute-timeout tests deliberately wait out a deadline, so the per-test
+# ceiling has to allow for both.
 integration_test integration_tests:
-	uv run --group test pytest -vvv --timeout 30 $(TEST_FILE)
+	uv run --group test pytest -vvv --timeout 300 $(TEST_FILE)
 
 test_watch: ## Run tests in watch mode
 	uv run --group test ptw --now . -- -vv $(TEST_FILE)

@@ -45,9 +45,12 @@ packages = ["langchain_wasmsh"]
 dev = []
 test = [
     "pytest>=7.3.0,<10.0.0",
-    "pytest-cov",
-    "pytest-socket",
-    "pytest-xdist",
+    # Lower bounds matter here, not just upper ones: the `lowest-direct`
+    # CI leg installs every declared floor, and an unpinned test tool
+    # resolves to a decade-old release that cannot run the suite.
+    "pytest-cov>=5.0",
+    "pytest-socket>=0.7",
+    "pytest-xdist>=3.5",
     "pytest-timeout>=2.3.1,<3.0.0",
     "pytest-asyncio>=1.3.0",
     "respx>=0.22",
