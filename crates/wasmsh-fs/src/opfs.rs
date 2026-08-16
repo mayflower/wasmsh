@@ -108,6 +108,12 @@ impl Vfs for OpfsFs {
             "OPFS not available on this platform: {path}"
         )))
     }
+
+    fn set_mode(&mut self, path: &str, _mode: u32) -> Result<(), FsError> {
+        Err(FsError::Io(format!(
+            "OPFS not available on this platform: {path}"
+        )))
+    }
 }
 
 #[cfg(test)]

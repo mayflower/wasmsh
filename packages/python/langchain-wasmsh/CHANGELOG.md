@@ -149,12 +149,16 @@ ships with `FS.ignorePermissions = true` and Pyodide depends on that for its
 own stdlib, so the check happens in the Rust layer against the mode `stat`
 reports rather than by flipping the global flag.
 
-**This needs a `wasmsh-pyodide-runtime` release to reach installed users.**
-Until the assets carrying it are published, the conformance test probes the
-running runtime and skips with an actionable message instead of failing; the
-enforcement itself is covered by `wasmsh-fs` unit tests and three `chmod_*`
-cases in the shell suite. Raise the adapter's runtime floor to that release
-when it ships.
+The fix lives in the Pyodide assets, so it reaches installed users only when
+`wasmsh-pyodide-runtime` is republished — that package's version tracks the
+Rust workspace, so `tools/bump-version.sh` covers it. The adapter keeps its
+`>=0.7.0` floor because it genuinely works against either runtime: an older
+one ignores `chmod` exactly as every wasmsh release before this one did.
+Nothing in the adapter depends on enforcement, so raising the floor is
+optional — it only changes whether the conformance test runs or skips. The
+test probes the running runtime and skips with an actionable message, and
+the enforcement itself is covered by `wasmsh-fs` unit tests and three
+`chmod_*` cases in the shell suite regardless.
 
 ### Deep Agents Code providers (optional)
 
