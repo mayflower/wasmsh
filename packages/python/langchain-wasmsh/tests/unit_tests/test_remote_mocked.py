@@ -11,6 +11,7 @@ import pytest
 import respx
 
 from langchain_wasmsh import WasmshRemoteSandbox
+from langchain_wasmsh._file_ops import TIMEOUT_EXIT_CODE
 
 BASE_URL = "http://dispatcher.test"
 SESSION_ID = "test-session"
@@ -572,3 +573,108 @@ class TestGrep:
 
         assert result.error is not None
         assert result.matches is None
+
+
+# ── execute timeout ────────────────────────────────────────────────────
+
+
+class TestExecuteTimeout:
+    """The deadline travels to the runner; the socket only outlives it."""
+
+    @respx.mock
+    def test_timeout_is_sent_as_timeout_ms(self) -> None:
+        sandbox = _make_sandbox(respx.mock)
+        route = respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/run").mock(
+            return_value=httpx.Response(
+                200,
+                json={"ok": True, "result": {"output": "hi", "exitCode": 0}},
+            ),
+        )
+
+        sandbox.execute("echo hi", timeout=30)
+
+        payload = json.loads(route.calls[-1].request.content)
+        assert payload["timeout_ms"] == 30_000
+
+    @respx.mock
+    def test_the_socket_deadline_outlives_the_command_deadline(self) -> None:
+        # Otherwise the client would abort before the runner's authoritative
+        # timeout answer arrived, and a timed-out command would be
+        # indistinguishable from an unreachable dispatcher.
+        sandbox = _make_sandbox(respx.mock)
+        route = respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/run").mock(
+            return_value=httpx.Response(
+                200,
+                json={"ok": True, "result": {"output": "hi", "exitCode": 0}},
+            ),
+        )
+
+        sandbox.execute("echo hi", timeout=30)
+
+        assert route.calls[-1].request.extensions["timeout"]["read"] > 30
+
+    @respx.mock
+    @pytest.mark.parametrize("timeout", [None, 0])
+    def test_no_deadline_sends_no_timeout_ms(self, timeout: int | None) -> None:
+        sandbox = _make_sandbox(respx.mock)
+        route = respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/run").mock(
+            return_value=httpx.Response(
+                200,
+                json={"ok": True, "result": {"output": "hi", "exitCode": 0}},
+            ),
+        )
+
+        sandbox.execute("echo hi", timeout=timeout)
+
+        assert "timeout_ms" not in json.loads(route.calls[-1].request.content)
+
+    @respx.mock
+    def test_a_runner_timeout_result_is_passed_through(self) -> None:
+        sandbox = _make_sandbox(respx.mock)
+        respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/run").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "output": "Error: command timed out after 5s",
+                        "exitCode": 124,
+                        "timedOut": True,
+                    },
+                },
+            ),
+        )
+
+        result = sandbox.execute("sleep 30", timeout=5)
+
+        assert result.exit_code == TIMEOUT_EXIT_CODE
+        assert "timed out" in result.output
+
+    @respx.mock
+    def test_a_socket_timeout_still_reports_124_when_a_deadline_was_set(
+        self,
+    ) -> None:
+        # The runner should have answered first; when it does not, the caller
+        # still learns the command hit its deadline rather than seeing a raw
+        # transport error.
+        sandbox = _make_sandbox(respx.mock)
+        respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/run").mock(
+            side_effect=httpx.ReadTimeout("read timeout"),
+        )
+
+        result = sandbox.execute("sleep 30", timeout=1)
+
+        assert result.exit_code == TIMEOUT_EXIT_CODE
+        assert "timed out after 1s" in result.output
+
+    @respx.mock
+    def test_a_socket_timeout_without_a_deadline_still_raises(self) -> None:
+        # With no deadline there is nothing to report as a timeout; the
+        # transport failure is the real answer.
+        sandbox = _make_sandbox(respx.mock)
+        respx.mock.post(f"{BASE_URL}/sessions/{SESSION_ID}/run").mock(
+            side_effect=httpx.ReadTimeout("read timeout"),
+        )
+
+        with pytest.raises(httpx.TimeoutException):
+            sandbox.execute("sleep 30")

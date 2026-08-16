@@ -13,6 +13,9 @@ import { applyCompileCacheEnv } from "./compile-cache.mjs";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const templateWorkerPath = resolve(__dirname, "./template-worker.mjs");
 
+/** Exit code reported for a command that missed its deadline (GNU `timeout(1)`). */
+const WASMSH_TIMEOUT_EXIT_CODE = 124;
+
 function normalizeContent(content) {
   if (typeof content === "string") {
     return new TextEncoder().encode(content);
@@ -250,8 +253,36 @@ export async function createRunner(options = {}) {
             workerId: this.workerId,
           });
         },
-        async run(command) {
-          return restored.sendRequest("run", { command });
+        async run(command, { timeoutMs } = {}) {
+          // A per-command deadline is enforced here rather than by the
+          // caller's socket, because only the runner can act on it: Pyodide
+          // runs synchronously inside the worker and offers no cancellation
+          // point, so `sendRequest` terminates the worker when the deadline
+          // passes. The session is then unusable — an abandoned evaluation
+          // leaves interpreter state no one should read — so it is marked
+          // closed and the caller gets a structured timeout result with GNU
+          // `timeout(1)`'s exit code instead of a transport error it would
+          // have to guess about.
+          try {
+            return await restored.sendRequest("run", { command }, { timeoutMs });
+          } catch (error) {
+            if (error?.code !== "WASMSH_REQUEST_TIMEOUT") {
+              throw error;
+            }
+            this.closed = true;
+            registry.delete(this.id);
+            metrics.sessionClosed();
+            const seconds = Math.round((timeoutMs ?? 0) / 1000);
+            return {
+              output:
+                `Error: command timed out after ${seconds}s and was terminated: ${command}\n` +
+                "The wasmsh session could not be interrupted safely and was destroyed; " +
+                "any interpreter state from this session is gone.",
+              exitCode: WASMSH_TIMEOUT_EXIT_CODE,
+              timedOut: true,
+              events: [],
+            };
+          }
         },
         async writeFile(path, content) {
           return restored.sendRequest("writeFile", {

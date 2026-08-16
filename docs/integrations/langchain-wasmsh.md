@@ -178,13 +178,39 @@ print(users)
 ```
 
 PTC calls round-trip through the sandbox's `host_call` /
-`host_call_result` protocol (see [ADR-0031](../adr/adr-0031-ptc-suspend-resume.md))
-and dispatch through the LangChain `BaseTool.invoke` path on the host.
-**Note:** PTC bypasses the regular `ToolNode` path, so per-tool
-`interrupt_on` approval hooks are *not* enforced — treat the
-allowlist as your permission boundary. PTC currently requires the
-**in-process** backend; `WasmshRemoteSandbox.run_ptc` raises
-`NotImplementedError` until the dispatcher SSE channel ships.
+`host_call_result` protocol (see [ADR-0031](../adr/adr-0031-ptc-suspend-resume.md)).
+On the host, each call is dispatched with a child `ToolRuntime` derived
+from the outer `py_eval` invocation, so a nested tool receives the same
+state, context, store, config, and stream writer the parent had — with its
+own `tool_call_id` so tracing can correlate the sub-call. Tools declaring
+`ToolRuntime`, `InjectedState`, `InjectedStore`, or `InjectedToolCallId`
+all work; arguments the generated program supplies for an injected
+parameter are discarded before injection, so model-authored code cannot
+forge identity or state. Sync and async tools both run, from sync and async
+agent invocations alike.
+
+Results keep their shape: a tool returning a list of dicts arrives in the
+interpreter as a list of dicts. `ToolMessage` and `Command` envelopes are
+unwrapped to their payload and Pydantic models keep their fields; only
+values with no JSON counterpart become strings, and only at the leaf.
+
+Two bounds apply:
+
+- **`max_ptc_calls`** (default 256, per evaluation) caps nested calls so a
+  loop in generated code cannot issue unbounded tool calls in one turn.
+  The call past the limit fails without reaching the tool. Pass `None` to
+  disable.
+- **The allowlist is the permission boundary.** PTC bypasses the regular
+  `ToolNode` path, so per-tool `interrupt_on` approval is *not* enforced
+  for nested calls. Gate the outer `py_eval` tool with `interrupt_on`,
+  expose only tools that are safe to call unattended, or leave PTC off.
+
+The interpreter's own tool is never exposed, even if you name it in the
+allowlist, so a program cannot recurse into itself.
+
+PTC currently requires the **in-process** backend;
+`WasmshRemoteSandbox.run_ptc` raises `NotImplementedError` until the
+dispatcher SSE channel ships (Phase 2 of ADR-0031).
 
 **Observability.** When a PTC tool raises, the middleware converts the
 exception into an envelope so the model can recover — but the original
@@ -231,40 +257,250 @@ The middleware scans the user's code for `import skills.<name>` /
 directory into the sandbox VFS on first use. An `__init__.py` is
 synthesised when the skill author didn't ship one.
 
-## `WasmshFilesystemBackend` — memory backend over a wasmsh VFS
+**Every regular file under the skill directory is staged**, not just
+Python: shell scripts, SQL, templates, fixtures, and binary assets all
+travel, with nested structure and bytes preserved. Bounds apply and are
+loud rather than silent — 2 MiB per file, 8 MiB per bundle, 512 files.
+Dot-prefixed files are skipped, which is upstream `glob` behaviour rather
+than a wasmsh choice.
 
-For DeepAgents [Memory](https://docs.langchain.com/oss/python/deepagents/memory),
-`WasmshFilesystemBackend` adapts a `WasmshSandbox` as a
-`BackendProtocol`. A `namespace=` prefix lets several memory routes share
-one sandbox VFS without colliding:
+**Importability is opt-in, not assumed.** `my-skill` maps to
+`skills.my_skill` because that mapping is unambiguous. A name that does not
+produce a valid Python identifier — upstream permits lowercase Unicode
+letters — is simply *not importable* unless the skill declares an alias.
+Discovery, progressive disclosure, and reading its instructions all keep
+working either way. Two optional keys live under upstream's free-form
+`metadata` mapping:
+
+```yaml
+---
+name: sales-report
+description: Build the weekly sales report
+metadata:
+  wasmsh.python_package: sales_report   # import alias
+  wasmsh.python_module: lib/report.py   # re-exported from __init__.py
+---
+```
+
+`allowed-tools` in skill frontmatter is descriptive metadata, not an
+authorization boundary; tool exposure inside the interpreter is governed by
+the PTC allowlist.
+
+**Reload semantics come from upstream and are not papered over.**
+`SkillsMiddleware` loads `skills_metadata` once per thread and keeps it in
+private state. Editing a skill persists immediately and a **new** thread
+sees it; an existing checkpointed thread keeps the view it started with.
+Staged bundles are cached by content fingerprint, so changed bytes re-stage
+and unchanged ones cost nothing. There is no watcher and no polling loop.
+
+## Durable memory: route it to a store, not the VFS
+
+The wasmsh VFS is an **execution workspace, not durable memory**. A local
+sandbox's files live inside its host subprocess and disappear when that
+process exits; a remote session's files last only as long as the dispatcher
+keeps that session. Neither is a cross-process store.
+
+So anything that must outlive a session — user profiles, user/agent/org
+memory, skills, policies — belongs in upstream
+[`StoreBackend`](https://docs.langchain.com/oss/python/deepagents/memory)
+over a real LangGraph `BaseStore`, routed by prefix through a
+`CompositeBackend` whose *default* is wasmsh:
+
+```python
+from dataclasses import dataclass
+
+from deepagents import FilesystemPermission, create_deep_agent
+from deepagents.backends import CompositeBackend, StoreBackend
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.store.memory import InMemoryStore
+
+from langchain_wasmsh import WasmshSandbox
+
+
+@dataclass
+class AgentContext:
+    user_id: str
+    assistant_id: str
+    org_id: str
+
+
+store = InMemoryStore()      # use your production store in deployment
+sandbox = WasmshSandbox()
+
+backend = CompositeBackend(
+    default=sandbox,          # executable workspace + transient artifacts
+    routes={
+        "/profiles/": StoreBackend(
+            store=store,
+            namespace=lambda rt: ("deepagents", "profile", rt.context.user_id),
+        ),
+        "/memories/user/": StoreBackend(
+            store=store,
+            namespace=lambda rt: ("deepagents", "memory-user", rt.context.user_id),
+        ),
+        "/memories/agent/": StoreBackend(
+            store=store,
+            namespace=lambda rt: ("deepagents", "memory-agent", rt.context.assistant_id),
+        ),
+        "/policies/": StoreBackend(
+            store=store,
+            namespace=lambda rt: ("deepagents", "policy", rt.context.org_id),
+        ),
+    },
+)
+
+agent = create_deep_agent(
+    model=model,
+    backend=backend,
+    context_schema=AgentContext,
+    checkpointer=InMemorySaver(),
+    store=store,
+    memory=[
+        "/profiles/user.md",
+        "/memories/user/AGENTS.md",
+        "/memories/agent/AGENTS.md",
+        "/policies/AGENTS.md",
+    ],
+    permissions=[
+        FilesystemPermission(
+            operations=["write"], paths=["/policies/**"], mode="deny",
+        ),
+    ],
+)
+```
+
+A persistent user profile is ordinary user-scoped memory at
+`/profiles/user.md` — there is no separate profile database or profile
+middleware. It must not hold secrets, tokens, or transient session state.
+
+Note that SDK **harness/provider profiles** (`HarnessProfile`,
+`ProviderProfile`) are a different concept entirely: configuration
+registries for prompt assembly, tool visibility, middleware, and model
+construction. They are not user memory.
+
+### Filesystem permissions apply to routed prefixes, not the workspace
+
+`deepagents==0.7.4` refuses `permissions` outright when the backend can run
+commands, unless **every** rule path sits under a `CompositeBackend` route.
+That is upstream being honest rather than restrictive: a rule guarding a
+path the agent can also reach through `execute` would be advisory, not
+enforced. In a wasmsh deployment, permissions therefore protect the routed
+store prefixes, and the wasmsh workspace stays an unguarded execution area.
+`delete` is classified as a **write**, and a recursive delete of a parent is
+refused when it would take a protected subtree with it.
+
+## `WasmshFilesystemBackend` — a namespace/path adapter
+
+When you want several routes to share **one** wasmsh VFS,
+`WasmshFilesystemBackend` adapts a sandbox to `BackendProtocol` with a
+`namespace=` prefix:
 
 ```python
 from deepagents.backends import CompositeBackend, StateBackend
 from langchain_wasmsh import WasmshFilesystemBackend, WasmshSandbox
 
-memory_sandbox = WasmshSandbox()  # long-lived; owns the persistent memory
+sandbox = WasmshSandbox()
 backend = CompositeBackend(
     default=StateBackend(),
     routes={
-        "/memories/": WasmshFilesystemBackend(memory_sandbox, namespace="/memories"),
+        "/scratch/": WasmshFilesystemBackend(sandbox, namespace="/scratch"),
     },
 )
 ```
 
-Unlike using the sandbox directly, the filesystem backend does not
-expose `execute()` — it is a memory store, not a code-runner.
+Unlike using the sandbox directly, it does not expose `execute()` — handing
+a routed prefix a shell would make the prefix meaningless.
 
-**Namespace boundary (security).** Every path the backend touches is
-joined onto `namespace` and resolved (`posixpath.normpath` in Python,
-`posix.resolve` in TypeScript). A path that resolves outside the
-namespace — via `..` segments, an absolute path smuggled through the
-API, or a sandbox-controlled response — is rejected with
-`WasmshNamespaceEscapeError` (a `PermissionError` subclass in Python)
-before any I/O. The containment is enforced symmetrically on inputs and
-outputs, so a malicious sandbox payload cannot exfiltrate paths from a
-sibling namespace. Treat `namespace=` as the isolation boundary
-between memory routes; skill loaders re-throw this error instead of
-swallowing it into a log.
+**What `namespace=` is.** Every path is joined onto the prefix and resolved
+with `posixpath.normpath`; anything that lands outside is rejected with
+`WasmshNamespaceEscapeError` (a `PermissionError` subclass) before any I/O.
+That stops an agent-controlled `file_path` like `../../skills/secret.py` on
+the ordinary file tools, which is what it exists for. Containment is checked
+on results too, so a misbehaving sandbox cannot surface a foreign path as if
+the caller could address it.
+
+**What `namespace=` is not: tenant isolation.** The check is lexical and
+does not survive symlinks — the sandbox resolves those at the POSIX layer,
+so anything with shell access (`execute`, the interpreter, a custom tool)
+can link out of the namespace and read through it. When principals do not
+trust each other, give each one its own sandbox session, or put the
+sensitive data in a non-executable store namespace.
+
+## Deep Agents 0.7.4 behaviour worth knowing
+
+Things that changed in Deep Agents 0.7, or that wasmsh does differently from
+the obvious guess. Each is asserted by a test rather than only described.
+
+- **`write_file` overwrites.** Pre-0.7 it refused to clobber an existing
+  file; `BaseSandbox.write` now creates parent directories and writes.
+- **`delete` is recursive and counts as a write.** It removes the path plus
+  everything under it, and write-deny rules cover it.
+- **`execute(timeout=N)` is a real deadline** — and enforcing it destroys the
+  session. Pyodide runs synchronously with no cancellation point, so the
+  local sandbox kills its host and the remote runner terminates its worker;
+  both report exit code 124 (GNU `timeout(1)`), and the session refuses
+  further work. Use `step_budget` for a bound that leaves the session alive.
+  `timeout` and `step_budget` are different controls: one is wall clock, the
+  other is VM steps.
+- **PTC allowlists are the permission boundary.** Nested calls do not
+  traverse an approval-capable path, so `interrupt_on` never fires for them.
+- **Filesystem permissions need routed prefixes** when the backend can
+  execute — see above.
+- **Namespace routing is not tenant isolation** — see above.
+- **Local VFS state is transient.** Durable memory, profiles, and skills
+  belong in a `StoreBackend` or an explicitly tested persistent remote
+  volume.
+- **Node gives weaker network enforcement than Deno.** Under Deno,
+  `allowed_hosts` maps to `--allow-net`, an OS-level restriction on the
+  subprocess. Under Node it is enforced only at the wasmsh application
+  layer. Install Deno for defence in depth.
+- **Capture/offload stays disabled.** `enable_capture_offload` remains
+  `False`; the inherited fallback runs the command exactly once and reports
+  `offloaded=False`. It will be enabled only after the offload wrapper
+  passes command-level conformance on the wasmsh shell.
+- **Remote PTC is unavailable.** `WasmshRemoteSandbox.run_ptc` raises
+  `NotImplementedError` until ADR-0031 Phase 2 lands the dispatcher SSE
+  channel; it fails loudly rather than degrading.
+- **TodoList middleware is no longer in the default 0.7 stack.** Add it
+  explicitly if an example depends on it.
+
+### `create_deep_agent` compatibility matrix
+
+Every row is exercised by a test that builds a real graph with wasmsh
+active. See `packages/python/langchain-wasmsh/tests/integration_tests/`.
+
+| Interface | Status | Notes |
+|---|---|---|
+| `model` | Supported | Pre-built instance or string spec; provider profiles honoured. |
+| `tools` | Supported | Sync, async, structured, and `ToolRuntime`-aware tools. A raising tool propagates rather than becoming an error `ToolMessage` — that is 0.7.4 policy. |
+| `system_prompt` | Supported | Caller prompt first, then profile base/suffix, memory, skills, interpreter — each once. |
+| `middleware` | Supported | Merged by `.name`; a matching name replaces the built-in slot. Two user middlewares sharing a name are rejected upstream. |
+| `subagents` | Supported | Declarative sync, compiled, and the default general-purpose subagent. See the inheritance notes below. |
+| `skills` | Supported | Upstream `SkillsMiddleware`; layered sources, last source wins. |
+| `memory` | Supported | Durability comes from the routed backend, not from wasmsh. |
+| `permissions` | Supported, scoped | Only for `CompositeBackend` routes when the backend can execute. |
+| `backend` | Supported | wasmsh as default plus `StoreBackend` routes through `CompositeBackend`. |
+| `interrupt_on` | Supported | Ordinary tools pause and resume normally. Nested PTC calls are the documented exception. |
+| `response_format` | Supported | Structured output with wasmsh middleware and backend active. |
+| `state_schema` | Supported | Custom fields survive; the REPL snapshot stays private. |
+| `context_schema` | Supported | Reaches `StoreBackend` namespaces, tools, subagents, and nested PTC calls. |
+| `checkpointer` | Supported | Same-thread replay, cross-thread isolation, and resumption from a reconstructed graph. |
+| `store` | Supported | Cross-thread and cross-sandbox persistence; runtime-injected store in tools and PTC. |
+| `cache` | Supported | Smoke-tested with the wasmsh backend active. |
+| `debug` / `name` | Supported | Passed through unchanged. |
+| Deep Agents Code provider | Not shipped | Optional integration; blocked on a `bash -c` setup-shell mismatch. |
+| Remote PTC | Unsupported | ADR-0031 Phase 2. |
+
+**Subagent inheritance** (0.7.4, asserted in `test_agent_subagents.py`): a
+declarative subagent shares the backend, inherits the parent's *ordinary*
+tools only when it omits `tools` (file and shell tools come from
+`FilesystemMiddleware` on every stack regardless), inherits permission rules
+only when it omits `permissions` — an explicit list replaces them rather
+than merging — and inherits **no memory at all**, because `SubAgent` has no
+`memory` field. A `CompiledSubAgent` is used exactly as supplied: no
+ambient backend, permissions, memory, skills, or interpreter reach it. Top-
+level custom middleware is not inherited either, so an interpreter in a
+subagent stack must be added there deliberately.
 
 ## Reference
 

@@ -13,6 +13,25 @@ function decodeContentBase64(contentBase64) {
   return Uint8Array.from(Buffer.from(contentBase64 ?? "", "base64"));
 }
 
+// Upper bound on a caller-supplied per-command deadline (1 hour), matching
+// the ceiling Deep Agents' FilesystemMiddleware allows for `execute`.
+const MAX_TIMEOUT_MS = 3_600_000;
+
+/**
+ * Normalize a caller-supplied `timeoutMs` into a positive, bounded value.
+ *
+ * Returns `undefined` for absent, non-numeric, or non-positive input, which
+ * the session treats as "no explicit deadline" and falls back to the
+ * runner's own request ceiling. A hostile or mistaken value cannot disable
+ * that ceiling or park a worker for days.
+ */
+function normalizeTimeoutMs(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+  return Math.min(Math.floor(value), MAX_TIMEOUT_MS);
+}
+
 // Default request-body ceiling for the runner control plane (32 MiB).
 // Matches the dispatcher's MAX_REQUEST_BODY_BYTES so the dispatcher
 // can't forward a payload that the runner will then reject. The cap
@@ -243,7 +262,11 @@ export async function createRunnerServer(options = {}) {
           return;
         }
         case "run": {
-          const result = await session.run(body.command ?? "");
+          // `timeoutMs` is optional: absent means the runner's own default
+          // request ceiling applies, matching `execute(timeout=None)`.
+          const result = await session.run(body.command ?? "", {
+            timeoutMs: normalizeTimeoutMs(body.timeoutMs),
+          });
           json(response, 200, {
             ok: true,
             sessionId,

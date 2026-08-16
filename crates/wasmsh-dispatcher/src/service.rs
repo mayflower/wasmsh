@@ -37,6 +37,19 @@ const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// TCP connect timeout for upstream calls to a runner.
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Upper bound on a caller-supplied per-command deadline (1 hour).
+///
+/// Matches the ceiling Deep Agents' `FilesystemMiddleware` allows for
+/// `execute`, and the runner's own clamp, so a hostile value cannot pin a
+/// runner worker indefinitely.
+const MAX_COMMAND_TIMEOUT_MS: u64 = 3_600_000;
+
+/// Extra socket budget granted on top of a per-command deadline.
+///
+/// The runner terminates the worker at the deadline and then serialises a
+/// timeout result; the dispatcher must still be listening when it arrives.
+const UPSTREAM_TIMEOUT_GRACE: Duration = Duration::from_secs(10);
+
 /// Hard cap on the byte size of a runner response that we will forward.
 ///
 /// Audit F10: the dispatcher previously called `response.bytes().await`
@@ -120,6 +133,14 @@ pub struct CreateSessionRequest {
 pub struct RunRequest {
     /// Shell command string to execute.
     pub command: String,
+    /// Optional per-command wall-clock deadline in milliseconds.
+    ///
+    /// Enforced by the runner, which owns the Pyodide worker and can
+    /// terminate it; a client socket timeout alone would abandon the request
+    /// while the command kept running. Absent means the runner's own default
+    /// request ceiling applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -335,6 +356,7 @@ async fn create_session(
         "/sessions",
         &request,
         state.config.runner_auth_token.as_deref(),
+        None,
     )
     .await;
     if let Err(ref error) = result {
@@ -388,7 +410,34 @@ async fn run_session(
     Path(session_id): Path<String>,
     Json(payload): Json<RunRequest>,
 ) -> Result<impl IntoResponse, ServiceError> {
-    forward_existing_session_post(&state, &session_id, "/run", &payload).await
+    // The runner enforces the deadline and answers with a structured timeout
+    // result, so the dispatcher's own socket has to outlive that exchange.
+    // Without the extra headroom the fixed 30s client timeout would abort a
+    // 60s command mid-flight and report a transport error, hiding the exit
+    // code the caller needs to tell "timed out" from "dispatcher is down".
+    let upstream_timeout = payload.timeout_ms.map(|ms| {
+        Duration::from_millis(ms.min(MAX_COMMAND_TIMEOUT_MS)) + UPSTREAM_TIMEOUT_GRACE
+    });
+    let request = RunnerRunRequest {
+        command: payload.command,
+        timeout_ms: payload.timeout_ms.map(|ms| ms.min(MAX_COMMAND_TIMEOUT_MS)),
+    };
+    forward_existing_session_post_with_timeout(
+        &state,
+        &session_id,
+        "/run",
+        &request,
+        upstream_timeout,
+    )
+    .await
+}
+
+#[derive(Debug, Serialize)]
+/// Runner-side shape of a run request (camelCase, as the Node runner expects).
+struct RunnerRunRequest {
+    command: String,
+    #[serde(rename = "timeoutMs", skip_serializing_if = "Option::is_none")]
+    timeout_ms: Option<u64>,
 }
 
 async fn write_file(
@@ -580,6 +629,16 @@ async fn forward_existing_session_post<T: Serialize>(
     suffix: &str,
     payload: &T,
 ) -> Result<impl IntoResponse, ServiceError> {
+    forward_existing_session_post_with_timeout(state, session_id, suffix, payload, None).await
+}
+
+async fn forward_existing_session_post_with_timeout<T: Serialize>(
+    state: &Arc<AppState>,
+    session_id: &str,
+    suffix: &str,
+    payload: &T,
+    request_timeout: Option<Duration>,
+) -> Result<impl IntoResponse, ServiceError> {
     let base_url = runner_url_for_existing_session(state, session_id).await?;
     let path = format!("/sessions/{session_id}{suffix}");
     match forward_post_json_with_token(
@@ -588,6 +647,7 @@ async fn forward_existing_session_post<T: Serialize>(
         &path,
         payload,
         state.config.runner_auth_token.as_deref(),
+        request_timeout,
     )
     .await
     {
@@ -624,10 +684,14 @@ async fn forward_post_json_with_token<T: Serialize>(
     path: &str,
     payload: &T,
     runner_token: Option<&str>,
+    request_timeout: Option<Duration>,
 ) -> Result<Response, ServiceError> {
     let mut builder = client.post(format!("{base_url}{path}")).json(payload);
     if let Some(t) = runner_token {
         builder = builder.bearer_auth(t);
+    }
+    if let Some(timeout) = request_timeout {
+        builder = builder.timeout(timeout);
     }
     let response = builder
         .send()

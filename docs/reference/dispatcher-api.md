@@ -36,9 +36,47 @@ Request body:
 
 ```json
 {
-  "command": "python - <<'PY'\nprint('hello')\nPY"
+  "command": "python - <<'PY'\nprint('hello')\nPY",
+  "timeout_ms": 60000
 }
 ```
+
+`timeout_ms` is optional. It is a wall-clock deadline for this one command,
+enforced by the **runner** — not by the caller's socket. Pyodide runs the
+shell synchronously inside the worker and offers no cancellation point, so
+the runner terminates the worker when the deadline passes.
+
+Two consequences follow, and both are deliberate:
+
+- The response is a normal `200` carrying a structured result rather than a
+  transport error, so a caller can tell "the command ran out of time" from
+  "the dispatcher is unreachable":
+
+  ```json
+  {
+    "ok": true,
+    "sessionId": "…",
+    "result": {
+      "output": "Error: command timed out after 60s and was terminated: …",
+      "exitCode": 124,
+      "timedOut": true
+    }
+  }
+  ```
+
+  `124` is GNU `timeout(1)`'s convention.
+
+- **The session is destroyed.** An abandoned evaluation leaves interpreter
+  state no one should read, so the session is closed and every later request
+  for it returns `404`. Use `step_budget` when you want a bound that leaves
+  the session alive.
+
+Values are clamped to one hour. A missing, zero, negative, or non-numeric
+value means "no explicit deadline" and falls back to the runner's own
+request ceiling.
+
+The dispatcher widens its own upstream socket timeout past `timeout_ms` so
+the runner's authoritative answer is never cut off in transit.
 
 ### `POST /sessions/{session_id}/write-file`
 
