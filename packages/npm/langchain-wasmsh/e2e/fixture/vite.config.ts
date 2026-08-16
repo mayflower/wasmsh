@@ -56,6 +56,12 @@ export default defineConfig({
         find: /^(node:)?path$/,
         replacement: "path-browserify",
       },
+      // os polyfill: fast-glob (via deepagents) calls os.platform() at
+      // module load, and Vite's browser-external stub throws on access.
+      {
+        find: /^(node:)?os$/,
+        replacement: resolve(__dirname, "shims/os.ts"),
+      },
     ],
   },
   define: {
