@@ -270,7 +270,14 @@ jobs:
         with:
           node-version: "22.22.1"
       - name: Install npm with OIDC trusted publishing support
-        run: npm install -g npm@latest && npm --version
+        # Pinned, not `npm@latest`. The node version above is pinned
+        # exactly, so a floating npm eventually resolves to a release that
+        # requires a newer node than this job has and the publish dies
+        # after every other artifact is already live: npm 12.0.2 wants
+        # node ^22.22.2 while this runner is on 22.22.1. 11.19.0 is the
+        # newest npm that supports OIDC trusted publishing on node 22.
+        # Bump both pins together.
+        run: npm install -g npm@11.19.0 && npm --version
       - name: Download npm package
         uses: actions/download-artifact@v4
         with:
