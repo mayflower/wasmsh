@@ -1,5 +1,12 @@
 [toolchain]
-channel = "stable"
+# Pinned to an exact release, not "stable".
+#
+# The Pyodide target links our Rust staticlib into the Pyodide MAIN_MODULE,
+# which is then dynamically linked against upstream-built side modules.
+# A floating channel silently changes that main module under fixed side
+# modules, so the compiler is a build input and has to be pinned like
+# every other one (see tools/pyodide/versions.env).
+channel = "1.95.0"
 components = [
     "rustfmt",
     "clippy",
