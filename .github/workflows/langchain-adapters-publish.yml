@@ -41,7 +41,14 @@ jobs:
     if: |
       startsWith(github.ref, 'refs/tags/langchain-wasmsh-py-v') ||
       (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'python' || github.event.inputs.target == 'both'))
-    runs-on: mayflower-k8s-runners
+    # MUST be github-hosted. Both publishes authenticate by OIDC trusted
+    # publishing, and the self-hosted k8s pool cannot reach
+    # *.actions.githubusercontent.com to mint the ambient token — the
+    # exchange dies in the TLS handshake, so the job fails before it
+    # uploads anything. npm additionally refuses to attach sigstore
+    # provenance from a self-hosted runner. The equivalent jobs in
+    # release.yml run on ubuntu-latest for exactly these reasons.
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
       name: pypi
@@ -131,7 +138,14 @@ jobs:
     if: |
       startsWith(github.ref, 'refs/tags/langchain-wasmsh-npm-v') ||
       (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'npm' || github.event.inputs.target == 'both'))
-    runs-on: mayflower-k8s-runners
+    # MUST be github-hosted. Both publishes authenticate by OIDC trusted
+    # publishing, and the self-hosted k8s pool cannot reach
+    # *.actions.githubusercontent.com to mint the ambient token — the
+    # exchange dies in the TLS handshake, so the job fails before it
+    # uploads anything. npm additionally refuses to attach sigstore
+    # provenance from a self-hosted runner. The equivalent jobs in
+    # release.yml run on ubuntu-latest for exactly these reasons.
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
       name: npm
