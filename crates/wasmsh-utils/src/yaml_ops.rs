@@ -173,15 +173,11 @@ fn read_yq_input(ctx: &mut UtilContext<'_>, file_args: &[&str]) -> Result<String
     let mut combined = String::new();
     for path in file_args {
         let full = resolve_path(ctx.cwd, path);
-        match collect_path_text(ctx, &full, path, "yq") {
-            Ok(t) => {
-                if !combined.is_empty() {
-                    combined.push('\n');
-                }
-                combined.push_str(&t);
-            }
-            Err(status) => return Err(status),
+        let text = collect_path_text(ctx, &full, path, "yq")?;
+        if !combined.is_empty() {
+            combined.push('\n');
         }
+        combined.push_str(&text);
     }
     Ok(combined)
 }

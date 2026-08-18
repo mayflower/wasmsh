@@ -3001,10 +3001,10 @@ fn gather_inputs(
             continue;
         }
         let full = resolve_path(ctx.cwd, path);
-        match collect_path_text(ctx, &full, path, "awk") {
-            Ok(text) => v.push(((*path).to_string(), text)),
-            Err(status) => return Err(status),
-        }
+        v.push((
+            (*path).to_string(),
+            collect_path_text(ctx, &full, path, "awk")?,
+        ));
     }
     if v.is_empty() {
         let stdin_data = stdin_text(ctx)?;

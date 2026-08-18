@@ -268,10 +268,7 @@ fn collect_jq_input_texts(
     let mut texts = Vec::new();
     for path in file_args {
         let full = resolve_path(ctx.cwd, path);
-        match collect_path_text(ctx, &full, path, "jq") {
-            Ok(text) => texts.push(text),
-            Err(status) => return Err(status),
-        }
+        texts.push(collect_path_text(ctx, &full, path, "jq")?);
     }
     Ok(texts)
 }

@@ -257,8 +257,14 @@ jobs:
           }
           console.log("manifest ok:", manifest.name + "@" + manifest.version);
           JS
+          # List once into a file rather than piping `tar` into `grep -q`
+          # per entry: `grep -q` exits on first match, closing the pipe, and
+          # under `set -o pipefail` the resulting SIGPIPE on `tar` fails the
+          # step. That race is timing-dependent — it passed locally and
+          # failed on CI.
+          tar tzf "$tarball" > "$RUNNER_TEMP/tarball-listing.txt"
           for entry in package/dist/index.js package/dist/index.cjs package/dist/index.d.ts; do
-            tar tzf "$tarball" | grep -qx "$entry" \
+            grep -qxF "$entry" "$RUNNER_TEMP/tarball-listing.txt" \
               || { echo "missing from tarball: $entry" >&2; exit 1; }
           done
           echo "tarball contents ok"
