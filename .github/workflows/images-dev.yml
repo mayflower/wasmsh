@@ -52,7 +52,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: tools/pyodide/pyodide-src
-          key: pyodide-toolchain-${{ runner.os }}-${{ hashFiles('tools/pyodide/versions.env') }}
+          key: pyodide-toolchain-${{ runner.os }}-${{ hashFiles('tools/pyodide/versions.env', 'rust-toolchain.toml') }}
       - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-unknown-emscripten
