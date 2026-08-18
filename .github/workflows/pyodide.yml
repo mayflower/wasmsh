@@ -13,6 +13,11 @@ on:
       - 'e2e/pyodide-node/**'
       - 'e2e/pyodide-browser/**'
       - 'e2e/build-contract/**'
+      # A toolchain or lockfile change relinks the main module against the
+      # cached side modules, which is exactly the pairing this job exists to
+      # validate.
+      - 'rust-toolchain.toml'
+      - 'Cargo.lock'
   pull_request:
     paths:
       - '.github/workflows/pyodide.yml'
@@ -24,6 +29,8 @@ on:
       - 'e2e/pyodide-node/**'
       - 'e2e/pyodide-browser/**'
       - 'e2e/build-contract/**'
+      - 'rust-toolchain.toml'
+      - 'Cargo.lock'
 
 concurrency:
   group: pyodide-${{ github.ref }}
@@ -55,11 +62,23 @@ jobs:
       #
       # No `restore-keys` fallback: a versions.env bump must rebuild
       # from scratch, not silently reuse an old emsdk install.
+      #
+      # CACHE_EPOCH exists because `versions.env` is not a complete
+      # description of what this tree contains. `pyodide-src/` also holds
+      # the *built package wheels* — including Rust-built side modules like
+      # `rpds_py` and `pydantic_core` — which are resolved during the build
+      # rather than pinned by `versions.env`. A cache entry can therefore
+      # stay valid by key while its side modules drift out of ABI agreement
+      # with a freshly relinked main module, which is how `jsonschema` and
+      # `pydantic` started trapping with a wasm `unreachable` while every
+      # C/Fortran package kept working. The existing staleness guard in
+      # build-custom.sh only refreshes `pyodide.asm.wasm`; it does not touch
+      # the wheels. Bump this integer to force a clean rebuild.
       - name: Cache Pyodide source + emsdk
         uses: actions/cache@v4
         with:
           path: tools/pyodide/pyodide-src
-          key: pyodide-toolchain-${{ runner.os }}-${{ hashFiles('tools/pyodide/versions.env') }}
+          key: pyodide-toolchain-v2-${{ runner.os }}-${{ hashFiles('tools/pyodide/versions.env') }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
