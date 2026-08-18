@@ -2,16 +2,22 @@ name: Setup Rust toolchain (k8s runner)
 description: >-
   Install the Rust toolchain and the system build dependencies needed
   for cargo to compile build scripts on the bare `mayflower-k8s-runners`
-  pool.  Bundles `dtolnay/rust-toolchain@stable` with the apt-get
-  install of `build-essential` (gcc, cc, libc-dev, make) and
-  `pkg-config`, which github-hosted ubuntu-latest runners ship by
-  default but the k8s runner image does not.
+  pool.  Bundles `dtolnay/rust-toolchain` with the apt-get install of
+  `build-essential` (gcc, cc, libc-dev, make) and `pkg-config`, which
+  github-hosted ubuntu-latest runners ship by default but the k8s runner
+  image does not.
+
+  With no `toolchain` input the channel comes from `rust-toolchain.toml`,
+  so CI compiles with the same rustc a developer gets from rustup.
 
 inputs:
   toolchain:
-    description: Rust toolchain to install (default stable).
+    description: >-
+      Rust toolchain to install.  Defaults to the channel pinned in
+      rust-toolchain.toml; pass a value only to deliberately build with
+      a different compiler than the repo pin (e.g. the MSRV job).
     required: false
-    default: stable
+    default: ""
   targets:
     description: Comma-separated list of additional rustup targets.
     required: false
@@ -28,9 +34,31 @@ runs:
       shell: bash
       run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config
 
+    - name: Resolve toolchain channel
+      id: resolve
+      shell: bash
+      run: |
+        set -euo pipefail
+        channel='${{ inputs.toolchain }}'
+        source='the workflow'
+        if [ -z "$channel" ]; then
+          # Single source of truth. Fail loudly rather than silently
+          # falling back to `stable` — a floating compiler is exactly the
+          # drift this indirection exists to prevent.
+          channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+            rust-toolchain.toml | head -1)
+          source='rust-toolchain.toml'
+        fi
+        if [ -z "$channel" ]; then
+          echo "::error::no Rust toolchain given and none found in rust-toolchain.toml" >&2
+          exit 1
+        fi
+        echo "Using Rust toolchain '$channel' (from $source)"
+        echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: ${{ inputs.toolchain }}
+        toolchain: ${{ steps.resolve.outputs.channel }}
         targets: ${{ inputs.targets }}
         components: ${{ inputs.components }}

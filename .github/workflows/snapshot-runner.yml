@@ -48,7 +48,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-unknown-emscripten
 
