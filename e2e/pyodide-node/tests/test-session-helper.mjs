@@ -21,3 +21,5 @@ export function createSessionTracker(createNodeSession, assetDir) {
     return session;
   };
 }
+
+// Baseline probe: trigger pyodide.yml on the pre-0.8.0 tree.
