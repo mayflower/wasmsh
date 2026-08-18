@@ -6,6 +6,14 @@
 # A floating channel silently changes that main module under fixed side
 # modules, so the compiler is a build input and has to be pinned like
 # every other one (see tools/pyodide/versions.env).
+#
+# Known good: 1.95.0. Known bad: 1.97.1 — a main module linked by it makes
+# upstream Rust-built side modules (pydantic-core via `pydantic`, rpds-py
+# via `jsonschema`) trap with a wasm `unreachable` at import, while every
+# C/C++/Fortran side module keeps working. The underlying incompatibility
+# is not understood; the symptom is reproducible and compiler-specific.
+# Before raising this pin, run `just test-e2e-pyodide-node` and check that
+# the compiled-side-module cases in pyodide-packages.test.mjs still pass.
 channel = "1.95.0"
 components = [
     "rustfmt",
