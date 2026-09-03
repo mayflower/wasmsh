@@ -34,6 +34,7 @@ jobs:
   # ── Python: unit + integration (no LLM) + basic example ────
   python:
     name: Python ${{ matrix.python-version }} (${{ matrix.resolution }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: mayflower-k8s-runners
     timeout-minutes: 25
     strategy:
@@ -157,6 +158,7 @@ jobs:
   # is allowed to fail without failing the workflow.
   dcode-provider:
     name: Deep Agents Code provider (optional)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: mayflower-k8s-runners
     timeout-minutes: 15
     continue-on-error: true
@@ -197,6 +199,7 @@ jobs:
   # ── npm: unit + build + typecheck ──────────────────────────
   npm:
     name: npm unit (Node ${{ matrix.node-version }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: mayflower-k8s-runners
     timeout-minutes: 15
     strategy:
@@ -277,6 +280,7 @@ jobs:
   # resolves exactly the bits end users install from the registry.
   npm-integration:
     name: npm integration
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: mayflower-k8s-runners
     timeout-minutes: 20
     steps:

@@ -20,6 +20,7 @@ concurrency:
 jobs:
   build-wasm:
     name: Build WASM artifacts
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: mayflower-k8s-runners
     timeout-minutes: 20
     steps:
@@ -103,6 +104,7 @@ jobs:
   # noticed because the suite never ran in CI.
   e2e-standalone:
     name: Standalone browser E2E
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: mayflower-k8s-runners
     timeout-minutes: 30
     steps:
@@ -138,6 +140,7 @@ jobs:
 
   build-pyodide:
     name: Build Pyodide artifact
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: mayflower-k8s-runners
     timeout-minutes: 45
     steps:

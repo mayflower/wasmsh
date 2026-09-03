@@ -56,6 +56,7 @@ jobs:
   # ── Docker-compose: WasmshRemoteSandbox (TS + Python) ──────
   dispatcher-compose:
     name: dispatcher-compose (ts + python)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: mayflower-k8s-runners
     timeout-minutes: 30
     steps:
@@ -127,6 +128,7 @@ jobs:
   # ── Kind: WasmshRemoteSandbox inside Kubernetes ────────────
   dispatcher-kind:
     name: dispatcher-kind (ts + python)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: mayflower-k8s-runners
     timeout-minutes: 45
     steps:
