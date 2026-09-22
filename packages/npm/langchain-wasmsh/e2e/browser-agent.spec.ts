@@ -11,11 +11,17 @@
 import { test, expect, type Page } from "@playwright/test";
 
 const API_KEY = process.env.ANTHROPIC_API_KEY;
+// Optional: an organisation-scoped key must name the workspace to bill on
+// every request. The browser client cannot read the process environment,
+// so it travels as a query parameter like the key does.
+const WORKSPACE_ID = process.env.ANTHROPIC_WORKSPACE_ID;
 
 test.skip(!API_KEY, "ANTHROPIC_API_KEY not set");
 
 async function runBrowserTest(page: Page, testName: string) {
-  await page.goto(`/?key=${encodeURIComponent(API_KEY!)}&test=${testName}`);
+  const params = new URLSearchParams({ key: API_KEY!, test: testName });
+  if (WORKSPACE_ID) params.set("workspace", WORKSPACE_ID);
+  await page.goto(`/?${params.toString()}`);
 
   // Wait for completion (boot + agent run)
   await page.waitForFunction(
