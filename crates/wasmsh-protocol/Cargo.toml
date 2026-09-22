@@ -16,7 +16,7 @@ serde = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-wit-parser = "0.244"
+wit-parser = "0.259"
 
 [lints]
 workspace = true

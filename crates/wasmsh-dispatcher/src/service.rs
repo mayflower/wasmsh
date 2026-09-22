@@ -237,6 +237,11 @@ impl DispatcherService {
     /// request-timeouts so a hung runner cannot stall `/readyz` or routed
     /// calls indefinitely.
     pub fn new(config: ServiceConfig) -> Result<Self, reqwest::Error> {
+        // reqwest is built with `rustls-no-provider`, so the process-level
+        // crypto provider has to be chosen here. `ring` keeps the TLS stack
+        // on the crates deny.toml already allows. Installing twice is an
+        // `Err` carrying the provider that won, which is the same one.
+        let _already_installed = rustls::crypto::ring::default_provider().install_default();
         let client = Client::builder()
             .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
             .timeout(UPSTREAM_REQUEST_TIMEOUT)
@@ -257,13 +262,13 @@ impl DispatcherService {
         // bearer-token check otherwise.
         let session_routes = Router::new()
             .route("/sessions", post(create_session))
-            .route("/sessions/:session_id", delete(delete_session))
-            .route("/sessions/:session_id/init", post(init_session))
-            .route("/sessions/:session_id/run", post(run_session))
-            .route("/sessions/:session_id/write-file", post(write_file))
-            .route("/sessions/:session_id/read-file", post(read_file))
-            .route("/sessions/:session_id/list-dir", post(list_dir))
-            .route("/sessions/:session_id/close", post(close_session))
+            .route("/sessions/{session_id}", delete(delete_session))
+            .route("/sessions/{session_id}/init", post(init_session))
+            .route("/sessions/{session_id}/run", post(run_session))
+            .route("/sessions/{session_id}/write-file", post(write_file))
+            .route("/sessions/{session_id}/read-file", post(read_file))
+            .route("/sessions/{session_id}/list-dir", post(list_dir))
+            .route("/sessions/{session_id}/close", post(close_session))
             .layer(from_fn_with_state(self.state.clone(), require_auth));
 
         Router::new()
