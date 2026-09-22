@@ -153,20 +153,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: "12.5.1"
-          # pnpm 12 has a preinstall hook that needs node on PATH; the setup step
-          # runs before Node is installed, so use the self-contained binary.
-          standalone: true
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
-          cache: "pnpm"
+
+      - name: Install pnpm
+        # After Node: pnpm 12's package runs a `preinstall` hook that needs
+        # `node` on PATH, which the self-hosted runners do not provide.
+        uses: pnpm/action-setup@v4
+        with:
+          version: "12.5.1"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
