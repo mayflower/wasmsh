@@ -5,10 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/pyodide.yml'
-      - 'crates/wasmsh-runtime/**'
-      - 'crates/wasmsh-pyodide/**'
-      - 'crates/wasmsh-pyodide-probe/**'
-      - 'crates/wasmsh-fs/**'
+      - 'crates/**'
       - 'tools/pyodide/**'
       - 'e2e/pyodide-node/**'
       - 'e2e/pyodide-browser/**'
@@ -21,10 +18,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/pyodide.yml'
-      - 'crates/wasmsh-runtime/**'
-      - 'crates/wasmsh-pyodide/**'
-      - 'crates/wasmsh-pyodide-probe/**'
-      - 'crates/wasmsh-fs/**'
+      - 'crates/**'
       - 'tools/pyodide/**'
       - 'e2e/pyodide-node/**'
       - 'e2e/pyodide-browser/**'

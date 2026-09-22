@@ -29,6 +29,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   # ── Python: unit + integration (no LLM) + basic example ────
@@ -290,14 +291,16 @@ jobs:
   # ── npm: integration (no LLM) + basic example ──────────────
   # Requires Pyodide assets in packages/npm/wasmsh-pyodide/assets/.
   # These are gitignored (built by tools/pyodide/build-custom.sh, ~30min).
-  # In CI we download the published npm tarball and stage its assets dir
-  # into the workspace source tree — the workspace-protocol dep then
-  # resolves exactly the bits end users install from the registry.
+  # The stage-pyodide-assets action downloads the published npm tarball as
+  # the baseline and, when the Pyodide workflow built and validated a
+  # runtime for this very commit, overlays that artifact — so a runtime
+  # change the adapter depends on is tested before it is published, and
+  # an adapter-only change still runs against what end users install.
   npm-integration:
     name: npm integration
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: mayflower-k8s-runners
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -320,35 +323,8 @@ jobs:
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-store-${{ runner.os }}-
 
-      - name: Stage Pyodide assets from published npm tarball
-        run: |
-          set -euo pipefail
-          # Source of truth: the version in packages/npm/wasmsh-pyodide/package.json
-          # (what `pnpm install` will publish later when v* is tagged). When that
-          # version isn't yet on the npm registry — typical during the
-          # bump-on-main → tag → publish window — fall back to the latest
-          # released version so the integration tests still run against a real
-          # tarball. The released version's adapter ABI is stable enough that
-          # the langchain-wasmsh adapter (the actual subject under test) still
-          # exercises end-to-end behavior; the gap only matters for changes
-          # that touched wasmsh-pyodide internals, which the Pyodide workflow
-          # already gates.
-          VERSION="$(node -p "require('./packages/npm/wasmsh-pyodide/package.json').version")"
-          echo "Target @mayflowergmbh/wasmsh-pyodide@$VERSION"
-          tmp="$(mktemp -d)"
-          url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
-          echo "Fetching $url"
-          if ! curl -fsSL "$url" -o "$tmp/pkg.tgz"; then
-            echo "Version $VERSION not yet on registry; falling back to latest published"
-            LATEST="$(npm view @mayflowergmbh/wasmsh-pyodide version)"
-            echo "Falling back to @mayflowergmbh/wasmsh-pyodide@$LATEST"
-            url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${LATEST}.tgz"
-            curl -fsSL "$url" -o "$tmp/pkg.tgz"
-          fi
-          mkdir -p "$tmp/extract"
-          tar -xzf "$tmp/pkg.tgz" -C "$tmp/extract"
-          cp -r "$tmp/extract/package/assets/"* packages/npm/wasmsh-pyodide/assets/
-          ls packages/npm/wasmsh-pyodide/assets/pyodide.asm.wasm
+      - name: Stage Pyodide assets
+        uses: ./.github/actions/stage-pyodide-assets
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

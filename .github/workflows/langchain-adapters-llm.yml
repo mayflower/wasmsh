@@ -30,6 +30,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   # ── Python LLM agent tests ─────────────────────────────────
@@ -100,22 +101,8 @@ jobs:
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-store-${{ runner.os }}-
 
-      - name: Stage Pyodide assets from published npm tarball
-        run: |
-          set -euo pipefail
-          VERSION="$(node -p "require('./packages/npm/wasmsh-pyodide/package.json').version")"
-          echo "Using @mayflowergmbh/wasmsh-pyodide@$VERSION"
-          tmp="$(mktemp -d)"
-          url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
-          if ! curl -fsSL "$url" -o "$tmp/pkg.tgz"; then
-            echo "Version $VERSION not on registry; falling back to latest published"
-            LATEST="$(npm view @mayflowergmbh/wasmsh-pyodide version)"
-            url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${LATEST}.tgz"
-            curl -fsSL "$url" -o "$tmp/pkg.tgz"
-          fi
-          mkdir -p "$tmp/extract"
-          tar -xzf "$tmp/pkg.tgz" -C "$tmp/extract"
-          cp -r "$tmp/extract/package/assets/"* packages/npm/wasmsh-pyodide/assets/
+      - name: Stage Pyodide assets
+        uses: ./.github/actions/stage-pyodide-assets
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -162,23 +149,8 @@ jobs:
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-store-${{ runner.os }}-
 
-      - name: Stage Pyodide assets from published npm tarball
-        working-directory: .
-        run: |
-          set -euo pipefail
-          VERSION="$(node -p "require('./packages/npm/wasmsh-pyodide/package.json').version")"
-          echo "Using @mayflowergmbh/wasmsh-pyodide@$VERSION"
-          tmp="$(mktemp -d)"
-          url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
-          if ! curl -fsSL "$url" -o "$tmp/pkg.tgz"; then
-            echo "Version $VERSION not on registry; falling back to latest published"
-            LATEST="$(npm view @mayflowergmbh/wasmsh-pyodide version)"
-            url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${LATEST}.tgz"
-            curl -fsSL "$url" -o "$tmp/pkg.tgz"
-          fi
-          mkdir -p "$tmp/extract"
-          tar -xzf "$tmp/pkg.tgz" -C "$tmp/extract"
-          cp -r "$tmp/extract/package/assets/"* packages/npm/wasmsh-pyodide/assets/
+      - name: Stage Pyodide assets
+        uses: ./.github/actions/stage-pyodide-assets
 
       - name: Install dependencies
         working-directory: .
