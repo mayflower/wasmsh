@@ -55,14 +55,18 @@ export async function installPackages(reqs, pyodide, opts) {
 
     // Bundled packages: resolve offline via pyodide.loadPackage()
     if (isPlainName && (await isBundled(req))) {
+      const loaderErrors = [];
       try {
-        await pyodide.loadPackage(req);
+        await pyodide.loadPackage(req, {
+          errorCallback: (message) => loaderErrors.push(String(message)),
+        });
       } catch (err) {
         throw new Error(
           `Failed to load bundled package '${req}' from local assets: ${err.message}. ` +
             "This may indicate a corrupt wheel file or missing symbol exports in the build.",
         );
       }
+      assertPackageLoaded(pyodide, req, loaderErrors);
       installed.push({ requirement: req });
       continue;
     }
@@ -87,10 +91,43 @@ export async function installPackages(reqs, pyodide, opts) {
       micropip = await ensureMicropip(pyodide);
     }
     await micropip.install(req, { deps: deps !== false });
+    if (isPlainName) {
+      assertPackageLoaded(pyodide, req, []);
+    }
     installed.push({ requirement: req });
   }
 
   return { installed, requirements: reqs };
+}
+
+/** Project name of a plain requirement (`numpy>=2`, `pkg[extra]`), PEP 503-normalized. */
+function normalizedPackageName(requirement) {
+  const match = /^[A-Za-z0-9][A-Za-z0-9._-]*/.exec(requirement.trim());
+  return (match ? match[0] : requirement).toLowerCase().replace(/[-_.]+/g, "-");
+}
+
+/**
+ * Fail loudly when an install did not actually make the package importable.
+ *
+ * Pyodide's `loadPackage` reports a wheel whose side module failed to link
+ * (or whose download failed) through `errorCallback` and resolves anyway,
+ * and micropip inherits that behaviour for lockfile packages. Without this
+ * check such an install returns success and the caller only finds out at
+ * import time, with a `ModuleNotFoundError` that names nothing useful.
+ */
+function assertPackageLoaded(pyodide, requirement, loaderErrors) {
+  const wanted = normalizedPackageName(requirement);
+  const loaded = Object.keys(pyodide.loadedPackages ?? {});
+  if (loaded.some((name) => normalizedPackageName(name) === wanted)) {
+    return;
+  }
+  const detail = loaderErrors.length
+    ? ` Loader reported: ${loaderErrors.join(" | ")}`
+    : "";
+  throw new Error(
+    `Package '${requirement}' was not loaded after install.${detail} ` +
+      `Loaded packages: ${loaded.length ? loaded.join(", ") : "<none>"}`,
+  );
 }
 
 /**
