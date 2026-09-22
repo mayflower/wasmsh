@@ -52,6 +52,13 @@ jobs:
     defaults:
       run:
         working-directory: packages/python/langchain-wasmsh
+    env:
+      # `uv run` re-syncs the environment to the lockfile's default
+      # resolution before every command, which quietly put the
+      # `lowest-direct` leg back on the newest deepagents after the
+      # explicit sync below had installed the 0.7.4 floor. The sync steps
+      # own the environment; every later `uv run` must use it as-is.
+      UV_NO_SYNC: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -62,7 +69,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
-          version: "0.11.7"
+          version: "0.12.17"
 
       - name: Install Node.js (runtime for WasmshSandbox subprocess)
         uses: actions/setup-node@v4
@@ -175,7 +182,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
-          version: "0.11.7"
+          version: "0.12.17"
 
       - name: Install Node.js (runtime for WasmshSandbox subprocess)
         uses: actions/setup-node@v4
@@ -205,14 +212,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ["20", "22"]
+        node-version: ["22", "24"]
     steps:
       - uses: actions/checkout@v4
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: "10.20.0"
+          version: "12.5.1"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -289,7 +296,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: "10.20.0"
+          version: "12.5.1"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

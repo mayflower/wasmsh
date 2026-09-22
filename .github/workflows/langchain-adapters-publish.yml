@@ -66,7 +66,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
-          version: "0.11.7"
+          version: "0.12.17"
 
       - name: Install Node.js (needed by the subprocess smoke test)
         uses: actions/setup-node@v4
@@ -156,7 +156,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: "10.20.0"
+          version: "12.5.1"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
