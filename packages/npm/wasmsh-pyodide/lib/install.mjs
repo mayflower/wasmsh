@@ -44,6 +44,7 @@ export async function installPackages(reqs, pyodide, opts) {
   const { isBundled, allowedHosts, deps = true } = opts;
   const installed = [];
   let micropip = null;
+  const debug = installDebugSink(pyodide);
 
   for (const req of reqs) {
     if (/^file:/i.test(req)) {
@@ -58,7 +59,11 @@ export async function installPackages(reqs, pyodide, opts) {
       const loaderErrors = [];
       try {
         await pyodide.loadPackage(req, {
-          errorCallback: (message) => loaderErrors.push(String(message)),
+          messageCallback: (message) => debug?.log(`loadPackage: ${message}`),
+          errorCallback: (message) => {
+            loaderErrors.push(String(message));
+            debug?.log(`loadPackage error: ${message}`);
+          },
         });
       } catch (err) {
         throw new Error(
@@ -90,7 +95,13 @@ export async function installPackages(reqs, pyodide, opts) {
     if (!micropip) {
       micropip = await ensureMicropip(pyodide);
     }
-    await micropip.install(req, { deps: deps !== false });
+    debug?.log(`micropip.install(${JSON.stringify(req)})`);
+    debug?.begin();
+    try {
+      await micropip.install(req, { deps: deps !== false, verbose: debug !== null });
+    } finally {
+      debug?.end();
+    }
     if (isPlainName) {
       assertPackageLoaded(pyodide, req, []);
     }
@@ -98,6 +109,36 @@ export async function installPackages(reqs, pyodide, opts) {
   }
 
   return { installed, requirements: reqs };
+}
+
+/**
+ * Opt-in install diagnostics (`WASMSH_PIP_DEBUG=1`).
+ *
+ * The host discards the interpreter's stdout/stderr because shell output
+ * travels over the protocol instead, which also hides everything micropip
+ * and `loadPackage` say about a resolution. With the flag set, those
+ * messages go to the host's stderr while an install is in flight.
+ */
+function installDebugSink(pyodide) {
+  if (!globalThis.process?.env?.WASMSH_PIP_DEBUG) {
+    return null;
+  }
+  const log = (line) => process.stderr.write(`[wasmsh pip] ${line}\n`);
+  const python = (line) => log(`py: ${line}`);
+  const silent = () => {};
+  return {
+    log,
+    // The host boots Pyodide with no-op stdio handlers; route the
+    // interpreter's output here only while micropip runs.
+    begin() {
+      pyodide.setStdout?.({ batched: python });
+      pyodide.setStderr?.({ batched: python });
+    },
+    end() {
+      pyodide.setStdout?.({ batched: silent });
+      pyodide.setStderr?.({ batched: silent });
+    },
+  };
 }
 
 /** Project name of a plain requirement (`numpy>=2`, `pkg[extra]`), PEP 503-normalized. */

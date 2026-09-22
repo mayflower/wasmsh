@@ -128,6 +128,11 @@ jobs:
           JS
 
       - name: Run Pyodide Node E2E
+        env:
+          # Surface micropip's resolution log and loader errors in the job
+          # log; without it a package that fails to load is only visible as
+          # the install verification's terse error.
+          WASMSH_PIP_DEBUG: "1"
         run: just test-e2e-pyodide-node
 
       - name: Install Playwright browsers
