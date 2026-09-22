@@ -2,6 +2,6 @@
 # `langchain-wasmsh` already requires `deepagents>=0.7.4,<0.8.0`; restating
 # it here keeps the constraint visible when someone reads the file to find
 # out which upstream release these examples target.
-langchain-wasmsh>=0.8.0,<0.9.0
+langchain-wasmsh>=0.9.0,<0.10.0
 deepagents>=0.7.4,<0.8.0
 langchain-anthropic>=1.0.0

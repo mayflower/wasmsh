@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0
 
 Dependency refresh against the current Deep Agents 0.7 line (0.7.17 at the
 time of writing). The declared window is unchanged: `deepagents>=0.7.4,<0.8.0`
