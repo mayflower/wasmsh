@@ -1029,6 +1029,18 @@ struct FindFilters<'a> {
 
 fn parse_find_args<'a>(argv: &'a [&'a str]) -> (&'a str, FindFilters<'a>) {
     let mut args = &argv[1..];
+    // `-H`, `-L` and `-P` select symlink handling and, unlike every other
+    // option, come *before* the start path. The VFS already resolves through
+    // links on every lookup, so they change nothing here; they only have to be
+    // consumed so the path that follows is not mistaken for an expression
+    // token (which silently turned `find -L /a/b` into a walk of `.`).
+    while let Some(&opt) = args.first() {
+        if matches!(opt, "-H" | "-L" | "-P") {
+            args = &args[1..];
+        } else {
+            break;
+        }
+    }
     let dir = if !args.is_empty() && !args[0].starts_with('-') && args[0] != "!" && args[0] != "(" {
         let d = args[0];
         args = &args[1..];
