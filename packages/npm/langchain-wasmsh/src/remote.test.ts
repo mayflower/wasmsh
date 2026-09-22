@@ -382,3 +382,52 @@ describe("close / stop", () => {
     await sandbox.close();
   });
 });
+
+describe("grep with glob", () => {
+  function runRoute(output: string) {
+    return {
+      match: (call: FetchCall) =>
+        call.url === `${BASE_URL}/sessions/${SESSION_ID}/run` &&
+        call.init.method === "POST",
+      respond: () =>
+        jsonResponse(200, { ok: true, result: { output, exitCode: 0 } }),
+    };
+  }
+
+  it("uses grep --include and honours maxCount", async () => {
+    const output = [
+      "/workspace/a.md:1:hello",
+      "/workspace/b.md:2:hello",
+      "/workspace/c.md:3:hello",
+    ].join("\n");
+    const { fetch, calls } = makeFetch([createSessionRoute(), runRoute(output)]);
+    const sandbox = await WasmshRemoteSandbox.create({
+      dispatcherUrl: BASE_URL,
+      fetch,
+    });
+
+    const result = await sandbox.grep("hello", "/workspace", "*.md", 2);
+
+    const command = bodyOf(calls[1]).command as string;
+    expect(command).toContain("grep -rHnF --include='*.md' -e 'hello'");
+    expect(result.matches).toEqual([
+      { path: "/workspace/a.md", line: 1, text: "hello" },
+      { path: "/workspace/b.md", line: 2, text: "hello" },
+    ]);
+    expect(result.truncated).toBe(true);
+  });
+
+  it("returns every match without a cap", async () => {
+    const output = "/workspace/a.md:1:hello\n/workspace/b.md:2:hello";
+    const { fetch } = makeFetch([createSessionRoute(), runRoute(output)]);
+    const sandbox = await WasmshRemoteSandbox.create({
+      dispatcherUrl: BASE_URL,
+      fetch,
+    });
+
+    const result = await sandbox.grep("hello", "/workspace", "*.md");
+
+    expect(result.matches).toHaveLength(2);
+    expect(result.truncated).toBeUndefined();
+  });
+});

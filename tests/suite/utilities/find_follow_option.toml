@@ -1,0 +1,19 @@
+[test]
+name = "find-follow-option-before-start-path"
+tags = ["utility", "P0"]
+tier = "P0"
+requires = ["find"]
+
+# `-L` (and `-H`/`-P`) precede the start path in GNU find. Deep Agents'
+# sandbox `ls`/`glob` issue `find -L <dir> -maxdepth 1 ...`, so the path
+# after the option must be honoured rather than falling back to `.`.
+
+[setup]
+files = { "/root.txt" = "r\n", "/data/sub/a.txt" = "1\n", "/data/sub/deep/b.txt" = "2\n" }
+
+[input]
+script = "cd /data && find -L /data/sub -maxdepth 1 -not -path /data/sub && find -P /data/sub -type f -name b.txt && find -H /data -name a.txt"
+
+[expect]
+status = 0
+stdout = "/data/sub/a.txt\n/data/sub/deep\n/data/sub/deep/b.txt\n/data/sub/a.txt\n"

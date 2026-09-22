@@ -44,6 +44,7 @@ export async function installPackages(reqs, pyodide, opts) {
   const { isBundled, allowedHosts, deps = true } = opts;
   const installed = [];
   let micropip = null;
+  const debug = installDebugSink(pyodide);
 
   for (const req of reqs) {
     if (/^file:/i.test(req)) {
@@ -55,14 +56,22 @@ export async function installPackages(reqs, pyodide, opts) {
 
     // Bundled packages: resolve offline via pyodide.loadPackage()
     if (isPlainName && (await isBundled(req))) {
+      const loaderErrors = [];
       try {
-        await pyodide.loadPackage(req);
+        await pyodide.loadPackage(req, {
+          messageCallback: (message) => debug?.log(`loadPackage: ${message}`),
+          errorCallback: (message) => {
+            loaderErrors.push(String(message));
+            debug?.log(`loadPackage error: ${message}`);
+          },
+        });
       } catch (err) {
         throw new Error(
           `Failed to load bundled package '${req}' from local assets: ${err.message}. ` +
             "This may indicate a corrupt wheel file or missing symbol exports in the build.",
         );
       }
+      assertPackageLoaded(pyodide, req, loaderErrors);
       installed.push({ requirement: req });
       continue;
     }
@@ -86,11 +95,80 @@ export async function installPackages(reqs, pyodide, opts) {
     if (!micropip) {
       micropip = await ensureMicropip(pyodide);
     }
-    await micropip.install(req, { deps: deps !== false });
+    debug?.log(`micropip.install(${JSON.stringify(req)})`);
+    debug?.begin();
+    try {
+      await micropip.install(req, { deps: deps !== false, verbose: debug !== null });
+    } finally {
+      debug?.end();
+    }
+    if (isPlainName) {
+      assertPackageLoaded(pyodide, req, []);
+    }
     installed.push({ requirement: req });
   }
 
   return { installed, requirements: reqs };
+}
+
+/**
+ * Opt-in install diagnostics (`WASMSH_PIP_DEBUG=1`).
+ *
+ * The host discards the interpreter's stdout/stderr because shell output
+ * travels over the protocol instead, which also hides everything micropip
+ * and `loadPackage` say about a resolution. With the flag set, those
+ * messages go to the host's stderr while an install is in flight.
+ */
+function installDebugSink(pyodide) {
+  if (!globalThis.process?.env?.WASMSH_PIP_DEBUG) {
+    return null;
+  }
+  const log = (line) => process.stderr.write(`[wasmsh pip] ${line}\n`);
+  const python = (line) => log(`py: ${line}`);
+  const silent = () => {};
+  return {
+    log,
+    // The host boots Pyodide with no-op stdio handlers; route the
+    // interpreter's output here only while micropip runs.
+    begin() {
+      pyodide.setStdout?.({ batched: python });
+      pyodide.setStderr?.({ batched: python });
+    },
+    end() {
+      pyodide.setStdout?.({ batched: silent });
+      pyodide.setStderr?.({ batched: silent });
+    },
+  };
+}
+
+/** Project name of a plain requirement (`numpy>=2`, `pkg[extra]`), PEP 503-normalized. */
+function normalizedPackageName(requirement) {
+  const match = /^[A-Za-z0-9][A-Za-z0-9._-]*/.exec(requirement.trim());
+  return (match ? match[0] : requirement).toLowerCase().replace(/[-_.]+/g, "-");
+}
+
+/**
+ * Fail loudly when an install did not actually make the package importable.
+ *
+ * Pyodide's `loadPackage` reports a wheel whose side module failed to link
+ * (or whose download failed) through `errorCallback` and resolves anyway,
+ * and micropip inherits that behaviour for lockfile packages. Without this
+ * check such an install returns success and the caller only finds out at
+ * import time, with a `ModuleNotFoundError` that names nothing useful.
+ */
+function assertPackageLoaded(pyodide, requirement, loaderErrors) {
+  const wanted = normalizedPackageName(requirement);
+  const loaded = Object.keys(pyodide.loadedPackages ?? {});
+  if (loaded.some((name) => normalizedPackageName(name) === wanted)) {
+    return;
+  }
+  const detail = loaderErrors.length
+    ? ` Loader reported: ${loaderErrors.join(" | ")}`
+    : "";
+  throw new Error(
+    `Package '${requirement}' was not loaded after install.${detail} ` +
+      `Loaded packages: ${loaded.length ? loaded.join(", ") : "<none>"}`,
+  );
 }
 
 /**

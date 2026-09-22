@@ -13,8 +13,15 @@ categories.workspace = true
 
 [dependencies]
 anyhow = "1"
-axum = { version = "0.7", features = ["http1", "json", "tokio"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+axum = { version = "0.8", features = ["http1", "json", "tokio"] }
+# `rustls-no-provider` keeps reqwest off the aws-lc-rs default so the TLS
+# stack stays on `ring` (see the `rustls` line below), which is what the
+# license allowlist in deny.toml covers.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+# Selects the crypto provider for the rustls stack reqwest links against;
+# `Service::new` installs it as the process default before building the
+# client, which `rustls-no-provider` requires.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 subtle = "2"

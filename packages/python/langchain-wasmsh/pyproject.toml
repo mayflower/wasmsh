@@ -69,7 +69,11 @@ test = [
     "pytest-timeout>=2.3.1,<3.0.0",
     "pytest-asyncio>=1.3.0",
     "respx>=0.22",
-    "ruff>=0.13.1,<0.16.0",
+    # Floor and ceiling move together: ruff 0.16 stopped flagging BLE001 on
+    # the handlers below, so the `noqa` markers older releases needed became
+    # RUF100 violations. One lint tool version per window keeps both legs of
+    # CI green on the same source.
+    "ruff>=0.16.8,<0.17.0",
     # Pinned exactly: the sandbox conformance suite makes byte-level
     # assertions, so a floating version would silently change what
     # "0.7.4 compatible" means. Bump deliberately alongside `deepagents`.
@@ -105,6 +109,7 @@ ignore = [
     "COM812",
     "ISC001",
     "ANN401",
+    "CPY001",  # no per-file copyright headers in this repository
 ]
 extend-safe-fixes = ["PLR6201"]
 

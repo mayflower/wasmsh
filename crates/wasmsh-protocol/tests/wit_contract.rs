@@ -164,8 +164,8 @@ fn experimental_wit_functions_match_progressive_protocol_shape() {
     let init = interface.functions.get("init").expect("init should exist");
     assert_eq!(init.kind, FunctionKind::Freestanding);
     assert_eq!(init.params.len(), 1);
-    assert_eq!(init.params[0].0, "config");
-    let config_id = match init.params[0].1 {
+    assert_eq!(init.params[0].name, "config");
+    let config_id = match init.params[0].ty {
         Type::Id(id) => id,
         other => panic!("expected init-config param, found {other:?}"),
     };
@@ -180,7 +180,9 @@ fn experimental_wit_functions_match_progressive_protocol_shape() {
     );
 
     let run = interface.functions.get("run").expect("run should exist");
-    assert_eq!(run.params, vec![("input".into(), Type::String)]);
+    assert_eq!(run.params[0].name, "input");
+    assert_eq!(run.params[0].ty, Type::String);
+    assert_eq!(run.params.len(), 1);
     expect_list_of_named_type(
         &resolve,
         run.result.expect("run should return events"),
@@ -191,7 +193,9 @@ fn experimental_wit_functions_match_progressive_protocol_shape() {
         .functions
         .get("start-run")
         .expect("start-run should exist");
-    assert_eq!(start_run.params, vec![("input".into(), Type::String)]);
+    assert_eq!(start_run.params[0].name, "input");
+    assert_eq!(start_run.params[0].ty, Type::String);
+    assert_eq!(start_run.params.len(), 1);
     expect_list_of_named_type(
         &resolve,
         start_run.result.expect("start-run should return events"),
@@ -225,7 +229,14 @@ fn experimental_wit_functions_match_progressive_protocol_shape() {
             .functions
             .get(name)
             .unwrap_or_else(|| panic!("{name} should exist"));
-        assert_eq!(function.params, vec![("path".into(), Type::String)]);
+        // wit-parser 0.256 models parameters as `Param { name, ty, span }`;
+        // compare the fields the contract cares about, not the span.
+        let params: Vec<(&str, Type)> = function
+            .params
+            .iter()
+            .map(|param| (param.name.as_str(), param.ty))
+            .collect();
+        assert_eq!(params, vec![("path", Type::String)]);
         expect_list_of_named_type(
             &resolve,
             function
@@ -239,8 +250,9 @@ fn experimental_wit_functions_match_progressive_protocol_shape() {
         .functions
         .get("write-file")
         .expect("write-file should exist");
-    assert_eq!(write_file.params[0], ("path".into(), Type::String));
-    expect_list_of_u8(&resolve, write_file.params[1].1);
+    assert_eq!(write_file.params[0].name, "path");
+    assert_eq!(write_file.params[0].ty, Type::String);
+    expect_list_of_u8(&resolve, write_file.params[1].ty);
     expect_list_of_named_type(
         &resolve,
         write_file.result.expect("write-file should return events"),

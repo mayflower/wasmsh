@@ -77,6 +77,12 @@ pnpm add @mayflowergmbh/langchain-wasmsh deepagents @langchain/anthropic
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+The npm adapter declares `deepagents` as a peer dependency on the stable
+`^1.14.0` line (the pre-release `1.9.0-alpha` pin is gone). Both sandboxes
+implement that release's `BaseSandbox` contract: `grep(pattern, path, glob,
+maxCount)` with `truncated`, the inherited `delete`, and the paginated
+`read` metadata.
+
 ```ts
 import { createDeepAgent } from "deepagents";
 import { WasmshSandbox } from "@mayflowergmbh/langchain-wasmsh";
@@ -435,6 +441,15 @@ the obvious guess. Each is asserted by a test rather than only described.
   file; `BaseSandbox.write` now creates parent directories and writes.
 - **`delete` is recursive and counts as a write.** It removes the path plus
   everything under it, and write-deny rules cover it.
+- **`glob` returns absolute paths from 0.7.7 on.** `BaseSandbox.glob`
+  joins every match onto the search root; 0.7.4 returned names relative to
+  it. wasmsh runs upstream's glob unchanged, so the result shape follows the
+  installed release. The pinned `langchain-tests==1.1.9` suite still asserts
+  bare names, which is why those six assertions are `xfail` on 0.7.7+ and
+  `TestGlobPathContract` asserts the newer shape.
+- **`read_file` frames output with an `@@ lines a-b of n @@` header** in
+  later 0.7.x releases instead of the 0.7.4 line-number gutter. Both come
+  from the filesystem middleware, not the backend.
 - **`execute(timeout=N)` is a real deadline** — and enforcing it destroys the
   session. Pyodide runs synchronously with no cancellation point, so the
   local sandbox kills its host and the remote runner terminates its worker;

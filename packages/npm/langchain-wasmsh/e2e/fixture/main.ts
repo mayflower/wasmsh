@@ -17,11 +17,19 @@ function report(data: Record<string, unknown>) {
   document.getElementById("result")!.textContent = JSON.stringify(data);
 }
 
+/** Workspace to bill when the key is organisation-scoped; see the spec. */
+let workspaceId: string | null = null;
+
 function makeModel(apiKey: string) {
   return new ChatAnthropic({
     model: "claude-haiku-4-5-20251001",
     apiKey,
-    clientOptions: { dangerouslyAllowBrowser: true },
+    clientOptions: {
+      dangerouslyAllowBrowser: true,
+      ...(workspaceId && {
+        defaultHeaders: { "anthropic-workspace-id": workspaceId },
+      }),
+    },
   });
 }
 
@@ -162,8 +170,11 @@ async function testMemory(sandbox: BrowserSandbox, apiKey: string) {
     ["/workspace/memory/AGENTS.md", enc.encode(memoryContent)],
   ]);
 
+  // deepagents 1.14's memory middleware turns an absent system prompt into
+  // an empty text block, which the API rejects; pass one as the docs do.
   const agent = createDeepAgent({
     model: makeModel(apiKey),
+    systemPrompt: "You are a deployment assistant with sandbox access.",
     backend: sandbox,
     memory: ["/workspace/memory/AGENTS.md"],
   });
@@ -224,6 +235,7 @@ async function run() {
   const params = new URLSearchParams(location.search);
   const apiKey = params.get("key");
   const testName = params.get("test") ?? "csv";
+  workspaceId = params.get("workspace");
 
   if (!apiKey) {
     report({ status: "error", message: "Missing ?key= query parameter" });

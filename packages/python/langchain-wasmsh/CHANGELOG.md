@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+Dependency refresh against the current Deep Agents 0.7 line (0.7.17 at the
+time of writing). The declared window is unchanged: `deepagents>=0.7.4,<0.8.0`
+still holds, the `min-deepagents` CI leg still proves the 0.7.4 floor, and the
+private upstream helpers listed in `langchain_wasmsh._file_ops` are present
+with the same signatures on 0.7.17.
+
+### Fixed
+
+- **`skills_metadata` set to `None` no longer breaks the interpreter tool.**
+  Deep Agents 0.7.8+ stores `None` (rather than omitting the key) to request
+  a skills reload on the next run. `WasmshInterpreterMiddleware` read the
+  key with a list default and then iterated `None`; it now treats a missing
+  key and `None` the same way upstream does.
+
+### Changed
+
+- `ruff` pinned to the `0.16` line. A fresh resolution now lands on
+  `deepagents` 0.7.17, `langchain` 1.4, `langchain-core` 1.6, and
+  `langgraph` 1.2.12, all inside the declared bounds; the unit, subprocess,
+  and integration suites pass there and on the 0.7.4 floor.
+- The conformance suite now tolerates two upstream changes inside the 0.7
+  window without loosening the pin: `BaseSandbox.glob` returns absolute
+  paths from 0.7.7 on (six stale `langchain-tests` assertions are `xfail`
+  only on those releases, with `TestGlobPathContract` asserting the new
+  shape), and `read_file` frames output with an `@@ lines a-b of n @@`
+  header rather than a line-number gutter. Profile keys with more than one
+  colon are also accepted upstream now, so they are no longer asserted as
+  malformed.
+
 ## 0.8.0
 
 Explicit, tested compatibility with LangChain Deep Agents **0.7.4**. The

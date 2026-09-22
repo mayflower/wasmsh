@@ -6,7 +6,7 @@
 # across a pool of runner pods; it has no native runtime dependencies beyond
 # glibc, so we ship it on debian:bookworm-slim with a non-root user.
 
-ARG RUST_VERSION=1.89
+ARG RUST_VERSION=1.95
 ARG DEBIAN_VERSION=bookworm
 
 FROM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS builder

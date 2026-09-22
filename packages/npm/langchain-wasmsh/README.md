@@ -28,7 +28,9 @@ See also the
 pnpm add @mayflowergmbh/langchain-wasmsh deepagents
 ```
 
-Requires Node.js 20+.
+Requires Node.js 20+. `deepagents` is a peer dependency on its stable
+`1.14` line; the sandbox implements the `BaseSandbox` contract of that
+release (`grep` with `maxCount`, `delete`, paginated `read` metadata).
 
 ### Create an agent with a wasmsh sandbox
 

@@ -122,8 +122,8 @@ async fn spawn_mock_runner(cfg: MockRunnerConfig) -> (String, oneshot::Sender<()
         .route("/healthz", get(mock_healthz))
         .route("/runner/snapshot", get(mock_snapshot))
         .route("/sessions", post(mock_create_session))
-        .route("/sessions/:session_id", delete(mock_delete_session))
-        .route("/sessions/:session_id/:action", post(mock_session_op))
+        .route("/sessions/{session_id}", delete(mock_delete_session))
+        .route("/sessions/{session_id}/{action}", post(mock_session_op))
         .with_state(state);
 
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))

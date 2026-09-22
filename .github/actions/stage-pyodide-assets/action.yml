@@ -1,0 +1,118 @@
+name: Stage Pyodide runtime assets
+description: >-
+  Populate packages/npm/wasmsh-pyodide/assets (and the Python runtime
+  package) with a Pyodide runtime. The published npm tarball is the
+  baseline; when the Pyodide workflow built and validated a runtime for
+  this very commit, its artifact replaces the core files so adapter tests
+  exercise the runtime the commit actually ships.
+
+inputs:
+  max-wait-minutes:
+    description: How long to wait for an in-progress Pyodide run of this commit.
+    required: false
+    default: "45"
+
+runs:
+  using: composite
+  steps:
+    - name: Stage the published npm tarball (baseline)
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Source of truth: the version in packages/npm/wasmsh-pyodide/package.json.
+        # When that version is not on the registry yet (the bump-on-main ->
+        # tag -> publish window), fall back to the latest released one. The
+        # tarball also carries the extra wheels the runtime ships, which the
+        # Pyodide build artifact does not contain; package-runtime-assets.mjs
+        # keeps them when it overlays a fresh build below.
+        VERSION="$(node -p "require('./packages/npm/wasmsh-pyodide/package.json').version")"
+        echo "Target @mayflowergmbh/wasmsh-pyodide@$VERSION"
+        tmp="$(mktemp -d)"
+        url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
+        echo "Fetching $url"
+        if ! curl -fsSL "$url" -o "$tmp/pkg.tgz"; then
+          echo "Version $VERSION not yet on registry; falling back to latest published"
+          LATEST="$(npm view @mayflowergmbh/wasmsh-pyodide version)"
+          echo "Falling back to @mayflowergmbh/wasmsh-pyodide@$LATEST"
+          url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${LATEST}.tgz"
+          curl -fsSL "$url" -o "$tmp/pkg.tgz"
+        fi
+        mkdir -p "$tmp/extract"
+        tar -xzf "$tmp/pkg.tgz" -C "$tmp/extract"
+        mkdir -p packages/npm/wasmsh-pyodide/assets
+        cp -r "$tmp/extract/package/assets/"* packages/npm/wasmsh-pyodide/assets/
+        ls packages/npm/wasmsh-pyodide/assets/pyodide.asm.wasm
+
+    - name: Look for a Pyodide runtime built from this commit
+      id: locate
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        MAX_WAIT_MINUTES: ${{ inputs.max-wait-minutes }}
+      run: |
+        set -euo pipefail
+        # The Pyodide workflow only uploads its artifact after its own E2E
+        # suites pass, so a successful run is a validated runtime. It is
+        # triggered by the same push, but only when runtime paths changed;
+        # give it two minutes to appear and otherwise stay on the tarball.
+        api="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/pyodide.yml/runs"
+        query="head_sha=${HEAD_SHA}&per_page=20"
+        deadline=$(( $(date +%s) + MAX_WAIT_MINUTES * 60 ))
+        appear_deadline=$(( $(date +%s) + 120 ))
+        run_id=""
+        while :; do
+          json="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "${api}?${query}" || echo '{}')"
+          read -r run_id status conclusion < <(node -e '
+            const runs = (JSON.parse(process.argv[1]).workflow_runs || [])
+              .filter((r) => r.head_sha === process.env.HEAD_SHA)
+              .sort((a, b) => b.id - a.id);
+            const r = runs[0];
+            console.log(r ? `${r.id} ${r.status} ${r.conclusion ?? "-"}` : "- - -");
+          ' "$json")
+          now=$(date +%s)
+          if [ "$run_id" = "-" ]; then
+            if [ "$now" -ge "$appear_deadline" ]; then
+              echo "No Pyodide run for ${HEAD_SHA}; keeping the published runtime."
+              run_id=""
+              break
+            fi
+            sleep 20
+            continue
+          fi
+          if [ "$status" = "completed" ]; then
+            if [ "$conclusion" = "success" ]; then
+              echo "Pyodide run ${run_id} succeeded; using its runtime."
+            else
+              echo "::warning::Pyodide run ${run_id} finished with '${conclusion}'; keeping the published runtime."
+              run_id=""
+            fi
+            break
+          fi
+          if [ "$now" -ge "$deadline" ]; then
+            echo "::warning::Pyodide run ${run_id} still ${status} after ${MAX_WAIT_MINUTES} min; keeping the published runtime."
+            run_id=""
+            break
+          fi
+          echo "Pyodide run ${run_id} is ${status}; waiting..."
+          sleep 60
+        done
+        echo "run-id=${run_id}" >> "$GITHUB_OUTPUT"
+
+    - name: Download the runtime built from this commit
+      if: steps.locate.outputs.run-id != ''
+      uses: actions/download-artifact@v4
+      with:
+        name: wasmsh-pyodide
+        path: dist/pyodide-custom
+        run-id: ${{ steps.locate.outputs.run-id }}
+        github-token: ${{ github.token }}
+
+    - name: Overlay the built runtime onto the staged assets
+      if: steps.locate.outputs.run-id != ''
+      shell: bash
+      run: |
+        set -euo pipefail
+        ls dist/pyodide-custom/pyodide.asm.wasm
+        node tools/pyodide/package-runtime-assets.mjs
+        ls -la packages/npm/wasmsh-pyodide/assets/pyodide.asm.wasm

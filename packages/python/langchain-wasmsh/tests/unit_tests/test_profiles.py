@@ -139,6 +139,9 @@ class _MarkerMiddleware(AgentMiddleware):
 # ── registration and lookup ────────────────────────────────────────────
 
 
+# `a:b:c` is deliberately absent from the malformed keys: Deep Agents 0.7.4
+# rejected a second colon, 0.7.17 accepts it as part of the model id
+# (`ollama:glm:cloud`), and the adapter supports both ends of that window.
 class TestHarnessProfileRegistration:
     def test_provider_wide_and_exact_model_keys_both_resolve(
         self,
@@ -185,7 +188,7 @@ class TestHarnessProfileRegistration:
 
     @pytest.mark.parametrize(
         "bad_key",
-        ["", " leading", "a:b:c", "a: b", ":model", "provider:"],
+        ["", " leading", "a: b", ":model", "provider:"],
     )
     def test_malformed_keys_are_rejected(
         self,
@@ -491,7 +494,7 @@ class TestProviderProfiles:
             {"temperature": 0.2},
         ) == {"temperature": 0.2}
 
-    @pytest.mark.parametrize("bad_key", ["", "a:b:c", " x", "provider:"])
+    @pytest.mark.parametrize("bad_key", ["", " x", "provider:"])
     def test_malformed_keys_are_rejected(
         self,
         isolated_registries: None,  # noqa: ARG002 -- fixture restores global registries

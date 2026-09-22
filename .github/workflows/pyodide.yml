@@ -5,10 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/pyodide.yml'
-      - 'crates/wasmsh-runtime/**'
-      - 'crates/wasmsh-pyodide/**'
-      - 'crates/wasmsh-pyodide-probe/**'
-      - 'crates/wasmsh-fs/**'
+      - 'crates/**'
       - 'tools/pyodide/**'
       - 'e2e/pyodide-node/**'
       - 'e2e/pyodide-browser/**'
@@ -21,10 +18,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/pyodide.yml'
-      - 'crates/wasmsh-runtime/**'
-      - 'crates/wasmsh-pyodide/**'
-      - 'crates/wasmsh-pyodide-probe/**'
-      - 'crates/wasmsh-fs/**'
+      - 'crates/**'
       - 'tools/pyodide/**'
       - 'e2e/pyodide-node/**'
       - 'e2e/pyodide-browser/**'
@@ -121,7 +115,24 @@ jobs:
       - name: Run emscripten build-contract test
         run: just test-emscripten-probe
 
+      - name: Report the built runtime's platform tags
+        # What micropip matches lockfile wheel tags against. Printed before
+        # the E2E suites so a tag mismatch is visible even when they fail.
+        run: |
+          node --input-type=module - <<'JS'
+          import { createNodeSession } from "./packages/npm/wasmsh-pyodide/index.js";
+          const s = await createNodeSession({});
+          const r = await s.run(`python3 -c "import sys, sysconfig; print('python', sys.version.split()[0], 'platform', sysconfig.get_platform()); print('emscripten', sys._emscripten_info); from packaging import tags; print('tags', [str(t) for t in list(tags.sys_tags())[:6]])"`);
+          console.log(r.output);
+          await s.close();
+          JS
+
       - name: Run Pyodide Node E2E
+        env:
+          # Surface micropip's resolution log and loader errors in the job
+          # log; without it a package that fails to load is only visible as
+          # the install verification's terse error.
+          WASMSH_PIP_DEBUG: "1"
         run: just test-e2e-pyodide-node
 
       - name: Install Playwright browsers
@@ -132,6 +143,10 @@ jobs:
         run: just test-e2e-pyodide-browser
 
       - name: Upload Pyodide artifact
+        # Uploaded even after a failed E2E so the build can be inspected
+        # offline; consumers (stage-pyodide-assets) only take it from a
+        # run whose conclusion is success.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: wasmsh-pyodide

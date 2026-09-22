@@ -179,8 +179,13 @@ describe("LLM agent integration via WasmshSandbox", () => {
         ["/workspace/memory/AGENTS.md", enc.encode(memoryContent)],
       ]);
 
+      // deepagents 1.14's memory middleware wraps whatever system prompt is
+      // already present into a text block, and an absent `systemPrompt`
+      // arrives as "" which Anthropic rejects as an empty block. A prompt is
+      // what every documented example passes anyway.
       const agent = createDeepAgent({
         model: MODEL,
+        systemPrompt: "You are a deployment assistant with sandbox access.",
         backend: sandbox,
         memory: ["/workspace/memory/AGENTS.md"],
       });

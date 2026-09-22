@@ -43,11 +43,14 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 # Version of @mayflowergmbh/wasmsh-pyodide is derived at runtime from
 # packages/npm/wasmsh-pyodide/package.json by the "Stage Pyodide assets"
 # step below.  CI stages pre-built Pyodide assets from the published
-# tarball so runner image builds don't have to rebuild Pyodide (~30min).
+# tarball so runner image builds don't have to rebuild Pyodide (~30min),
+# and overlays the runtime the Pyodide workflow built for this commit
+# when there is one (see .github/actions/stage-pyodide-assets).
 # We used to hardcode the version here and it silently drifted from the
 # workspace every release — deriving it from package.json removes the
 # bump-two-places coupling.
@@ -58,19 +61,27 @@ jobs:
     name: dispatcher-compose (ts + python)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: mayflower-k8s-runners
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: "10.20.0"
 
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: "pnpm"
+
+      - name: Install pnpm
+        # After Node: pnpm 12's package runs a `preinstall` hook that needs
+        # `node` on PATH, which the self-hosted runners do not provide.
+        uses: pnpm/action-setup@v4
+        with:
+          version: "12.5.1"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
 
       - uses: actions/setup-python@v5
         with:
@@ -79,25 +90,10 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
-          version: "0.11.7"
+          version: "0.12.17"
 
-      - name: Stage Pyodide assets (for runner image)
-        run: |
-          set -euo pipefail
-          VERSION="$(node -p "require('./packages/npm/wasmsh-pyodide/package.json').version")"
-          echo "Using @mayflowergmbh/wasmsh-pyodide@$VERSION"
-          tmp="$(mktemp -d)"
-          url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
-          echo "Fetching $url"
-          if ! curl -fsSL "$url" -o "$tmp/pkg.tgz"; then
-            echo "Version $VERSION not on registry; falling back to latest published"
-            LATEST="$(npm view @mayflowergmbh/wasmsh-pyodide version)"
-            url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${LATEST}.tgz"
-            curl -fsSL "$url" -o "$tmp/pkg.tgz"
-          fi
-          mkdir -p "$tmp/extract"
-          tar -xzf "$tmp/pkg.tgz" -C "$tmp/extract"
-          cp -r "$tmp/extract/package/assets/"* packages/npm/wasmsh-pyodide/assets/
+      - name: Stage Pyodide assets
+        uses: ./.github/actions/stage-pyodide-assets
 
       - name: pnpm install
         run: pnpm install --frozen-lockfile
@@ -130,19 +126,27 @@ jobs:
     name: dispatcher-kind (ts + python)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: mayflower-k8s-runners
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: "10.20.0"
 
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: "pnpm"
+
+      - name: Install pnpm
+        # After Node: pnpm 12's package runs a `preinstall` hook that needs
+        # `node` on PATH, which the self-hosted runners do not provide.
+        uses: pnpm/action-setup@v4
+        with:
+          version: "12.5.1"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
 
       - uses: actions/setup-python@v5
         with:
@@ -151,7 +155,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
-          version: "0.11.7"
+          version: "0.12.17"
 
       - name: Install kind
         uses: helm/kind-action@v1
@@ -169,23 +173,8 @@ jobs:
         with:
           version: v3.16.2
 
-      - name: Stage Pyodide assets (for runner image)
-        run: |
-          set -euo pipefail
-          VERSION="$(node -p "require('./packages/npm/wasmsh-pyodide/package.json').version")"
-          echo "Using @mayflowergmbh/wasmsh-pyodide@$VERSION"
-          tmp="$(mktemp -d)"
-          url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${VERSION}.tgz"
-          echo "Fetching $url"
-          if ! curl -fsSL "$url" -o "$tmp/pkg.tgz"; then
-            echo "Version $VERSION not on registry; falling back to latest published"
-            LATEST="$(npm view @mayflowergmbh/wasmsh-pyodide version)"
-            url="https://registry.npmjs.org/@mayflowergmbh/wasmsh-pyodide/-/wasmsh-pyodide-${LATEST}.tgz"
-            curl -fsSL "$url" -o "$tmp/pkg.tgz"
-          fi
-          mkdir -p "$tmp/extract"
-          tar -xzf "$tmp/pkg.tgz" -C "$tmp/extract"
-          cp -r "$tmp/extract/package/assets/"* packages/npm/wasmsh-pyodide/assets/
+      - name: Stage Pyodide assets
+        uses: ./.github/actions/stage-pyodide-assets
 
       - name: pnpm install
         run: pnpm install --frozen-lockfile
