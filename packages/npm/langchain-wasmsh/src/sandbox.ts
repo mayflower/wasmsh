@@ -1,5 +1,6 @@
 import {
   BaseSandbox,
+  applyGrepMaxCount,
   type ExecuteResponse,
   type FileDownloadResponse,
   type FileUploadResponse,
@@ -161,11 +162,12 @@ export class WasmshSandbox extends BaseSandbox {
     pattern: string,
     path: string = "/",
     glob: string | null = null,
+    maxCount: number | null = null,
   ): Promise<GrepResult> {
     // Non-glob path matches BaseSandbox exactly — delegate to share parser
     // (including binary-file skip).
     if (!glob) {
-      return super.grep(pattern, path, glob);
+      return super.grep(pattern, path, glob, maxCount);
     }
 
     if (!this.#session) {
@@ -191,7 +193,7 @@ export class WasmshSandbox extends BaseSandbox {
         text: parts.slice(2).join(":"),
       });
     }
-    return { matches };
+    return applyGrepMaxCount({ result: { matches }, maxCount });
   }
 
   async downloadFiles(paths: string[]): Promise<FileDownloadResponse[]> {

@@ -488,15 +488,89 @@ describe("downloadFiles", () => {
 });
 
 describe("inherited BaseSandbox methods", () => {
-  it("exposes read, write, edit, ls, grep, glob", async () => {
+  it("exposes read, write, edit, delete, ls, grep, glob", async () => {
     const sandbox = await WasmshSandbox.createNode();
     try {
       expect(typeof sandbox.read).toBe("function");
       expect(typeof sandbox.write).toBe("function");
       expect(typeof sandbox.edit).toBe("function");
+      expect(typeof sandbox.delete).toBe("function");
       expect(typeof sandbox.ls).toBe("function");
       expect(typeof sandbox.grep).toBe("function");
       expect(typeof sandbox.glob).toBe("function");
+    } finally {
+      await sandbox.stop();
+    }
+  });
+});
+
+describe("grep with glob", () => {
+  const output = [
+    "/workspace/a.md:1:hello",
+    "/workspace/b.md:3:hello again",
+    "/workspace/c.md:7:hello: with colon",
+  ].join("\n");
+
+  it("uses grep --include and parses path:line:text records", async () => {
+    const sandbox = await WasmshSandbox.createNode();
+    try {
+      mockState.session!.run.mockResolvedValueOnce({
+        events: [],
+        output,
+        exitCode: 0,
+      });
+      const result = await sandbox.grep("hello", "/workspace", "*.md");
+      const command = mockState.session!.run.mock.calls[0][0] as string;
+      expect(command).toContain("grep -rHnF --include='*.md' -e 'hello'");
+      expect(result).toEqual({
+        matches: [
+          { path: "/workspace/a.md", line: 1, text: "hello" },
+          { path: "/workspace/b.md", line: 3, text: "hello again" },
+          { path: "/workspace/c.md", line: 7, text: "hello: with colon" },
+        ],
+      });
+    } finally {
+      await sandbox.stop();
+    }
+  });
+
+  it("caps matches at maxCount and flags truncation", async () => {
+    const sandbox = await WasmshSandbox.createNode();
+    try {
+      mockState.session!.run.mockResolvedValueOnce({
+        events: [],
+        output,
+        exitCode: 0,
+      });
+      const result = await sandbox.grep("hello", "/workspace", "*.md", 2);
+      expect(result.matches).toHaveLength(2);
+      expect(result.truncated).toBe(true);
+    } finally {
+      await sandbox.stop();
+    }
+  });
+
+  it("leaves truncated unset when the cap is not reached", async () => {
+    const sandbox = await WasmshSandbox.createNode();
+    try {
+      mockState.session!.run.mockResolvedValueOnce({
+        events: [],
+        output,
+        exitCode: 0,
+      });
+      const result = await sandbox.grep("hello", "/workspace", "*.md", 3);
+      expect(result.matches).toHaveLength(3);
+      expect(result.truncated).toBeUndefined();
+    } finally {
+      await sandbox.stop();
+    }
+  });
+
+  it("returns no matches on empty output", async () => {
+    const sandbox = await WasmshSandbox.createNode();
+    try {
+      const result = await sandbox.grep("nothing", "/workspace", "*.md", 1);
+      expect(result).toEqual({ matches: [] });
     } finally {
       await sandbox.stop();
     }

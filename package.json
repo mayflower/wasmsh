@@ -4,7 +4,7 @@
   "private": true,
   "description": "wasmsh repo root — pnpm workspace for packages/npm/*",
   "license": "MIT",
-  "packageManager": "pnpm@10.20.0",
+  "packageManager": "pnpm@12.5.1",
   "engines": {
     "node": ">=20"
   }

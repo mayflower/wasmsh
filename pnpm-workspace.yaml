@@ -3,3 +3,8 @@ packages:
   - "examples/deepagent-typescript"
   - "e2e/kind"
   - "e2e/dispatcher-compose"
+
+# esbuild's postinstall only re-validates its prebuilt binary, so the build
+# script stays off. pnpm 12 refuses to install until the decision is recorded.
+allowBuilds:
+  esbuild: false

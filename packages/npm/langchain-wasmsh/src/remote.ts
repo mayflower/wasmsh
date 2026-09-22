@@ -1,5 +1,6 @@
 import {
   BaseSandbox,
+  applyGrepMaxCount,
   type ExecuteResponse,
   type FileDownloadResponse,
   type FileUploadResponse,
@@ -270,9 +271,10 @@ export class WasmshRemoteSandbox extends BaseSandbox {
     pattern: string,
     path: string = "/",
     glob: string | null = null,
+    maxCount: number | null = null,
   ): Promise<GrepResult> {
     if (!glob) {
-      return super.grep(pattern, path, glob);
+      return super.grep(pattern, path, glob, maxCount);
     }
     // wasmsh's `find` lacks `-exec`, same constraint as the in-process
     // variant — use `grep --include=GLOB` instead.
@@ -296,7 +298,7 @@ export class WasmshRemoteSandbox extends BaseSandbox {
         text: parts.slice(2).join(":"),
       });
     }
-    return { matches };
+    return applyGrepMaxCount({ result: { matches }, maxCount });
   }
 
   async stop(): Promise<void> {

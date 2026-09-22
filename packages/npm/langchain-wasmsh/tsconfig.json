@@ -12,7 +12,8 @@
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
     "forceConsistentCasingInFileNames": true,
-    "verbatimModuleSyntax": false
+    "verbatimModuleSyntax": false,
+    "types": ["node"]
   },
   "include": ["src/**/*.ts", "src/*.ts"],
   "exclude": ["node_modules", "dist", "e2e"]
