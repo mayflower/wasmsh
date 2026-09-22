@@ -400,9 +400,11 @@ class WasmshInterpreterMiddleware(
     ) -> dict[str, SkillMetadata] | None:
         if self._skills_backend is None:
             return None
+        # `SkillsMiddleware` stores `None` (not a missing key) to request a
+        # reload on the next run, so a default on `.get` is not enough.
         metadata_list = (
-            runtime.state.get("skills_metadata", []) if runtime.state else []
-        )
+            runtime.state.get("skills_metadata") if runtime.state else None
+        ) or []
         return {m["name"]: m for m in metadata_list}
 
     # ---- lifecycle hooks -------------------------------------------------
@@ -422,7 +424,7 @@ class WasmshInterpreterMiddleware(
         repl = self._registry.get(thread_id)
         try:
             repl.restore_snapshot(payload)
-        except Exception:  # noqa: BLE001 -- best-effort snapshot path
+        except Exception:  # best-effort snapshot path
             # A corrupt or unreadable snapshot must not take the rest of the
             # checkpoint with it: clear only this private field and continue
             # with an empty interpreter.
@@ -533,7 +535,7 @@ class WasmshInterpreterMiddleware(
         try:
             payload = repl.create_snapshot()
             update = self._snapshot_update(payload=payload, thread_id=thread_id)
-        except Exception:  # noqa: BLE001 -- best-effort snapshot path
+        except Exception:  # best-effort snapshot path
             logger.warning(
                 "Failed to read wasmsh snapshot for thread_id=%s",
                 thread_id,

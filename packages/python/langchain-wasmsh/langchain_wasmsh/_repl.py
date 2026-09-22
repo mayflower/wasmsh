@@ -192,7 +192,7 @@ class _ThreadREPL:
             return
         try:
             sandbox.close()
-        except Exception:  # noqa: BLE001 -- surface every failure path
+        except Exception:  # surface every failure path
             logger.warning("WasmshSandbox.close failed", exc_info=True)
 
     # ---- skill staging ---------------------------------------------------
@@ -354,7 +354,7 @@ class _ThreadREPL:
             return None
         try:
             responses = self._sandbox.download_files([GLOBALS_PATH])
-        except Exception:  # noqa: BLE001 -- surface every failure path
+        except Exception:  # surface every failure path
             logger.warning("snapshot read failed", exc_info=True)
             return None
         if not responses:
@@ -417,7 +417,7 @@ class _PTCSession:
                 (call_id := synth_tool_call_id(tool.name)),
             )
             raw = self._invoke(tool, enriched, call_id)
-        except Exception as exc:  # noqa: BLE001 -- isolate one tool failure
+        except Exception as exc:  # isolate one tool failure
             # The envelope reaches the sandbox so the model can recover, but
             # the original stack and call context are lost in that
             # conversion. Emit a warning so host applications wiring up

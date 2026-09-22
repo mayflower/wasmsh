@@ -94,10 +94,19 @@ class TestFilesystemToolSurface:
         )
         result = invoke(create_deep_agent(model=model, backend=shared_sandbox))
         read_back = last_tool_message(result, "read_file")
-        # The gutter is added by the filesystem middleware, not the backend,
-        # so seeing it proves the read went through the whole stack.
-        assert "1\talpha" in read_back.content or "1  alpha" in read_back.content
-        assert "beta" in read_back.content
+        content = read_back.content
+        # The framing is added by the filesystem middleware, not the backend,
+        # so seeing it proves the read went through the whole stack. Deep
+        # Agents 0.7.4 rendered a line-number gutter; later 0.7.x releases
+        # render an `@@ lines a-b of n @@` hunk header instead.
+        framed = (
+            "1\talpha" in content
+            or "1  alpha" in content
+            or content.startswith("@@ lines ")
+        )
+        assert framed, content
+        assert "alpha" in content
+        assert "beta" in content
 
     @pytest.mark.parametrize(
         ("command", "expected_exit"),

@@ -19,6 +19,14 @@ The behaviour itself is not left untested: `TestWriteOverwriteContract` below
 asserts what 0.7.x actually promises, and would fail if wasmsh ever stopped
 overwriting.
 
+The suite's six non-recursive `glob` assertions have the same problem from
+Deep Agents 0.7.7 on: `BaseSandbox.glob` started returning absolute paths
+(`_absolutize_glob_path`), while `langchain-tests==1.1.9` still expects bare
+names such as `file1.txt`. wasmsh runs upstream's glob unchanged, so those
+assertions are marked `xfail` only when the installed release is 0.7.7 or
+newer; on the 0.7.4 floor they still pass. `TestGlobPathContract` asserts the
+newer behaviour directly.
+
 `test_download_error_permission_denied` needs a wasmsh runtime whose VFS
 enforces permission bits. That landed with the `chmod` implementation in this
 repo, so it passes against a locally built dist; an environment still on a
@@ -37,6 +45,7 @@ import shutil
 from typing import TYPE_CHECKING
 
 import pytest
+from deepagents import __version__ as deepagents_version
 from langchain_tests.integration_tests import SandboxIntegrationTests
 
 from langchain_wasmsh import WasmshSandbox
@@ -55,6 +64,22 @@ except (ImportError, FileNotFoundError):
 
 _ASSETS_REASON = (
     "Pyodide assets not built (run just build-pyodide && just package-pyodide-runtime)"
+)
+
+# Deep Agents 0.7.7 changed `BaseSandbox.glob` to return absolute paths; the
+# pinned conformance suite predates that and asserts bare file names.
+_GLOB_RETURNS_ABSOLUTE_PATHS = tuple(
+    int(part) for part in deepagents_version.split(".")[:3]
+) >= (0, 7, 7)
+_STALE_GLOB_ASSERTIONS = frozenset(
+    {
+        "test_glob",
+        "test_glob_basic_pattern",
+        "test_glob_with_directories",
+        "test_glob_hidden_files_explicitly",
+        "test_glob_with_character_class",
+        "test_glob_with_question_mark",
+    },
 )
 
 
@@ -108,6 +133,29 @@ class _WasmshStandardSuite(SandboxIntegrationTests):
                 "rebuild with `just build-pyodide && just package-pyodide-runtime`",
             )
 
+    @pytest.fixture(autouse=True)
+    def _xfail_stale_glob_assertions(self, request: pytest.FixtureRequest) -> None:
+        """Mark the relative-path glob assertions `xfail` on deepagents >= 0.7.7.
+
+        A fixture rather than an override for the same reason as above, and
+        conditional rather than blanket so the 0.7.4 floor keeps asserting
+        the assertions it still satisfies. `strict=True` turns an upstream
+        reversal into a loud failure instead of a silent xpass.
+        """
+        if request.node.name not in _STALE_GLOB_ASSERTIONS:
+            return
+        if _GLOB_RETURNS_ABSOLUTE_PATHS:
+            request.node.add_marker(
+                pytest.mark.xfail(
+                    reason=(
+                        "langchain-tests 1.1.9 expects bare glob names; "
+                        "deepagents >= 0.7.7 returns absolute paths by design. "
+                        "Covered instead by TestGlobPathContract."
+                    ),
+                    strict=True,
+                ),
+            )
+
     @pytest.mark.xfail(
         reason=(
             "langchain-tests 1.1.9 asserts pre-0.7 create-only write; every "
@@ -132,6 +180,41 @@ class TestWasmshSandboxStandardNode(_WasmshStandardSuite):
 @pytest.mark.skipif(shutil.which("deno") is None, reason="deno is not installed")
 class TestWasmshSandboxStandardDeno(_WasmshStandardSuite):
     runtime = "deno"
+
+
+@pytest.mark.skipif(not _assets_available, reason=_ASSETS_REASON)
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.skipif(
+    not _GLOB_RETURNS_ABSOLUTE_PATHS,
+    reason="deepagents < 0.7.7 returns glob matches relative to the search root",
+)
+class TestGlobPathContract:
+    """The 0.7.7+ `glob` contract the stale suite assertions contradict."""
+
+    @pytest.fixture(scope="class")
+    def sandbox(self) -> Iterator[WasmshSandbox]:
+        backend = WasmshSandbox(runtime="node")
+        try:
+            yield backend
+        finally:
+            backend.close()
+
+    def test_matches_are_absolute_and_rooted_at_the_search_path(
+        self,
+        sandbox: WasmshSandbox,
+    ) -> None:
+        base = "/tmp/glob_contract"
+        sandbox.execute(f"mkdir -p {base}/nested")
+        sandbox.write(f"{base}/one.txt", "1")
+        sandbox.write(f"{base}/nested/two.txt", "2")
+        sandbox.write(f"{base}/skip.py", "3")
+
+        result = sandbox.glob("*.txt", path=base)
+
+        assert result.error is None
+        assert result.matches is not None
+        paths = sorted(info["path"] for info in result.matches)
+        assert paths == [f"{base}/nested/two.txt", f"{base}/one.txt"]
 
 
 @pytest.mark.skipif(not _assets_available, reason=_ASSETS_REASON)
