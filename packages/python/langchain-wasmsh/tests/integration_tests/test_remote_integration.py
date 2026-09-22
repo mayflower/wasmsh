@@ -19,7 +19,11 @@ import pytest
 from langchain_tests.integration_tests import SandboxIntegrationTests
 
 from langchain_wasmsh import WasmshRemoteSandbox
-from tests.integration_tests.test_integration import enforces_permissions
+from tests.integration_tests.test_integration import (
+    _GLOB_RETURNS_ABSOLUTE_PATHS,
+    _STALE_GLOB_ASSERTIONS,
+    enforces_permissions,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -61,6 +65,27 @@ class TestWasmshRemoteSandboxStandard(SandboxIntegrationTests):
             pytest.skip(
                 "dispatcher runner predates VFS permission enforcement; "
                 "rebuild the runner image from a current wasmsh revision",
+            )
+
+    @pytest.fixture(autouse=True)
+    def _xfail_stale_glob_assertions(self, request: pytest.FixtureRequest) -> None:
+        """Same version-conditional `xfail` as the local suite.
+
+        The remote sandbox runs upstream's glob unchanged too, so from
+        deepagents 0.7.7 on it returns absolute paths the pinned suite does
+        not expect. See `test_integration.py` for the reasoning.
+        """
+        if request.node.name not in _STALE_GLOB_ASSERTIONS:
+            return
+        if _GLOB_RETURNS_ABSOLUTE_PATHS:
+            request.node.add_marker(
+                pytest.mark.xfail(
+                    reason=(
+                        "langchain-tests 1.1.9 expects bare glob names; "
+                        "deepagents >= 0.7.7 returns absolute paths by design."
+                    ),
+                    strict=True,
+                ),
             )
 
     @pytest.mark.xfail(
